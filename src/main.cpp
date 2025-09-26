@@ -8,17 +8,24 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <random>
+#include <mutex>
 #include <numeric>
+#include <queue>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -29,6 +36,7 @@ constexpr float kNearPlane = 0.1f;
 constexpr float kFarPlane = 256.0f;
 constexpr float kCameraEyeHeight = 1.7f;
 constexpr float kEpsilon = 1e-6f;
+constexpr float kMaxRayDistance = 8.0f; // Maximum reach distance for block targeting
 
 constexpr int kChunkSizeX = 16;
 constexpr int kChunkSizeY = 64;
@@ -105,6 +113,16 @@ struct InputContext
     float lastX{0.0f};
     float lastY{0.0f};
     bool firstMouse{true};
+    bool leftMousePressed{false};
+    bool leftMouseJustPressed{false};
+};
+
+struct RaycastHit
+{
+    bool hit{false};
+    glm::ivec3 blockPos{0};
+    glm::ivec3 faceNormal{0};
+    float distance{0.0f};
 };
 
 void processInput(GLFWwindow* window, Camera& camera, float deltaTime)
@@ -178,6 +196,22 @@ void mouseCallback(GLFWwindow* window, double xpos, double ypos)
     input->lastY = static_cast<float>(ypos);
 
     input->camera->processMouse(xoffset, yoffset);
+}
+
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
+{
+    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
+    if (input == nullptr)
+    {
+        return;
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
+    {
+        bool wasPressed = input->leftMousePressed;
+        input->leftMousePressed = (action == GLFW_PRESS);
+        input->leftMouseJustPressed = input->leftMousePressed && !wasPressed;
+    }
 }
 
 [[nodiscard]] GLuint compileShader(GLenum type, const char* source)
@@ -257,6 +291,114 @@ void mouseCallback(GLFWwindow* window, double xpos, double ypos)
     return program;
 }
 
+class Crosshair
+{
+public:
+    Crosshair()
+    {
+        setupCrosshair();
+    }
+
+    ~Crosshair()
+    {
+        cleanup();
+    }
+
+    void render(int screenWidth, int screenHeight)
+    {
+        glDisable(GL_DEPTH_TEST);
+        glUseProgram(shaderProgram_);
+        
+        glUniform2f(glGetUniformLocation(shaderProgram_, "uScreenSize"), 
+                   static_cast<float>(screenWidth), static_cast<float>(screenHeight));
+        
+        glBindVertexArray(vao_);
+        glDrawArrays(GL_LINES, 0, 4);
+        glBindVertexArray(0);
+        
+        glUseProgram(0);
+        glEnable(GL_DEPTH_TEST);
+    }
+
+private:
+    GLuint vao_{0};
+    GLuint vbo_{0};
+    GLuint shaderProgram_{0};
+
+    void setupCrosshair()
+    {
+        // Crosshair vertices (two lines in normalized device coordinates)
+        float crosshairSize = 0.02f;
+        float vertices[] = {
+            // Horizontal line
+            -crosshairSize, 0.0f,
+             crosshairSize, 0.0f,
+            // Vertical line
+             0.0f, -crosshairSize,
+             0.0f,  crosshairSize
+        };
+
+        glGenVertexArrays(1, &vao_);
+        glGenBuffers(1, &vbo_);
+        
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(0);
+        
+        glBindVertexArray(0);
+
+        // Create crosshair shader
+        const char* crosshairVertexShader = R"(#version 330 core
+layout (location = 0) in vec2 aPos;
+
+void main()
+{
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+        const char* crosshairFragmentShader = R"(#version 330 core
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(1.0, 1.0, 1.0, 0.8);
+}
+)";
+
+        try
+        {
+            shaderProgram_ = createProgram(crosshairVertexShader, crosshairFragmentShader);
+        }
+        catch (const std::exception& ex)
+        {
+            std::cerr << "Failed to create crosshair shader: " << ex.what() << std::endl;
+        }
+    }
+
+    void cleanup()
+    {
+        if (vao_ != 0)
+        {
+            glDeleteVertexArrays(1, &vao_);
+            vao_ = 0;
+        }
+        if (vbo_ != 0)
+        {
+            glDeleteBuffers(1, &vbo_);
+            vbo_ = 0;
+        }
+        if (shaderProgram_ != 0)
+        {
+            glDeleteProgram(shaderProgram_);
+            shaderProgram_ = 0;
+        }
+    }
+};
+
 inline int floorDiv(int value, int divisor) noexcept
 {
     int quotient = value / divisor;
@@ -282,6 +424,87 @@ enum class BlockId : std::uint8_t
 {
     Air = 0,
     Grass = 1
+};
+
+enum class ChunkState : std::uint8_t
+{
+    Empty = 0,        // Not started
+    Generating,       // Block generation in progress
+    Meshing,         // Mesh building in progress
+    Ready,           // Mesh ready for GPU upload
+    Uploaded,        // Uploaded to GPU and ready to render
+    Remeshing        // Currently remeshing but keep old mesh visible
+};
+
+enum class JobType : std::uint8_t
+{
+    Generate = 0,
+    Mesh = 1
+};
+
+struct Job
+{
+    JobType type;
+    glm::ivec2 chunkCoord;
+    
+    Job(JobType t, const glm::ivec2& coord) : type(t), chunkCoord(coord) {}
+};
+
+class JobQueue
+{
+public:
+    void push(const Job& job)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(job);
+        condition_.notify_one();
+    }
+
+    bool tryPop(Job& job)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (queue_.empty())
+        {
+            return false;
+        }
+        job = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    Job waitAndPop()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this] { return !queue_.empty() || shouldStop_; });
+        
+        if (shouldStop_ && queue_.empty())
+        {
+            throw std::runtime_error("Job queue stopped");
+        }
+        
+        Job job = queue_.front();
+        queue_.pop();
+        return job;
+    }
+
+    void stop()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        shouldStop_ = true;
+        condition_.notify_all();
+    }
+
+    bool empty() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::queue<Job> queue_;
+    std::condition_variable condition_;
+    std::atomic<bool> shouldStop_{false};
 };
 
 inline bool isSolid(BlockId block) noexcept
@@ -406,10 +629,33 @@ private:
     }
 };
 
+struct MeshData
+{
+    std::vector<Vertex> vertices;
+    std::vector<std::uint32_t> indices;
+    
+    MeshData() 
+    {
+        vertices.reserve(4096);
+        indices.reserve(6144);
+    }
+    
+    void clear()
+    {
+        vertices.clear();
+        indices.clear();
+    }
+    
+    bool empty() const
+    {
+        return vertices.empty() || indices.empty();
+    }
+};
+
 struct Chunk
 {
     explicit Chunk(const glm::ivec2& c)
-        : coord(c), blocks(kChunkBlockCount, BlockId::Air)
+        : coord(c), blocks(kChunkBlockCount, BlockId::Air), state(ChunkState::Empty)
     {
     }
 
@@ -434,11 +680,18 @@ struct Chunk
 
     glm::ivec2 coord;
     std::vector<BlockId> blocks;
+    std::atomic<ChunkState> state;
+    
+    // GPU resources (main thread only)
     GLuint vao{0};
     GLuint vbo{0};
     GLuint ibo{0};
     GLsizei indexCount{0};
-    bool meshDirty{true};
+    
+    // Mesh data for async operations
+    std::mutex meshMutex;
+    MeshData meshData;
+    bool meshReady{false};
 };
 
 struct ChunkHasher
@@ -502,12 +755,14 @@ class ChunkManager
 {
 public:
     explicit ChunkManager(unsigned seed)
-        : noise_(seed)
+        : noise_(seed), shouldStop_(false)
     {
+        startWorkerThreads();
     }
 
     ~ChunkManager()
     {
+        stopWorkerThreads();
         clear();
     }
 
@@ -528,10 +783,10 @@ public:
             }
         }
 
-        // Create missing chunks
+        // Create missing chunks and start generation
         for (const glm::ivec2& coord : needed)
         {
-            ensureChunk(coord);
+            ensureChunkAsync(coord);
         }
 
         // Remove chunks outside the view distance
@@ -555,14 +810,8 @@ public:
             }
         }
 
-        // Rebuild meshes that are marked dirty
-        for (const auto& [coord, chunkPtr] : chunks_)
-        {
-            if (chunkPtr->meshDirty)
-            {
-                buildChunkMesh(*chunkPtr);
-            }
-        }
+        // Upload ready meshes to GPU
+        uploadReadyMeshes();
     }
 
     void render(GLuint shaderProgram, const glm::mat4& viewProj, const glm::vec3& cameraPos, const Frustum& frustum) const
@@ -574,7 +823,9 @@ public:
 
         for (const auto& [coord, chunkPtr] : chunks_)
         {
-            if (chunkPtr->indexCount == 0)
+            // Only render chunks that are uploaded or remeshing and have geometry
+            ChunkState state = chunkPtr->state.load();
+            if ((state != ChunkState::Uploaded && state != ChunkState::Remeshing) || chunkPtr->indexCount == 0)
             {
                 continue;
             }
@@ -631,111 +882,239 @@ public:
         chunks_.clear();
     }
 
-private:
-    [[nodiscard]] static glm::ivec2 worldToChunkCoords(int worldX, int worldZ) noexcept
-    {
-        return {floorDiv(worldX, kChunkSizeX), floorDiv(worldZ, kChunkSizeZ)};
-    }
-
-    [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
+    bool destroyBlock(const glm::ivec3& worldPos)
     {
         if (worldPos.y < 0 || worldPos.y >= kChunkSizeY)
         {
-            return BlockId::Air;
+            return false;
         }
 
         const glm::ivec2 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.z);
-        const Chunk* chunk = getChunk(chunkCoord);
+        Chunk* chunk = getChunk(chunkCoord);
         if (chunk == nullptr)
         {
-            return BlockId::Air;
+            return false;
+        }
+
+        ChunkState currentState = chunk->state.load();
+        if (currentState != ChunkState::Uploaded && currentState != ChunkState::Remeshing)
+        {
+            return false;
         }
 
         const int localX = wrapIndex(worldPos.x, kChunkSizeX);
         const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
-        return chunk->blocks[blockIndex(localX, worldPos.y, localZ)];
+        const std::size_t blockIdx = blockIndex(localX, worldPos.y, localZ);
+
+        if (!isSolid(chunk->blocks[blockIdx]))
+        {
+            return false;
+        }
+
+        chunk->blocks[blockIdx] = BlockId::Air;
+        
+        // Re-queue for meshing but keep rendering the old mesh
+        chunk->state = ChunkState::Remeshing;
+        jobQueue_.push(Job(JobType::Mesh, chunkCoord));
+        
+        // Only remesh neighbors if the destroyed block is on a chunk boundary
+        markNeighborsForRemeshingIfNeeded(chunkCoord, localX, localZ);
+        return true;
     }
 
-    [[nodiscard]] Chunk* getChunk(const glm::ivec2& coord) noexcept
+    RaycastHit raycast(const glm::vec3& origin, const glm::vec3& direction) const
     {
-        auto it = chunks_.find(coord);
-        return (it != chunks_.end()) ? it->second.get() : nullptr;
+        RaycastHit result;
+        
+        const float stepSize = 0.1f;
+        const int maxSteps = static_cast<int>(kMaxRayDistance / stepSize);
+        
+        glm::vec3 currentPos = origin;
+        glm::vec3 step = glm::normalize(direction) * stepSize;
+        glm::ivec3 lastBlockPos{std::numeric_limits<int>::max()};
+        
+        for (int i = 0; i < maxSteps; ++i)
+        {
+            currentPos += step;
+            
+            glm::ivec3 blockPos{
+                static_cast<int>(std::floor(currentPos.x)),
+                static_cast<int>(std::floor(currentPos.y)),
+                static_cast<int>(std::floor(currentPos.z))
+            };
+            
+            // Skip if we're still in the same block
+            if (blockPos == lastBlockPos)
+            {
+                continue;
+            }
+            
+            lastBlockPos = blockPos;
+            
+            if (isSolid(blockAt(blockPos)))
+            {
+                result.hit = true;
+                result.blockPos = blockPos;
+                result.distance = glm::length(currentPos - origin);
+                
+                // Calculate face normal by comparing with previous position
+                glm::vec3 prevPos = currentPos - step;
+                glm::ivec3 prevBlockPos{
+                    static_cast<int>(std::floor(prevPos.x)),
+                    static_cast<int>(std::floor(prevPos.y)),
+                    static_cast<int>(std::floor(prevPos.z))
+                };
+                
+                result.faceNormal = prevBlockPos - blockPos;
+                break;
+            }
+        }
+        
+        return result;
     }
 
-    [[nodiscard]] const Chunk* getChunk(const glm::ivec2& coord) const noexcept
+private:
+    void startWorkerThreads()
     {
-        auto it = chunks_.find(coord);
-        return (it != chunks_.end()) ? it->second.get() : nullptr;
+        const unsigned numThreads = std::max(1u, std::thread::hardware_concurrency() / 2);
+        workerThreads_.reserve(numThreads);
+        
+        for (unsigned i = 0; i < numThreads; ++i)
+        {
+            workerThreads_.emplace_back(&ChunkManager::workerThreadFunction, this);
+        }
     }
 
-    void ensureChunk(const glm::ivec2& coord)
+    void stopWorkerThreads()
+    {
+        shouldStop_ = true;
+        jobQueue_.stop();
+        
+        for (auto& thread : workerThreads_)
+        {
+            if (thread.joinable())
+            {
+                thread.join();
+            }
+        }
+        workerThreads_.clear();
+    }
+
+    void workerThreadFunction()
+    {
+        while (!shouldStop_)
+        {
+            try
+            {
+                Job job = jobQueue_.waitAndPop();
+                processJob(job);
+            }
+            catch (const std::exception&)
+            {
+                // Thread should exit (queue stopped)
+                break;
+            }
+        }
+    }
+
+    void processJob(const Job& job)
+    {
+        auto it = chunks_.find(job.chunkCoord);
+        if (it == chunks_.end())
+        {
+            return; // Chunk was removed while in queue
+        }
+
+        Chunk& chunk = *it->second;
+
+        if (job.type == JobType::Generate)
+        {
+            generateChunkBlocks(chunk);
+            chunk.state = ChunkState::Meshing;
+            
+            // Queue meshing job
+            jobQueue_.push(Job(JobType::Mesh, job.chunkCoord));
+        }
+        else if (job.type == JobType::Mesh)
+        {
+            buildChunkMeshAsync(chunk);
+            chunk.state = ChunkState::Ready;
+        }
+    }
+
+    void ensureChunkAsync(const glm::ivec2& coord)
     {
         if (chunks_.find(coord) != chunks_.end())
         {
-            return;
+            return; // Chunk already exists
         }
 
         auto chunk = std::make_unique<Chunk>(coord);
-        generateChunkBlocks(*chunk);
-        chunk->meshDirty = true;
-        Chunk* raw = chunk.get();
+        chunk->state = ChunkState::Generating;
         chunks_.emplace(coord, std::move(chunk));
-        markNeighborsDirty(coord);
-        raw->meshDirty = true;
+        
+        // Queue generation job
+        jobQueue_.push(Job(JobType::Generate, coord));
     }
 
-    void markNeighborsDirty(const glm::ivec2& coord)
+    void uploadReadyMeshes()
     {
-        static const std::array<glm::ivec2, 4> offsets{
-            glm::ivec2{1, 0},
-            glm::ivec2{-1, 0},
-            glm::ivec2{0, 1},
-            glm::ivec2{0, -1}
-        };
-
-        for (const glm::ivec2& offset : offsets)
+        for (const auto& [coord, chunkPtr] : chunks_)
         {
-            Chunk* neighbor = getChunk(coord + offset);
-            if (neighbor != nullptr)
+            if (chunkPtr->state.load() == ChunkState::Ready && chunkPtr->meshReady)
             {
-                neighbor->meshDirty = true;
+                uploadChunkMesh(*chunkPtr);
+                chunkPtr->state = ChunkState::Uploaded;
+                chunkPtr->meshReady = false;
             }
         }
     }
 
-    void generateChunkBlocks(Chunk& chunk)
+    void uploadChunkMesh(Chunk& chunk)
     {
-        const int baseWorldX = chunk.coord.x * kChunkSizeX;
-        const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
-
-        for (int x = 0; x < kChunkSizeX; ++x)
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        
+        if (chunk.meshData.empty())
         {
-            for (int z = 0; z < kChunkSizeZ; ++z)
-            {
-                const int worldX = baseWorldX + x;
-                const int worldZ = baseWorldZ + z;
-
-                const float nx = static_cast<float>(worldX) * 0.035f;
-                const float nz = static_cast<float>(worldZ) * 0.035f;
-
-                float heightNoise = noise_.fbm(nx, nz, 4, 0.5f, 2.0f);
-                float ridgeNoise = noise_.ridge(nx * 0.6f, nz * 0.6f, 3, 2.0f, 0.5f);
-                float combined = heightNoise * 8.0f + ridgeNoise * 6.0f;
-                combined += noise_.noise(nx * 2.2f, nz * 2.2f) * 1.5f;
-
-                float targetHeight = 14.0f + combined;
-                targetHeight = std::clamp(targetHeight, 1.0f, static_cast<float>(kChunkSizeY - 2));
-                const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
-
-                for (int y = 0; y < kChunkSizeY; ++y)
-                {
-                    chunk.blocks[blockIndex(x, y, z)] = (y <= columnHeight) ? BlockId::Grass : BlockId::Air;
-                }
-            }
+            chunk.indexCount = 0;
+            return;
         }
+
+        if (chunk.vao == 0)
+        {
+            glGenVertexArrays(1, &chunk.vao);
+            glGenBuffers(1, &chunk.vbo);
+            glGenBuffers(1, &chunk.ibo);
+
+            glBindVertexArray(chunk.vao);
+            glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+            glEnableVertexAttribArray(0);
+
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+            glEnableVertexAttribArray(1);
+
+            glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
+            glEnableVertexAttribArray(2);
+        }
+
+        glBindVertexArray(chunk.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.vertices.size() * sizeof(Vertex)), 
+                     chunk.meshData.vertices.data(), GL_STATIC_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.indices.size() * sizeof(std::uint32_t)), 
+                     chunk.meshData.indices.data(), GL_STATIC_DRAW);
+
+        chunk.indexCount = static_cast<GLsizei>(chunk.meshData.indices.size());
+        glBindVertexArray(0);
+        
+        // Clear mesh data to save memory
+        chunk.meshData.clear();
     }
 
-    void buildChunkMesh(Chunk& chunk)
+    void buildChunkMeshAsync(Chunk& chunk)
     {
         static const std::array<glm::ivec3, 6> faceDirections{
             glm::ivec3{0, 0, -1}, // Front (-Z)
@@ -794,10 +1173,8 @@ private:
             glm::vec3{0.0f, 1.0f, 0.0f}
         };
 
-        std::vector<Vertex> vertices;
-        vertices.reserve(4096);
-        std::vector<std::uint32_t> indices;
-        indices.reserve(6144);
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        chunk.meshData.clear();
 
         const int baseWorldX = chunk.coord.x * kChunkSizeX;
         const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
@@ -839,7 +1216,7 @@ private:
                         color = glm::clamp(color, 0.0f, 1.0f);
 
                         const glm::vec3 blockOrigin(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y), static_cast<float>(worldPos.z));
-                        const std::size_t vertexStart = vertices.size();
+                        const std::size_t vertexStart = chunk.meshData.vertices.size();
 
                         for (int i = 0; i < 4; ++i)
                         {
@@ -847,50 +1224,139 @@ private:
                             vertex.position = blockOrigin + faceVertices[static_cast<std::size_t>(face)][static_cast<std::size_t>(i)];
                             vertex.normal = normal;
                             vertex.color = color;
-                            vertices.push_back(vertex);
+                            chunk.meshData.vertices.push_back(vertex);
                         }
 
-                        indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
-                        indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
-                        indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-                        indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-                        indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
-                        indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
+                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
+                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
                     }
                 }
             }
         }
 
-        if (chunk.vao == 0)
+        chunk.meshReady = true;
+    }
+
+    [[nodiscard]] static glm::ivec2 worldToChunkCoords(int worldX, int worldZ) noexcept
+    {
+        return {floorDiv(worldX, kChunkSizeX), floorDiv(worldZ, kChunkSizeZ)};
+    }
+
+    [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
+    {
+        if (worldPos.y < 0 || worldPos.y >= kChunkSizeY)
         {
-            glGenVertexArrays(1, &chunk.vao);
-            glGenBuffers(1, &chunk.vbo);
-            glGenBuffers(1, &chunk.ibo);
-
-            glBindVertexArray(chunk.vao);
-            glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
-            glEnableVertexAttribArray(0);
-
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
-            glEnableVertexAttribArray(1);
-
-            glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
-            glEnableVertexAttribArray(2);
+            return BlockId::Air;
         }
 
-        glBindVertexArray(chunk.vao);
-        glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(Vertex)), vertices.data(), GL_STATIC_DRAW);
+        const glm::ivec2 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.z);
+        const Chunk* chunk = getChunk(chunkCoord);
+        if (chunk == nullptr)
+        {
+            return BlockId::Air;
+        }
 
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t)), indices.data(), GL_STATIC_DRAW);
-
-        chunk.indexCount = static_cast<GLsizei>(indices.size());
-        chunk.meshDirty = false;
-
-        glBindVertexArray(0);
+        const int localX = wrapIndex(worldPos.x, kChunkSizeX);
+        const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
+        return chunk->blocks[blockIndex(localX, worldPos.y, localZ)];
     }
+
+    [[nodiscard]] Chunk* getChunk(const glm::ivec2& coord) noexcept
+    {
+        auto it = chunks_.find(coord);
+        return (it != chunks_.end()) ? it->second.get() : nullptr;
+    }
+
+    [[nodiscard]] const Chunk* getChunk(const glm::ivec2& coord) const noexcept
+    {
+        auto it = chunks_.find(coord);
+        return (it != chunks_.end()) ? it->second.get() : nullptr;
+    }
+
+
+    void markNeighborsForRemeshingIfNeeded(const glm::ivec2& coord, int localX, int localZ)
+    {
+        // Only remesh neighbors if the destroyed block is on the chunk boundary
+        // This prevents unnecessary remeshing and the associated flashing
+        
+        // Check if block is on the edges that would affect neighboring chunks
+        if (localX == 0) // Left edge - affects left neighbor
+        {
+            Chunk* neighbor = getChunk(coord + glm::ivec2{-1, 0});
+            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
+            {
+                neighbor->state = ChunkState::Remeshing;
+                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{-1, 0}));
+            }
+        }
+        
+        if (localX == kChunkSizeX - 1) // Right edge - affects right neighbor
+        {
+            Chunk* neighbor = getChunk(coord + glm::ivec2{1, 0});
+            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
+            {
+                neighbor->state = ChunkState::Remeshing;
+                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{1, 0}));
+            }
+        }
+        
+        if (localZ == 0) // Front edge - affects front neighbor
+        {
+            Chunk* neighbor = getChunk(coord + glm::ivec2{0, -1});
+            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
+            {
+                neighbor->state = ChunkState::Remeshing;
+                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{0, -1}));
+            }
+        }
+        
+        if (localZ == kChunkSizeZ - 1) // Back edge - affects back neighbor
+        {
+            Chunk* neighbor = getChunk(coord + glm::ivec2{0, 1});
+            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
+            {
+                neighbor->state = ChunkState::Remeshing;
+                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{0, 1}));
+            }
+        }
+    }
+
+    void generateChunkBlocks(Chunk& chunk)
+    {
+        const int baseWorldX = chunk.coord.x * kChunkSizeX;
+        const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
+
+        for (int x = 0; x < kChunkSizeX; ++x)
+        {
+            for (int z = 0; z < kChunkSizeZ; ++z)
+            {
+                const int worldX = baseWorldX + x;
+                const int worldZ = baseWorldZ + z;
+
+                const float nx = static_cast<float>(worldX) * 0.035f;
+                const float nz = static_cast<float>(worldZ) * 0.035f;
+
+                float heightNoise = noise_.fbm(nx, nz, 4, 0.5f, 2.0f);
+                float ridgeNoise = noise_.ridge(nx * 0.6f, nz * 0.6f, 3, 2.0f, 0.5f);
+                float combined = heightNoise * 8.0f + ridgeNoise * 6.0f;
+                combined += noise_.noise(nx * 2.2f, nz * 2.2f) * 1.5f;
+
+                float targetHeight = 14.0f + combined;
+                targetHeight = std::clamp(targetHeight, 1.0f, static_cast<float>(kChunkSizeY - 2));
+                const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
+
+                for (int y = 0; y < kChunkSizeY; ++y)
+                {
+                    chunk.blocks[blockIndex(x, y, z)] = (y <= columnHeight) ? BlockId::Grass : BlockId::Air;
+                }
+            }
+        }
+    }
+
 
     PerlinNoise noise_;
     std::unordered_map<glm::ivec2, std::unique_ptr<Chunk>, ChunkHasher> chunks_;
@@ -898,6 +1364,11 @@ private:
     const glm::vec3 topColor_{0.26f, 0.72f, 0.32f};
     const glm::vec3 sideColor_{0.29f, 0.48f, 0.24f};
     const glm::vec3 bottomColor_{0.20f, 0.18f, 0.12f};
+    
+    // Threading infrastructure
+    JobQueue jobQueue_;
+    std::vector<std::thread> workerThreads_;
+    std::atomic<bool> shouldStop_;
 };
 
 } // namespace
@@ -961,6 +1432,7 @@ int main()
 
     glfwSetWindowUserPointer(window, &inputContext);
     glfwSetCursorPosCallback(window, mouseCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     const char* vertexShaderSrc = R"(#version 330 core
@@ -1024,8 +1496,10 @@ void main()
     chunkManager.update(camera.position);
     camera.position.y = chunkManager.surfaceHeight(camera.position.x, camera.position.z) + kCameraEyeHeight;
 
+    Crosshair crosshair;
+    
     float lastFrame = static_cast<float>(glfwGetTime());
-    std::cout << "Controls: WASD to move, mouse to look, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, left-click to destroy blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -1034,6 +1508,17 @@ void main()
         lastFrame = currentFrame;
 
         processInput(window, camera, deltaTime);
+
+        // Handle block destruction
+        if (inputContext.leftMouseJustPressed)
+        {
+            RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
+            if (hit.hit)
+            {
+                chunkManager.destroyBlock(hit.blockPos);
+            }
+            inputContext.leftMouseJustPressed = false; // Reset the flag
+        }
 
         chunkManager.update(camera.position);
         camera.position.y = chunkManager.surfaceHeight(camera.position.x, camera.position.z) + kCameraEyeHeight;
@@ -1054,6 +1539,9 @@ void main()
         const Frustum frustum = Frustum::fromMatrix(viewProj);
 
         chunkManager.render(shaderProgram, viewProj, camera.position, frustum);
+
+        // Render crosshair on top of everything
+        crosshair.render(framebufferWidth, framebufferHeight);
 
         glfwSwapBuffers(window);
         glfwPollEvents();

@@ -32,6 +32,9 @@
 #include <unordered_set>
 #include <vector>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 namespace
 {
 constexpr float kNearPlane = 0.1f;
@@ -68,7 +71,7 @@ struct Vertex
 {
     glm::vec3 position;
     glm::vec3 normal;
-    glm::vec3 color;
+    glm::vec2 texCoord;
 };
 
 class Camera
@@ -282,6 +285,55 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
     glDeleteShader(fragmentShader);
 
     return program;
+}
+
+[[nodiscard]] GLuint loadTexture(const char* path)
+{
+    GLuint textureId = 0;
+    glGenTextures(1, &textureId);
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load(false);
+    unsigned char* data = stbi_load(path, &width, &height, &channels, 0);
+
+    if (!data)
+    {
+        std::cerr << "Failed to load texture: " << path << std::endl;
+        glDeleteTextures(1, &textureId);
+        return 0;
+    }
+
+    GLenum format = GL_RGB;
+    if (channels == 1)
+    {
+        format = GL_RED;
+    }
+    else if (channels == 3)
+    {
+        format = GL_RGB;
+    }
+    else if (channels == 4)
+    {
+        format = GL_RGBA;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    stbi_image_free(data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    std::cout << "Loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
+
+    return textureId;
 }
 
 class Crosshair
@@ -765,6 +817,11 @@ public:
         clear();
     }
 
+    void setAtlasTexture(GLuint texture) noexcept
+    {
+        atlasTexture_ = texture;
+    }
+
     void update(const glm::vec3& cameraPos)
     {
         const int worldX = static_cast<int>(std::floor(cameraPos.x));
@@ -847,6 +904,13 @@ public:
         glUniform3fv(glGetUniformLocation(shaderProgram, "uCameraPos"), 1, glm::value_ptr(cameraPos));
         
         // Pass highlighted block position to shader
+        if (atlasTexture_ != 0)
+        {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, atlasTexture_);
+            glUniform1i(glGetUniformLocation(shaderProgram, "uAtlas"), 0);
+        }
+
         glUniform3f(glGetUniformLocation(shaderProgram, "uHighlightedBlock"), 
                    static_cast<float>(highlightedBlock_.x), 
                    static_cast<float>(highlightedBlock_.y), 
@@ -889,6 +953,10 @@ public:
         }
 
         glBindVertexArray(0);
+        if (atlasTexture_ != 0)
+        {
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
         glUseProgram(0);
     }
 
@@ -1435,7 +1503,7 @@ private:
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
             glEnableVertexAttribArray(1);
 
-            glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texCoord)));
             glEnableVertexAttribArray(2);
         }
 
@@ -1461,9 +1529,6 @@ private:
         const int baseWorldX = chunk.coord.x * kChunkSizeX;
         const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
         const glm::vec3 chunkOrigin(static_cast<float>(baseWorldX), 0.0f, static_cast<float>(baseWorldZ));
-
-        static const glm::vec3 grassTopColor{0.227f, 0.349f, 0.200f};
-        static const glm::vec3 dirtColor{0.6f, 0.4f, 0.2f};
 
         auto isInsideChunk = [](const glm::ivec3& local) noexcept
         {
@@ -1497,11 +1562,12 @@ private:
 
         struct FaceMaterial
         {
-            glm::vec3 color{0.0f};
+            glm::vec2 uvBase{0.0f};
+            glm::vec2 uvSize{1.0f};
 
             bool operator==(const FaceMaterial& other) const noexcept
             {
-                return color == other.color;
+                return uvBase == other.uvBase && uvSize == other.uvSize;
             }
         };
 
@@ -1517,18 +1583,32 @@ private:
             glm::vec3{0.0f, 0.0f, 1.0f}
         };
 
-        auto makeMaterial = [&](const glm::ivec3& localBlock, const glm::vec3& normal) -> FaceMaterial
+        auto makeMaterial = [&](const glm::ivec3&, const glm::vec3& normal) -> FaceMaterial
         {
-            const glm::ivec3 worldPos = localToWorld(localBlock.x, localBlock.y, localBlock.z);
-            const bool isSurfaceBlock = !isSolid(blockAt(worldPos + glm::ivec3(0, 1, 0)));
+            FaceMaterial material{};
 
-            glm::vec3 color = dirtColor;
-            if (isSurfaceBlock && normal.y > 0.5f)
+            // Atlas has 3 sections:
+            // Top third (0-16px): grass top texture (normalized: 0.0 - 0.333)
+            // Middle third (16-32px): grass side texture (normalized: 0.333 - 0.667)
+            // Bottom third (32-48px): dirt bottom texture (normalized: 0.667 - 1.0)
+
+            if (normal.y > 0.5f)
             {
-                color = grassTopColor;
+                material.uvBase = glm::vec2(0.0f, 0.0f);
+                material.uvSize = glm::vec2(1.0f, 0.333f);
+            }
+            else if (normal.y < -0.5f)
+            {
+                material.uvBase = glm::vec2(0.0f, 0.667f);
+                material.uvSize = glm::vec2(1.0f, 0.333f);
+            }
+            else
+            {
+                material.uvBase = glm::vec2(0.0f, 0.333f);
+                material.uvSize = glm::vec2(1.0f, 0.333f);
             }
 
-            return FaceMaterial{color};
+            return material;
         };
 
         auto emitQuad = [&](Axis axis, FaceDir dir, int slice, int bStart, int cStart, int bSize, int cSize, const FaceMaterial& material)
@@ -1566,13 +1646,97 @@ private:
                 std::swap(positions[1], positions[3]);
             }
 
+            const glm::vec2 uvBase = material.uvBase;
+            const glm::vec2 uvSize = material.uvSize;
+
+            float tilesU = 1.0f;
+            float tilesV = 1.0f;
+
+            if (axis == Axis::Y)
+            {
+                tilesU = static_cast<float>(cSize);
+                tilesV = static_cast<float>(bSize);
+            }
+            else if (axis == Axis::X)
+            {
+                tilesU = static_cast<float>(cSize);
+                tilesV = static_cast<float>(bSize);
+            }
+            else // Axis::Z
+            {
+                tilesU = static_cast<float>(cSize);
+                tilesV = static_cast<float>(bSize);
+            }
+
+            const float u0 = uvBase.x;
+            const float v0 = uvBase.y;
+            const float duTex = uvSize.x * tilesU;
+            const float dvTex = uvSize.y * tilesV;
+
+            std::array<glm::vec2, 4> uvs;
+
+            if (axis == Axis::Y && dir == FaceDir::Positive)
+            {
+                uvs = {
+                    glm::vec2(u0, v0),
+                    glm::vec2(u0 + duTex, v0),
+                    glm::vec2(u0 + duTex, v0 + dvTex),
+                    glm::vec2(u0, v0 + dvTex)
+                };
+            }
+            else if (axis == Axis::Y && dir == FaceDir::Negative)
+            {
+                uvs = {
+                    glm::vec2(u0, v0 + dvTex),
+                    glm::vec2(u0 + duTex, v0 + dvTex),
+                    glm::vec2(u0 + duTex, v0),
+                    glm::vec2(u0, v0)
+                };
+            }
+            else if (axis == Axis::X && dir == FaceDir::Positive)
+            {
+                uvs = {
+                    glm::vec2(u0, v0),
+                    glm::vec2(u0, v0 + dvTex),
+                    glm::vec2(u0 + duTex, v0 + dvTex),
+                    glm::vec2(u0 + duTex, v0)
+                };
+            }
+            else if (axis == Axis::X && dir == FaceDir::Negative)
+            {
+                uvs = {
+                    glm::vec2(u0 + duTex, v0),
+                    glm::vec2(u0 + duTex, v0 + dvTex),
+                    glm::vec2(u0, v0 + dvTex),
+                    glm::vec2(u0, v0)
+                };
+            }
+            else if (axis == Axis::Z && dir == FaceDir::Positive)
+            {
+                uvs = {
+                    glm::vec2(u0 + duTex, v0),
+                    glm::vec2(u0 + duTex, v0 + dvTex),
+                    glm::vec2(u0, v0 + dvTex),
+                    glm::vec2(u0, v0)
+                };
+            }
+            else
+            {
+                uvs = {
+                    glm::vec2(u0, v0),
+                    glm::vec2(u0, v0 + dvTex),
+                    glm::vec2(u0 + duTex, v0 + dvTex),
+                    glm::vec2(u0 + duTex, v0)
+                };
+            }
+
             const std::size_t vertexStart = chunk.meshData.vertices.size();
-            for (const glm::vec3& position : positions)
+            for (int i = 0; i < 4; ++i)
             {
                 Vertex vertex{};
-                vertex.position = position;
+                vertex.position = positions[i];
                 vertex.normal = normal;
-                vertex.color = material.color;
+                vertex.texCoord = uvs[i];
                 chunk.meshData.vertices.push_back(vertex);
             }
 
@@ -1867,10 +2031,7 @@ private:
     std::unordered_map<glm::ivec2, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
-    const glm::vec3 topColor_{0.26f, 0.72f, 0.32f};
-    const glm::vec3 sideColor_{0.29f, 0.48f, 0.24f};
-    const glm::vec3 bottomColor_{0.20f, 0.18f, 0.12f};
-    
+    GLuint atlasTexture_{0};
     // Threading infrastructure
     JobQueue jobQueue_;
     std::vector<std::thread> workerThreads_;
@@ -2168,19 +2329,19 @@ int main()
     const char* vertexShaderSrc = R"(#version 330 core
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
-layout (location = 2) in vec3 aColor;
+layout (location = 2) in vec2 aTexCoord;
 
 uniform mat4 uViewProj;
 
 out vec3 vNormal;
 out vec3 vWorldPos;
-out vec3 vColor;
+out vec2 vTexCoord;
 
 void main()
 {
     vNormal = aNormal;
     vWorldPos = aPos;
-    vColor = aColor;
+    vTexCoord = aTexCoord;
     gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 )";
@@ -2190,8 +2351,9 @@ out vec4 FragColor;
 
 in vec3 vNormal;
 in vec3 vWorldPos;
-in vec3 vColor;
+in vec2 vTexCoord;
 
+uniform sampler2D uAtlas;
 uniform vec3 uLightDir;
 uniform vec3 uCameraPos;
 uniform vec3 uHighlightedBlock;
@@ -2206,21 +2368,20 @@ void main()
     float ambient = 0.35;
     vec3 halfDir = normalize(lightDir + viewDir);
     float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
-    vec3 color = vColor * (ambient + diff) + vec3(0.1f) * spec;
-    
-    // Apply highlighting effect
+
+    vec3 textureColor = texture(uAtlas, vTexCoord).rgb;
+    vec3 color = textureColor * (ambient + diff) + vec3(0.1f) * spec;
+
     if (uHasHighlight == 1) {
-        // Check if this fragment belongs to the highlighted block
         ivec3 currentBlock = ivec3(floor(vWorldPos));
         ivec3 targetBlock = ivec3(uHighlightedBlock);
-        
+
         if (currentBlock == targetBlock) {
-            // This is the highlighted block - make it brighter
-            color += vec3(0.3, 0.3, 0.3); // Add brightness
-            color = min(color, vec3(1.0)); // Clamp to prevent over-brightness
+            color += vec3(0.3f);
+            color = min(color, vec3(1.0));
         }
     }
-    
+
     FragColor = vec4(color, 1.0);
 }
 )";
@@ -2238,7 +2399,21 @@ void main()
         return EXIT_FAILURE;
     }
 
+    GLuint atlasTexture = loadTexture("grass_block_atlas.png");
+    if (atlasTexture == 0)
+    {
+        glDeleteProgram(shaderProgram);
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
+    glUseProgram(shaderProgram);
+    glUniform1i(glGetUniformLocation(shaderProgram, "uAtlas"), 0);
+    glUseProgram(0);
+
     ChunkManager chunkManager(1337u);
+    chunkManager.setAtlasTexture(atlasTexture);
     chunkManager.update(camera.position);
     
     // Find a guaranteed safe spawn position above ground
@@ -2316,6 +2491,10 @@ void main()
     }
 
     chunkManager.clear();
+    if (atlasTexture != 0)
+    {
+        glDeleteTextures(1, &atlasTexture);
+    }
     glDeleteProgram(shaderProgram);
 
     glfwDestroyWindow(window);

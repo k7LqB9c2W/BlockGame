@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -433,12 +435,16 @@ enum class JobType : std::uint8_t
     Mesh = 1
 };
 
+struct Chunk;
+
 struct Job
 {
     JobType type;
     glm::ivec2 chunkCoord;
+    std::shared_ptr<Chunk> chunk;
     
-    Job(JobType t, const glm::ivec2& coord) : type(t), chunkCoord(coord) {}
+    Job(JobType t, const glm::ivec2& coord, std::shared_ptr<Chunk> c)
+        : type(t), chunkCoord(coord), chunk(std::move(c)) {}
 };
 
 class JobQueue
@@ -683,6 +689,7 @@ struct Chunk
     std::mutex meshMutex;
     MeshData meshData;
     bool meshReady{false};
+    std::atomic<int> inFlight{0};
 };
 
 struct ChunkHasher
@@ -790,22 +797,41 @@ public:
 
         // Remove chunks outside the view distance
         std::vector<glm::ivec2> toRemove;
-        toRemove.reserve(chunks_.size());
-        for (const auto& [coord, chunkPtr] : chunks_)
         {
-            if (needed.find(coord) == needed.end())
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            toRemove.reserve(chunks_.size());
+            for (const auto& [coord, chunkPtr] : chunks_)
             {
-                toRemove.push_back(coord);
+                if (needed.find(coord) == needed.end())
+                {
+                    toRemove.push_back(coord);
+                }
             }
         }
 
         for (const glm::ivec2& coord : toRemove)
         {
-            auto it = chunks_.find(coord);
-            if (it != chunks_.end())
+            std::shared_ptr<Chunk> chunk;
             {
-                it->second->releaseGPU();
+                std::lock_guard<std::mutex> lock(chunksMutex);
+                auto it = chunks_.find(coord);
+                if (it == chunks_.end())
+                {
+                    continue;
+                }
+
+                if (it->second->inFlight.load(std::memory_order_acquire) != 0)
+                {
+                    continue;
+                }
+
+                chunk = it->second;
                 chunks_.erase(it);
+            }
+
+            if (chunk)
+            {
+                chunk->releaseGPU();
             }
         }
 
@@ -827,9 +853,23 @@ public:
                    static_cast<float>(highlightedBlock_.z));
         glUniform1i(glGetUniformLocation(shaderProgram, "uHasHighlight"), hasHighlight_ ? 1 : 0);
 
-        for (const auto& [coord, chunkPtr] : chunks_)
+        std::vector<std::pair<glm::ivec2, std::shared_ptr<Chunk>>> snapshot;
         {
-            // Only render chunks that are uploaded or remeshing and have geometry
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            snapshot.reserve(chunks_.size());
+            for (const auto& entry : chunks_)
+            {
+                snapshot.push_back(entry);
+            }
+        }
+
+        for (const auto& [coord, chunkPtr] : snapshot)
+        {
+            if (!chunkPtr)
+            {
+                continue;
+            }
+
             ChunkState state = chunkPtr->state.load();
             if ((state != ChunkState::Uploaded && state != ChunkState::Remeshing) || chunkPtr->indexCount == 0)
             {
@@ -860,8 +900,8 @@ public:
         const int localX = wrapIndex(wx, kChunkSizeX);
         const int localZ = wrapIndex(wz, kChunkSizeZ);
 
-        const Chunk* chunk = getChunk(chunkCoord);
-        if (chunk == nullptr)
+        auto chunk = getChunkShared(chunkCoord);
+        if (!chunk)
         {
             return 0.0f;
         }
@@ -878,14 +918,56 @@ public:
 
     void clear()
     {
-        for (auto& [coord, chunkPtr] : chunks_)
+        while (true)
         {
-            if (chunkPtr)
+            std::vector<glm::ivec2> coords;
             {
-                chunkPtr->releaseGPU();
+                std::lock_guard<std::mutex> lock(chunksMutex);
+                coords.reserve(chunks_.size());
+                for (const auto& [coord, chunkPtr] : chunks_)
+                {
+                    coords.push_back(coord);
+                }
+            }
+
+            if (coords.empty())
+            {
+                break;
+            }
+
+            bool removedAny = false;
+            for (const glm::ivec2& coord : coords)
+            {
+                std::shared_ptr<Chunk> chunk;
+                {
+                    std::lock_guard<std::mutex> lock(chunksMutex);
+                    auto it = chunks_.find(coord);
+                    if (it == chunks_.end())
+                    {
+                        continue;
+                    }
+
+                    if (it->second->inFlight.load(std::memory_order_acquire) != 0)
+                    {
+                        continue;
+                    }
+
+                    chunk = it->second;
+                    chunks_.erase(it);
+                    removedAny = true;
+                }
+
+                if (chunk)
+                {
+                    chunk->releaseGPU();
+                }
+            }
+
+            if (!removedAny)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
-        chunks_.clear();
     }
 
     bool destroyBlock(const glm::ivec3& worldPos)
@@ -896,8 +978,8 @@ public:
         }
 
         const glm::ivec2 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.z);
-        Chunk* chunk = getChunk(chunkCoord);
-        if (chunk == nullptr)
+        auto chunk = getChunkShared(chunkCoord);
+        if (!chunk)
         {
             return false;
         }
@@ -912,17 +994,19 @@ public:
         const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
         const std::size_t blockIdx = blockIndex(localX, worldPos.y, localZ);
 
-        if (!isSolid(chunk->blocks[blockIdx]))
         {
-            return false;
+            std::lock_guard<std::mutex> lock(chunk->meshMutex);
+            if (!isSolid(chunk->blocks[blockIdx]))
+            {
+                return false;
+            }
+
+            chunk->blocks[blockIdx] = BlockId::Air;
+            chunk->state = ChunkState::Remeshing;
         }
 
-        chunk->blocks[blockIdx] = BlockId::Air;
-        
-        // Re-queue for meshing but keep rendering the old mesh
-        chunk->state = ChunkState::Remeshing;
-        jobQueue_.push(Job(JobType::Mesh, chunkCoord));
-        
+        enqueueJob(chunk, JobType::Mesh, chunkCoord);
+
         // Only remesh neighbors if the destroyed block is on a chunk boundary
         markNeighborsForRemeshingIfNeeded(chunkCoord, localX, localZ);
         return true;
@@ -940,8 +1024,8 @@ public:
         }
 
         const glm::ivec2 chunkCoord = worldToChunkCoords(placePos.x, placePos.z);
-        Chunk* chunk = getChunk(chunkCoord);
-        if (chunk == nullptr)
+        auto chunk = getChunkShared(chunkCoord);
+        if (!chunk)
         {
             return false;
         }
@@ -956,18 +1040,20 @@ public:
         const int localZ = wrapIndex(placePos.z, kChunkSizeZ);
         const std::size_t blockIdx = blockIndex(localX, placePos.y, localZ);
 
-        // Don't place if there's already a block there
-        if (isSolid(chunk->blocks[blockIdx]))
         {
-            return false;
+            std::lock_guard<std::mutex> lock(chunk->meshMutex);
+            // Don't place if there's already a block there
+            if (isSolid(chunk->blocks[blockIdx]))
+            {
+                return false;
+            }
+
+            chunk->blocks[blockIdx] = BlockId::Grass;
+            chunk->state = ChunkState::Remeshing;
         }
 
-        chunk->blocks[blockIdx] = BlockId::Grass;
-        
-        // Re-queue for meshing but keep rendering the old mesh
-        chunk->state = ChunkState::Remeshing;
-        jobQueue_.push(Job(JobType::Mesh, chunkCoord));
-        
+        enqueueJob(chunk, JobType::Mesh, chunkCoord);
+
         // Only remesh neighbors if the placed block is on a chunk boundary
         markNeighborsForRemeshingIfNeeded(chunkCoord, localX, localZ);
         return true;
@@ -1088,8 +1174,8 @@ public:
         }
 
         const glm::ivec2 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.z);
-        const Chunk* chunk = getChunk(chunkCoord);
-        if (chunk == nullptr)
+        auto chunk = getChunkShared(chunkCoord);
+        if (!chunk)
         {
             return BlockId::Air;
         }
@@ -1218,46 +1304,78 @@ private:
         }
     }
 
-    void processJob(const Job& job)
+    void enqueueJob(const std::shared_ptr<Chunk>& chunk, JobType type, const glm::ivec2& coord)
     {
-        auto it = chunks_.find(job.chunkCoord);
-        if (it == chunks_.end())
+        if (!chunk)
         {
-            return; // Chunk was removed while in queue
+            return;
         }
 
-        Chunk& chunk = *it->second;
+        chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
+        try
+        {
+            jobQueue_.push(Job(type, coord, chunk));
+        }
+        catch (...)
+        {
+            chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
+            throw;
+        }
+    }
+
+    void processJob(const Job& job)
+    {
+        std::shared_ptr<Chunk> chunk = job.chunk;
+        if (!chunk)
+        {
+            return;
+        }
+
+        struct FlightGuard
+        {
+            Chunk* chunkPtr;
+            explicit FlightGuard(Chunk* ptr) : chunkPtr(ptr) {}
+            ~FlightGuard()
+            {
+                if (chunkPtr)
+                {
+                    chunkPtr->inFlight.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+        } guard(chunk.get());
 
         if (job.type == JobType::Generate)
         {
-            generateChunkBlocks(chunk);
-            chunk.state = ChunkState::Meshing;
-            
-            // Queue meshing job
-            jobQueue_.push(Job(JobType::Mesh, job.chunkCoord));
+            generateChunkBlocks(*chunk);
+            chunk->state = ChunkState::Meshing;
+
+            enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
         }
         else if (job.type == JobType::Mesh)
         {
-            buildChunkMeshAsync(chunk);
-            chunk.state = ChunkState::Ready;
+            buildChunkMeshAsync(*chunk);
+            chunk->state = ChunkState::Ready;
         }
     }
 
     void ensureChunkAsync(const glm::ivec2& coord)
     {
-        if (chunks_.find(coord) != chunks_.end())
-        {
-            return; // Chunk already exists
-        }
-
         try
         {
-            auto chunk = std::make_unique<Chunk>(coord);
-            chunk->state = ChunkState::Generating;
-            chunks_.emplace(coord, std::move(chunk));
-            
-            // Queue generation job
-            jobQueue_.push(Job(JobType::Generate, coord));
+            std::shared_ptr<Chunk> chunk;
+            {
+                std::lock_guard<std::mutex> lock(chunksMutex);
+                if (chunks_.find(coord) != chunks_.end())
+                {
+                    return; // Chunk already exists
+                }
+
+                chunk = std::make_shared<Chunk>(coord);
+                chunk->state = ChunkState::Generating;
+                chunks_.emplace(coord, chunk);
+            }
+
+            enqueueJob(chunk, JobType::Generate, coord);
         }
         catch (const std::exception& ex)
         {
@@ -1267,8 +1385,23 @@ private:
 
     void uploadReadyMeshes()
     {
-        for (const auto& [coord, chunkPtr] : chunks_)
+        std::vector<std::shared_ptr<Chunk>> snapshot;
         {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            snapshot.reserve(chunks_.size());
+            for (const auto& [coord, chunkPtr] : chunks_)
+            {
+                snapshot.push_back(chunkPtr);
+            }
+        }
+
+        for (const auto& chunkPtr : snapshot)
+        {
+            if (!chunkPtr)
+            {
+                continue;
+            }
+
             if (chunkPtr->state.load() == ChunkState::Ready && chunkPtr->meshReady)
             {
                 uploadChunkMesh(*chunkPtr);
@@ -1308,12 +1441,10 @@ private:
 
         glBindVertexArray(chunk.vao);
         glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.vertices.size() * sizeof(Vertex)), 
-                     chunk.meshData.vertices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.vertices.size() * sizeof(Vertex)),                      chunk.meshData.vertices.data(), GL_STATIC_DRAW);
 
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.indices.size() * sizeof(std::uint32_t)), 
-                     chunk.meshData.indices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.indices.size() * sizeof(std::uint32_t)),                      chunk.meshData.indices.data(), GL_STATIC_DRAW);
 
         chunk.indexCount = static_cast<GLsizei>(chunk.meshData.indices.size());
         glBindVertexArray(0);
@@ -1609,63 +1740,80 @@ private:
         return {floorDiv(worldX, kChunkSizeX), floorDiv(worldZ, kChunkSizeZ)};
     }
 
+    [[nodiscard]] std::shared_ptr<Chunk> getChunkShared(const glm::ivec2& coord) noexcept
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        auto it = chunks_.find(coord);
+        return (it != chunks_.end()) ? it->second : nullptr;
+    }
+
+    [[nodiscard]] std::shared_ptr<const Chunk> getChunkShared(const glm::ivec2& coord) const noexcept
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        auto it = chunks_.find(coord);
+        if (it != chunks_.end())
+        {
+            return it->second;
+        }
+        return nullptr;
+    }
+
     [[nodiscard]] Chunk* getChunk(const glm::ivec2& coord) noexcept
     {
-        auto it = chunks_.find(coord);
-        return (it != chunks_.end()) ? it->second.get() : nullptr;
+        return getChunkShared(coord).get();
     }
 
     [[nodiscard]] const Chunk* getChunk(const glm::ivec2& coord) const noexcept
     {
-        auto it = chunks_.find(coord);
-        return (it != chunks_.end()) ? it->second.get() : nullptr;
+        return getChunkShared(coord).get();
     }
 
 
     void markNeighborsForRemeshingIfNeeded(const glm::ivec2& coord, int localX, int localZ)
     {
-        // Only remesh neighbors if the destroyed block is on the chunk boundary
-        // This prevents unnecessary remeshing and the associated flashing
-        
-        // Check if block is on the edges that would affect neighboring chunks
+        auto queueNeighbor = [&](const glm::ivec2& neighborCoord)
+        {
+            auto neighbor = getChunkShared(neighborCoord);
+            if (!neighbor)
+            {
+                return;
+            }
+
+            ChunkState neighborState = neighbor->state.load();
+            if (neighborState != ChunkState::Uploaded && neighborState != ChunkState::Remeshing)
+            {
+                return;
+            }
+
+            neighbor->state = ChunkState::Remeshing;
+            try
+            {
+                enqueueJob(neighbor, JobType::Mesh, neighborCoord);
+            }
+            catch (const std::exception& ex)
+            {
+                std::cerr << "Failed to queue remesh for neighbor (" << neighborCoord.x << ", " << neighborCoord.y << "): " << ex.what() << std::endl;
+            }
+        };
+
         if (localX == 0) // Left edge - affects left neighbor
         {
-            Chunk* neighbor = getChunk(coord + glm::ivec2{-1, 0});
-            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
-            {
-                neighbor->state = ChunkState::Remeshing;
-                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{-1, 0}));
-            }
+            queueNeighbor(coord + glm::ivec2{-1, 0});
         }
-        
+
         if (localX == kChunkSizeX - 1) // Right edge - affects right neighbor
         {
-            Chunk* neighbor = getChunk(coord + glm::ivec2{1, 0});
-            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
-            {
-                neighbor->state = ChunkState::Remeshing;
-                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{1, 0}));
-            }
+            queueNeighbor(coord + glm::ivec2{1, 0});
         }
-        
+
         if (localZ == 0) // Front edge - affects front neighbor
         {
-            Chunk* neighbor = getChunk(coord + glm::ivec2{0, -1});
-            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
-            {
-                neighbor->state = ChunkState::Remeshing;
-                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{0, -1}));
-            }
+            queueNeighbor(coord + glm::ivec2{0, -1});
         }
-        
+
         if (localZ == kChunkSizeZ - 1) // Back edge - affects back neighbor
         {
-            Chunk* neighbor = getChunk(coord + glm::ivec2{0, 1});
-            if (neighbor != nullptr && (neighbor->state.load() == ChunkState::Uploaded || neighbor->state.load() == ChunkState::Remeshing))
-            {
-                neighbor->state = ChunkState::Remeshing;
-                jobQueue_.push(Job(JobType::Mesh, coord + glm::ivec2{0, 1}));
-            }
+            queueNeighbor(coord + glm::ivec2{0, 1});
         }
     }
 
@@ -1716,7 +1864,8 @@ private:
 
 
     PerlinNoise noise_;
-    std::unordered_map<glm::ivec2, std::unique_ptr<Chunk>, ChunkHasher> chunks_;
+    std::unordered_map<glm::ivec2, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
+    mutable std::mutex chunksMutex;
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
     const glm::vec3 topColor_{0.26f, 0.72f, 0.32f};
     const glm::vec3 sideColor_{0.29f, 0.48f, 0.24f};
@@ -2150,7 +2299,9 @@ void main()
         framebufferHeight = std::max(framebufferHeight, 1);
         const float aspect = static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight);
 
-        const glm::mat4 projection = glm::perspective(glm::radians(60.0f), aspect, kNearPlane, kFarPlane);
+        const float currentFarPlane = computeFarPlaneForViewDistance(chunkManager.viewDistance());
+        kFarPlane = currentFarPlane;
+        const glm::mat4 projection = glm::perspective(glm::radians(60.0f), aspect, kNearPlane, currentFarPlane);
         const glm::mat4 view = glm::lookAt(camera.position, camera.position + camera.front(), camera.up());
         const glm::mat4 viewProj = projection * view;
         const Frustum frustum = Frustum::fromMatrix(viewProj);

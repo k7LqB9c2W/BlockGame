@@ -49,7 +49,8 @@ constexpr int kChunkSizeX = 16;
 constexpr int kChunkSizeY = 64;
 constexpr int kChunkSizeZ = 16;
 constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
-constexpr int kViewDistance = 4; // chunks around the player
+constexpr int kDefaultViewDistance = 4;  // Default chunks around the player
+constexpr int kExtendedViewDistance = 8; // Extended view distance (reduced for stability)
 
 struct Vertex
 {
@@ -128,6 +129,8 @@ struct InputContext
     bool leftMouseJustPressed{false};
     bool rightMousePressed{false};
     bool rightMouseJustPressed{false};
+    bool nKeyPressed{false};
+    bool nKeyJustPressed{false};
 };
 
 // Forward declaration
@@ -733,7 +736,7 @@ class ChunkManager
 {
 public:
     explicit ChunkManager(unsigned seed)
-        : noise_(seed), shouldStop_(false)
+        : noise_(seed), shouldStop_(false), viewDistance_(kDefaultViewDistance)
     {
         startWorkerThreads();
     }
@@ -750,12 +753,19 @@ public:
         const int worldZ = static_cast<int>(std::floor(cameraPos.z));
         const glm::ivec2 centerChunk = worldToChunkCoords(worldX, worldZ);
 
+        const int maxChunks = (2 * viewDistance_ + 1) * (2 * viewDistance_ + 1);
         std::unordered_set<glm::ivec2, ChunkHasher> needed;
-        needed.reserve(static_cast<std::size_t>((2 * kViewDistance + 1) * (2 * kViewDistance + 1)));
+        needed.reserve(static_cast<std::size_t>(maxChunks));
 
-        for (int dz = -kViewDistance; dz <= kViewDistance; ++dz)
+        // Add debug output for large view distances
+        if (viewDistance_ > 8)
         {
-            for (int dx = -kViewDistance; dx <= kViewDistance; ++dx)
+            std::cout << "Loading " << maxChunks << " chunks for view distance " << viewDistance_ << std::endl;
+        }
+
+        for (int dz = -viewDistance_; dz <= viewDistance_; ++dz)
+        {
+            for (int dx = -viewDistance_; dx <= viewDistance_; ++dx)
             {
                 needed.insert(centerChunk + glm::ivec2(dx, dz));
             }
@@ -1017,6 +1027,40 @@ public:
         }
     }
 
+    void toggleViewDistance()
+    {
+        try
+        {
+            if (viewDistance_ == kDefaultViewDistance)
+            {
+                std::cout << "Switching to extended render distance..." << std::endl;
+                
+                // Clear existing chunks first to prevent memory issues
+                clear();
+                
+                viewDistance_ = kExtendedViewDistance;
+                std::cout << "Extended render distance active: " << viewDistance_ << " chunks (total: " 
+                          << (2 * viewDistance_ + 1) * (2 * viewDistance_ + 1) << " chunks)" << std::endl;
+            }
+            else
+            {
+                std::cout << "Switching to default render distance..." << std::endl;
+                
+                // Clear chunks when going back to normal
+                clear();
+                
+                viewDistance_ = kDefaultViewDistance;
+                std::cout << "Default render distance active: " << viewDistance_ << " chunks" << std::endl;
+            }
+        }
+        catch (const std::exception& ex)
+        {
+            std::cerr << "Error toggling view distance: " << ex.what() << std::endl;
+            // Reset to default on error
+            viewDistance_ = kDefaultViewDistance;
+        }
+    }
+
     [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
     {
         if (worldPos.y < 0 || worldPos.y >= kChunkSizeY)
@@ -1034,6 +1078,76 @@ public:
         const int localX = wrapIndex(worldPos.x, kChunkSizeX);
         const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
         return chunk->blocks[blockIndex(localX, worldPos.y, localZ)];
+    }
+
+    glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const
+    {
+        const float halfWidth = kPlayerWidth * 0.5f;
+        
+        // Start from the top of the world and work down
+        for (int y = kChunkSizeY - 3; y >= 2; --y)
+        {
+            // Check if there's solid ground at this level
+            bool hasGround = false;
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                for (int dz = -1; dz <= 1; ++dz)
+                {
+                    if (isSolid(blockAt(glm::ivec3(
+                        static_cast<int>(std::floor(worldX + dx * halfWidth)),
+                        y - 1, 
+                        static_cast<int>(std::floor(worldZ + dz * halfWidth))))))
+                    {
+                        hasGround = true;
+                        break;
+                    }
+                }
+                if (hasGround) break;
+            }
+            
+            if (!hasGround) continue;
+            
+            // Check if there's enough vertical clearance for the player
+            bool canFit = true;
+            const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
+            
+            for (int checkY = y; checkY < y + clearanceHeight && checkY < kChunkSizeY; ++checkY)
+            {
+                // Check all blocks in the player's footprint
+                for (int dx = -1; dx <= 1; ++dx)
+                {
+                    for (int dz = -1; dz <= 1; ++dz)
+                    {
+                        const float checkX = worldX + dx * halfWidth;
+                        const float checkZ = worldZ + dz * halfWidth;
+                        
+                        if (isSolid(blockAt(glm::ivec3(
+                            static_cast<int>(std::floor(checkX)),
+                            checkY,
+                            static_cast<int>(std::floor(checkZ))))))
+                        {
+                            canFit = false;
+                            break;
+                        }
+                    }
+                    if (!canFit) break;
+                }
+                if (!canFit) break;
+            }
+            
+            if (canFit)
+            {
+                // Found a safe position - return camera position (eye level)
+                const float safeY = static_cast<float>(y) + kCameraEyeHeight;
+                std::cout << "Safe spawn found at height: " << safeY << " (feet at: " << y << ")" << std::endl;
+                return glm::vec3(worldX, safeY, worldZ);
+            }
+        }
+        
+        // Fallback: spawn high above the world if no safe spot found
+        std::cout << "Warning: No safe spawn found, spawning above terrain" << std::endl;
+        const float fallbackY = static_cast<float>(kChunkSizeY - 5) + kCameraEyeHeight;
+        return glm::vec3(worldX, fallbackY, worldZ);
     }
 
 private:
@@ -1072,10 +1186,15 @@ private:
                 Job job = jobQueue_.waitAndPop();
                 processJob(job);
             }
-            catch (const std::exception&)
+            catch (const std::runtime_error&)
             {
                 // Thread should exit (queue stopped)
                 break;
+            }
+            catch (const std::exception& ex)
+            {
+                std::cerr << "Worker thread error: " << ex.what() << std::endl;
+                // Continue running despite error
             }
         }
     }
@@ -1112,12 +1231,19 @@ private:
             return; // Chunk already exists
         }
 
-        auto chunk = std::make_unique<Chunk>(coord);
-        chunk->state = ChunkState::Generating;
-        chunks_.emplace(coord, std::move(chunk));
-        
-        // Queue generation job
-        jobQueue_.push(Job(JobType::Generate, coord));
+        try
+        {
+            auto chunk = std::make_unique<Chunk>(coord);
+            chunk->state = ChunkState::Generating;
+            chunks_.emplace(coord, std::move(chunk));
+            
+            // Queue generation job
+            jobQueue_.push(Job(JobType::Generate, coord));
+        }
+        catch (const std::exception& ex)
+        {
+            std::cerr << "Error creating chunk at (" << coord.x << ", " << coord.y << "): " << ex.what() << std::endl;
+        }
     }
 
     void uploadReadyMeshes()
@@ -1441,6 +1567,9 @@ private:
     // Block highlighting
     glm::ivec3 highlightedBlock_{0};
     bool hasHighlight_{false};
+    
+    // View distance setting
+    int viewDistance_;
 };
 
 // Collision detection helper functions
@@ -1567,11 +1696,25 @@ glm::vec3 resolveCollisionAxisByAxis(const glm::vec3& currentPos, const glm::vec
     return result;
 }
 
-void processInput(GLFWwindow* window, Camera& camera, const ChunkManager& chunkManager, float deltaTime)
+void processInput(GLFWwindow* window, Camera& camera, ChunkManager& chunkManager, float deltaTime)
 {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
     {
         glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+
+    // Handle view distance toggle
+    auto* inputContext = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
+    if (inputContext)
+    {
+        bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
+        inputContext->nKeyJustPressed = nKeyCurrentlyPressed && !inputContext->nKeyPressed;
+        inputContext->nKeyPressed = nKeyCurrentlyPressed;
+
+        if (inputContext->nKeyJustPressed)
+        {
+            chunkManager.toggleViewDistance();
+        }
     }
 
     // Apply gravity
@@ -1786,16 +1929,18 @@ void main()
     ChunkManager chunkManager(1337u);
     chunkManager.update(camera.position);
     
-    // Position camera properly above ground with small offset to avoid initial clipping
-    float groundHeight = chunkManager.surfaceHeight(camera.position.x, camera.position.z);
-    camera.position.y = groundHeight + kCameraEyeHeight + 0.1f;
+    // Find a guaranteed safe spawn position above ground
+    std::cout << "Finding safe spawn position..." << std::endl;
+    camera.position = chunkManager.findSafeSpawnPosition(camera.position.x, camera.position.z);
     camera.velocity = glm::vec3(0.0f);
     camera.onGround = false;
+    
+    std::cout << "Player spawned at: (" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")" << std::endl;
 
     Crosshair crosshair;
 
     float lastFrame = static_cast<float>(glfwGetTime());
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to toggle render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {

@@ -33,7 +33,8 @@
 namespace
 {
 constexpr float kNearPlane = 0.1f;
-constexpr float kFarPlane = 256.0f;
+constexpr float kDefaultFarPlane = 256.0f;
+constexpr float kFarPlanePadding = 96.0f;
 constexpr float kCameraEyeHeight = 1.7f;
 constexpr float kEpsilon = 1e-6f;
 constexpr float kMaxRayDistance = 8.0f; // Maximum reach distance for block targeting
@@ -50,7 +51,16 @@ constexpr int kChunkSizeY = 64;
 constexpr int kChunkSizeZ = 16;
 constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
 constexpr int kDefaultViewDistance = 4;  // Default chunks around the player
-constexpr int kExtendedViewDistance = 8; // Extended view distance (reduced for stability)
+constexpr int kExtendedViewDistance = 12; // Extended view distance for N toggle
+
+inline float computeFarPlaneForViewDistance(int viewDistance) noexcept
+{
+    const float horizontalSpan = static_cast<float>(viewDistance + 1) * static_cast<float>(std::max(kChunkSizeX, kChunkSizeZ));
+    const float diagonal = std::sqrt(2.0f) * horizontalSpan;
+    return std::max(diagonal + kFarPlanePadding, kDefaultFarPlane);
+}
+
+float kFarPlane = computeFarPlaneForViewDistance(kDefaultViewDistance);
 
 struct Vertex
 {
@@ -738,6 +748,7 @@ public:
     explicit ChunkManager(unsigned seed)
         : noise_(seed), shouldStop_(false), viewDistance_(kDefaultViewDistance)
     {
+        kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
         startWorkerThreads();
     }
 
@@ -1039,6 +1050,7 @@ public:
                 clear();
                 
                 viewDistance_ = kExtendedViewDistance;
+                kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
                 std::cout << "Extended render distance active: " << viewDistance_ << " chunks (total: " 
                           << (2 * viewDistance_ + 1) * (2 * viewDistance_ + 1) << " chunks)" << std::endl;
             }
@@ -1050,6 +1062,7 @@ public:
                 clear();
                 
                 viewDistance_ = kDefaultViewDistance;
+                kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
                 std::cout << "Default render distance active: " << viewDistance_ << " chunks" << std::endl;
             }
         }
@@ -1058,7 +1071,13 @@ public:
             std::cerr << "Error toggling view distance: " << ex.what() << std::endl;
             // Reset to default on error
             viewDistance_ = kDefaultViewDistance;
+            kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
         }
+    }
+
+    [[nodiscard]] int viewDistance() const noexcept
+    {
+        return viewDistance_;
     }
 
     [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
@@ -1305,138 +1324,282 @@ private:
 
     void buildChunkMeshAsync(Chunk& chunk)
     {
-        static const std::array<glm::ivec3, 6> faceDirections{
-            glm::ivec3{0, 0, -1}, // Front (-Z)
-            glm::ivec3{0, 0, 1},  // Back (+Z)
-            glm::ivec3{-1, 0, 0}, // Left (-X)
-            glm::ivec3{1, 0, 0},  // Right (+X)
-            glm::ivec3{0, -1, 0}, // Bottom (-Y)
-            glm::ivec3{0, 1, 0}   // Top (+Y)
-        };
-
-        static const std::array<std::array<glm::vec3, 4>, 6> faceVertices{
-            // Front (-Z)
-            std::array<glm::vec3, 4>{
-                glm::vec3{0.0f, 0.0f, 0.0f},
-                glm::vec3{0.0f, 1.0f, 0.0f},
-                glm::vec3{1.0f, 1.0f, 0.0f},
-                glm::vec3{1.0f, 0.0f, 0.0f}},
-            // Back (+Z)
-            std::array<glm::vec3, 4>{
-                glm::vec3{0.0f, 0.0f, 1.0f},
-                glm::vec3{1.0f, 0.0f, 1.0f},
-                glm::vec3{1.0f, 1.0f, 1.0f},
-                glm::vec3{0.0f, 1.0f, 1.0f}},
-            // Left (-X)
-            std::array<glm::vec3, 4>{
-                glm::vec3{0.0f, 0.0f, 1.0f},
-                glm::vec3{0.0f, 1.0f, 1.0f},
-                glm::vec3{0.0f, 1.0f, 0.0f},
-                glm::vec3{0.0f, 0.0f, 0.0f}},
-            // Right (+X)
-            std::array<glm::vec3, 4>{
-                glm::vec3{1.0f, 0.0f, 1.0f},
-                glm::vec3{1.0f, 0.0f, 0.0f},
-                glm::vec3{1.0f, 1.0f, 0.0f},
-                glm::vec3{1.0f, 1.0f, 1.0f}},
-            // Bottom (-Y)
-            std::array<glm::vec3, 4>{
-                glm::vec3{0.0f, 0.0f, 1.0f},
-                glm::vec3{0.0f, 0.0f, 0.0f},
-                glm::vec3{1.0f, 0.0f, 0.0f},
-                glm::vec3{1.0f, 0.0f, 1.0f}},
-            // Top (+Y)
-            std::array<glm::vec3, 4>{
-                glm::vec3{0.0f, 1.0f, 0.0f},
-                glm::vec3{0.0f, 1.0f, 1.0f},
-                glm::vec3{1.0f, 1.0f, 1.0f},
-                glm::vec3{1.0f, 1.0f, 0.0f}},
-        };
-
-        static const std::array<glm::vec3, 6> faceNormals{
-            glm::vec3{0.0f, 0.0f, -1.0f},
-            glm::vec3{0.0f, 0.0f, 1.0f},
-            glm::vec3{-1.0f, 0.0f, 0.0f},
-            glm::vec3{1.0f, 0.0f, 0.0f},
-            glm::vec3{0.0f, -1.0f, 0.0f},
-            glm::vec3{0.0f, 1.0f, 0.0f}
-        };
-
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         chunk.meshData.clear();
 
         const int baseWorldX = chunk.coord.x * kChunkSizeX;
         const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
+        const glm::vec3 chunkOrigin(static_cast<float>(baseWorldX), 0.0f, static_cast<float>(baseWorldZ));
 
-        for (int x = 0; x < kChunkSizeX; ++x)
+        static const glm::vec3 grassTopColor{0.4f, 0.7f, 0.3f};
+        static const glm::vec3 dirtColor{0.6f, 0.4f, 0.2f};
+
+        auto isInsideChunk = [](const glm::ivec3& local) noexcept
         {
-            for (int y = 0; y < kChunkSizeY; ++y)
+            return local.x >= 0 && local.x < kChunkSizeX &&
+                   local.y >= 0 && local.y < kChunkSizeY &&
+                   local.z >= 0 && local.z < kChunkSizeZ;
+        };
+
+        auto localToWorld = [&](int lx, int ly, int lz) -> glm::ivec3
+        {
+            return glm::ivec3(baseWorldX + lx, ly, baseWorldZ + lz);
+        };
+
+        auto sampleBlock = [&](int lx, int ly, int lz) -> BlockId
+        {
+            if (ly < 0 || ly >= kChunkSizeY)
             {
-                for (int z = 0; z < kChunkSizeZ; ++z)
+                return BlockId::Air;
+            }
+
+            if (lx >= 0 && lx < kChunkSizeX && lz >= 0 && lz < kChunkSizeZ)
+            {
+                return chunk.blocks[blockIndex(lx, ly, lz)];
+            }
+
+            return blockAt(localToWorld(lx, ly, lz));
+        };
+
+        enum class Axis : int { X = 0, Y = 1, Z = 2 };
+        enum class FaceDir : int { Negative = 0, Positive = 1 };
+
+        struct FaceMaterial
+        {
+            glm::vec3 color{0.0f};
+
+            bool operator==(const FaceMaterial& other) const noexcept
+            {
+                return color == other.color;
+            }
+        };
+
+        struct MaskCell
+        {
+            bool exists{false};
+            FaceMaterial material{};
+        };
+
+        const std::array<glm::vec3, 3> axisNormals{
+            glm::vec3{1.0f, 0.0f, 0.0f},
+            glm::vec3{0.0f, 1.0f, 0.0f},
+            glm::vec3{0.0f, 0.0f, 1.0f}
+        };
+
+        auto makeMaterial = [&](const glm::ivec3& localBlock, const glm::vec3& normal) -> FaceMaterial
+        {
+            const glm::ivec3 worldPos = localToWorld(localBlock.x, localBlock.y, localBlock.z);
+            const bool isSurfaceBlock = !isSolid(blockAt(worldPos + glm::ivec3(0, 1, 0)));
+
+            glm::vec3 color = dirtColor;
+            if (isSurfaceBlock && normal.y > 0.5f)
+            {
+                color = grassTopColor;
+            }
+
+            return FaceMaterial{color};
+        };
+
+        auto emitQuad = [&](Axis axis, FaceDir dir, int slice, int bStart, int cStart, int bSize, int cSize, const FaceMaterial& material)
+        {
+            const int a = static_cast<int>(axis);
+            const int b = (a + 1) % 3;
+            const int c = (a + 2) % 3;
+
+            glm::vec3 normal = axisNormals[a];
+            if (dir == FaceDir::Negative)
+            {
+                normal = -normal;
+            }
+
+            glm::vec3 base(0.0f);
+            base[a] = static_cast<float>(slice);
+            base[b] = static_cast<float>(bStart);
+            base[c] = static_cast<float>(cStart);
+
+            glm::vec3 du(0.0f);
+            du[b] = static_cast<float>(bSize);
+
+            glm::vec3 dv(0.0f);
+            dv[c] = static_cast<float>(cSize);
+
+            std::array<glm::vec3, 4> positions{
+                chunkOrigin + base,
+                chunkOrigin + base + du,
+                chunkOrigin + base + du + dv,
+                chunkOrigin + base + dv
+            };
+
+            if (dir == FaceDir::Negative)
+            {
+                std::swap(positions[1], positions[3]);
+            }
+
+            const std::size_t vertexStart = chunk.meshData.vertices.size();
+            for (const glm::vec3& position : positions)
+            {
+                Vertex vertex{};
+                vertex.position = position;
+                vertex.normal = normal;
+                vertex.color = material.color;
+                chunk.meshData.vertices.push_back(vertex);
+            }
+
+            chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+            chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
+            chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+            chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+            chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
+            chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+        };
+
+        auto greedyMeshAxis = [&](Axis axis)
+        {
+            const int dims[3] = {kChunkSizeX, kChunkSizeY, kChunkSizeZ};
+            const int a = static_cast<int>(axis);
+            const int b = (a + 1) % 3;
+            const int c = (a + 2) % 3;
+
+            const int sizeA = dims[a];
+            const int sizeB = dims[b];
+            const int sizeC = dims[c];
+
+            std::vector<MaskCell> mask(static_cast<std::size_t>(sizeB * sizeC));
+
+            auto maskIndex = [&](int bi, int ci) -> int
+            {
+                return bi * sizeC + ci;
+            };
+
+            for (int dirIndex = 0; dirIndex < 2; ++dirIndex)
+            {
+                const FaceDir dir = static_cast<FaceDir>(dirIndex);
+
+                for (int slice = 0; slice <= sizeA; ++slice)
                 {
-                    const BlockId block = chunk.blocks[blockIndex(x, y, z)];
-                    if (!isSolid(block))
+                    std::fill(mask.begin(), mask.end(), MaskCell{});
+
+                    for (int bi = 0; bi < sizeB; ++bi)
                     {
-                        continue;
+                        for (int ci = 0; ci < sizeC; ++ci)
+                        {
+                            const int maskIdx = maskIndex(bi, ci);
+                            MaskCell cell{};
+
+                            const glm::ivec3 positiveLocal{
+                                (a == 0) ? slice : ((b == 0) ? bi : ci),
+                                (a == 1) ? slice : ((b == 1) ? bi : ci),
+                                (a == 2) ? slice : ((b == 2) ? bi : ci)
+                            };
+
+                            const glm::ivec3 negativeLocal{
+                                (a == 0) ? slice - 1 : ((b == 0) ? bi : ci),
+                                (a == 1) ? slice - 1 : ((b == 1) ? bi : ci),
+                                (a == 2) ? slice - 1 : ((b == 2) ? bi : ci)
+                            };
+
+                            const bool positiveSolid = isSolid(sampleBlock(positiveLocal.x, positiveLocal.y, positiveLocal.z));
+                            const bool negativeSolid = isSolid(sampleBlock(negativeLocal.x, negativeLocal.y, negativeLocal.z));
+
+                            glm::ivec3 owningLocal{0};
+                            bool createFace = false;
+
+                            if (dir == FaceDir::Positive)
+                            {
+                                if (negativeSolid && !positiveSolid && isInsideChunk(negativeLocal))
+                                {
+                                    owningLocal = negativeLocal;
+                                    createFace = true;
+                                }
+                            }
+                            else
+                            {
+                                if (positiveSolid && !negativeSolid && isInsideChunk(positiveLocal))
+                                {
+                                    owningLocal = positiveLocal;
+                                    createFace = true;
+                                }
+                            }
+
+                            if (createFace)
+                            {
+                                const glm::vec3 normal = axisNormals[a] * ((dir == FaceDir::Positive) ? 1.0f : -1.0f);
+                                cell.exists = true;
+                                cell.material = makeMaterial(owningLocal, normal);
+                            }
+
+                            mask[maskIdx] = cell;
+                        }
                     }
 
-                    const glm::ivec3 worldPos{baseWorldX + x, y, baseWorldZ + z};
-
-                    for (int face = 0; face < 6; ++face)
+                    for (int bi = 0; bi < sizeB; ++bi)
                     {
-                        const glm::ivec3 neighborPos = worldPos + faceDirections[static_cast<std::size_t>(face)];
-                        if (isSolid(blockAt(neighborPos)))
+                        int ci = 0;
+                        while (ci < sizeC)
                         {
-                            continue;
-                        }
+                            const int maskIdx = maskIndex(bi, ci);
+                            const MaskCell& cell = mask[maskIdx];
+                            if (!cell.exists)
+                            {
+                                ++ci;
+                                continue;
+                            }
 
-                        const glm::vec3 normal = faceNormals[static_cast<std::size_t>(face)];
-                        
-                        // Check if this block has air above it (is a surface block)
-                        const glm::ivec3 blockAbove = worldPos + glm::ivec3(0, 1, 0);
-                        const bool isSurfaceBlock = !isSolid(blockAt(blockAbove));
-                        
-                        // Define grass and dirt colors
-                        const glm::vec3 grassTopColor{0.4f, 0.7f, 0.3f};   // Green for grass top
-                        const glm::vec3 dirtColor{0.6f, 0.4f, 0.2f};       // Brown for dirt/sides
-                        
-                        glm::vec3 color;
-                        if (isSurfaceBlock && normal.y > 0.5f)
-                        {
-                            // Top face of surface block - use grass green
-                            color = grassTopColor;
-                        }
-                        else
-                        {
-                            // All other faces (sides, bottom, or underground blocks) - use dirt brown
-                            color = dirtColor;
-                        }
-                        const float tint = hashToUnitFloat(worldPos.x, worldPos.y, worldPos.z) * 0.12f - 0.06f;
-                        color += glm::vec3(tint);
-                        color = glm::clamp(color, 0.0f, 1.0f);
+                            const FaceMaterial material = cell.material;
 
-                        const glm::vec3 blockOrigin(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y), static_cast<float>(worldPos.z));
-                        const std::size_t vertexStart = chunk.meshData.vertices.size();
+                            int runLengthC = 1;
+                            while (ci + runLengthC < sizeC)
+                            {
+                                const MaskCell& nextCell = mask[maskIndex(bi, ci + runLengthC)];
+                                if (!nextCell.exists || !(nextCell.material == material))
+                                {
+                                    break;
+                                }
+                                ++runLengthC;
+                            }
 
-                        for (int i = 0; i < 4; ++i)
-                        {
-                            Vertex vertex{};
-                            vertex.position = blockOrigin + faceVertices[static_cast<std::size_t>(face)][static_cast<std::size_t>(i)];
-                            vertex.normal = normal;
-                            vertex.color = color;
-                            chunk.meshData.vertices.push_back(vertex);
+                            int runHeightB = 1;
+                            while (bi + runHeightB < sizeB)
+                            {
+                                bool rowMatches = true;
+                                for (int offset = 0; offset < runLengthC; ++offset)
+                                {
+                                    const MaskCell& rowCell = mask[maskIndex(bi + runHeightB, ci + offset)];
+                                    if (!rowCell.exists || !(rowCell.material == material))
+                                    {
+                                        rowMatches = false;
+                                        break;
+                                    }
+                                }
+
+                                if (!rowMatches)
+                                {
+                                    break;
+                                }
+
+                                ++runHeightB;
+                            }
+
+                            emitQuad(axis, dir, slice, bi, ci, runHeightB, runLengthC, material);
+
+                            for (int bOffset = 0; bOffset < runHeightB; ++bOffset)
+                            {
+                                for (int cOffset = 0; cOffset < runLengthC; ++cOffset)
+                                {
+                                    mask[maskIndex(bi + bOffset, ci + cOffset)].exists = false;
+                                }
+                            }
+
+                            ci += runLengthC;
                         }
-
-                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
-                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
-                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
-                        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
                     }
                 }
             }
-        }
+        };
+
+        greedyMeshAxis(Axis::X);
+        greedyMeshAxis(Axis::Y);
+        greedyMeshAxis(Axis::Z);
 
         chunk.meshReady = true;
     }

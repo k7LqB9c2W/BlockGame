@@ -1462,7 +1462,7 @@ private:
         const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
         const glm::vec3 chunkOrigin(static_cast<float>(baseWorldX), 0.0f, static_cast<float>(baseWorldZ));
 
-        static const glm::vec3 grassTopColor{0.4f, 0.7f, 0.3f};
+        static const glm::vec3 grassTopColor{0.227f, 0.349f, 0.200f};
         static const glm::vec3 dirtColor{0.6f, 0.4f, 0.2f};
 
         auto isInsideChunk = [](const glm::ivec3& local) noexcept

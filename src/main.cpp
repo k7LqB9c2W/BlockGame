@@ -38,6 +38,13 @@ constexpr float kCameraEyeHeight = 1.7f;
 constexpr float kEpsilon = 1e-6f;
 constexpr float kMaxRayDistance = 8.0f; // Maximum reach distance for block targeting
 
+// Player physics constants
+constexpr float kPlayerWidth = 0.6f;     // Player bounding box width
+constexpr float kPlayerHeight = 1.8f;    // Player bounding box height
+constexpr float kGravity = -20.0f;       // Gravity acceleration (negative = downward)
+constexpr float kJumpVelocity = 8.0f;    // Initial jump velocity
+constexpr float kTerminalVelocity = -50.0f; // Maximum fall speed
+
 constexpr int kChunkSizeX = 16;
 constexpr int kChunkSizeY = 64;
 constexpr int kChunkSizeZ = 16;
@@ -59,6 +66,10 @@ public:
     float pitch{0.0f};
     float moveSpeed{8.0f};
     float mouseSensitivity{0.12f};
+    
+    // Physics properties
+    glm::vec3 velocity{0.0f, 0.0f, 0.0f};
+    bool onGround{false};
 
     const glm::vec3& front() const noexcept { return front_; }
     const glm::vec3& up() const noexcept { return up_; }
@@ -115,7 +126,12 @@ struct InputContext
     bool firstMouse{true};
     bool leftMousePressed{false};
     bool leftMouseJustPressed{false};
+    bool rightMousePressed{false};
+    bool rightMouseJustPressed{false};
 };
+
+// Forward declaration
+class ChunkManager;
 
 struct RaycastHit
 {
@@ -124,50 +140,6 @@ struct RaycastHit
     glm::ivec3 faceNormal{0};
     float distance{0.0f};
 };
-
-void processInput(GLFWwindow* window, Camera& camera, float deltaTime)
-{
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-    {
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-    }
-
-    const float velocity = camera.moveSpeed * deltaTime;
-
-    glm::vec3 forward = camera.front();
-    forward.y = 0.0f;
-    if (glm::length(forward) > kEpsilon)
-    {
-        forward = glm::normalize(forward);
-    }
-
-    glm::vec3 right = glm::cross(forward, camera.worldUp());
-    if (glm::length(right) > kEpsilon)
-    {
-        right = glm::normalize(right);
-    }
-    else
-    {
-        right = camera.right();
-    }
-
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-    {
-        camera.position += forward * velocity;
-    }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-    {
-        camera.position -= forward * velocity;
-    }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-    {
-        camera.position -= right * velocity;
-    }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-    {
-        camera.position += right * velocity;
-    }
-}
 
 void framebufferSizeCallback(GLFWwindow*, int width, int height)
 {
@@ -211,6 +183,12 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
         bool wasPressed = input->leftMousePressed;
         input->leftMousePressed = (action == GLFW_PRESS);
         input->leftMouseJustPressed = input->leftMousePressed && !wasPressed;
+    }
+    else if (button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        bool wasPressed = input->rightMousePressed;
+        input->rightMousePressed = (action == GLFW_PRESS);
+        input->rightMouseJustPressed = input->rightMousePressed && !wasPressed;
     }
 }
 
@@ -820,6 +798,13 @@ public:
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "uViewProj"), 1, GL_FALSE, glm::value_ptr(viewProj));
         glUniform3fv(glGetUniformLocation(shaderProgram, "uLightDir"), 1, glm::value_ptr(lightDirection_));
         glUniform3fv(glGetUniformLocation(shaderProgram, "uCameraPos"), 1, glm::value_ptr(cameraPos));
+        
+        // Pass highlighted block position to shader
+        glUniform3f(glGetUniformLocation(shaderProgram, "uHighlightedBlock"), 
+                   static_cast<float>(highlightedBlock_.x), 
+                   static_cast<float>(highlightedBlock_.y), 
+                   static_cast<float>(highlightedBlock_.z));
+        glUniform1i(glGetUniformLocation(shaderProgram, "uHasHighlight"), hasHighlight_ ? 1 : 0);
 
         for (const auto& [coord, chunkPtr] : chunks_)
         {
@@ -922,6 +907,51 @@ public:
         return true;
     }
 
+    bool placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal)
+    {
+        // Calculate placement position by moving away from the target block face
+        const glm::ivec3 placePos = targetBlockPos + faceNormal;
+        
+        // Check if placement position is valid
+        if (placePos.y < 0 || placePos.y >= kChunkSizeY)
+        {
+            return false;
+        }
+
+        const glm::ivec2 chunkCoord = worldToChunkCoords(placePos.x, placePos.z);
+        Chunk* chunk = getChunk(chunkCoord);
+        if (chunk == nullptr)
+        {
+            return false;
+        }
+
+        ChunkState currentState = chunk->state.load();
+        if (currentState != ChunkState::Uploaded && currentState != ChunkState::Remeshing)
+        {
+            return false;
+        }
+
+        const int localX = wrapIndex(placePos.x, kChunkSizeX);
+        const int localZ = wrapIndex(placePos.z, kChunkSizeZ);
+        const std::size_t blockIdx = blockIndex(localX, placePos.y, localZ);
+
+        // Don't place if there's already a block there
+        if (isSolid(chunk->blocks[blockIdx]))
+        {
+            return false;
+        }
+
+        chunk->blocks[blockIdx] = BlockId::Grass;
+        
+        // Re-queue for meshing but keep rendering the old mesh
+        chunk->state = ChunkState::Remeshing;
+        jobQueue_.push(Job(JobType::Mesh, chunkCoord));
+        
+        // Only remesh neighbors if the placed block is on a chunk boundary
+        markNeighborsForRemeshingIfNeeded(chunkCoord, localX, localZ);
+        return true;
+    }
+
     RaycastHit raycast(const glm::vec3& origin, const glm::vec3& direction) const
     {
         RaycastHit result;
@@ -971,6 +1001,39 @@ public:
         }
         
         return result;
+    }
+
+    void updateHighlight(const glm::vec3& cameraPos, const glm::vec3& cameraDirection)
+    {
+        RaycastHit hit = raycast(cameraPos, cameraDirection);
+        if (hit.hit)
+        {
+            highlightedBlock_ = hit.blockPos;
+            hasHighlight_ = true;
+        }
+        else
+        {
+            hasHighlight_ = false;
+        }
+    }
+
+    [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
+    {
+        if (worldPos.y < 0 || worldPos.y >= kChunkSizeY)
+        {
+            return BlockId::Air;
+        }
+
+        const glm::ivec2 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.z);
+        const Chunk* chunk = getChunk(chunkCoord);
+        if (chunk == nullptr)
+        {
+            return BlockId::Air;
+        }
+
+        const int localX = wrapIndex(worldPos.x, kChunkSizeX);
+        const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
+        return chunk->blocks[blockIndex(localX, worldPos.y, localZ)];
     }
 
 private:
@@ -1202,14 +1265,25 @@ private:
                         }
 
                         const glm::vec3 normal = faceNormals[static_cast<std::size_t>(face)];
-                        glm::vec3 color = sideColor_;
-                        if (normal.y > 0.5f)
+                        
+                        // Check if this block has air above it (is a surface block)
+                        const glm::ivec3 blockAbove = worldPos + glm::ivec3(0, 1, 0);
+                        const bool isSurfaceBlock = !isSolid(blockAt(blockAbove));
+                        
+                        // Define grass and dirt colors
+                        const glm::vec3 grassTopColor{0.4f, 0.7f, 0.3f};   // Green for grass top
+                        const glm::vec3 dirtColor{0.6f, 0.4f, 0.2f};       // Brown for dirt/sides
+                        
+                        glm::vec3 color;
+                        if (isSurfaceBlock && normal.y > 0.5f)
                         {
-                            color = topColor_;
+                            // Top face of surface block - use grass green
+                            color = grassTopColor;
                         }
-                        else if (normal.y < -0.5f)
+                        else
                         {
-                            color = bottomColor_;
+                            // All other faces (sides, bottom, or underground blocks) - use dirt brown
+                            color = dirtColor;
                         }
                         const float tint = hashToUnitFloat(worldPos.x, worldPos.y, worldPos.z) * 0.12f - 0.06f;
                         color += glm::vec3(tint);
@@ -1244,25 +1318,6 @@ private:
     [[nodiscard]] static glm::ivec2 worldToChunkCoords(int worldX, int worldZ) noexcept
     {
         return {floorDiv(worldX, kChunkSizeX), floorDiv(worldZ, kChunkSizeZ)};
-    }
-
-    [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
-    {
-        if (worldPos.y < 0 || worldPos.y >= kChunkSizeY)
-        {
-            return BlockId::Air;
-        }
-
-        const glm::ivec2 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.z);
-        const Chunk* chunk = getChunk(chunkCoord);
-        if (chunk == nullptr)
-        {
-            return BlockId::Air;
-        }
-
-        const int localX = wrapIndex(worldPos.x, kChunkSizeX);
-        const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
-        return chunk->blocks[blockIndex(localX, worldPos.y, localZ)];
     }
 
     [[nodiscard]] Chunk* getChunk(const glm::ivec2& coord) noexcept
@@ -1337,16 +1392,29 @@ private:
                 const int worldX = baseWorldX + x;
                 const int worldZ = baseWorldZ + z;
 
-                const float nx = static_cast<float>(worldX) * 0.035f;
-                const float nz = static_cast<float>(worldZ) * 0.035f;
+                const float nx = static_cast<float>(worldX) * 0.01f;
+                const float nz = static_cast<float>(worldZ) * 0.01f;
 
-                float heightNoise = noise_.fbm(nx, nz, 4, 0.5f, 2.0f);
-                float ridgeNoise = noise_.ridge(nx * 0.6f, nz * 0.6f, 3, 2.0f, 0.5f);
-                float combined = heightNoise * 8.0f + ridgeNoise * 6.0f;
-                combined += noise_.noise(nx * 2.2f, nz * 2.2f) * 1.5f;
+                // Main terrain with more octaves for rolling hills
+                float mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
+                
+                // Mountain features with ridge noise
+                float mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
+                
+                // Fine detail with high-frequency noise
+                float detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
+                
+                // Medium-scale features
+                float mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+                
+                // Combine all noise layers for natural variation
+                float combined = mainTerrain * 12.0f +           // Base rolling hills
+                               mountainNoise * 8.0f +            // Mountain ridges
+                               mediumNoise * 4.0f +             // Medium features
+                               detailNoise * 2.0f;              // Fine surface detail
 
-                float targetHeight = 14.0f + combined;
-                targetHeight = std::clamp(targetHeight, 1.0f, static_cast<float>(kChunkSizeY - 2));
+                float targetHeight = 16.0f + combined;
+                targetHeight = std::clamp(targetHeight, 2.0f, static_cast<float>(kChunkSizeY - 3));
                 const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
 
                 for (int y = 0; y < kChunkSizeY; ++y)
@@ -1369,7 +1437,214 @@ private:
     JobQueue jobQueue_;
     std::vector<std::thread> workerThreads_;
     std::atomic<bool> shouldStop_;
+    
+    // Block highlighting
+    glm::ivec3 highlightedBlock_{0};
+    bool hasHighlight_{false};
 };
+
+// Collision detection helper functions
+bool hasCollision(const glm::vec3& cameraPosition, const ChunkManager& chunkManager)
+{
+    // Calculate feet position from camera (eye) position
+    const float feetY = cameraPosition.y - kCameraEyeHeight;
+    const float halfWidth = kPlayerWidth * 0.5f;
+    
+    // Build AABB from feet position
+    const glm::vec3 minCorner = glm::vec3(cameraPosition.x - halfWidth, feetY, cameraPosition.z - halfWidth);
+    const glm::vec3 maxCorner = minCorner + glm::vec3(kPlayerWidth, kPlayerHeight, kPlayerWidth);
+    
+    const int minX = static_cast<int>(std::floor(minCorner.x));
+    const int maxX = static_cast<int>(std::ceil(maxCorner.x));
+    const int minY = static_cast<int>(std::floor(minCorner.y));
+    const int maxY = static_cast<int>(std::ceil(maxCorner.y));
+    const int minZ = static_cast<int>(std::floor(minCorner.z));
+    const int maxZ = static_cast<int>(std::ceil(maxCorner.z));
+    
+    for (int x = minX; x <= maxX; ++x)
+    {
+        for (int y = minY; y <= maxY; ++y)
+        {
+            for (int z = minZ; z <= maxZ; ++z)
+            {
+                // Check if this block position overlaps with player bounding box
+                const glm::vec3 blockMin(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+                const glm::vec3 blockMax = blockMin + glm::vec3(1.0f);
+                
+                // AABB collision test
+                if (minCorner.x < blockMax.x && maxCorner.x > blockMin.x &&
+                    minCorner.y < blockMax.y && maxCorner.y > blockMin.y &&
+                    minCorner.z < blockMax.z && maxCorner.z > blockMin.z)
+                {
+                    if (isSolid(chunkManager.blockAt(glm::ivec3(x, y, z))))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+glm::vec3 resolveCollisionAxisByAxis(const glm::vec3& currentPos, const glm::vec3& targetPos, 
+                                     Camera& camera, const ChunkManager& chunkManager)
+{
+    glm::vec3 result = currentPos;
+    
+    // Try X movement
+    glm::vec3 testPos = result;
+    testPos.x = targetPos.x;
+    if (!hasCollision(testPos, chunkManager))
+    {
+        result.x = testPos.x;
+    }
+    else
+    {
+        camera.velocity.x = 0.0f; // Stop horizontal velocity on collision
+    }
+    
+    // Try Z movement
+    testPos = result;
+    testPos.z = targetPos.z;
+    if (!hasCollision(testPos, chunkManager))
+    {
+        result.z = testPos.z;
+    }
+    else
+    {
+        camera.velocity.z = 0.0f; // Stop horizontal velocity on collision
+    }
+    
+    // Try Y movement
+    testPos = result;
+    testPos.y = targetPos.y;
+    if (!hasCollision(testPos, chunkManager))
+    {
+        result.y = testPos.y;
+        camera.onGround = false;
+    }
+    else
+    {
+        if (camera.velocity.y < 0.0f) // Landing (falling down)
+        {
+            // Calculate feet position and find the block top to snap to
+            const float currentFeetY = result.y - kCameraEyeHeight;
+            const float halfWidth = kPlayerWidth * 0.5f;
+            
+            // Find the highest block top that the player would collide with
+            const int minX = static_cast<int>(std::floor(result.x - halfWidth));
+            const int maxX = static_cast<int>(std::ceil(result.x + halfWidth));
+            const int minZ = static_cast<int>(std::floor(result.z - halfWidth));
+            const int maxZ = static_cast<int>(std::ceil(result.z + halfWidth));
+            const int checkY = static_cast<int>(std::floor(currentFeetY));
+            
+            float highestBlockTop = -1000.0f;
+            
+            for (int x = minX; x <= maxX; ++x)
+            {
+                for (int z = minZ; z <= maxZ; ++z)
+                {
+                    if (isSolid(chunkManager.blockAt(glm::ivec3(x, checkY, z))))
+                    {
+                        const float blockTop = static_cast<float>(checkY + 1);
+                        highestBlockTop = std::max(highestBlockTop, blockTop);
+                    }
+                }
+            }
+            
+            if (highestBlockTop > -1000.0f)
+            {
+                // Snap camera so feet sit exactly on the block top
+                result.y = highestBlockTop + kCameraEyeHeight;
+            }
+            
+            camera.onGround = true;
+        }
+        camera.velocity.y = 0.0f; // Stop vertical velocity on collision
+    }
+    
+    return result;
+}
+
+void processInput(GLFWwindow* window, Camera& camera, const ChunkManager& chunkManager, float deltaTime)
+{
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+    {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+
+    // Apply gravity
+    camera.velocity.y += kGravity * deltaTime;
+    if (camera.velocity.y < kTerminalVelocity)
+    {
+        camera.velocity.y = kTerminalVelocity;
+    }
+
+    // Handle jumping
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && camera.onGround)
+    {
+        camera.velocity.y = kJumpVelocity;
+        camera.onGround = false;
+    }
+
+    // Handle horizontal movement
+    glm::vec3 forward = camera.front();
+    forward.y = 0.0f;
+    if (glm::length(forward) > kEpsilon)
+    {
+        forward = glm::normalize(forward);
+    }
+
+    glm::vec3 right = glm::cross(forward, camera.worldUp());
+    if (glm::length(right) > kEpsilon)
+    {
+        right = glm::normalize(right);
+    }
+    else
+    {
+        right = camera.right();
+    }
+
+    // Calculate desired movement
+    glm::vec3 moveDirection{0.0f};
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+    {
+        moveDirection += forward;
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+    {
+        moveDirection -= forward;
+    }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+    {
+        moveDirection -= right;
+    }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+    {
+        moveDirection += right;
+    }
+
+    // Apply horizontal movement (only if we have input)
+    if (glm::length(moveDirection) > kEpsilon)
+    {
+        moveDirection = glm::normalize(moveDirection);
+        camera.velocity.x = moveDirection.x * camera.moveSpeed;
+        camera.velocity.z = moveDirection.z * camera.moveSpeed;
+    }
+    else
+    {
+        // Apply friction when no input
+        camera.velocity.x *= 0.8f;
+        camera.velocity.z *= 0.8f;
+    }
+
+    // Calculate target position
+    glm::vec3 targetPosition = camera.position + camera.velocity * deltaTime;
+    
+    // Apply collision detection and resolve movement
+    camera.position = resolveCollisionAxisByAxis(camera.position, targetPosition, camera, chunkManager);
+}
 
 } // namespace
 
@@ -1464,6 +1739,8 @@ in vec3 vColor;
 
 uniform vec3 uLightDir;
 uniform vec3 uCameraPos;
+uniform vec3 uHighlightedBlock;
+uniform int uHasHighlight;
 
 void main()
 {
@@ -1475,6 +1752,20 @@ void main()
     vec3 halfDir = normalize(lightDir + viewDir);
     float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
     vec3 color = vColor * (ambient + diff) + vec3(0.1f) * spec;
+    
+    // Apply highlighting effect
+    if (uHasHighlight == 1) {
+        // Check if this fragment belongs to the highlighted block
+        ivec3 currentBlock = ivec3(floor(vWorldPos));
+        ivec3 targetBlock = ivec3(uHighlightedBlock);
+        
+        if (currentBlock == targetBlock) {
+            // This is the highlighted block - make it brighter
+            color += vec3(0.3, 0.3, 0.3); // Add brightness
+            color = min(color, vec3(1.0)); // Clamp to prevent over-brightness
+        }
+    }
+    
     FragColor = vec4(color, 1.0);
 }
 )";
@@ -1494,12 +1785,17 @@ void main()
 
     ChunkManager chunkManager(1337u);
     chunkManager.update(camera.position);
-    camera.position.y = chunkManager.surfaceHeight(camera.position.x, camera.position.z) + kCameraEyeHeight;
+    
+    // Position camera properly above ground with small offset to avoid initial clipping
+    float groundHeight = chunkManager.surfaceHeight(camera.position.x, camera.position.z);
+    camera.position.y = groundHeight + kCameraEyeHeight + 0.1f;
+    camera.velocity = glm::vec3(0.0f);
+    camera.onGround = false;
 
     Crosshair crosshair;
-    
+
     float lastFrame = static_cast<float>(glfwGetTime());
-    std::cout << "Controls: WASD to move, mouse to look, left-click to destroy blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -1507,7 +1803,10 @@ void main()
         const float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        processInput(window, camera, deltaTime);
+        processInput(window, camera, chunkManager, deltaTime);
+
+        // Update block highlighting based on crosshair
+        chunkManager.updateHighlight(camera.position, camera.front());
 
         // Handle block destruction
         if (inputContext.leftMouseJustPressed)
@@ -1520,8 +1819,18 @@ void main()
             inputContext.leftMouseJustPressed = false; // Reset the flag
         }
 
+        // Handle block placement
+        if (inputContext.rightMouseJustPressed)
+        {
+            RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
+            if (hit.hit)
+            {
+                chunkManager.placeBlock(hit.blockPos, hit.faceNormal);
+            }
+            inputContext.rightMouseJustPressed = false; // Reset the flag
+        }
+
         chunkManager.update(camera.position);
-        camera.position.y = chunkManager.surfaceHeight(camera.position.x, camera.position.z) + kCameraEyeHeight;
 
         glClearColor(0.55f, 0.78f, 0.95f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

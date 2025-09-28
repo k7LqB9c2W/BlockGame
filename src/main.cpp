@@ -327,9 +327,8 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    // If you see seams while debugging, temporarily switch to GL_CLAMP_TO_EDGE to isolate wrapping issues.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     stbi_image_free(data);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -1569,14 +1568,31 @@ private:
         enum class Axis : int { X = 0, Y = 1, Z = 2 };
         enum class FaceDir : int { Negative = 0, Positive = 1 };
 
+        enum class BlockFace : std::uint8_t
+        {
+            Top,
+            Bottom,
+            North,
+            South,
+            East,
+            West
+        };
+
         struct FaceMaterial
         {
             glm::vec2 uvBase{0.0f};
             glm::vec2 uvSize{1.0f};
+            glm::ivec3 uAxis{1, 0, 0};
+            glm::ivec3 vAxis{0, 1, 0};
+            BlockFace face{BlockFace::Top};
 
             bool operator==(const FaceMaterial& other) const noexcept
             {
-                return uvBase == other.uvBase && uvSize == other.uvSize;
+                return uvBase == other.uvBase &&
+                       uvSize == other.uvSize &&
+                       uAxis == other.uAxis &&
+                       vAxis == other.vAxis &&
+                       face == other.face;
             }
         };
 
@@ -1596,26 +1612,61 @@ private:
         {
             FaceMaterial material{};
 
-            // Atlas has 3 sections:
-            // Top third (0-16px): grass top texture (normalized: 0.0 - 0.333)
-            // Middle third (16-32px): grass side texture (normalized: 0.333 - 0.667)
-            // Bottom third (32-48px): dirt bottom texture (normalized: 0.667 - 1.0)
+            const BlockFace face = [&]() -> BlockFace
+            {
+                if (normal.y > 0.5f) return BlockFace::Top;
+                if (normal.y < -0.5f) return BlockFace::Bottom;
+                if (normal.x > 0.5f) return BlockFace::East;
+                if (normal.x < -0.5f) return BlockFace::West;
+                if (normal.z > 0.5f) return BlockFace::South;
+                return BlockFace::North;
+            }();
 
-            if (normal.y > 0.5f)
+            material.face = face;
+
+            // Atlas layout: top third = grass top, middle third = sides, bottom third = dirt.
+            constexpr float kAtlasThird = 1.0f / 3.0f;
+
+            switch (face)
             {
+            case BlockFace::Top:
                 material.uvBase = glm::vec2(0.0f, 0.0f);
-                material.uvSize = glm::vec2(1.0f, 0.333f);
+                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+                material.uAxis = glm::ivec3(1, 0, 0);
+                material.vAxis = glm::ivec3(0, 0, 1);
+                break;
+            case BlockFace::Bottom:
+                material.uvBase = glm::vec2(0.0f, 2.0f * kAtlasThird);
+                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+                material.uAxis = glm::ivec3(1, 0, 0);
+                material.vAxis = glm::ivec3(0, 0, -1);
+                break;
+            case BlockFace::East:
+                material.uvBase = glm::vec2(0.0f, kAtlasThird);
+                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+                material.uAxis = glm::ivec3(0, 0, 1);
+                material.vAxis = glm::ivec3(0, 1, 0);
+                break;
+            case BlockFace::West:
+                material.uvBase = glm::vec2(0.0f, kAtlasThird);
+                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+                material.uAxis = glm::ivec3(0, 0, -1);
+                material.vAxis = glm::ivec3(0, 1, 0);
+                break;
+            case BlockFace::South:
+                material.uvBase = glm::vec2(0.0f, kAtlasThird);
+                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+                material.uAxis = glm::ivec3(-1, 0, 0);
+                material.vAxis = glm::ivec3(0, 1, 0);
+                break;
+            case BlockFace::North:
+                material.uvBase = glm::vec2(0.0f, kAtlasThird);
+                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+                material.uAxis = glm::ivec3(1, 0, 0);
+                material.vAxis = glm::ivec3(0, 1, 0);
+                break;
             }
-            else if (normal.y < -0.5f)
-            {
-                material.uvBase = glm::vec2(0.0f, 0.667f);
-                material.uvSize = glm::vec2(1.0f, 0.333f);
-            }
-            else
-            {
-                material.uvBase = glm::vec2(0.0f, 0.333f);
-                material.uvSize = glm::vec2(1.0f, 0.333f);
-            }
+
             return material;
         };
 
@@ -1654,89 +1705,18 @@ private:
                 std::swap(positions[1], positions[3]);
             }
 
-            float tilesU = 1.0f;
-            float tilesV = 1.0f;
-
-            if (axis == Axis::Y)
-            {
-                tilesU = static_cast<float>(cSize);
-                tilesV = static_cast<float>(bSize);
-            }
-            else if (axis == Axis::X)
-            {
-                tilesU = static_cast<float>(cSize);
-                tilesV = static_cast<float>(bSize);
-            }
-            else // Axis::Z
-            {
-                tilesU = static_cast<float>(cSize);
-                tilesV = static_cast<float>(bSize);
-            }
-
-            std::array<glm::vec2, 4> tileUVs{};
-
-            if (axis == Axis::Y && dir == FaceDir::Positive)
-            {
-                tileUVs = {
-                    glm::vec2(0.0f, 0.0f),
-                    glm::vec2(tilesU, 0.0f),
-                    glm::vec2(tilesU, tilesV),
-                    glm::vec2(0.0f, tilesV)
-                };
-            }
-            else if (axis == Axis::Y && dir == FaceDir::Negative)
-            {
-                tileUVs = {
-                    glm::vec2(0.0f, tilesV),
-                    glm::vec2(tilesU, tilesV),
-                    glm::vec2(tilesU, 0.0f),
-                    glm::vec2(0.0f, 0.0f)
-                };
-            }
-            else if (axis == Axis::X && dir == FaceDir::Positive)
-            {
-                tileUVs = {
-                    glm::vec2(0.0f, 0.0f),
-                    glm::vec2(0.0f, tilesV),
-                    glm::vec2(tilesU, tilesV),
-                    glm::vec2(tilesU, 0.0f)
-                };
-            }
-            else if (axis == Axis::X && dir == FaceDir::Negative)
-            {
-                tileUVs = {
-                    glm::vec2(tilesU, 0.0f),
-                    glm::vec2(tilesU, tilesV),
-                    glm::vec2(0.0f, tilesV),
-                    glm::vec2(0.0f, 0.0f)
-                };
-            }
-            else if (axis == Axis::Z && dir == FaceDir::Positive)
-            {
-                tileUVs = {
-                    glm::vec2(tilesU, 0.0f),
-                    glm::vec2(tilesU, tilesV),
-                    glm::vec2(0.0f, tilesV),
-                    glm::vec2(0.0f, 0.0f)
-                };
-            }
-            else
-            {
-                tileUVs = {
-                    glm::vec2(0.0f, 0.0f),
-                    glm::vec2(0.0f, tilesV),
-                    glm::vec2(tilesU, tilesV),
-                    glm::vec2(tilesU, 0.0f)
-                };
-            }
+            const glm::vec3 uAxisVec = glm::vec3(material.uAxis);
+            const glm::vec3 vAxisVec = glm::vec3(material.vAxis);
 
             const std::size_t vertexStart = chunk.meshData.vertices.size();
             for (int i = 0; i < 4; ++i)
             {
+                const glm::vec3& pos = positions[i];
+
                 Vertex vertex{};
-                vertex.position = positions[i];
+                vertex.position = pos;
                 vertex.normal = normal;
-                vertex.tileCoord = tileUVs[i];
+                vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
                 vertex.atlasBase = material.uvBase;
                 vertex.atlasSize = material.uvSize;
                 chunk.meshData.vertices.push_back(vertex);
@@ -1749,6 +1729,7 @@ private:
             chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
             chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
         };
+
 
         auto greedyMeshAxis = [&](Axis axis)
         {

@@ -2113,37 +2113,56 @@ glm::vec3 resolveCollisionAxisByAxis(const glm::vec3& currentPos, const glm::vec
     {
         if (camera.velocity.y < 0.0f) // Landing (falling down)
         {
-            // Calculate feet position and find the block top to snap to
-            const float currentFeetY = result.y - kCameraEyeHeight;
             const float halfWidth = kPlayerWidth * 0.5f;
-            
-            // Find the highest block top that the player would collide with
-            const int minX = static_cast<int>(std::floor(result.x - halfWidth));
-            const int maxX = static_cast<int>(std::ceil(result.x + halfWidth));
-            const int minZ = static_cast<int>(std::floor(result.z - halfWidth));
-            const int maxZ = static_cast<int>(std::ceil(result.z + halfWidth));
-            const int checkY = static_cast<int>(std::floor(currentFeetY));
-            
-            float highestBlockTop = -1000.0f;
-            
+            const glm::vec3 targetMin(targetPos.x - halfWidth,
+                                      targetPos.y - kCameraEyeHeight,
+                                      targetPos.z - halfWidth);
+            const glm::vec3 targetMax = targetMin + glm::vec3(kPlayerWidth, kPlayerHeight, kPlayerWidth);
+
+            const int minX = static_cast<int>(std::floor(targetMin.x));
+            const int maxX = static_cast<int>(std::floor(targetMax.x));
+            const int minY = static_cast<int>(std::floor(targetMin.y));
+            const int maxY = static_cast<int>(std::floor(targetMax.y));
+            const int minZ = static_cast<int>(std::floor(targetMin.z));
+            const int maxZ = static_cast<int>(std::floor(targetMax.z));
+
+            // Evaluate blocks intersected by the target AABB to determine the true ground surface.
+            float highestBlockTop = -std::numeric_limits<float>::infinity();
+
             for (int x = minX; x <= maxX; ++x)
             {
-                for (int z = minZ; z <= maxZ; ++z)
+                for (int y = minY; y <= maxY; ++y)
                 {
-                    if (isSolid(chunkManager.blockAt(glm::ivec3(x, checkY, z))))
+                    for (int z = minZ; z <= maxZ; ++z)
                     {
-                        const float blockTop = static_cast<float>(checkY + 1);
-                        highestBlockTop = std::max(highestBlockTop, blockTop);
+                        if (!isSolid(chunkManager.blockAt(glm::ivec3(x, y, z))))
+                        {
+                            continue;
+                        }
+
+                        const glm::vec3 blockMin(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+                        const glm::vec3 blockMax = blockMin + glm::vec3(1.0f);
+
+                        if (targetMin.x < blockMax.x && targetMax.x > blockMin.x &&
+                            targetMin.y < blockMax.y && targetMax.y > blockMin.y &&
+                            targetMin.z < blockMax.z && targetMax.z > blockMin.z)
+                        {
+                            highestBlockTop = std::max(highestBlockTop, blockMax.y);
+                        }
                     }
                 }
             }
-            
-            if (highestBlockTop > -1000.0f)
+
+            if (highestBlockTop > -std::numeric_limits<float>::infinity())
             {
-                // Snap camera so feet sit exactly on the block top
-                result.y = highestBlockTop + kCameraEyeHeight;
+                const float desiredY = highestBlockTop + kCameraEyeHeight;
+                const float kGroundSnapTolerance = 1e-3f;
+                if (desiredY <= result.y + kGroundSnapTolerance)
+                {
+                    result.y = desiredY;
+                }
             }
-            
+
             camera.onGround = true;
         }
         camera.velocity.y = 0.0f; // Stop vertical velocity on collision

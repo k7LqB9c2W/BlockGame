@@ -1132,51 +1132,86 @@ public:
     RaycastHit raycast(const glm::vec3& origin, const glm::vec3& direction) const
     {
         RaycastHit result;
-        
-        const float stepSize = 0.1f;
-        const int maxSteps = static_cast<int>(kMaxRayDistance / stepSize);
-        
-        glm::vec3 currentPos = origin;
-        glm::vec3 step = glm::normalize(direction) * stepSize;
-        glm::ivec3 lastBlockPos{std::numeric_limits<int>::max()};
-        
-        for (int i = 0; i < maxSteps; ++i)
+
+        const float dirLengthSq = glm::dot(direction, direction);
+        if (dirLengthSq < kEpsilon * kEpsilon)
         {
-            currentPos += step;
-            
-            glm::ivec3 blockPos{
-                static_cast<int>(std::floor(currentPos.x)),
-                static_cast<int>(std::floor(currentPos.y)),
-                static_cast<int>(std::floor(currentPos.z))
-            };
-            
-            // Skip if we're still in the same block
-            if (blockPos == lastBlockPos)
+            return result;
+        }
+
+        const glm::vec3 dir = glm::normalize(direction);
+        glm::ivec3 currentBlock{
+            static_cast<int>(std::floor(origin.x)),
+            static_cast<int>(std::floor(origin.y)),
+            static_cast<int>(std::floor(origin.z))
+        };
+
+        glm::ivec3 stepVec;
+        glm::vec3 tMax;
+        glm::vec3 tDelta;
+
+        auto initializeAxis = [](float dirComponent, float originComponent, int blockComponent, int& stepOut, float& tMaxOut, float& tDeltaOut)
+        {
+            if (dirComponent > 0.0f)
             {
-                continue;
+                stepOut = 1;
+                const float nextBoundary = static_cast<float>(blockComponent + 1);
+                tMaxOut = (nextBoundary - originComponent) / dirComponent;
+                tDeltaOut = 1.0f / dirComponent;
             }
-            
-            lastBlockPos = blockPos;
-            
-            if (isSolid(blockAt(blockPos)))
+            else if (dirComponent < 0.0f)
+            {
+                stepOut = -1;
+                const float nextBoundary = static_cast<float>(blockComponent);
+                tMaxOut = (nextBoundary - originComponent) / dirComponent;
+                tDeltaOut = -1.0f / dirComponent;
+            }
+            else
+            {
+                stepOut = 0;
+                tMaxOut = std::numeric_limits<float>::infinity();
+                tDeltaOut = std::numeric_limits<float>::infinity();
+            }
+        };
+
+        initializeAxis(dir.x, origin.x, currentBlock.x, stepVec.x, tMax.x, tDelta.x);
+        initializeAxis(dir.y, origin.y, currentBlock.y, stepVec.y, tMax.y, tDelta.y);
+        initializeAxis(dir.z, origin.z, currentBlock.z, stepVec.z, tMax.z, tDelta.z);
+
+        glm::ivec3 previousBlock = currentBlock;
+
+        while (true)
+        {
+            int axis = 0;
+            if (tMax.y < tMax.x)
+            {
+                axis = 1;
+            }
+            if (tMax.z < tMax[axis])
+            {
+                axis = 2;
+            }
+
+            const float nextT = tMax[axis];
+            if (nextT > kMaxRayDistance)
+            {
+                break;
+            }
+
+            previousBlock = currentBlock;
+            currentBlock[axis] += stepVec[axis];
+            tMax[axis] += tDelta[axis];
+
+            if (isSolid(blockAt(currentBlock)))
             {
                 result.hit = true;
-                result.blockPos = blockPos;
-                result.distance = glm::length(currentPos - origin);
-                
-                // Calculate face normal by comparing with previous position
-                glm::vec3 prevPos = currentPos - step;
-                glm::ivec3 prevBlockPos{
-                    static_cast<int>(std::floor(prevPos.x)),
-                    static_cast<int>(std::floor(prevPos.y)),
-                    static_cast<int>(std::floor(prevPos.z))
-                };
-                
-                result.faceNormal = prevBlockPos - blockPos;
+                result.blockPos = currentBlock;
+                result.distance = nextT;
+                result.faceNormal = previousBlock - currentBlock;
                 break;
             }
         }
-        
+
         return result;
     }
 

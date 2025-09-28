@@ -325,6 +325,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    // If you see seams while debugging, temporarily switch to GL_CLAMP_TO_EDGE to isolate wrapping issues.
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
@@ -1583,6 +1584,8 @@ private:
             glm::vec3{0.0f, 0.0f, 1.0f}
         };
 
+        constexpr float kAtlasEdgeEpsilon = 0.0005f;
+
         auto makeMaterial = [&](const glm::ivec3&, const glm::vec3& normal) -> FaceMaterial
         {
             FaceMaterial material{};
@@ -1608,6 +1611,8 @@ private:
                 material.uvSize = glm::vec2(1.0f, 0.333f);
             }
 
+            material.uvBase += glm::vec2(kAtlasEdgeEpsilon);
+            material.uvSize -= glm::vec2(2.0f * kAtlasEdgeEpsilon);
             return material;
         };
 
@@ -1646,9 +1651,6 @@ private:
                 std::swap(positions[1], positions[3]);
             }
 
-            const glm::vec2 uvBase = material.uvBase;
-            const glm::vec2 uvSize = material.uvSize;
-
             float tilesU = 1.0f;
             float tilesV = 1.0f;
 
@@ -1668,65 +1670,71 @@ private:
                 tilesV = static_cast<float>(bSize);
             }
 
-            const float u0 = uvBase.x;
-            const float v0 = uvBase.y;
-            const float duTex = uvSize.x * tilesU;
-            const float dvTex = uvSize.y * tilesV;
+            auto wrap01 = [](float t) noexcept
+            {
+                return t - std::floor(t);
+            };
+
+            auto uvInAtlas = [&](float uTile, float vTile)
+            {
+                const glm::vec2 wrapped{wrap01(uTile), wrap01(vTile)};
+                return material.uvBase + material.uvSize * wrapped;
+            };
 
             std::array<glm::vec2, 4> uvs;
 
             if (axis == Axis::Y && dir == FaceDir::Positive)
             {
                 uvs = {
-                    glm::vec2(u0, v0),
-                    glm::vec2(u0 + duTex, v0),
-                    glm::vec2(u0 + duTex, v0 + dvTex),
-                    glm::vec2(u0, v0 + dvTex)
+                    uvInAtlas(0.0f, 0.0f),
+                    uvInAtlas(tilesU, 0.0f),
+                    uvInAtlas(tilesU, tilesV),
+                    uvInAtlas(0.0f, tilesV)
                 };
             }
             else if (axis == Axis::Y && dir == FaceDir::Negative)
             {
                 uvs = {
-                    glm::vec2(u0, v0 + dvTex),
-                    glm::vec2(u0 + duTex, v0 + dvTex),
-                    glm::vec2(u0 + duTex, v0),
-                    glm::vec2(u0, v0)
+                    uvInAtlas(0.0f, tilesV),
+                    uvInAtlas(tilesU, tilesV),
+                    uvInAtlas(tilesU, 0.0f),
+                    uvInAtlas(0.0f, 0.0f)
                 };
             }
             else if (axis == Axis::X && dir == FaceDir::Positive)
             {
                 uvs = {
-                    glm::vec2(u0, v0),
-                    glm::vec2(u0, v0 + dvTex),
-                    glm::vec2(u0 + duTex, v0 + dvTex),
-                    glm::vec2(u0 + duTex, v0)
+                    uvInAtlas(0.0f, 0.0f),
+                    uvInAtlas(0.0f, tilesV),
+                    uvInAtlas(tilesU, tilesV),
+                    uvInAtlas(tilesU, 0.0f)
                 };
             }
             else if (axis == Axis::X && dir == FaceDir::Negative)
             {
                 uvs = {
-                    glm::vec2(u0 + duTex, v0),
-                    glm::vec2(u0 + duTex, v0 + dvTex),
-                    glm::vec2(u0, v0 + dvTex),
-                    glm::vec2(u0, v0)
+                    uvInAtlas(tilesU, 0.0f),
+                    uvInAtlas(tilesU, tilesV),
+                    uvInAtlas(0.0f, tilesV),
+                    uvInAtlas(0.0f, 0.0f)
                 };
             }
             else if (axis == Axis::Z && dir == FaceDir::Positive)
             {
                 uvs = {
-                    glm::vec2(u0 + duTex, v0),
-                    glm::vec2(u0 + duTex, v0 + dvTex),
-                    glm::vec2(u0, v0 + dvTex),
-                    glm::vec2(u0, v0)
+                    uvInAtlas(tilesU, 0.0f),
+                    uvInAtlas(tilesU, tilesV),
+                    uvInAtlas(0.0f, tilesV),
+                    uvInAtlas(0.0f, 0.0f)
                 };
             }
             else
             {
                 uvs = {
-                    glm::vec2(u0, v0),
-                    glm::vec2(u0, v0 + dvTex),
-                    glm::vec2(u0 + duTex, v0 + dvTex),
-                    glm::vec2(u0 + duTex, v0)
+                    uvInAtlas(0.0f, 0.0f),
+                    uvInAtlas(0.0f, tilesV),
+                    uvInAtlas(tilesU, tilesV),
+                    uvInAtlas(tilesU, 0.0f)
                 };
             }
 

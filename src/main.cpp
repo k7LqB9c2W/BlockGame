@@ -71,7 +71,9 @@ struct Vertex
 {
     glm::vec3 position;
     glm::vec3 normal;
-    glm::vec2 texCoord;
+    glm::vec2 tileCoord;
+    glm::vec2 atlasBase;
+    glm::vec2 atlasSize;
 };
 
 class Camera
@@ -1504,8 +1506,14 @@ private:
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
             glEnableVertexAttribArray(1);
 
-            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texCoord)));
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, tileCoord)));
             glEnableVertexAttribArray(2);
+
+            glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasBase)));
+            glEnableVertexAttribArray(3);
+
+            glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
+            glEnableVertexAttribArray(4);
         }
 
         glBindVertexArray(chunk.vao);
@@ -1584,8 +1592,6 @@ private:
             glm::vec3{0.0f, 0.0f, 1.0f}
         };
 
-        constexpr float kAtlasEdgeEpsilon = 0.0005f;
-
         auto makeMaterial = [&](const glm::ivec3&, const glm::vec3& normal) -> FaceMaterial
         {
             FaceMaterial material{};
@@ -1610,9 +1616,6 @@ private:
                 material.uvBase = glm::vec2(0.0f, 0.333f);
                 material.uvSize = glm::vec2(1.0f, 0.333f);
             }
-
-            material.uvBase += glm::vec2(kAtlasEdgeEpsilon);
-            material.uvSize -= glm::vec2(2.0f * kAtlasEdgeEpsilon);
             return material;
         };
 
@@ -1670,71 +1673,60 @@ private:
                 tilesV = static_cast<float>(bSize);
             }
 
-            auto wrap01 = [](float t) noexcept
-            {
-                return t - std::floor(t);
-            };
-
-            auto uvInAtlas = [&](float uTile, float vTile)
-            {
-                const glm::vec2 wrapped{wrap01(uTile), wrap01(vTile)};
-                return material.uvBase + material.uvSize * wrapped;
-            };
-
-            std::array<glm::vec2, 4> uvs;
+            std::array<glm::vec2, 4> tileUVs{};
 
             if (axis == Axis::Y && dir == FaceDir::Positive)
             {
-                uvs = {
-                    uvInAtlas(0.0f, 0.0f),
-                    uvInAtlas(tilesU, 0.0f),
-                    uvInAtlas(tilesU, tilesV),
-                    uvInAtlas(0.0f, tilesV)
+                tileUVs = {
+                    glm::vec2(0.0f, 0.0f),
+                    glm::vec2(tilesU, 0.0f),
+                    glm::vec2(tilesU, tilesV),
+                    glm::vec2(0.0f, tilesV)
                 };
             }
             else if (axis == Axis::Y && dir == FaceDir::Negative)
             {
-                uvs = {
-                    uvInAtlas(0.0f, tilesV),
-                    uvInAtlas(tilesU, tilesV),
-                    uvInAtlas(tilesU, 0.0f),
-                    uvInAtlas(0.0f, 0.0f)
+                tileUVs = {
+                    glm::vec2(0.0f, tilesV),
+                    glm::vec2(tilesU, tilesV),
+                    glm::vec2(tilesU, 0.0f),
+                    glm::vec2(0.0f, 0.0f)
                 };
             }
             else if (axis == Axis::X && dir == FaceDir::Positive)
             {
-                uvs = {
-                    uvInAtlas(0.0f, 0.0f),
-                    uvInAtlas(0.0f, tilesV),
-                    uvInAtlas(tilesU, tilesV),
-                    uvInAtlas(tilesU, 0.0f)
+                tileUVs = {
+                    glm::vec2(0.0f, 0.0f),
+                    glm::vec2(0.0f, tilesV),
+                    glm::vec2(tilesU, tilesV),
+                    glm::vec2(tilesU, 0.0f)
                 };
             }
             else if (axis == Axis::X && dir == FaceDir::Negative)
             {
-                uvs = {
-                    uvInAtlas(tilesU, 0.0f),
-                    uvInAtlas(tilesU, tilesV),
-                    uvInAtlas(0.0f, tilesV),
-                    uvInAtlas(0.0f, 0.0f)
+                tileUVs = {
+                    glm::vec2(tilesU, 0.0f),
+                    glm::vec2(tilesU, tilesV),
+                    glm::vec2(0.0f, tilesV),
+                    glm::vec2(0.0f, 0.0f)
                 };
             }
             else if (axis == Axis::Z && dir == FaceDir::Positive)
             {
-                uvs = {
-                    uvInAtlas(tilesU, 0.0f),
-                    uvInAtlas(tilesU, tilesV),
-                    uvInAtlas(0.0f, tilesV),
-                    uvInAtlas(0.0f, 0.0f)
+                tileUVs = {
+                    glm::vec2(tilesU, 0.0f),
+                    glm::vec2(tilesU, tilesV),
+                    glm::vec2(0.0f, tilesV),
+                    glm::vec2(0.0f, 0.0f)
                 };
             }
             else
             {
-                uvs = {
-                    uvInAtlas(0.0f, 0.0f),
-                    uvInAtlas(0.0f, tilesV),
-                    uvInAtlas(tilesU, tilesV),
-                    uvInAtlas(tilesU, 0.0f)
+                tileUVs = {
+                    glm::vec2(0.0f, 0.0f),
+                    glm::vec2(0.0f, tilesV),
+                    glm::vec2(tilesU, tilesV),
+                    glm::vec2(tilesU, 0.0f)
                 };
             }
 
@@ -1744,7 +1736,9 @@ private:
                 Vertex vertex{};
                 vertex.position = positions[i];
                 vertex.normal = normal;
-                vertex.texCoord = uvs[i];
+                vertex.tileCoord = tileUVs[i];
+                vertex.atlasBase = material.uvBase;
+                vertex.atlasSize = material.uvSize;
                 chunk.meshData.vertices.push_back(vertex);
             }
 
@@ -2337,19 +2331,25 @@ int main()
     const char* vertexShaderSrc = R"(#version 330 core
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
-layout (location = 2) in vec2 aTexCoord;
+layout (location = 2) in vec2 aTileCoord;
+layout (location = 3) in vec2 aAtlasBase;
+layout (location = 4) in vec2 aAtlasSize;
 
 uniform mat4 uViewProj;
 
 out vec3 vNormal;
 out vec3 vWorldPos;
-out vec2 vTexCoord;
+out vec2 vTileCoord;
+out vec2 vAtlasBase;
+out vec2 vAtlasSize;
 
 void main()
 {
     vNormal = aNormal;
     vWorldPos = aPos;
-    vTexCoord = aTexCoord;
+    vTileCoord = aTileCoord;
+    vAtlasBase = aAtlasBase;
+    vAtlasSize = aAtlasSize;
     gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 )";
@@ -2359,7 +2359,9 @@ out vec4 FragColor;
 
 in vec3 vNormal;
 in vec3 vWorldPos;
-in vec2 vTexCoord;
+in vec2 vTileCoord;
+in vec2 vAtlasBase;
+in vec2 vAtlasSize;
 
 uniform sampler2D uAtlas;
 uniform vec3 uLightDir;
@@ -2377,7 +2379,9 @@ void main()
     vec3 halfDir = normalize(lightDir + viewDir);
     float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
 
-    vec3 textureColor = texture(uAtlas, vTexCoord).rgb;
+    vec2 tileUV = fract(vTileCoord);
+    vec2 atlasUV = vAtlasBase + vAtlasSize * tileUV;
+    vec3 textureColor = texture(uAtlas, atlasUV).rgb;
     vec3 color = textureColor * (ambient + diff) + vec3(0.1f) * spec;
 
     if (uHasHighlight == 1) {

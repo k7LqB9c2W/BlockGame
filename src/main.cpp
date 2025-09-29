@@ -2209,7 +2209,7 @@ AxisMoveResult sweepPlayerAABB(AABB& box,
     if (move > 0.0f)
     {
         const float face = box.max[axis];
-        const int firstBlock = static_cast<int>(std::floor(face + kAxisCollisionEpsilon)) + 1;
+        const int firstBlock = static_cast<int>(std::floor(face - kAxisCollisionEpsilon)) + 1;
         const int lastBlock = static_cast<int>(std::floor(face + move + kAxisCollisionEpsilon));
         if (firstBlock <= lastBlock)
         {

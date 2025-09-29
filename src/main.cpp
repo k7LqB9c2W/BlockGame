@@ -61,6 +61,8 @@ constexpr int kChunkSizeZ = 16;
 constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
 constexpr int kDefaultViewDistance = 4;  // Default chunks around the player
 constexpr int kExtendedViewDistance = 12; // Extended view distance for N toggle
+constexpr int kMaxChunkJobsPerFrame = 12;
+constexpr int kMaxRingsPerFrame = 1;
 
 inline float computeFarPlaneForViewDistance(int viewDistance) noexcept
 {
@@ -516,56 +518,130 @@ public:
     void push(const Job& job)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(job);
+        priorityQueue_.push(wrap(job));
         condition_.notify_one();
     }
 
     bool tryPop(Job& job)
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (queue_.empty())
+        if (priorityQueue_.empty())
         {
             return false;
         }
-        job = queue_.front();
-        queue_.pop();
+        job = priorityQueue_.top().job;
+        priorityQueue_.pop();
         return true;
     }
 
     Job waitAndPop()
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [this] { return !queue_.empty() || shouldStop_; });
-        
-        if (shouldStop_ && queue_.empty())
+        condition_.wait(lock, [this] { return !priorityQueue_.empty() || shouldStop_.load(std::memory_order_acquire); });
+
+        if (shouldStop_.load(std::memory_order_acquire) && priorityQueue_.empty())
         {
             throw std::runtime_error("Job queue stopped");
         }
-        
-        Job job = queue_.front();
-        queue_.pop();
+
+        Job job = priorityQueue_.top().job;
+        priorityQueue_.pop();
         return job;
     }
 
     void stop()
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        shouldStop_ = true;
+        shouldStop_.store(true, std::memory_order_release);
         condition_.notify_all();
     }
 
     bool empty() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.empty();
+        return priorityQueue_.empty();
+    }
+
+    void updatePriorityOrigin(const glm::ivec2& origin)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (origin == priorityOrigin_)
+        {
+            return;
+        }
+
+        priorityOrigin_ = origin;
+        rebuildLocked();
     }
 
 private:
+    struct PrioritizedJob
+    {
+        Job job;
+        int distance{0};
+        int priorityBias{0};
+        std::uint64_t sequence{0};
+    };
+
+    struct JobComparer
+    {
+        bool operator()(const PrioritizedJob& lhs, const PrioritizedJob& rhs) const
+        {
+            if (lhs.distance != rhs.distance)
+            {
+                return lhs.distance > rhs.distance;
+            }
+            if (lhs.priorityBias != rhs.priorityBias)
+            {
+                return lhs.priorityBias > rhs.priorityBias;
+            }
+            return lhs.sequence > rhs.sequence;
+        }
+    };
+
+    PrioritizedJob wrap(const Job& job)
+    {
+        const int distance = manhattanDistance(job.chunkCoord, priorityOrigin_);
+        const int bias = (job.type == JobType::Mesh) ? 0 : 1;
+        const std::uint64_t sequence = nextSequence_++;
+        return PrioritizedJob{job, distance, bias, sequence};
+    }
+
+    static int manhattanDistance(const glm::ivec2& a, const glm::ivec2& b) noexcept
+    {
+        return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+    }
+
+    void rebuildLocked()
+    {
+        if (priorityQueue_.empty())
+        {
+            return;
+        }
+
+        std::vector<PrioritizedJob> jobs;
+        jobs.reserve(priorityQueue_.size());
+        while (!priorityQueue_.empty())
+        {
+            jobs.push_back(priorityQueue_.top());
+            priorityQueue_.pop();
+        }
+
+        for (auto& prioritized : jobs)
+        {
+            prioritized.distance = manhattanDistance(prioritized.job.chunkCoord, priorityOrigin_);
+            priorityQueue_.push(std::move(prioritized));
+        }
+    }
+
     mutable std::mutex mutex_;
-    std::queue<Job> queue_;
     std::condition_variable condition_;
     std::atomic<bool> shouldStop_{false};
+    glm::ivec2 priorityOrigin_{0, 0};
+    std::priority_queue<PrioritizedJob, std::vector<PrioritizedJob>, JobComparer> priorityQueue_;
+    std::uint64_t nextSequence_{0};
 };
+
 
 inline bool isSolid(BlockId block) noexcept
 {
@@ -822,9 +898,9 @@ class ChunkManager
 {
 public:
     explicit ChunkManager(unsigned seed)
-        : noise_(seed), shouldStop_(false), viewDistance_(kDefaultViewDistance)
+        : noise_(seed), shouldStop_(false), viewDistance_(kDefaultViewDistance), targetViewDistance_(kDefaultViewDistance)
     {
-        kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
+        kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
         startWorkerThreads();
     }
 
@@ -845,71 +921,53 @@ public:
         const int worldZ = static_cast<int>(std::floor(cameraPos.z));
         const glm::ivec2 centerChunk = worldToChunkCoords(worldX, worldZ);
 
-        const int maxChunks = (2 * viewDistance_ + 1) * (2 * viewDistance_ + 1);
-        std::unordered_set<glm::ivec2, ChunkHasher> needed;
-        needed.reserve(static_cast<std::size_t>(maxChunks));
+        jobQueue_.updatePriorityOrigin(centerChunk);
 
-        // Add debug output for large view distances
-        if (viewDistance_ > 8)
+        if (viewDistance_ > targetViewDistance_)
         {
-            std::cout << "Loading " << maxChunks << " chunks for view distance " << viewDistance_ << std::endl;
+            viewDistance_ = targetViewDistance_;
         }
 
-        for (int dz = -viewDistance_; dz <= viewDistance_; ++dz)
+        if (targetViewDistance_ > 8)
         {
-            for (int dx = -viewDistance_; dx <= viewDistance_; ++dx)
+            const int maxChunks = (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1);
+            std::cout << "Loading " << maxChunks << " chunks for view distance " << targetViewDistance_ << std::endl;
+        }
+
+        int jobBudget = kMaxChunkJobsPerFrame;
+
+        for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
+        {
+            RingProgress progress = ensureRing(centerChunk, ring, jobBudget);
+            if (progress.budgetExhausted)
             {
-                needed.insert(centerChunk + glm::ivec2(dx, dz));
+                break;
             }
         }
 
-        // Create missing chunks and start generation
-        for (const glm::ivec2& coord : needed)
+        int ringsExpanded = 0;
+        while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < kMaxRingsPerFrame)
         {
-            ensureChunkAsync(coord);
-        }
+            const int nextRing = viewDistance_ + 1;
+            RingProgress progress = ensureRing(centerChunk, nextRing, jobBudget);
 
-        // Remove chunks outside the view distance
-        std::vector<glm::ivec2> toRemove;
-        {
-            std::lock_guard<std::mutex> lock(chunksMutex);
-            toRemove.reserve(chunks_.size());
-            for (const auto& [coord, chunkPtr] : chunks_)
+            if (progress.budgetExhausted)
             {
-                if (needed.find(coord) == needed.end())
-                {
-                    toRemove.push_back(coord);
-                }
-            }
-        }
-
-        for (const glm::ivec2& coord : toRemove)
-        {
-            std::shared_ptr<Chunk> chunk;
-            {
-                std::lock_guard<std::mutex> lock(chunksMutex);
-                auto it = chunks_.find(coord);
-                if (it == chunks_.end())
-                {
-                    continue;
-                }
-
-                if (it->second->inFlight.load(std::memory_order_acquire) != 0)
-                {
-                    continue;
-                }
-
-                chunk = it->second;
-                chunks_.erase(it);
+                break;
             }
 
-            if (chunk)
+            if (progress.fullyLoaded)
             {
-                chunk->releaseGPU();
+                ++viewDistance_;
+                ++ringsExpanded;
+                continue;
             }
+
+            break;
         }
 
-        // Upload ready meshes to GPU
+        removeDistantChunks(centerChunk);
+
         uploadReadyMeshes();
     }
 
@@ -1257,42 +1315,41 @@ public:
     {
         try
         {
-            if (viewDistance_ == kDefaultViewDistance)
+            if (targetViewDistance_ == kDefaultViewDistance)
             {
                 std::cout << "Switching to extended render distance..." << std::endl;
-                
-                // Clear existing chunks first to prevent memory issues
-                clear();
-                
-                viewDistance_ = kExtendedViewDistance;
-                kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
-                std::cout << "Extended render distance active: " << viewDistance_ << " chunks (total: " 
-                          << (2 * viewDistance_ + 1) * (2 * viewDistance_ + 1) << " chunks)" << std::endl;
+
+                targetViewDistance_ = kExtendedViewDistance;
+                kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+                std::cout << "Extended render distance target: " << targetViewDistance_ << " chunks (total: "
+                          << (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1) << " chunks)" << std::endl;
             }
             else
             {
                 std::cout << "Switching to default render distance..." << std::endl;
-                
-                // Clear chunks when going back to normal
-                clear();
-                
-                viewDistance_ = kDefaultViewDistance;
-                kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
-                std::cout << "Default render distance active: " << viewDistance_ << " chunks" << std::endl;
+
+                targetViewDistance_ = kDefaultViewDistance;
+                kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+                std::cout << "Default render distance target: " << targetViewDistance_ << " chunks" << std::endl;
+            }
+
+            if (viewDistance_ > targetViewDistance_)
+            {
+                viewDistance_ = targetViewDistance_;
             }
         }
         catch (const std::exception& ex)
         {
             std::cerr << "Error toggling view distance: " << ex.what() << std::endl;
-            // Reset to default on error
-            viewDistance_ = kDefaultViewDistance;
-            kFarPlane = computeFarPlaneForViewDistance(viewDistance_);
+            targetViewDistance_ = kDefaultViewDistance;
+            viewDistance_ = std::min(viewDistance_, targetViewDistance_);
+            kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
         }
     }
 
     [[nodiscard]] int viewDistance() const noexcept
     {
-        return viewDistance_;
+        return targetViewDistance_;
     }
 
     [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
@@ -1487,16 +1544,124 @@ private:
         }
     }
 
-    void ensureChunkAsync(const glm::ivec2& coord)
+
+    struct RingProgress
+    {
+        bool fullyLoaded{false};
+        bool budgetExhausted{false};
+    };
+
+    RingProgress ensureRing(const glm::ivec2& center, int radius, int& jobBudget)
+    {
+        bool missingFound = false;
+
+        auto visitCoordinate = [&](const glm::ivec2& coord) -> bool
+        {
+            if (jobBudget <= 0)
+            {
+                return true;
+            }
+
+            if (ensureChunkAsync(coord))
+            {
+                --jobBudget;
+                missingFound = true;
+            }
+
+            return jobBudget <= 0;
+        };
+
+        if (radius == 0)
+        {
+            if (visitCoordinate(center))
+            {
+                return RingProgress{false, true};
+            }
+
+            return RingProgress{!missingFound, false};
+        }
+
+        for (int dx = -radius; dx <= radius; ++dx)
+        {
+            if (visitCoordinate(center + glm::ivec2(dx, -radius)))
+            {
+                return RingProgress{false, true};
+            }
+            if (visitCoordinate(center + glm::ivec2(dx, radius)))
+            {
+                return RingProgress{false, true};
+            }
+        }
+
+        for (int dz = -radius + 1; dz <= radius - 1; ++dz)
+        {
+            if (visitCoordinate(center + glm::ivec2(-radius, dz)))
+            {
+                return RingProgress{false, true};
+            }
+            if (visitCoordinate(center + glm::ivec2(radius, dz)))
+            {
+                return RingProgress{false, true};
+            }
+        }
+
+        return RingProgress{!missingFound, false};
+    }
+
+    void removeDistantChunks(const glm::ivec2& center)
+    {
+        std::vector<glm::ivec2> toRemove;
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            toRemove.reserve(chunks_.size());
+            for (const auto& [coord, chunkPtr] : chunks_)
+            {
+                const int dx = coord.x - center.x;
+                const int dz = coord.y - center.y;
+                if (std::max(std::abs(dx), std::abs(dz)) > targetViewDistance_)
+                {
+                    toRemove.push_back(coord);
+                }
+            }
+        }
+
+        for (const glm::ivec2& coord : toRemove)
+        {
+            std::shared_ptr<Chunk> chunk;
+            {
+                std::lock_guard<std::mutex> lock(chunksMutex);
+                auto it = chunks_.find(coord);
+                if (it == chunks_.end())
+                {
+                    continue;
+                }
+
+                if (it->second->inFlight.load(std::memory_order_acquire) != 0)
+                {
+                    continue;
+                }
+
+                chunk = it->second;
+                chunks_.erase(it);
+            }
+
+            if (chunk)
+            {
+                chunk->releaseGPU();
+            }
+        }
+    }
+    bool ensureChunkAsync(const glm::ivec2& coord)
     {
         try
         {
             std::shared_ptr<Chunk> chunk;
             {
                 std::lock_guard<std::mutex> lock(chunksMutex);
-                if (chunks_.find(coord) != chunks_.end())
+                auto it = chunks_.find(coord);
+                if (it != chunks_.end())
                 {
-                    return; // Chunk already exists
+                    return false;
                 }
 
                 chunk = std::make_shared<Chunk>(coord);
@@ -1505,12 +1670,15 @@ private:
             }
 
             enqueueJob(chunk, JobType::Generate, coord);
+            return true;
         }
         catch (const std::exception& ex)
         {
             std::cerr << "Error creating chunk at (" << coord.x << ", " << coord.y << "): " << ex.what() << std::endl;
+            return false;
         }
     }
+
 
     void uploadReadyMeshes()
     {
@@ -2103,6 +2271,7 @@ private:
     
     // View distance setting
     int viewDistance_;
+    int targetViewDistance_;
 };
 
 // Collision detection helper functions
@@ -2727,7 +2896,4 @@ void main()
     glfwTerminate();
     return EXIT_SUCCESS;
 }
-
-
-
 

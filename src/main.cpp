@@ -61,6 +61,7 @@ constexpr int kChunkSizeX = 16;
 constexpr int kChunkSizeY = 64;
 constexpr int kChunkSizeZ = 16;
 constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
+constexpr int kAtlasTileSizePixels = 16;
 constexpr int kDefaultViewDistance = 4;  // Default chunks around the player
 constexpr int kExtendedViewDistance = 12; // Extended view distance for N toggle
 constexpr int kMaxChunkJobsPerFrame = 12;
@@ -327,10 +328,16 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
     return program;
 }
 
-[[nodiscard]] GLuint loadTexture(const char* path)
+struct LoadedTexture
 {
-    GLuint textureId = 0;
-    glGenTextures(1, &textureId);
+    GLuint id{0};
+    glm::ivec2 size{0};
+};
+
+[[nodiscard]] LoadedTexture loadTexture(const char* path)
+{
+    LoadedTexture texture{};
+    glGenTextures(1, &texture.id);
 
     int width = 0;
     int height = 0;
@@ -341,8 +348,10 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
     if (!data)
     {
         std::cerr << "Failed to load texture: " << path << std::endl;
-        glDeleteTextures(1, &textureId);
-        return 0;
+        glDeleteTextures(1, &texture.id);
+        texture.id = 0;
+        texture.size = glm::ivec2(0);
+        return texture;
     }
 
     GLenum format = GL_RGB;
@@ -359,7 +368,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
         format = GL_RGBA;
     }
 
-    glBindTexture(GL_TEXTURE_2D, textureId);
+    glBindTexture(GL_TEXTURE_2D, texture.id);
     glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
     glGenerateMipmap(GL_TEXTURE_2D);
 
@@ -371,9 +380,10 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
     stbi_image_free(data);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    std::cout << "Loaded texture: " << path << " (" << width << "x" << height << ")" << std::endl;
+    texture.size = glm::ivec2(width, height);
+    std::cout << "Loaded texture: " << path << " (" << texture.size.x << "x" << texture.size.y << ")" << std::endl;
 
-    return textureId;
+    return texture;
 }
 
 class Crosshair
@@ -524,8 +534,34 @@ inline int wrapIndex(int value, int modulus) noexcept
 enum class BlockId : std::uint8_t
 {
     Air = 0,
-    Grass = 1
+    Grass = 1,
+    Log = 2,
+    Count
 };
+
+constexpr std::size_t toIndex(BlockId block) noexcept
+{
+    return static_cast<std::size_t>(block);
+}
+
+enum class BlockFace : std::uint8_t
+{
+    Top = 0,
+    Bottom,
+    North,
+    South,
+    East,
+    West,
+    Count
+};
+
+constexpr std::size_t toIndex(BlockFace face) noexcept
+{
+    return static_cast<std::size_t>(face);
+}
+
+constexpr std::size_t kBlockCount = toIndex(BlockId::Count);
+constexpr std::size_t kBlockFaceCount = toIndex(BlockFace::Count);
 
 enum class ChunkState : std::uint8_t
 {
@@ -951,6 +987,56 @@ public:
     void setAtlasTexture(GLuint texture) noexcept
     {
         atlasTexture_ = texture;
+    }
+
+    void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels)
+    {
+        if (tileSizePixels <= 0 || textureSizePixels.x <= 0 || textureSizePixels.y <= 0)
+        {
+            std::cerr << "Invalid block atlas dimensions provided" << std::endl;
+            blockAtlasConfigured_ = false;
+            return;
+        }
+
+        atlasTileScale_ = glm::vec2(
+            static_cast<float>(tileSizePixels) / static_cast<float>(textureSizePixels.x),
+            static_cast<float>(tileSizePixels) / static_cast<float>(textureSizePixels.y));
+
+        for (auto& blockEntry : blockUVTable_)
+        {
+            for (auto& face : blockEntry.faces)
+            {
+                face.base = glm::vec2(0.0f);
+                face.size = atlasTileScale_;
+            }
+        }
+
+        auto assignFace = [&](BlockId block, BlockFace face, const glm::ivec2& tile)
+        {
+            const glm::vec2 base = glm::vec2(static_cast<float>(tile.x), static_cast<float>(tile.y)) * atlasTileScale_;
+            auto& faceUV = blockUVTable_[toIndex(block)].faces[toIndex(face)];
+            faceUV.base = base;
+            faceUV.size = atlasTileScale_;
+        };
+
+        // Grass: tile row order follows OpenGL's bottom-left origin, row 0 is the bottom of the atlas.
+        assignFace(BlockId::Grass, BlockFace::Top, {0, 0});
+        assignFace(BlockId::Grass, BlockFace::Bottom, {0, 2});
+        for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+        {
+            assignFace(BlockId::Grass, face, {0, 1});
+        }
+
+        // Log block example: bark on row 3, caps on row 4. Update these indices to match your atlas.
+        assignFace(BlockId::Log, BlockFace::Top, {0, 4});
+        assignFace(BlockId::Log, BlockFace::Bottom, {0, 4});
+        for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+        {
+            assignFace(BlockId::Log, face, {0, 3});
+        }
+
+        // Add new block types here by mapping each face to a tile coordinate.
+        blockAtlasConfigured_ = true;
     }
 
     void update(const glm::vec3& cameraPos)
@@ -2110,16 +2196,6 @@ private:
         enum class Axis : int { X = 0, Y = 1, Z = 2 };
         enum class FaceDir : int { Negative = 0, Positive = 1 };
 
-        enum class BlockFace : std::uint8_t
-        {
-            Top,
-            Bottom,
-            North,
-            South,
-            East,
-            West
-        };
-
         struct FaceMaterial
         {
             glm::vec2 uvBase{0.0f};
@@ -2150,7 +2226,7 @@ private:
             glm::vec3{0.0f, 0.0f, 1.0f}
         };
 
-        auto makeMaterial = [&](const glm::ivec3&, const glm::vec3& normal) -> FaceMaterial
+        auto makeMaterial = [&](BlockId block, const glm::vec3& normal) -> FaceMaterial
         {
             FaceMaterial material{};
 
@@ -2166,44 +2242,44 @@ private:
 
             material.face = face;
 
-            // Atlas layout: top third = grass top, middle third = sides, bottom third = dirt.
-            constexpr float kAtlasThird = 1.0f / 3.0f;
+            if (blockAtlasConfigured_)
+            {
+                const BlockUVSet& uvSet = blockUVTable_[toIndex(block)];
+                const FaceUV& faceUV = uvSet.faces[toIndex(face)];
+                material.uvBase = faceUV.base;
+                material.uvSize = faceUV.size;
+            }
+            else
+            {
+                // Fallback so we can still render even if the atlas has not been configured yet.
+                material.uvBase = glm::vec2(0.0f);
+                material.uvSize = glm::vec2(1.0f);
+            }
 
             switch (face)
             {
             case BlockFace::Top:
-                material.uvBase = glm::vec2(0.0f, 0.0f);
-                material.uvSize = glm::vec2(1.0f, kAtlasThird);
                 material.uAxis = glm::ivec3(1, 0, 0);
                 material.vAxis = glm::ivec3(0, 0, 1);
                 break;
             case BlockFace::Bottom:
-                material.uvBase = glm::vec2(0.0f, 2.0f * kAtlasThird);
-                material.uvSize = glm::vec2(1.0f, kAtlasThird);
                 material.uAxis = glm::ivec3(1, 0, 0);
                 material.vAxis = glm::ivec3(0, 0, -1);
                 break;
             case BlockFace::East:
-                material.uvBase = glm::vec2(0.0f, kAtlasThird);
-                material.uvSize = glm::vec2(1.0f, kAtlasThird);
                 material.uAxis = glm::ivec3(0, 0, 1);
                 material.vAxis = glm::ivec3(0, 1, 0);
                 break;
             case BlockFace::West:
-                material.uvBase = glm::vec2(0.0f, kAtlasThird);
-                material.uvSize = glm::vec2(1.0f, kAtlasThird);
                 material.uAxis = glm::ivec3(0, 0, -1);
                 material.vAxis = glm::ivec3(0, 1, 0);
                 break;
             case BlockFace::South:
-                material.uvBase = glm::vec2(0.0f, kAtlasThird);
-                material.uvSize = glm::vec2(1.0f, kAtlasThird);
                 material.uAxis = glm::ivec3(-1, 0, 0);
                 material.vAxis = glm::ivec3(0, 1, 0);
                 break;
             case BlockFace::North:
-                material.uvBase = glm::vec2(0.0f, kAtlasThird);
-                material.uvSize = glm::vec2(1.0f, kAtlasThird);
+            default:
                 material.uAxis = glm::ivec3(1, 0, 0);
                 material.vAxis = glm::ivec3(0, 1, 0);
                 break;
@@ -2345,7 +2421,9 @@ private:
                             {
                                 const glm::vec3 normal = axisNormals[a] * ((dir == FaceDir::Positive) ? 1.0f : -1.0f);
                                 cell.exists = true;
-                                cell.material = makeMaterial(owningLocal, normal);
+                                const std::size_t blockIdx = blockIndex(owningLocal.x, owningLocal.y, owningLocal.z);
+                                const BlockId owningBlock = chunk.blocks[blockIdx];
+                                cell.material = makeMaterial(owningBlock, normal);
                             }
 
                             mask[maskIdx] = cell;
@@ -2569,6 +2647,21 @@ private:
         }
     }
 
+
+    struct FaceUV
+    {
+        glm::vec2 base{0.0f}; // Normalized origin inside the atlas.
+        glm::vec2 size{1.0f}; // Normalized tile dimensions.
+    };
+
+    struct BlockUVSet
+    {
+        std::array<FaceUV, kBlockFaceCount> faces{}; // One entry per cube face.
+    };
+
+    glm::vec2 atlasTileScale_{1.0f, 1.0f};
+    std::array<BlockUVSet, kBlockCount> blockUVTable_{};
+    bool blockAtlasConfigured_{false};
 
     std::deque<std::weak_ptr<Chunk>> uploadQueue_;
     std::mutex uploadQueueMutex_;
@@ -3130,8 +3223,8 @@ void main()
     chunkUniforms.uHighlightedBlock = glGetUniformLocation(shaderProgram, "uHighlightedBlock");
     chunkUniforms.uHasHighlight = glGetUniformLocation(shaderProgram, "uHasHighlight");
 
-    GLuint atlasTexture = loadTexture("grass_block_atlas.png");
-    if (atlasTexture == 0)
+    LoadedTexture blockAtlas = loadTexture("block_atlas.png");
+    if (blockAtlas.id == 0)
     {
         glDeleteProgram(shaderProgram);
         glfwDestroyWindow(window);
@@ -3147,7 +3240,8 @@ void main()
     glUseProgram(0);
 
     ChunkManager chunkManager(1337u);
-    chunkManager.setAtlasTexture(atlasTexture);
+    chunkManager.setAtlasTexture(blockAtlas.id);
+    chunkManager.setBlockTextureAtlasConfig(blockAtlas.size, kAtlasTileSizePixels); // Map block faces to atlas tiles.
     chunkManager.update(camera.position);
     
     // Find a guaranteed safe spawn position above ground
@@ -3299,9 +3393,9 @@ void main()
     }
 
     chunkManager.clear();
-    if (atlasTexture != 0)
+    if (blockAtlas.id != 0)
     {
-        glDeleteTextures(1, &atlasTexture);
+        glDeleteTextures(1, &blockAtlas.id);
     }
     glDeleteProgram(shaderProgram);
 
@@ -3309,5 +3403,6 @@ void main()
     glfwTerminate();
     return EXIT_SUCCESS;
 }
+
 
 

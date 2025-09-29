@@ -32,6 +32,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <deque>
+#include <map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -63,6 +65,8 @@ constexpr int kDefaultViewDistance = 4;  // Default chunks around the player
 constexpr int kExtendedViewDistance = 12; // Extended view distance for N toggle
 constexpr int kMaxChunkJobsPerFrame = 12;
 constexpr int kMaxRingsPerFrame = 1;
+constexpr std::size_t kUploadBudgetBytesPerFrame = 4ull * 1024ull * 1024ull;
+constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
 
 inline float computeFarPlaneForViewDistance(int viewDistance) noexcept
 {
@@ -800,25 +804,6 @@ struct Chunk
     {
     }
 
-    void releaseGPU()
-    {
-        if (ibo != 0)
-        {
-            glDeleteBuffers(1, &ibo);
-            ibo = 0;
-        }
-        if (vbo != 0)
-        {
-            glDeleteBuffers(1, &vbo);
-            vbo = 0;
-        }
-        if (vao != 0)
-        {
-            glDeleteVertexArrays(1, &vao);
-            vao = 0;
-        }
-    }
-
     glm::ivec2 coord;
     std::vector<BlockId> blocks;
     std::atomic<ChunkState> state;
@@ -829,6 +814,9 @@ struct Chunk
     GLuint vbo{0};
     GLuint ibo{0};
     GLsizei indexCount{0};
+    std::size_t vertexCapacity{0};
+    std::size_t indexCapacity{0};
+    bool queuedForUpload{false};
     
     // Mesh data for async operations
     mutable std::mutex meshMutex;
@@ -908,6 +896,7 @@ public:
     {
         stopWorkerThreads();
         clear();
+        destroyBufferPool();
     }
 
     void setAtlasTexture(GLuint texture) noexcept
@@ -1109,7 +1098,7 @@ public:
 
                 if (chunk)
                 {
-                    chunk->releaseGPU();
+                    recycleChunkGPU(*chunk);
                 }
             }
 
@@ -1117,6 +1106,10 @@ public:
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+        }
+        {
+            std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+            uploadQueue_.clear();
         }
     }
 
@@ -1541,10 +1534,238 @@ private:
         {
             buildChunkMeshAsync(*chunk);
             chunk->state = ChunkState::Ready;
+            queueChunkForUpload(chunk);
         }
     }
 
+    std::shared_ptr<Chunk> popNextChunkForUpload()
+    {
+        std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+        while (!uploadQueue_.empty())
+        {
+            std::shared_ptr<Chunk> chunk = uploadQueue_.front().lock();
+            uploadQueue_.pop_front();
+            if (!chunk)
+            {
+                continue;
+            }
 
+            chunk->queuedForUpload = false;
+            return chunk;
+        }
+        return nullptr;
+    }
+
+    void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk)
+    {
+        if (!chunk)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+        if (chunk->queuedForUpload)
+        {
+            return;
+        }
+
+        uploadQueue_.emplace_back(chunk);
+        chunk->queuedForUpload = true;
+    }
+
+    void requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront)
+    {
+        if (!chunk)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+        if (chunk->queuedForUpload)
+        {
+            return;
+        }
+
+        if (toFront)
+        {
+            uploadQueue_.emplace_front(chunk);
+        }
+        else
+        {
+            uploadQueue_.emplace_back(chunk);
+        }
+        chunk->queuedForUpload = true;
+    }
+
+    struct BufferEntry
+    {
+        GLuint vao{0};
+        GLuint vbo{0};
+        GLuint ibo{0};
+        std::size_t vertexCapacity{0};
+        std::size_t indexCapacity{0};
+    };
+
+    static std::size_t bucketForSize(std::size_t bytes) noexcept
+    {
+        bytes = std::max(bytes, kMinBufferSizeBytes);
+        bytes -= 1;
+        bytes |= bytes >> 1;
+        bytes |= bytes >> 2;
+        bytes |= bytes >> 4;
+        bytes |= bytes >> 8;
+        bytes |= bytes >> 16;
+#if SIZE_MAX > 0xffffffffu
+        bytes |= bytes >> 32;
+#endif
+        return bytes + 1;
+    }
+
+    BufferEntry acquireBufferEntry(std::size_t vertexBytes, std::size_t indexBytes)
+    {
+        const std::size_t vertexBucket = bucketForSize(vertexBytes);
+        const std::size_t indexBucket = bucketForSize(indexBytes);
+
+        {
+            std::lock_guard<std::mutex> lock(bufferPoolMutex_);
+            auto it = bufferPool_.lower_bound(vertexBucket);
+            while (it != bufferPool_.end())
+            {
+                auto& pool = it->second;
+                for (std::size_t i = 0; i < pool.size(); ++i)
+                {
+                    if (pool[i].indexCapacity >= indexBucket)
+                    {
+                        auto itEntry = pool.begin() + static_cast<std::ptrdiff_t>(i);
+                        BufferEntry entry = *itEntry;
+                        pool.erase(itEntry);
+                        if (pool.empty())
+                        {
+                            bufferPool_.erase(it);
+                        }
+                        return entry;
+                    }
+                }
+                ++it;
+            }
+        }
+
+        BufferEntry entry;
+        entry.vertexCapacity = vertexBucket;
+        entry.indexCapacity = indexBucket;
+
+        glGenVertexArrays(1, &entry.vao);
+        glGenBuffers(1, &entry.vbo);
+        glGenBuffers(1, &entry.ibo);
+
+        glBindVertexArray(entry.vao);
+
+        glBindBuffer(GL_ARRAY_BUFFER, entry.vbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(entry.vertexCapacity), nullptr, GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, tileCoord)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasBase)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
+        glEnableVertexAttribArray(4);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, entry.ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(entry.indexCapacity), nullptr, GL_DYNAMIC_DRAW);
+
+        glBindVertexArray(0);
+
+        return entry;
+    }
+
+    void releaseChunkBuffers(Chunk& chunk)
+    {
+        if (chunk.vao == 0)
+        {
+            chunk.vertexCapacity = 0;
+            chunk.indexCapacity = 0;
+            return;
+        }
+
+        BufferEntry entry{};
+        entry.vao = chunk.vao;
+        entry.vbo = chunk.vbo;
+        entry.ibo = chunk.ibo;
+        entry.vertexCapacity = chunk.vertexCapacity;
+        entry.indexCapacity = chunk.indexCapacity;
+
+        chunk.vao = 0;
+        chunk.vbo = 0;
+        chunk.ibo = 0;
+        chunk.vertexCapacity = 0;
+        chunk.indexCapacity = 0;
+        chunk.indexCount = 0;
+
+        std::lock_guard<std::mutex> lock(bufferPoolMutex_);
+        bufferPool_[entry.vertexCapacity].push_back(entry);
+    }
+
+    void ensureChunkBuffers(Chunk& chunk, std::size_t vertexBytes, std::size_t indexBytes)
+    {
+        const std::size_t requiredVertex = std::max(vertexBytes, static_cast<std::size_t>(sizeof(Vertex)));
+        const std::size_t requiredIndex = std::max(indexBytes, static_cast<std::size_t>(sizeof(std::uint32_t)));
+
+        if (chunk.vao != 0 &&
+            chunk.vertexCapacity >= requiredVertex &&
+            chunk.indexCapacity >= requiredIndex)
+        {
+            return;
+        }
+
+        if (chunk.vao != 0)
+        {
+            releaseChunkBuffers(chunk);
+        }
+
+        BufferEntry entry = acquireBufferEntry(requiredVertex, requiredIndex);
+        chunk.vao = entry.vao;
+        chunk.vbo = entry.vbo;
+        chunk.ibo = entry.ibo;
+        chunk.vertexCapacity = entry.vertexCapacity;
+        chunk.indexCapacity = entry.indexCapacity;
+    }
+
+    void recycleChunkGPU(Chunk& chunk)
+    {
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        releaseChunkBuffers(chunk);
+        chunk.meshData.clear();
+        chunk.meshReady = false;
+        chunk.queuedForUpload = false;
+        chunk.indexCount = 0;
+    }
+
+    void destroyBufferPool()
+    {
+        std::lock_guard<std::mutex> lock(bufferPoolMutex_);
+        for (auto& [_, entries] : bufferPool_)
+        {
+            for (auto& entry : entries)
+            {
+                if (entry.ibo != 0)
+                {
+                    glDeleteBuffers(1, &entry.ibo);
+                }
+                if (entry.vbo != 0)
+                {
+                    glDeleteBuffers(1, &entry.vbo);
+                }
+                if (entry.vao != 0)
+                {
+                    glDeleteVertexArrays(1, &entry.vao);
+                }
+            }
+        }
+        bufferPool_.clear();
+    }
     struct RingProgress
     {
         bool fullyLoaded{false};
@@ -1647,7 +1868,7 @@ private:
 
             if (chunk)
             {
-                chunk->releaseGPU();
+                recycleChunkGPU(*chunk);
             }
         }
     }
@@ -1682,28 +1903,49 @@ private:
 
     void uploadReadyMeshes()
     {
-        std::vector<std::shared_ptr<Chunk>> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(chunksMutex);
-            snapshot.reserve(chunks_.size());
-            for (const auto& [coord, chunkPtr] : chunks_)
-            {
-                snapshot.push_back(chunkPtr);
-            }
-        }
+        std::size_t remainingBudget = kUploadBudgetBytesPerFrame;
+        bool uploadedAnything = false;
 
-        for (const auto& chunkPtr : snapshot)
+        while (remainingBudget > 0 || !uploadedAnything)
         {
-            if (!chunkPtr)
+            std::shared_ptr<Chunk> chunk = popNextChunkForUpload();
+            if (!chunk)
+            {
+                break;
+            }
+
+            if (!chunk->meshReady || chunk->state.load() != ChunkState::Ready)
             {
                 continue;
             }
 
-            if (chunkPtr->state.load() == ChunkState::Ready && chunkPtr->meshReady)
+            std::size_t vertexBytes = 0;
+            std::size_t indexBytes = 0;
             {
-                uploadChunkMesh(*chunkPtr);
-                chunkPtr->state = ChunkState::Uploaded;
-                chunkPtr->meshReady = false;
+                std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+                vertexBytes = chunk->meshData.vertices.size() * sizeof(Vertex);
+                indexBytes = chunk->meshData.indices.size() * sizeof(std::uint32_t);
+            }
+            const std::size_t totalBytes = vertexBytes + indexBytes;
+
+            if (uploadedAnything && totalBytes > remainingBudget && totalBytes > 0)
+            {
+                requeueChunkForUpload(chunk, true);
+                break;
+            }
+
+            uploadChunkMesh(*chunk);
+            chunk->state = ChunkState::Uploaded;
+            chunk->meshReady = false;
+            uploadedAnything = true;
+
+            if (totalBytes >= remainingBudget)
+            {
+                remainingBudget = 0;
+            }
+            else
+            {
+                remainingBudget -= totalBytes;
             }
         }
     }
@@ -1711,50 +1953,39 @@ private:
     void uploadChunkMesh(Chunk& chunk)
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
-        
+
         if (chunk.meshData.empty())
         {
+            releaseChunkBuffers(chunk);
+            chunk.meshData.clear();
             chunk.indexCount = 0;
             return;
         }
 
-        if (chunk.vao == 0)
-        {
-            glGenVertexArrays(1, &chunk.vao);
-            glGenBuffers(1, &chunk.vbo);
-            glGenBuffers(1, &chunk.ibo);
+        const std::size_t vertexBytes = chunk.meshData.vertices.size() * sizeof(Vertex);
+        const std::size_t indexBytes = chunk.meshData.indices.size() * sizeof(std::uint32_t);
 
-            glBindVertexArray(chunk.vao);
-            glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
-            glEnableVertexAttribArray(0);
-
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
-            glEnableVertexAttribArray(1);
-
-            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, tileCoord)));
-            glEnableVertexAttribArray(2);
-
-            glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasBase)));
-            glEnableVertexAttribArray(3);
-
-            glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
-            glEnableVertexAttribArray(4);
-        }
+        ensureChunkBuffers(chunk, vertexBytes, indexBytes);
 
         glBindVertexArray(chunk.vao);
         glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.vertices.size() * sizeof(Vertex)),                      chunk.meshData.vertices.data(), GL_STATIC_DRAW);
+        if (vertexBytes > 0)
+        {
+            glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(vertexBytes), chunk.meshData.vertices.data());
+        }
 
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(chunk.meshData.indices.size() * sizeof(std::uint32_t)),                      chunk.meshData.indices.data(), GL_STATIC_DRAW);
+        if (indexBytes > 0)
+        {
+            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(indexBytes), chunk.meshData.indices.data());
+        }
 
         chunk.indexCount = static_cast<GLsizei>(chunk.meshData.indices.size());
         glBindVertexArray(0);
-        
-        // Clear mesh data to save memory
+
         chunk.meshData.clear();
     }
+
 
     void buildChunkMeshAsync(Chunk& chunk)
     {
@@ -2255,6 +2486,10 @@ private:
     }
 
 
+    std::deque<std::weak_ptr<Chunk>> uploadQueue_;
+    std::mutex uploadQueueMutex_;
+    std::map<std::size_t, std::vector<BufferEntry>> bufferPool_;
+    std::mutex bufferPoolMutex_;
     PerlinNoise noise_;
     std::unordered_map<glm::ivec2, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;

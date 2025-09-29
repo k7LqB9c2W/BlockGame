@@ -394,8 +394,11 @@ public:
         glDisable(GL_DEPTH_TEST);
         glUseProgram(shaderProgram_);
         
-        glUniform2f(glGetUniformLocation(shaderProgram_, "uScreenSize"), 
-                   static_cast<float>(screenWidth), static_cast<float>(screenHeight));
+        if (screenSizeLocation_ >= 0)
+        {
+            glUniform2f(screenSizeLocation_,
+                       static_cast<float>(screenWidth), static_cast<float>(screenHeight));
+        }
         
         glBindVertexArray(vao_);
         glDrawArrays(GL_LINES, 0, 4);
@@ -409,6 +412,7 @@ private:
     GLuint vao_{0};
     GLuint vbo_{0};
     GLuint shaderProgram_{0};
+    GLint screenSizeLocation_{-1};
 
     void setupCrosshair()
     {
@@ -462,6 +466,15 @@ void main()
         {
             std::cerr << "Failed to create crosshair shader: " << ex.what() << std::endl;
         }
+
+        if (shaderProgram_ != 0)
+        {
+            screenSizeLocation_ = glGetUniformLocation(shaderProgram_, "uScreenSize");
+        }
+        else
+        {
+            screenSizeLocation_ = -1;
+        }
     }
 
     void cleanup()
@@ -481,6 +494,7 @@ void main()
             glDeleteProgram(shaderProgram_);
             shaderProgram_ = 0;
         }
+        screenSizeLocation_ = -1;
     }
 };
 
@@ -907,6 +921,16 @@ struct Frustum
     }
 };
 
+struct ChunkShaderUniformLocations
+{
+    GLint uViewProj{-1};
+    GLint uLightDir{-1};
+    GLint uCameraPos{-1};
+    GLint uAtlas{-1};
+    GLint uHighlightedBlock{-1};
+    GLint uHasHighlight{-1};
+};
+
 class ChunkManager
 {
 public:
@@ -940,12 +964,6 @@ public:
         if (viewDistance_ > targetViewDistance_)
         {
             viewDistance_ = targetViewDistance_;
-        }
-
-        if (targetViewDistance_ > 8)
-        {
-            const int maxChunks = (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1);
-            std::cout << "Loading " << maxChunks << " chunks for view distance " << targetViewDistance_ << std::endl;
         }
 
         int jobBudget = kMaxChunkJobsPerFrame;
@@ -985,26 +1003,44 @@ public:
         uploadReadyMeshes();
     }
 
-    void render(GLuint shaderProgram, const glm::mat4& viewProj, const glm::vec3& cameraPos, const Frustum& frustum) const
+    void render(GLuint shaderProgram, const glm::mat4& viewProj, const glm::vec3& cameraPos, const Frustum& frustum, const ChunkShaderUniformLocations& uniforms) const
     {
         glUseProgram(shaderProgram);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "uViewProj"), 1, GL_FALSE, glm::value_ptr(viewProj));
-        glUniform3fv(glGetUniformLocation(shaderProgram, "uLightDir"), 1, glm::value_ptr(lightDirection_));
-        glUniform3fv(glGetUniformLocation(shaderProgram, "uCameraPos"), 1, glm::value_ptr(cameraPos));
+        if (uniforms.uViewProj >= 0)
+        {
+            glUniformMatrix4fv(uniforms.uViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+        }
+        if (uniforms.uLightDir >= 0)
+        {
+            glUniform3fv(uniforms.uLightDir, 1, glm::value_ptr(lightDirection_));
+        }
+        if (uniforms.uCameraPos >= 0)
+        {
+            glUniform3fv(uniforms.uCameraPos, 1, glm::value_ptr(cameraPos));
+        }
         
         // Pass highlighted block position to shader
         if (atlasTexture_ != 0)
         {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, atlasTexture_);
-            glUniform1i(glGetUniformLocation(shaderProgram, "uAtlas"), 0);
+            if (uniforms.uAtlas >= 0)
+            {
+                glUniform1i(uniforms.uAtlas, 0);
+            }
         }
 
-        glUniform3f(glGetUniformLocation(shaderProgram, "uHighlightedBlock"), 
-                   static_cast<float>(highlightedBlock_.x), 
-                   static_cast<float>(highlightedBlock_.y), 
-                   static_cast<float>(highlightedBlock_.z));
-        glUniform1i(glGetUniformLocation(shaderProgram, "uHasHighlight"), hasHighlight_ ? 1 : 0);
+        if (uniforms.uHighlightedBlock >= 0)
+        {
+            glUniform3f(uniforms.uHighlightedBlock,
+                        static_cast<float>(highlightedBlock_.x),
+                        static_cast<float>(highlightedBlock_.y),
+                        static_cast<float>(highlightedBlock_.z));
+        }
+        if (uniforms.uHasHighlight >= 0)
+        {
+            glUniform1i(uniforms.uHasHighlight, hasHighlight_ ? 1 : 0);
+        }
 
         std::vector<std::pair<glm::ivec2, std::shared_ptr<Chunk>>> snapshot;
         {
@@ -3086,6 +3122,14 @@ void main()
         return EXIT_FAILURE;
     }
 
+    ChunkShaderUniformLocations chunkUniforms{};
+    chunkUniforms.uViewProj = glGetUniformLocation(shaderProgram, "uViewProj");
+    chunkUniforms.uLightDir = glGetUniformLocation(shaderProgram, "uLightDir");
+    chunkUniforms.uCameraPos = glGetUniformLocation(shaderProgram, "uCameraPos");
+    chunkUniforms.uAtlas = glGetUniformLocation(shaderProgram, "uAtlas");
+    chunkUniforms.uHighlightedBlock = glGetUniformLocation(shaderProgram, "uHighlightedBlock");
+    chunkUniforms.uHasHighlight = glGetUniformLocation(shaderProgram, "uHasHighlight");
+
     GLuint atlasTexture = loadTexture("grass_block_atlas.png");
     if (atlasTexture == 0)
     {
@@ -3096,7 +3140,10 @@ void main()
     }
 
     glUseProgram(shaderProgram);
-    glUniform1i(glGetUniformLocation(shaderProgram, "uAtlas"), 0);
+    if (chunkUniforms.uAtlas >= 0)
+    {
+        glUniform1i(chunkUniforms.uAtlas, 0);
+    }
     glUseProgram(0);
 
     ChunkManager chunkManager(1337u);
@@ -3206,7 +3253,7 @@ void main()
         const glm::mat4 viewProj = projection * view;
         const Frustum frustum = Frustum::fromMatrix(viewProj);
 
-        chunkManager.render(shaderProgram, viewProj, camera.position, frustum);
+        chunkManager.render(shaderProgram, viewProj, camera.position, frustum, chunkUniforms);
 
         // Render crosshair on top of everything
         crosshair.render(framebufferWidth, framebufferHeight);
@@ -3262,4 +3309,5 @@ void main()
     glfwTerminate();
     return EXIT_SUCCESS;
 }
+
 

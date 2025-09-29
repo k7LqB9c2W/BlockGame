@@ -1,0 +1,25 @@
+Block Atlas Tile Guide
+======================
+
+Grid Basics
+-----------
+- Atlas is a grid of 16x16 pixel tiles.
+- Origin is bottom-left (tile {0,0}).
+- Columns increase to the right; rows increase upward.
+
+Assigning UVs
+-------------
+- Use assignFace(BlockId, BlockFace, {column, row}).
+- Example: {0,2} targets the third tile up in column 0.
+- Give side faces the same tile if they share art.
+
+Adding Blocks
+-------------
+1. Extend BlockId enum before Count.
+2. In setBlockTextureAtlasConfig, add assignFace lines.
+3. Update gameplay code to use the new BlockId.
+
+Atlas Maintenance
+-----------------
+- Keep tiles aligned to the 16x16 grid.
+- Update this guide when adding new rows/columns.

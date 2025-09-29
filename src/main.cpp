@@ -25,6 +25,7 @@
 #include <queue>
 #include <random>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -151,6 +152,9 @@ struct InputContext
     bool rightMouseJustPressed{false};
     bool nKeyPressed{false};
     bool nKeyJustPressed{false};
+    bool f1Pressed{false};
+    bool f1JustPressed{false};
+    bool showCoordinates{false};
 };
 
 // Forward declaration
@@ -448,6 +452,8 @@ void main()
         }
     }
 };
+
+#include "text_overlay.inl"
 
 inline int floorDiv(int value, int divisor) noexcept
 {
@@ -2599,6 +2605,7 @@ void main()
     std::cout << "Player spawned at: (" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")" << std::endl;
 
     Crosshair crosshair;
+    TextOverlay textOverlay;
 
     constexpr double kFixedTimeStep = 1.0 / 60.0;
     double previousTime = glfwGetTime();
@@ -2614,6 +2621,15 @@ void main()
         accumulator += frameTime;
 
         glfwPollEvents();
+
+        bool f1CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS);
+        bool f1JustPressed = f1CurrentlyPressed && !inputContext.f1Pressed;
+        if (f1JustPressed)
+        {
+            inputContext.showCoordinates = !inputContext.showCoordinates;
+        }
+        inputContext.f1JustPressed = f1JustPressed;
+        inputContext.f1Pressed = f1CurrentlyPressed;
 
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         {
@@ -2685,6 +2701,17 @@ void main()
 
         // Render crosshair on top of everything
         crosshair.render(framebufferWidth, framebufferHeight);
+
+        if (inputContext.showCoordinates)
+        {
+            std::ostringstream coordStream;
+            coordStream.setf(std::ios::fixed, std::ios::floatfield);
+            coordStream.precision(1);
+            coordStream << 'X' << ' ' << camera.position.x << ' '
+                         << 'Y' << ' ' << camera.position.y << ' '
+                         << 'Z' << ' ' << camera.position.z;
+            textOverlay.render(coordStream.str(), 8.0f, 8.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
+        }
 
         glfwSwapBuffers(window);
     }

@@ -161,6 +161,8 @@ struct InputContext
     bool f1Pressed{false};
     bool f1JustPressed{false};
     bool showCoordinates{false};
+    bool showRenderDistanceGUI{false};
+    std::string inputBuffer{};
 };
 
 // Forward declaration
@@ -201,6 +203,29 @@ void mouseCallback(GLFWwindow* window, double xpos, double ypos)
     input->lastY = static_cast<float>(ypos);
 
     input->camera->processMouse(xoffset, yoffset);
+}
+
+void charCallback(GLFWwindow* window, unsigned int codepoint)
+{
+    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
+    if (input == nullptr)
+    {
+        return;
+    }
+
+    // Only accept input when GUI is active
+    if (input->showRenderDistanceGUI && codepoint < 128)
+    {
+        // Only accept digits
+        if (codepoint >= '0' && codepoint <= '9')
+        {
+            // Limit input length to prevent overflow
+            if (input->inputBuffer.size() < 10)
+            {
+                input->inputBuffer += static_cast<char>(codepoint);
+            }
+        }
+    }
 }
 
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
@@ -1343,6 +1368,29 @@ public:
     [[nodiscard]] int viewDistance() const noexcept
     {
         return targetViewDistance_;
+    }
+
+    void setRenderDistance(int distance) noexcept
+    {
+        try
+        {
+            // Clamp distance to reasonable values (minimum 1, maximum 200 for safety)
+            const int clampedDistance = std::max(1, std::min(distance, 200));
+            targetViewDistance_ = clampedDistance;
+            kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+            
+            if (viewDistance_ > targetViewDistance_)
+            {
+                viewDistance_ = targetViewDistance_;
+            }
+            
+            std::cout << "Render distance set to: " << targetViewDistance_ << " chunks (total: "
+                      << (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1) << " chunks)" << std::endl;
+        }
+        catch (const std::exception& ex)
+        {
+            std::cerr << "Error setting render distance: " << ex.what() << std::endl;
+        }
     }
 
     [[nodiscard]] BlockId blockAt(const glm::ivec3& worldPos) const noexcept
@@ -2686,9 +2734,63 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
     inputContext.nKeyJustPressed = nKeyCurrentlyPressed && !inputContext.nKeyPressed;
     inputContext.nKeyPressed = nKeyCurrentlyPressed;
-    if (inputContext.nKeyJustPressed)
+    if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI)
     {
-        chunkManager.toggleViewDistance();
+        // Show the GUI
+        inputContext.showRenderDistanceGUI = true;
+        inputContext.inputBuffer.clear();
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+    
+    // Handle GUI input
+    if (inputContext.showRenderDistanceGUI)
+    {
+        // Enter key to apply
+        static bool enterKeyPressed = false;
+        bool enterKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS || 
+                                          glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS);
+        if (enterKeyCurrentlyPressed && !enterKeyPressed)
+        {
+            if (!inputContext.inputBuffer.empty())
+            {
+                try
+                {
+                    int distance = std::stoi(inputContext.inputBuffer);
+                    chunkManager.setRenderDistance(distance);
+                }
+                catch (const std::exception& e)
+                {
+                    std::cerr << "Invalid render distance input: " << e.what() << std::endl;
+                }
+            }
+            inputContext.showRenderDistanceGUI = false;
+            inputContext.inputBuffer.clear();
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        enterKeyPressed = enterKeyCurrentlyPressed;
+        
+        // Escape key to cancel
+        static bool escapeKeyPressed = false;
+        bool escapeKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+        if (escapeKeyCurrentlyPressed && !escapeKeyPressed)
+        {
+            inputContext.showRenderDistanceGUI = false;
+            inputContext.inputBuffer.clear();
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        escapeKeyPressed = escapeKeyCurrentlyPressed;
+        
+        // Backspace to delete characters
+        static bool backspaceKeyPressed = false;
+        bool backspaceKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
+        if (backspaceKeyCurrentlyPressed && !backspaceKeyPressed)
+        {
+            if (!inputContext.inputBuffer.empty())
+            {
+                inputContext.inputBuffer.pop_back();
+            }
+        }
+        backspaceKeyPressed = backspaceKeyCurrentlyPressed;
     }
 
     glm::vec3 forward = camera.front();
@@ -2898,6 +3000,7 @@ int main()
     glfwSetWindowUserPointer(window, &inputContext);
     glfwSetCursorPosCallback(window, mouseCallback);
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetCharCallback(window, charCallback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     const char* vertexShaderSrc = R"(#version 330 core
@@ -3014,7 +3117,7 @@ void main()
     constexpr double kFixedTimeStep = 1.0 / 60.0;
     double previousTime = glfwGetTime();
     double accumulator = 0.0;
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to toggle render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -3035,7 +3138,9 @@ void main()
         inputContext.f1JustPressed = f1JustPressed;
         inputContext.f1Pressed = f1CurrentlyPressed;
 
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        // Only close window with ESC if GUI is not active
+        // (ESC to close GUI is handled in computePlayerInputState)
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS && !inputContext.showRenderDistanceGUI)
         {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
@@ -3115,6 +3220,32 @@ void main()
                          << 'Y' << ' ' << camera.position.y << ' '
                          << 'Z' << ' ' << camera.position.z;
             textOverlay.render(coordStream.str(), 8.0f, 8.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
+        }
+
+        // Render render distance GUI
+        if (inputContext.showRenderDistanceGUI)
+        {
+            // Calculate center of screen for the GUI
+            float centerX = framebufferWidth * 0.5f;
+            float centerY = framebufferHeight * 0.5f;
+            
+            // Draw semi-transparent background (using multiple overlapping lines to create a filled rectangle effect)
+            float boxWidth = 400.0f;
+            float boxHeight = 100.0f;
+            float boxLeft = centerX - boxWidth * 0.5f;
+            float boxTop = centerY - boxHeight * 0.5f;
+            
+            // Draw prompt text
+            std::string promptText = "Enter render distance:";
+            textOverlay.render(promptText, boxLeft + 20.0f, boxTop + 20.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
+            
+            // Draw input text with cursor
+            std::string inputText = inputContext.inputBuffer;
+            if (static_cast<int>(glfwGetTime() * 2) % 2 == 0)  // Blinking cursor
+            {
+                inputText += "_";
+            }
+            textOverlay.render(inputText, boxLeft + 20.0f, boxTop + 50.0f, framebufferWidth, framebufferHeight, 10.0f, glm::vec3(0.5f, 1.0f, 0.5f));
         }
 
         glfwSwapBuffers(window);

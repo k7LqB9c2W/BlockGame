@@ -124,6 +124,101 @@ const GlyphPattern* glyphForChar(char c) noexcept
         static const GlyphPattern glyph = makeGlyph({{"000", "000", "000", "000", "000", "000", "000"}}, 3);
         return &glyph;
     }
+    case 'A':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"01110", "10001", "10001", "11111", "10001", "10001", "10001"}}, 5);
+        return &glyph;
+    }
+    case 'C':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"01110", "10001", "10000", "10000", "10000", "10001", "01110"}}, 5);
+        return &glyph;
+    }
+    case 'D':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"11110", "10001", "10001", "10001", "10001", "10001", "11110"}}, 5);
+        return &glyph;
+    }
+    case 'E':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"11111", "10000", "10000", "11110", "10000", "10000", "11111"}}, 5);
+        return &glyph;
+    }
+    case 'I':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"111", "010", "010", "010", "010", "010", "111"}}, 3);
+        return &glyph;
+    }
+    case 'N':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"10001", "11001", "10101", "10101", "10011", "10001", "10001"}}, 5);
+        return &glyph;
+    }
+    case 'R':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"11110", "10001", "10001", "11110", "10100", "10010", "10001"}}, 5);
+        return &glyph;
+    }
+    case 'S':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"01111", "10000", "10000", "01110", "00001", "00001", "11110"}}, 5);
+        return &glyph;
+    }
+    case 'T':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"11111", "00100", "00100", "00100", "00100", "00100", "00100"}}, 5);
+        return &glyph;
+    }
+    case ':':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"0", "0", "1", "0", "1", "0", "0"}}, 1);
+        return &glyph;
+    }
+    case 'a':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00000", "00000", "01110", "00001", "01111", "10001", "01111"}}, 5);
+        return &glyph;
+    }
+    case 'c':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00000", "00000", "01110", "10000", "10000", "10001", "01110"}}, 5);
+        return &glyph;
+    }
+    case 'd':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00001", "00001", "01111", "10001", "10001", "10001", "01111"}}, 5);
+        return &glyph;
+    }
+    case 'e':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00000", "00000", "01110", "10001", "11111", "10000", "01111"}}, 5);
+        return &glyph;
+    }
+    case 'i':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"010", "000", "110", "010", "010", "010", "111"}}, 3);
+        return &glyph;
+    }
+    case 'n':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00000", "00000", "10110", "11001", "10001", "10001", "10001"}}, 5);
+        return &glyph;
+    }
+    case 'r':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00000", "00000", "10110", "11001", "10000", "10000", "10000"}}, 5);
+        return &glyph;
+    }
+    case 's':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00000", "00000", "01111", "10000", "01110", "00001", "11110"}}, 5);
+        return &glyph;
+    }
+    case 't':
+    {
+        static const GlyphPattern glyph = makeGlyph({{"00100", "00100", "11111", "00100", "00100", "00100", "00011"}}, 5);
+        return &glyph;
+    }
     default:
         return nullptr;
     }

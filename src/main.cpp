@@ -50,6 +50,9 @@ constexpr float kPlayerHeight = 1.8f;    // Player bounding box height
 constexpr float kGravity = -20.0f;       // Gravity acceleration (negative = downward)
 constexpr float kJumpVelocity = 8.0f;    // Initial jump velocity
 constexpr float kTerminalVelocity = -50.0f; // Maximum fall speed
+constexpr float kHorizontalDamping = 0.80f;     // Velocity damping when no input is held
+constexpr float kGroundSnapTolerance = 1e-3f;   // Threshold for snapping the player to the ground
+constexpr float kAxisCollisionEpsilon = 1e-4f;  // Padding used during axis sweeps
 
 constexpr int kChunkSizeX = 16;
 constexpr int kChunkSizeY = 64;
@@ -568,6 +571,11 @@ inline std::size_t blockIndex(int x, int y, int z) noexcept
     return static_cast<std::size_t>(y) * (kChunkSizeX * kChunkSizeZ) + static_cast<std::size_t>(z) * kChunkSizeX + static_cast<std::size_t>(x);
 }
 
+inline std::size_t columnIndex(int x, int z) noexcept
+{
+    return static_cast<std::size_t>(z) * kChunkSizeX + static_cast<std::size_t>(x);
+}
+
 inline float hashToUnitFloat(int x, int y, int z) noexcept
 {
     std::uint32_t h = static_cast<std::uint32_t>(x * 374761393 + y * 668265263 + z * 2147483647);
@@ -706,7 +714,7 @@ struct MeshData
 struct Chunk
 {
     explicit Chunk(const glm::ivec2& c)
-        : coord(c), blocks(kChunkBlockCount, BlockId::Air), state(ChunkState::Empty)
+        : coord(c), blocks(kChunkBlockCount, BlockId::Air), state(ChunkState::Empty), columnMaxHeights(kChunkSizeX * kChunkSizeZ, -1)
     {
     }
 
@@ -732,6 +740,7 @@ struct Chunk
     glm::ivec2 coord;
     std::vector<BlockId> blocks;
     std::atomic<ChunkState> state;
+    std::vector<int> columnMaxHeights; // Highest solid block index per (x, z) column
     
     // GPU resources (main thread only)
     GLuint vao{0};
@@ -740,7 +749,7 @@ struct Chunk
     GLsizei indexCount{0};
     
     // Mesh data for async operations
-    std::mutex meshMutex;
+    mutable std::mutex meshMutex;
     MeshData meshData;
     bool meshReady{false};
     std::atomic<int> inFlight{0};
@@ -976,14 +985,21 @@ public:
             return 0.0f;
         }
 
-        for (int y = kChunkSizeY - 1; y >= 0; --y)
+        int topBlock = -1;
         {
-            if (isSolid(chunk->blocks[blockIndex(localX, y, localZ)]))
+            std::lock_guard<std::mutex> lock(chunk->meshMutex);
+            if (!chunk->columnMaxHeights.empty())
             {
-                return static_cast<float>(y + 1);
+                topBlock = chunk->columnMaxHeights[columnIndex(localX, localZ)];
             }
         }
-        return 0.0f;
+
+        if (topBlock < 0)
+        {
+            return 0.0f;
+        }
+
+        return static_cast<float>(topBlock + 1);
     }
 
     void clear()
@@ -1072,6 +1088,7 @@ public:
             }
 
             chunk->blocks[blockIdx] = BlockId::Air;
+            recomputeColumnHeight(*chunk, localX, localZ);
             chunk->state = ChunkState::Remeshing;
         }
 
@@ -1119,6 +1136,7 @@ public:
             }
 
             chunk->blocks[blockIdx] = BlockId::Grass;
+            recomputeColumnHeight(*chunk, localX, localZ);
             chunk->state = ChunkState::Remeshing;
         }
 
@@ -1999,8 +2017,24 @@ private:
         }
     }
 
+    void recomputeColumnHeight(Chunk& chunk, int localX, int localZ) noexcept
+    {
+        const std::size_t idx = columnIndex(localX, localZ);
+        int top = -1;
+        for (int y = kChunkSizeY - 1; y >= 0; --y)
+        {
+            if (isSolid(chunk.blocks[blockIndex(localX, y, localZ)]))
+            {
+                top = y;
+                break;
+            }
+        }
+        chunk.columnMaxHeights[idx] = top;
+    }
+
     void generateChunkBlocks(Chunk& chunk)
     {
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
         const int baseWorldX = chunk.coord.x * kChunkSizeX;
         const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
 
@@ -2035,10 +2069,12 @@ private:
                 float targetHeight = 16.0f + combined;
                 targetHeight = std::clamp(targetHeight, 2.0f, static_cast<float>(kChunkSizeY - 3));
                 const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
+                const int topBlock = std::clamp(columnHeight, 0, kChunkSizeY - 1);
+                chunk.columnMaxHeights[columnIndex(x, z)] = topBlock;
 
                 for (int y = 0; y < kChunkSizeY; ++y)
                 {
-                    chunk.blocks[blockIndex(x, y, z)] = (y <= columnHeight) ? BlockId::Grass : BlockId::Air;
+                    chunk.blocks[blockIndex(x, y, z)] = (y <= topBlock) ? BlockId::Grass : BlockId::Air;
                 }
             }
         }
@@ -2064,184 +2100,187 @@ private:
 };
 
 // Collision detection helper functions
-bool hasCollision(const glm::vec3& cameraPosition, const ChunkManager& chunkManager)
+struct AABB
 {
-    // Calculate feet position from camera (eye) position
-    const float feetY = cameraPosition.y - kCameraEyeHeight;
+    glm::vec3 min;
+    glm::vec3 max;
+};
+
+struct PlayerInputState
+{
+    glm::vec3 moveDirection{0.0f};
+    bool jumpHeld{false};
+};
+
+inline AABB makePlayerAABB(const glm::vec3& position) noexcept
+{
     const float halfWidth = kPlayerWidth * 0.5f;
-    
-    // Build AABB from feet position
-    const glm::vec3 minCorner = glm::vec3(cameraPosition.x - halfWidth, feetY, cameraPosition.z - halfWidth);
-    const glm::vec3 maxCorner = minCorner + glm::vec3(kPlayerWidth, kPlayerHeight, kPlayerWidth);
-    
-    const int minX = static_cast<int>(std::floor(minCorner.x));
-    const int maxX = static_cast<int>(std::ceil(maxCorner.x));
-    const int minY = static_cast<int>(std::floor(minCorner.y));
-    const int maxY = static_cast<int>(std::ceil(maxCorner.y));
-    const int minZ = static_cast<int>(std::floor(minCorner.z));
-    const int maxZ = static_cast<int>(std::ceil(maxCorner.z));
-    
-    for (int x = minX; x <= maxX; ++x)
-    {
-        for (int y = minY; y <= maxY; ++y)
-        {
-            for (int z = minZ; z <= maxZ; ++z)
-            {
-                // Check if this block position overlaps with player bounding box
-                const glm::vec3 blockMin(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
-                const glm::vec3 blockMax = blockMin + glm::vec3(1.0f);
-                
-                // AABB collision test
-                if (minCorner.x < blockMax.x && maxCorner.x > blockMin.x &&
-                    minCorner.y < blockMax.y && maxCorner.y > blockMin.y &&
-                    minCorner.z < blockMax.z && maxCorner.z > blockMin.z)
-                {
-                    if (isSolid(chunkManager.blockAt(glm::ivec3(x, y, z))))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
+    const glm::vec3 minCorner(position.x - halfWidth,
+                              position.y - kCameraEyeHeight,
+                              position.z - halfWidth);
+    return AABB{minCorner, minCorner + glm::vec3(kPlayerWidth, kPlayerHeight, kPlayerWidth)};
 }
 
-glm::vec3 resolveCollisionAxisByAxis(const glm::vec3& currentPos, const glm::vec3& targetPos, 
-                                     Camera& camera, const ChunkManager& chunkManager)
+inline bool overlaps1D(float minA, float maxA, float minB, float maxB) noexcept
 {
-    glm::vec3 result = currentPos;
-    
-    // Try X movement
-    glm::vec3 testPos = result;
-    testPos.x = targetPos.x;
-    if (!hasCollision(testPos, chunkManager))
+    return (minA < maxB - kAxisCollisionEpsilon) && (maxA > minB + kAxisCollisionEpsilon);
+}
+
+struct AxisMoveResult
+{
+    float actualMove{0.0f};
+    bool collided{false};
+};
+
+AxisMoveResult sweepPlayerAABB(AABB& box,
+                               glm::vec3& position,
+                               float move,
+                               int axis,
+                               const ChunkManager& chunkManager)
+{
+    AxisMoveResult result{move, false};
+    if (std::abs(move) <= kAxisCollisionEpsilon)
     {
-        result.x = testPos.x;
-    }
-    else
-    {
-        camera.velocity.x = 0.0f; // Stop horizontal velocity on collision
-    }
-    
-    // Try Z movement
-    testPos = result;
-    testPos.z = targetPos.z;
-    if (!hasCollision(testPos, chunkManager))
-    {
-        result.z = testPos.z;
-    }
-    else
-    {
-        camera.velocity.z = 0.0f; // Stop horizontal velocity on collision
-    }
-    
-    // Try Y movement
-    testPos = result;
-    testPos.y = targetPos.y;
-    if (!hasCollision(testPos, chunkManager))
-    {
-        result.y = testPos.y;
-        camera.onGround = false;
-    }
-    else
-    {
-        if (camera.velocity.y < 0.0f) // Landing (falling down)
+        if (move != 0.0f)
         {
-            const float halfWidth = kPlayerWidth * 0.5f;
-            const glm::vec3 targetMin(targetPos.x - halfWidth,
-                                      targetPos.y - kCameraEyeHeight,
-                                      targetPos.z - halfWidth);
-            const glm::vec3 targetMax = targetMin + glm::vec3(kPlayerWidth, kPlayerHeight, kPlayerWidth);
-
-            const int minX = static_cast<int>(std::floor(targetMin.x));
-            const int maxX = static_cast<int>(std::floor(targetMax.x));
-            const int minY = static_cast<int>(std::floor(targetMin.y));
-            const int maxY = static_cast<int>(std::floor(targetMax.y));
-            const int minZ = static_cast<int>(std::floor(targetMin.z));
-            const int maxZ = static_cast<int>(std::floor(targetMax.z));
-
-            // Evaluate blocks intersected by the target AABB to determine the true ground surface.
-            float highestBlockTop = -std::numeric_limits<float>::infinity();
-
-            for (int x = minX; x <= maxX; ++x)
-            {
-                for (int y = minY; y <= maxY; ++y)
-                {
-                    for (int z = minZ; z <= maxZ; ++z)
-                    {
-                        if (!isSolid(chunkManager.blockAt(glm::ivec3(x, y, z))))
-                        {
-                            continue;
-                        }
-
-                        const glm::vec3 blockMin(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
-                        const glm::vec3 blockMax = blockMin + glm::vec3(1.0f);
-
-                        if (targetMin.x < blockMax.x && targetMax.x > blockMin.x &&
-                            targetMin.y < blockMax.y && targetMax.y > blockMin.y &&
-                            targetMin.z < blockMax.z && targetMax.z > blockMin.z)
-                        {
-                            highestBlockTop = std::max(highestBlockTop, blockMax.y);
-                        }
-                    }
-                }
-            }
-
-            if (highestBlockTop > -std::numeric_limits<float>::infinity())
-            {
-                const float desiredY = highestBlockTop + kCameraEyeHeight;
-                const float kGroundSnapTolerance = 1e-3f;
-                if (desiredY <= result.y + kGroundSnapTolerance)
-                {
-                    result.y = desiredY;
-                }
-            }
-
-            camera.onGround = true;
+            position[axis] += move;
+            box.min[axis] += move;
+            box.max[axis] += move;
         }
-        camera.velocity.y = 0.0f; // Stop vertical velocity on collision
+        return result;
     }
-    
+
+    const int otherAxis0 = (axis + 1) % 3;
+    const int otherAxis1 = (axis + 2) % 3;
+    const float minOther0 = box.min[otherAxis0];
+    const float maxOther0 = box.max[otherAxis0];
+    const float minOther1 = box.min[otherAxis1];
+    const float maxOther1 = box.max[otherAxis1];
+
+    int other0Min = static_cast<int>(std::floor(minOther0));
+    int other0Max = static_cast<int>(std::floor(maxOther0));
+    if (other0Max < other0Min)
+    {
+        other0Max = other0Min;
+    }
+
+    int other1Min = static_cast<int>(std::floor(minOther1));
+    int other1Max = static_cast<int>(std::floor(maxOther1));
+    if (other1Max < other1Min)
+    {
+        other1Max = other1Min;
+    }
+
+    auto layerHasCollision = [&](int primaryIndex) -> bool
+    {
+        for (int idx0 = other0Min; idx0 <= other0Max; ++idx0)
+        {
+            const float blockMin0 = static_cast<float>(idx0);
+            const float blockMax0 = blockMin0 + 1.0f;
+            if (!overlaps1D(minOther0, maxOther0, blockMin0, blockMax0))
+            {
+                continue;
+            }
+
+            for (int idx1 = other1Min; idx1 <= other1Max; ++idx1)
+            {
+                const float blockMin1 = static_cast<float>(idx1);
+                const float blockMax1 = blockMin1 + 1.0f;
+                if (!overlaps1D(minOther1, maxOther1, blockMin1, blockMax1))
+                {
+                    continue;
+                }
+
+                glm::ivec3 blockCoord(0);
+                blockCoord[axis] = primaryIndex;
+                blockCoord[otherAxis0] = idx0;
+                blockCoord[otherAxis1] = idx1;
+
+                if (isSolid(chunkManager.blockAt(blockCoord)))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    float allowed = move;
+    if (move > 0.0f)
+    {
+        const float face = box.max[axis];
+        const int firstBlock = static_cast<int>(std::floor(face + kAxisCollisionEpsilon)) + 1;
+        const int lastBlock = static_cast<int>(std::floor(face + move + kAxisCollisionEpsilon));
+        if (firstBlock <= lastBlock)
+        {
+            for (int primary = firstBlock; primary <= lastBlock; ++primary)
+            {
+                const float blockMin = static_cast<float>(primary);
+                const float distance = blockMin - face;
+                if (distance > allowed + kAxisCollisionEpsilon)
+                {
+                    break;
+                }
+
+                if (layerHasCollision(primary))
+                {
+                    allowed = std::min(allowed, std::max(distance - kAxisCollisionEpsilon, 0.0f));
+                    result.collided = true;
+                    break;
+                }
+            }
+        }
+        allowed = std::clamp(allowed, 0.0f, move);
+    }
+    else
+    {
+        const float face = box.min[axis];
+        const int firstBlock = static_cast<int>(std::floor(face - kAxisCollisionEpsilon)) - 1;
+        const int lastBlock = static_cast<int>(std::floor(face + move - kAxisCollisionEpsilon));
+        if (firstBlock >= lastBlock)
+        {
+            for (int primary = firstBlock; primary >= lastBlock; --primary)
+            {
+                const float blockMax = static_cast<float>(primary + 1);
+                const float distance = blockMax - face;
+                if (distance < allowed - kAxisCollisionEpsilon)
+                {
+                    break;
+                }
+
+                if (layerHasCollision(primary))
+                {
+                    allowed = std::max(allowed, std::min(distance + kAxisCollisionEpsilon, 0.0f));
+                    result.collided = true;
+                    break;
+                }
+            }
+        }
+        allowed = std::clamp(allowed, move, 0.0f);
+    }
+
+    position[axis] += allowed;
+    box.min[axis] += allowed;
+    box.max[axis] += allowed;
+    result.actualMove = allowed;
     return result;
 }
 
-void processInput(GLFWwindow* window, Camera& camera, ChunkManager& chunkManager, float deltaTime)
+PlayerInputState computePlayerInputState(GLFWwindow* window,
+                                         InputContext& inputContext,
+                                         Camera& camera,
+                                         ChunkManager& chunkManager)
 {
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+    PlayerInputState state;
+
+    bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
+    inputContext.nKeyJustPressed = nKeyCurrentlyPressed && !inputContext.nKeyPressed;
+    inputContext.nKeyPressed = nKeyCurrentlyPressed;
+    if (inputContext.nKeyJustPressed)
     {
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
+        chunkManager.toggleViewDistance();
     }
 
-    // Handle view distance toggle
-    auto* inputContext = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (inputContext)
-    {
-        bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
-        inputContext->nKeyJustPressed = nKeyCurrentlyPressed && !inputContext->nKeyPressed;
-        inputContext->nKeyPressed = nKeyCurrentlyPressed;
-
-        if (inputContext->nKeyJustPressed)
-        {
-            chunkManager.toggleViewDistance();
-        }
-    }
-
-    // Apply gravity
-    camera.velocity.y += kGravity * deltaTime;
-    if (camera.velocity.y < kTerminalVelocity)
-    {
-        camera.velocity.y = kTerminalVelocity;
-    }
-
-    // Handle jumping
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && camera.onGround)
-    {
-        camera.velocity.y = kJumpVelocity;
-        camera.onGround = false;
-    }
-
-    // Handle horizontal movement
     glm::vec3 forward = camera.front();
     forward.y = 0.0f;
     if (glm::length(forward) > kEpsilon)
@@ -2259,44 +2298,132 @@ void processInput(GLFWwindow* window, Camera& camera, ChunkManager& chunkManager
         right = camera.right();
     }
 
-    // Calculate desired movement
-    glm::vec3 moveDirection{0.0f};
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     {
-        moveDirection += forward;
+        state.moveDirection += forward;
     }
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
     {
-        moveDirection -= forward;
+        state.moveDirection -= forward;
     }
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
     {
-        moveDirection -= right;
+        state.moveDirection -= right;
     }
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
     {
-        moveDirection += right;
+        state.moveDirection += right;
     }
 
-    // Apply horizontal movement (only if we have input)
-    if (glm::length(moveDirection) > kEpsilon)
+    state.jumpHeld = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+    return state;
+}
+
+void applyGroundSnap(Camera& camera, const ChunkManager& chunkManager)
+{
+    const float halfWidth = kPlayerWidth * 0.5f;
+    const std::array<glm::vec2, 4> sampleOffsets = {
+        glm::vec2{-halfWidth, -halfWidth},
+        glm::vec2{halfWidth, -halfWidth},
+        glm::vec2{-halfWidth, halfWidth},
+        glm::vec2{halfWidth, halfWidth}
+    };
+
+    float highestSurface = -std::numeric_limits<float>::infinity();
+    for (const glm::vec2& offset : sampleOffsets)
     {
-        moveDirection = glm::normalize(moveDirection);
-        camera.velocity.x = moveDirection.x * camera.moveSpeed;
-        camera.velocity.z = moveDirection.z * camera.moveSpeed;
+        const float sampleX = camera.position.x + offset.x;
+        const float sampleZ = camera.position.z + offset.y;
+        highestSurface = std::max(highestSurface, chunkManager.surfaceHeight(sampleX, sampleZ));
+    }
+
+    if (highestSurface > -std::numeric_limits<float>::infinity())
+    {
+        const float desiredY = highestSurface + kCameraEyeHeight;
+        if (desiredY <= camera.position.y + kGroundSnapTolerance && camera.velocity.y <= 0.0f)
+        {
+            camera.position.y = desiredY;
+			camera.velocity.y = 0.0f;
+			camera.onGround = true;
+        }
+    }
+}
+
+void updatePhysics(Camera& camera,
+                   const ChunkManager& chunkManager,
+                   const PlayerInputState& inputState,
+                   float dt)
+{
+    camera.velocity.y += kGravity * dt;
+    if (camera.velocity.y < kTerminalVelocity)
+    {
+        camera.velocity.y = kTerminalVelocity;
+    }
+
+    const glm::vec2 horizontalInput(inputState.moveDirection.x, inputState.moveDirection.z);
+    if (glm::dot(horizontalInput, horizontalInput) > kEpsilon * kEpsilon)
+    {
+        glm::vec3 normalized = glm::normalize(glm::vec3(horizontalInput.x, 0.0f, horizontalInput.y));
+        camera.velocity.x = normalized.x * camera.moveSpeed;
+        camera.velocity.z = normalized.z * camera.moveSpeed;
     }
     else
     {
-        // Apply friction when no input
-        camera.velocity.x *= 0.8f;
-        camera.velocity.z *= 0.8f;
+        camera.velocity.x *= kHorizontalDamping;
+        camera.velocity.z *= kHorizontalDamping;
+
+        if (std::abs(camera.velocity.x) < kAxisCollisionEpsilon)
+        {
+            camera.velocity.x = 0.0f;
+        }
+        if (std::abs(camera.velocity.z) < kAxisCollisionEpsilon)
+        {
+            camera.velocity.z = 0.0f;
+        }
     }
 
-    // Calculate target position
-    glm::vec3 targetPosition = camera.position + camera.velocity * deltaTime;
-    
-    // Apply collision detection and resolve movement
-    camera.position = resolveCollisionAxisByAxis(camera.position, targetPosition, camera, chunkManager);
+    if (inputState.jumpHeld && camera.onGround)
+    {
+        camera.velocity.y = kJumpVelocity;
+        camera.onGround = false;
+    }
+
+    glm::vec3 desiredMove = camera.velocity * dt;
+    AABB box = makePlayerAABB(camera.position);
+
+    auto moveAndResolveAxis = [&](int axis) -> AxisMoveResult
+    {
+        return sweepPlayerAABB(box, camera.position, desiredMove[axis], axis, chunkManager);
+    };
+
+    AxisMoveResult moveX = moveAndResolveAxis(0);
+    if (std::abs(moveX.actualMove - desiredMove.x) > kAxisCollisionEpsilon)
+    {
+        camera.velocity.x = 0.0f;
+    }
+
+    AxisMoveResult moveZ = moveAndResolveAxis(2);
+    if (std::abs(moveZ.actualMove - desiredMove.z) > kAxisCollisionEpsilon)
+    {
+        camera.velocity.z = 0.0f;
+    }
+
+    bool groundedThisStep = false;
+    AxisMoveResult moveY = moveAndResolveAxis(1);
+    if (std::abs(moveY.actualMove - desiredMove.y) > kAxisCollisionEpsilon)
+    {
+        camera.velocity.y = 0.0f;
+        if (desiredMove.y < 0.0f && moveY.actualMove > desiredMove.y)
+        {
+            groundedThisStep = true;
+        }
+    }
+
+    camera.onGround = groundedThisStep;
+    if (camera.onGround)
+    {
+        applyGroundSnap(camera, chunkManager);
+    }
 }
 
 } // namespace
@@ -2473,16 +2600,42 @@ void main()
 
     Crosshair crosshair;
 
-    float lastFrame = static_cast<float>(glfwGetTime());
+    constexpr double kFixedTimeStep = 1.0 / 60.0;
+    double previousTime = glfwGetTime();
+    double accumulator = 0.0;
     std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to toggle render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
-        const float currentFrame = static_cast<float>(glfwGetTime());
-        const float deltaTime = currentFrame - lastFrame;
-        lastFrame = currentFrame;
+        const double currentTime = glfwGetTime();
+        double frameTime = currentTime - previousTime;
+        previousTime = currentTime;
+        frameTime = std::min(frameTime, 0.25);
+        accumulator += frameTime;
 
-        processInput(window, camera, chunkManager, deltaTime);
+        glfwPollEvents();
+
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+
+        auto* inputContextPtr = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
+        while (accumulator >= kFixedTimeStep)
+        {
+            if (inputContextPtr)
+            {
+                PlayerInputState inputState = computePlayerInputState(window, *inputContextPtr, camera, chunkManager);
+                updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+            }
+            else
+            {
+                InputContext dummy;
+                PlayerInputState inputState = computePlayerInputState(window, dummy, camera, chunkManager);
+                updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+            }
+            accumulator -= kFixedTimeStep;
+        }
 
         // Update block highlighting based on crosshair
         chunkManager.updateHighlight(camera.position, camera.front());
@@ -2534,7 +2687,6 @@ void main()
         crosshair.render(framebufferWidth, framebufferHeight);
 
         glfwSwapBuffers(window);
-        glfwPollEvents();
     }
 
     chunkManager.clear();

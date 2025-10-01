@@ -33,6 +33,7 @@ inline constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
 inline constexpr int kAtlasTileSizePixels = 16;
 inline constexpr int kDefaultViewDistance = 4;
 inline constexpr int kExtendedViewDistance = 12;
+inline constexpr int kVerticalViewDistance = 2;
 inline constexpr int kMaxChunkJobsPerFrame = 12;
 inline constexpr int kMaxRingsPerFrame = 1;
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 4ull * 1024ull * 1024ull;

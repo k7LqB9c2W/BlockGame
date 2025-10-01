@@ -2298,41 +2298,66 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         const int regionBaseChunkX = biomeRegionX * kBiomeSizeInChunks;
         const int regionBaseChunkZ = biomeRegionZ * kBiomeSizeInChunks;
-        const int localChunkX = chunkX - regionBaseChunkX;
-        const int localChunkZ = chunkZ - regionBaseChunkZ;
+        const int regionBaseBlockX = regionBaseChunkX * kChunkSizeX;
+        const int regionBaseBlockZ = regionBaseChunkZ * kChunkSizeZ;
 
-        constexpr float kBiomeBlendRadius = 2.5f;
+        const int regionSizeBlocksX = kBiomeSizeInChunks * kChunkSizeX;
+        const int regionSizeBlocksZ = kBiomeSizeInChunks * kChunkSizeZ;
+
+        const int localBlockX = worldX - regionBaseBlockX;
+        const int localBlockZ = worldZ - regionBaseBlockZ;
+
+        constexpr float kBiomeBlendRadiusChunks = 2.0f;
+        const float blendRadiusBlocksX = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeX);
+        const float blendRadiusBlocksZ = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeZ);
+
+
         auto smooth01 = [](float t)
         {
             t = std::clamp(t, 0.0f, 1.0f);
             return t * t * (3.0f - 2.0f * t);
         };
 
-        auto edgeInfluence = [&](float distance)
+        auto edgeInfluence = [&](float distance, float blendRadius)
         {
-            if (distance >= kBiomeBlendRadius)
+            if (distance >= blendRadius)
             {
                 return 0.0f;
             }
-            return 1.0f - smooth01(distance / kBiomeBlendRadius);
+            const float normalized = 1.0f - (distance / blendRadius);
+            return smooth01(normalized);
         };
 
-        const float distanceLeft = static_cast<float>(localChunkX);
-        const float distanceRight = static_cast<float>((kBiomeSizeInChunks - 1) - localChunkX);
-        const float distanceNorth = static_cast<float>(localChunkZ);
-        const float distanceSouth = static_cast<float>((kBiomeSizeInChunks - 1) - localChunkZ);
+        const float distanceLeft = static_cast<float>(localBlockX);
+        const float distanceRight = static_cast<float>((regionSizeBlocksX - 1) - localBlockX);
+        const float distanceNorth = static_cast<float>(localBlockZ);
+        const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
 
-        float leftWeightAxis = edgeInfluence(distanceLeft);
-        float rightWeightAxis = edgeInfluence(distanceRight);
+        float leftWeightAxis = edgeInfluence(distanceLeft, blendRadiusBlocksX);
+        float rightWeightAxis = edgeInfluence(distanceRight, blendRadiusBlocksX);
+        float northWeightAxis = edgeInfluence(distanceNorth, blendRadiusBlocksZ);
+        float southWeightAxis = edgeInfluence(distanceSouth, blendRadiusBlocksZ);
+
+        const float edgeSumX = leftWeightAxis + rightWeightAxis;
+        const float edgeSumZ = northWeightAxis + southWeightAxis;
+        if (edgeSumX > 1.0f)
+        {
+            leftWeightAxis /= edgeSumX;
+            rightWeightAxis /= edgeSumX;
+        }
+        if (edgeSumZ > 1.0f)
+        {
+            northWeightAxis /= edgeSumZ;
+            southWeightAxis /= edgeSumZ;
+        }
+
         float centerWeightAxisX = 1.0f - (leftWeightAxis + rightWeightAxis);
-        centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
-
-        float northWeightAxis = edgeInfluence(distanceNorth);
-        float southWeightAxis = edgeInfluence(distanceSouth);
         float centerWeightAxisZ = 1.0f - (northWeightAxis + southWeightAxis);
+        centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
         centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
 
-        std::array<WeightedBiome, 9> weightedBiomes{};
+        std::array<WeightedBiome, 5> weightedBiomes{};
+
         std::size_t weightCount = 0;
 
         auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
@@ -2351,10 +2376,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         addBiomeWeight(1, 0, rightWeightAxis * centerWeightAxisZ);
         addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
         addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
-        addBiomeWeight(-1, -1, leftWeightAxis * northWeightAxis);
-        addBiomeWeight(1, -1, rightWeightAxis * northWeightAxis);
-        addBiomeWeight(-1, 1, leftWeightAxis * southWeightAxis);
-        addBiomeWeight(1, 1, rightWeightAxis * southWeightAxis);
+
 
         if (weightCount == 0)
         {

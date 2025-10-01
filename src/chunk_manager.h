@@ -25,17 +25,22 @@ inline constexpr float kHorizontalDamping = 0.80f;
 inline constexpr float kGroundSnapTolerance = 1e-3f;
 inline constexpr float kAxisCollisionEpsilon = 1e-4f;
 
-inline constexpr int kChunkSizeX = 16;
+inline constexpr int kChunkEdgeLength = 16;
+inline constexpr int kChunkSizeX = kChunkEdgeLength;
 inline constexpr int kChunkSizeY = 64;
-inline constexpr int kChunkSizeZ = 16;
+inline constexpr int kChunkSizeZ = kChunkEdgeLength;
 inline constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
 inline constexpr int kAtlasTileSizePixels = 16;
 inline constexpr int kDefaultViewDistance = 4;
 inline constexpr int kExtendedViewDistance = 12;
-inline constexpr int kMaxChunkJobsPerFrame = 12;
-inline constexpr int kMaxRingsPerFrame = 1;
-inline constexpr std::size_t kUploadBudgetBytesPerFrame = 4ull * 1024ull * 1024ull;
+inline constexpr int kVerticalViewDistance = 2;
+inline constexpr int kMaxChunkJobsPerFrame = 18;
+inline constexpr int kMaxRingsPerFrame = 2;
+inline constexpr std::size_t kUploadBudgetBytesPerFrame = 6ull * 1024ull * 1024ull;
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
+inline constexpr std::size_t kChunkPoolSoftCap = 512ull;
+inline constexpr int kMaxUploadsPerColumnPerFrame = 2;
+inline constexpr std::size_t kUploadQueueScanLimit = 128ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept;
@@ -78,6 +83,17 @@ struct ChunkShaderUniformLocations
     GLint uAtlas{-1};
     GLint uHighlightedBlock{-1};
     GLint uHasHighlight{-1};
+};
+
+struct ChunkProfilingSnapshot
+{
+    double averageGenerationMs{0.0};
+    double averageMeshingMs{0.0};
+    std::size_t uploadedBytes{0};
+    int generatedChunks{0};
+    int meshedChunks{0};
+    int uploadedChunks{0};
+    int throttledUploads{0};
 };
 
 struct Frustum
@@ -123,6 +139,8 @@ public:
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
+
+    ChunkProfilingSnapshot sampleProfilingSnapshot();
 
 private:
     struct Impl;

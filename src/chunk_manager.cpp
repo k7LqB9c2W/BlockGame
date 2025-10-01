@@ -667,11 +667,16 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSiz
         assignFace(BlockId::Grass, face, {0, 1});
     }
 
-    assignFace(BlockId::Log, BlockFace::Top, {0, 4});
-    assignFace(BlockId::Log, BlockFace::Bottom, {0, 4});
+    assignFace(BlockId::Wood, BlockFace::Top, {0, 4});
+    assignFace(BlockId::Wood, BlockFace::Bottom, {0, 4});
     for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
     {
-        assignFace(BlockId::Log, face, {0, 3});
+        assignFace(BlockId::Wood, face, {0, 3});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::Leaves, face, {0, 5});
     }
 
     blockAtlasConfigured_ = true;
@@ -2211,35 +2216,176 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     const int baseWorldX = chunk.coord.x * kChunkSizeX;
     const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
 
+    auto terrainHeightAt = [&](int worldX, int worldZ) -> int
+    {
+        const float nx = static_cast<float>(worldX) * 0.01f;
+        const float nz = static_cast<float>(worldZ) * 0.01f;
+
+        const float mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
+        const float mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
+        const float detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
+        const float mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+
+        const float combined = mainTerrain * 12.0f +
+                               mountainNoise * 8.0f +
+                               mediumNoise * 4.0f +
+                               detailNoise * 2.0f;
+
+        float targetHeight = 16.0f + combined;
+        targetHeight = std::clamp(targetHeight, 2.0f, static_cast<float>(kChunkSizeY - 3));
+        const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
+        return std::clamp(columnHeight, 0, kChunkSizeY - 1);
+    };
+
     for (int x = 0; x < kChunkSizeX; ++x)
     {
         for (int z = 0; z < kChunkSizeZ; ++z)
         {
             const int worldX = baseWorldX + x;
             const int worldZ = baseWorldZ + z;
-
-            const float nx = static_cast<float>(worldX) * 0.01f;
-            const float nz = static_cast<float>(worldZ) * 0.01f;
-
-            float mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
-            float mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
-            float detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
-            float mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
-
-            float combined = mainTerrain * 12.0f +
-                           mountainNoise * 8.0f +
-                           mediumNoise * 4.0f +
-                           detailNoise * 2.0f;
-
-            float targetHeight = 16.0f + combined;
-            targetHeight = std::clamp(targetHeight, 2.0f, static_cast<float>(kChunkSizeY - 3));
-            const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
-            const int topBlock = std::clamp(columnHeight, 0, kChunkSizeY - 1);
+            const int topBlock = terrainHeightAt(worldX, worldZ);
             chunk.columnMaxHeights[columnIndex(x, z)] = topBlock;
 
             for (int y = 0; y < kChunkSizeY; ++y)
             {
                 chunk.blocks[blockIndex(x, y, z)] = (y <= topBlock) ? BlockId::Grass : BlockId::Air;
+            }
+        }
+    }
+
+    constexpr int kTreeMinHeight = 6;
+    constexpr int kTreeMaxHeight = 8;
+    constexpr int kTreeMaxRadius = 2;
+
+    auto trySetBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
+    {
+        const int localX = worldX - baseWorldX;
+        const int localZ = worldZ - baseWorldZ;
+        if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
+        {
+            return;
+        }
+        if (worldY < 0 || worldY >= kChunkSizeY)
+        {
+            return;
+        }
+
+        const std::size_t idx = blockIndex(localX, worldY, localZ);
+        BlockId& destination = chunk.blocks[idx];
+        if (!replaceSolid && destination != BlockId::Air)
+        {
+            return;
+        }
+
+        destination = block;
+        auto& columnMax = chunk.columnMaxHeights[columnIndex(localX, localZ)];
+        if (isSolid(block))
+        {
+            columnMax = std::max(columnMax, worldY);
+        }
+    };
+
+    const int minWorldX = baseWorldX - kTreeMaxRadius;
+    const int maxWorldX = baseWorldX + kChunkSizeX + kTreeMaxRadius - 1;
+    const int minWorldZ = baseWorldZ - kTreeMaxRadius;
+    const int maxWorldZ = baseWorldZ + kChunkSizeZ + kTreeMaxRadius - 1;
+
+    for (int worldX = minWorldX; worldX <= maxWorldX; ++worldX)
+    {
+        for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
+        {
+            const int groundY = terrainHeightAt(worldX, worldZ);
+            if (groundY <= 2 || groundY >= kChunkSizeY - (kTreeMaxHeight + 1))
+            {
+                continue;
+            }
+
+            const float density = noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                                             static_cast<float>(worldZ) * 0.05f,
+                                             4,
+                                             0.55f,
+                                             2.0f);
+            const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
+            const float randomValue = hashToUnitFloat(worldX, groundY, worldZ);
+            const float spawnThreshold = 0.015f + normalizedDensity * 0.02f;
+            if (randomValue > spawnThreshold)
+            {
+                continue;
+            }
+
+            bool terrainSuitable = true;
+            for (int dx = -1; dx <= 1 && terrainSuitable; ++dx)
+            {
+                for (int dz = -1; dz <= 1; ++dz)
+                {
+                    if (dx == 0 && dz == 0)
+                    {
+                        continue;
+                    }
+
+                    const int neighborHeight = terrainHeightAt(worldX + dx, worldZ + dz);
+                    if (std::abs(neighborHeight - groundY) > 1)
+                    {
+                        terrainSuitable = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!terrainSuitable)
+            {
+                continue;
+            }
+
+            int trunkHeight = kTreeMinHeight +
+                              static_cast<int>(hashToUnitFloat(worldX, groundY + 1, worldZ) *
+                                               static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
+            trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
+
+            const int canopyTop = groundY + trunkHeight;
+            if (canopyTop >= kChunkSizeY)
+            {
+                continue;
+            }
+
+            const int trunkTop = groundY + trunkHeight - 1;
+            for (int dy = 0; dy < trunkHeight; ++dy)
+            {
+                trySetBlock(worldX, groundY + dy, worldZ, BlockId::Wood, true);
+            }
+
+            const int canopyBase = groundY + trunkHeight - 3;
+            for (int y = canopyBase; y <= canopyTop; ++y)
+            {
+                const int layer = y - canopyBase;
+                int radius = 2;
+                if (y >= canopyTop - 1)
+                {
+                    radius = 1;
+                }
+
+                for (int dx = -radius; dx <= radius; ++dx)
+                {
+                    for (int dz = -radius; dz <= radius; ++dz)
+                    {
+                        if (std::abs(dx) == radius && std::abs(dz) == radius && radius > 1)
+                        {
+                            continue;
+                        }
+
+                        if (dx == 0 && dz == 0 && y <= trunkTop)
+                        {
+                            continue;
+                        }
+
+                        if (layer == 0 && std::abs(dx) + std::abs(dz) > 3)
+                        {
+                            continue;
+                        }
+
+                        trySetBlock(worldX + dx, y, worldZ + dz, BlockId::Leaves, false);
+                    }
+                }
             }
         }
     }

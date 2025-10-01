@@ -2024,7 +2024,7 @@ int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
     int radius = std::max(verticalRadius, kVerticalStreamingConfig.minRadiusChunks);
 
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-    const int worldZ = column.z * kChunkSizeZ + kChunkSizeZ / 2;
+    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
 
     int highest = columnManager_.highestSolidBlock(worldX, worldZ);
     if (highest == ColumnManager::kNoHeight)

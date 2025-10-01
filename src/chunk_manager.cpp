@@ -3185,14 +3185,20 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     float targetHeight = blendedOffset + combined * blendedScale;
     targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
 
-    if (oceanWeight > 0.0f && landWeight > 0.0f)
-    {
-        const float rawShoreBlend = std::clamp(oceanWeight * landWeight * 4.0f, 0.0f, 1.0f);
-        const float shorelineBlend = smooth01(rawShoreBlend);
+    const bool hasOceanContribution = oceanWeight > 0.0f;
+    const bool hasLandContribution = landWeight > 0.0f;
 
-        const float oceanTarget = std::clamp(oceanOffset + combined * oceanScale,
-                                             oceanMinHeight,
-                                             oceanMaxHeight);
+    float oceanTarget = targetHeight;
+    if (hasOceanContribution)
+    {
+        oceanTarget = std::clamp(oceanOffset + combined * oceanScale, oceanMinHeight, oceanMaxHeight);
+        minHeight = std::min(minHeight, oceanTarget);
+        maxHeight = std::max(maxHeight, oceanTarget);
+    }
+
+    float landTarget = targetHeight;
+    if (hasLandContribution)
+    {
 
         float landMin = landMinHeight;
         float landMax = landMaxHeight;
@@ -3204,16 +3210,52 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         landMin = std::clamp(landMin, kMinIntAsFloat, kMaxIntAsFloat);
         landMax = std::clamp(landMax, kMinIntAsFloat, kMaxIntAsFloat);
 
-        float landTarget = landOffset + combined * landScale;
+        landTarget = landOffset + combined * landScale;
         landTarget = std::clamp(landTarget, landMin, landMax);
+        minHeight = std::min(minHeight, landTarget);
+        maxHeight = std::max(maxHeight, landTarget);
+    }
 
-        const float shorelineFlatten = shorelineBlend * shorelineBlend;
-        const float gentleLand = landTarget - (landTarget - oceanTarget) * shorelineFlatten;
-        const float shorelineTarget = gentleLand + (oceanTarget - gentleLand) * shorelineBlend;
+    if (hasOceanContribution && hasLandContribution)
+    {
+        const float totalCategoryWeight = oceanWeight + landWeight;
+        if (totalCategoryWeight > std::numeric_limits<float>::epsilon())
+        {
+            const float oceanShare = oceanWeight / totalCategoryWeight;
+            const float landShare = landWeight / totalCategoryWeight;
 
-        targetHeight = shorelineTarget;
-        minHeight = std::min(minHeight, shorelineTarget);
-        maxHeight = std::max(maxHeight, shorelineTarget);
+            auto shorelineRamp = [](float share)
+            {
+                const float t = std::clamp((share - 0.3f) / 0.2f, 0.0f, 1.0f);
+                return t * t * (3.0f - 2.0f * t);
+            };
+
+            const float shorelineBlend = shorelineRamp(oceanShare) * shorelineRamp(landShare);
+            if (shorelineBlend > 0.0f)
+            {
+                const float easedBlend = shorelineBlend * shorelineBlend * (3.0f - 2.0f * shorelineBlend);
+                const float shorelineLandHeight = oceanTarget + (landTarget - oceanTarget) * (1.0f - easedBlend);
+                const float clampedShoreline = std::max(shorelineLandHeight, oceanTarget);
+
+                landTarget = clampedShoreline;
+                minHeight = std::min(minHeight, clampedShoreline);
+                maxHeight = std::max(maxHeight, clampedShoreline);
+            }
+        }
+    }
+
+    if (dominantBiome && dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
+    {
+        targetHeight = oceanTarget;
+    }
+    else if (hasLandContribution)
+    {
+        targetHeight = landTarget;
+    }
+    else if (hasOceanContribution)
+    {
+        targetHeight = oceanTarget;
+
     }
 
     ColumnSample sample;

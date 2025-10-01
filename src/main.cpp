@@ -735,8 +735,10 @@ void main()
     constexpr double kFixedTimeStep = 1.0 / 60.0;
     double previousTime = glfwGetTime();
     double accumulator = 0.0;
+#ifndef NDEBUG
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
+#endif
     std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
@@ -746,6 +748,7 @@ void main()
         previousTime = currentTime;
         frameTime = std::min(frameTime, 0.25);
         accumulator += frameTime;
+#ifndef NDEBUG
         profilingOverlayTimer += frameTime;
 
         if (profilingOverlayTimer >= 1.0)
@@ -788,6 +791,7 @@ void main()
             profilingOverlayText = profilingStream.str();
             profilingOverlayTimer = 0.0;
         }
+#endif
 
         glfwPollEvents();
 
@@ -884,6 +888,7 @@ void main()
             textOverlay.render(coordStream.str(), 8.0f, 8.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
         }
 
+#ifndef NDEBUG
         if (!profilingOverlayText.empty())
         {
             const float overlayY = inputContext.showCoordinates ? 24.0f : 8.0f;
@@ -895,6 +900,7 @@ void main()
                                8.0f,
                                glm::vec3(0.85f, 0.95f, 1.0f));
         }
+#endif
 
         // Render render distance GUI
         if (inputContext.showRenderDistanceGUI)

@@ -30,6 +30,7 @@
 #include <random>
 #include <stdexcept>
 #include <sstream>
+#include <iomanip>
 #include <string>
 #include <thread>
 #include <utility>
@@ -239,6 +240,27 @@ void main()
         screenSizeLocation_ = -1;
     }
 };
+
+void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3& basePosition)
+{
+    std::cout << "Running streaming validation scenarios..." << std::endl;
+    const std::array<glm::vec3, 4> offsets = {
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, static_cast<float>(kChunkSizeY * 6), 0.0f),
+        glm::vec3(0.0f, static_cast<float>(-kChunkSizeY * 4), 0.0f),
+        glm::vec3(static_cast<float>(kChunkSizeX * 3), static_cast<float>(kChunkSizeY * 2), static_cast<float>(kChunkSizeZ * 3))
+    };
+
+    for (const glm::vec3& offset : offsets)
+    {
+        const glm::vec3 target = basePosition + offset;
+        std::cout << "  Probing stream at (" << target.x << ", " << target.y << ", " << target.z << ")" << std::endl;
+        chunkManager.update(target);
+    }
+
+    chunkManager.update(basePosition);
+    chunkManager.sampleProfilingSnapshot();
+}
 
 #include "text_overlay.inl"
 
@@ -692,8 +714,14 @@ void main()
     camera.position = chunkManager.findSafeSpawnPosition(camera.position.x, camera.position.z);
     camera.velocity = glm::vec3(0.0f);
     camera.onGround = false;
-    
+
     std::cout << "Player spawned at: (" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")" << std::endl;
+
+    if (std::getenv("BLOCKGAME_STREAMING_TEST"))
+    {
+        runStreamingValidationScenarios(chunkManager, camera.position);
+        chunkManager.update(camera.position);
+    }
 
     Crosshair crosshair;
     TextOverlay textOverlay;
@@ -701,6 +729,8 @@ void main()
     constexpr double kFixedTimeStep = 1.0 / 60.0;
     double previousTime = glfwGetTime();
     double accumulator = 0.0;
+    double profilingOverlayTimer = 0.0;
+    std::string profilingOverlayText;
     std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
@@ -710,6 +740,40 @@ void main()
         previousTime = currentTime;
         frameTime = std::min(frameTime, 0.25);
         accumulator += frameTime;
+        profilingOverlayTimer += frameTime;
+
+        if (profilingOverlayTimer >= 1.0)
+        {
+            ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
+            std::ostringstream profilingStream;
+            profilingStream.setf(std::ios::fixed, std::ios::floatfield);
+            profilingStream << std::setprecision(2);
+
+            const double uploadedKiB = static_cast<double>(snapshot.uploadedBytes) / 1024.0;
+            profilingStream << "Gen " << snapshot.generatedChunks;
+            if (snapshot.generatedChunks > 0)
+            {
+                profilingStream << " @" << snapshot.averageGenerationMs << "ms";
+            }
+            profilingStream << " | Mesh " << snapshot.meshedChunks;
+            if (snapshot.meshedChunks > 0)
+            {
+                profilingStream << " @" << snapshot.averageMeshingMs << "ms";
+            }
+            profilingStream << " | Upload " << snapshot.uploadedChunks << " (" << uploadedKiB << " KiB)";
+            if (snapshot.throttledUploads > 0)
+            {
+                profilingStream << " Throttle " << snapshot.throttledUploads;
+            }
+
+            const int verticalSpan = (kVerticalViewDistance * 2 + 1) * kChunkSizeY;
+            profilingStream << " | View " << chunkManager.viewDistance()
+                            << "x" << kVerticalViewDistance
+                            << " (" << verticalSpan << "h)";
+
+            profilingOverlayText = profilingStream.str();
+            profilingOverlayTimer = 0.0;
+        }
 
         glfwPollEvents();
 
@@ -804,6 +868,18 @@ void main()
                          << 'Y' << ' ' << camera.position.y << ' '
                          << 'Z' << ' ' << camera.position.z;
             textOverlay.render(coordStream.str(), 8.0f, 8.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
+        }
+
+        if (!profilingOverlayText.empty())
+        {
+            const float overlayY = inputContext.showCoordinates ? 24.0f : 8.0f;
+            textOverlay.render(profilingOverlayText,
+                               8.0f,
+                               overlayY,
+                               framebufferWidth,
+                               framebufferHeight,
+                               8.0f,
+                               glm::vec3(0.85f, 0.95f, 1.0f));
         }
 
         // Render render distance GUI

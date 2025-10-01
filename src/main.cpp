@@ -244,11 +244,13 @@ void main()
 void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3& basePosition)
 {
     std::cout << "Running streaming validation scenarios..." << std::endl;
-    const std::array<glm::vec3, 4> offsets = {
+    const std::array<glm::vec3, 6> offsets = {
         glm::vec3(0.0f, 0.0f, 0.0f),
         glm::vec3(0.0f, static_cast<float>(kChunkSizeY * 6), 0.0f),
         glm::vec3(0.0f, static_cast<float>(-kChunkSizeY * 4), 0.0f),
-        glm::vec3(static_cast<float>(kChunkSizeX * 3), static_cast<float>(kChunkSizeY * 2), static_cast<float>(kChunkSizeZ * 3))
+        glm::vec3(static_cast<float>(kChunkSizeX * 3), static_cast<float>(kChunkSizeY * 2), static_cast<float>(kChunkSizeZ * 3)),
+        glm::vec3(0.0f, static_cast<float>(kChunkSizeY * 12), 0.0f),
+        glm::vec3(0.0f, static_cast<float>(-kChunkSizeY * 8), 0.0f)
     };
 
     for (const glm::vec3& offset : offsets)
@@ -256,6 +258,10 @@ void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3
         const glm::vec3 target = basePosition + offset;
         std::cout << "  Probing stream at (" << target.x << ", " << target.y << ", " << target.z << ")" << std::endl;
         chunkManager.update(target);
+        ChunkProfilingSnapshot sweep = chunkManager.sampleProfilingSnapshot();
+        std::cout << "    Stream vertical radius " << sweep.verticalRadius
+                  << ", uploads " << sweep.uploadedChunks
+                  << " (deferrals: " << sweep.deferredUploads << ")" << std::endl;
     }
 
     chunkManager.update(basePosition);
@@ -765,10 +771,18 @@ void main()
             {
                 profilingStream << " Throttle " << snapshot.throttledUploads;
             }
+            if (snapshot.deferredUploads > 0)
+            {
+                profilingStream << " Def " << snapshot.deferredUploads;
+            }
+            if (snapshot.evictedChunks > 0)
+            {
+                profilingStream << " Evict " << snapshot.evictedChunks;
+            }
 
-            const int verticalSpan = (kVerticalViewDistance * 2 + 1) * kChunkSizeY;
+            const int verticalSpan = (snapshot.verticalRadius * 2 + 1) * kChunkSizeY;
             profilingStream << " | View " << chunkManager.viewDistance()
-                            << "x" << kVerticalViewDistance
+                            << "x" << snapshot.verticalRadius
                             << " (" << verticalSpan << "h)";
 
             profilingOverlayText = profilingStream.str();

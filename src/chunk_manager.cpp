@@ -2268,20 +2268,115 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     const int baseWorldX = chunk.coord.x * kChunkSizeX;
     const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
 
-    auto selectBiomeFor = [&](int worldX, int worldZ) -> const BiomeDefinition&
+    auto biomeForRegion = [&](int regionX, int regionZ) -> const BiomeDefinition&
     {
-        const int chunkX = floorDiv(worldX, kChunkSizeX);
-        const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
-        const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
-        const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
-        const float selector = hashToUnitFloat(biomeRegionX, 31, biomeRegionZ);
+        const float selector = hashToUnitFloat(regionX, 31, regionZ);
         const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
         const std::size_t biomeIndex = std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
         return kBiomeDefinitions[biomeIndex];
     };
 
-    auto columnHeightForBiome = [&](const BiomeDefinition& biome, int worldX, int worldZ) -> int
+    struct ColumnSample
     {
+        const BiomeDefinition* dominantBiome = nullptr;
+        float dominantWeight = 0.0f;
+        int topBlock = 0;
+    };
+
+    auto sampleColumn = [&](int worldX, int worldZ) -> ColumnSample
+    {
+        struct WeightedBiome
+        {
+            const BiomeDefinition* biome;
+            float weight;
+        };
+
+        const int chunkX = floorDiv(worldX, kChunkSizeX);
+        const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
+        const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
+        const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
+
+        const int regionBaseChunkX = biomeRegionX * kBiomeSizeInChunks;
+        const int regionBaseChunkZ = biomeRegionZ * kBiomeSizeInChunks;
+        const int localChunkX = chunkX - regionBaseChunkX;
+        const int localChunkZ = chunkZ - regionBaseChunkZ;
+
+        constexpr float kBiomeBlendRadius = 2.5f;
+        auto smooth01 = [](float t)
+        {
+            t = std::clamp(t, 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+
+        auto edgeInfluence = [&](float distance)
+        {
+            if (distance >= kBiomeBlendRadius)
+            {
+                return 0.0f;
+            }
+            return 1.0f - smooth01(distance / kBiomeBlendRadius);
+        };
+
+        const float distanceLeft = static_cast<float>(localChunkX);
+        const float distanceRight = static_cast<float>((kBiomeSizeInChunks - 1) - localChunkX);
+        const float distanceNorth = static_cast<float>(localChunkZ);
+        const float distanceSouth = static_cast<float>((kBiomeSizeInChunks - 1) - localChunkZ);
+
+        float leftWeightAxis = edgeInfluence(distanceLeft);
+        float rightWeightAxis = edgeInfluence(distanceRight);
+        float centerWeightAxisX = 1.0f - (leftWeightAxis + rightWeightAxis);
+        centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
+
+        float northWeightAxis = edgeInfluence(distanceNorth);
+        float southWeightAxis = edgeInfluence(distanceSouth);
+        float centerWeightAxisZ = 1.0f - (northWeightAxis + southWeightAxis);
+        centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
+
+        std::array<WeightedBiome, 9> weightedBiomes{};
+        std::size_t weightCount = 0;
+
+        auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
+        {
+            if (weight <= 0.0f)
+            {
+                return;
+            }
+
+            const BiomeDefinition& biome = biomeForRegion(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);
+            weightedBiomes[weightCount++] = WeightedBiome{&biome, weight};
+        };
+
+        addBiomeWeight(0, 0, centerWeightAxisX * centerWeightAxisZ);
+        addBiomeWeight(-1, 0, leftWeightAxis * centerWeightAxisZ);
+        addBiomeWeight(1, 0, rightWeightAxis * centerWeightAxisZ);
+        addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
+        addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
+        addBiomeWeight(-1, -1, leftWeightAxis * northWeightAxis);
+        addBiomeWeight(1, -1, rightWeightAxis * northWeightAxis);
+        addBiomeWeight(-1, 1, leftWeightAxis * southWeightAxis);
+        addBiomeWeight(1, 1, rightWeightAxis * southWeightAxis);
+
+        if (weightCount == 0)
+        {
+            addBiomeWeight(0, 0, 1.0f);
+        }
+
+        float totalWeight = 0.0f;
+        for (std::size_t i = 0; i < weightCount; ++i)
+        {
+            totalWeight += weightedBiomes[i].weight;
+        }
+
+        if (totalWeight <= std::numeric_limits<float>::epsilon())
+        {
+            totalWeight = 1.0f;
+        }
+
+        for (std::size_t i = 0; i < weightCount; ++i)
+        {
+            weightedBiomes[i].weight /= totalWeight;
+        }
+
         const float nx = static_cast<float>(worldX) * 0.01f;
         const float nz = static_cast<float>(worldZ) * 0.01f;
 
@@ -2295,19 +2390,45 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                                mediumNoise * 4.0f +
                                detailNoise * 2.0f;
 
-        float targetHeight = biome.heightOffset + combined * biome.heightScale;
-        targetHeight = std::clamp(targetHeight,
-                                  static_cast<float>(biome.minHeight),
-                                  static_cast<float>(biome.maxHeight));
+        float blendedOffset = 0.0f;
+        float blendedScale = 0.0f;
+        float blendedMinHeight = 0.0f;
+        float blendedMaxHeight = 0.0f;
+        const BiomeDefinition* dominantBiome = nullptr;
+        float dominantWeight = -1.0f;
 
-        return std::clamp(static_cast<int>(std::round(targetHeight)), 0, kChunkSizeY - 1);
-    };
+        for (std::size_t i = 0; i < weightCount; ++i)
+        {
+            const auto& weightedBiome = weightedBiomes[i];
+            blendedOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+            blendedScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+            blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+            blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
 
-    auto biomeAndHeightAt = [&](int worldX, int worldZ)
-    {
-        const BiomeDefinition& biome = selectBiomeFor(worldX, worldZ);
-        const int columnHeight = columnHeightForBiome(biome, worldX, worldZ);
-        return std::pair<const BiomeDefinition*, int>{&biome, columnHeight};
+            if (weightedBiome.weight > dominantWeight)
+            {
+                dominantWeight = weightedBiome.weight;
+                dominantBiome = weightedBiome.biome;
+            }
+        }
+
+        dominantWeight = std::max(dominantWeight, 0.0f);
+        if (dominantBiome == nullptr)
+        {
+            dominantBiome = &biomeForRegion(biomeRegionX, biomeRegionZ);
+        }
+
+        const float minHeight = std::clamp(blendedMinHeight, 0.0f, static_cast<float>(kChunkSizeY - 1));
+        const float maxHeight = std::clamp(blendedMaxHeight, 0.0f, static_cast<float>(kChunkSizeY - 1));
+
+        float targetHeight = blendedOffset + combined * blendedScale;
+        targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+
+        ColumnSample sample;
+        sample.dominantBiome = dominantBiome;
+        sample.dominantWeight = dominantWeight;
+        sample.topBlock = std::clamp(static_cast<int>(std::round(targetHeight)), 0, kChunkSizeY - 1);
+        return sample;
     };
 
     for (int x = 0; x < kChunkSizeX; ++x)
@@ -2316,9 +2437,9 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         {
             const int worldX = baseWorldX + x;
             const int worldZ = baseWorldZ + z;
-            const auto biomeSample = biomeAndHeightAt(worldX, worldZ);
-            const BiomeDefinition& biome = *biomeSample.first;
-            const int topBlock = biomeSample.second;
+            const ColumnSample columnSample = sampleColumn(worldX, worldZ);
+            const BiomeDefinition& biome = *columnSample.dominantBiome;
+            const int topBlock = columnSample.topBlock;
             chunk.columnMaxHeights[columnIndex(x, z)] = topBlock;
 
             for (int y = 0; y < kChunkSizeY; ++y)
@@ -2379,14 +2500,20 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     {
         for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
         {
-            const auto biomeSample = biomeAndHeightAt(worldX, worldZ);
-            const BiomeDefinition& biome = *biomeSample.first;
+            const ColumnSample columnSample = sampleColumn(worldX, worldZ);
+            const BiomeDefinition& biome = *columnSample.dominantBiome;
             if (!biome.generatesTrees)
             {
                 continue;
             }
 
-            const int groundY = biomeSample.second;
+            constexpr float kTreeBiomeWeightThreshold = 0.55f;
+            if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
+            {
+                continue;
+            }
+
+            const int groundY = columnSample.topBlock;
             if (groundY <= 2 || groundY >= kChunkSizeY - (kTreeMaxHeight + 1))
             {
                 continue;
@@ -2427,8 +2554,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         continue;
                     }
 
-                    const auto neighborSample = biomeAndHeightAt(worldX + dx, worldZ + dz);
-                    const int neighborHeight = neighborSample.second;
+                    const ColumnSample neighborSample = sampleColumn(worldX + dx, worldZ + dz);
+                    const int neighborHeight = neighborSample.topBlock;
                     if (std::abs(neighborHeight - groundY) > 1)
                     {
                         terrainSuitable = false;

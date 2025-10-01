@@ -182,11 +182,21 @@ struct BiomeDefinition
 
 constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
 
+// The biome height ranges are expressed in absolute world Y units so that terrain
+// generation remains stable regardless of the chunk edge length. These values
+// mirror the pre-cubic-chunk tuning that produced varied hills for each biome,
+// while oceans clamp to a fixed sea level so their surfaces stay flat.
+constexpr int kGrasslandsMaxSurfaceHeight = 61;
+constexpr int kForestMaxSurfaceHeight = 61;
+constexpr int kDesertMaxSurfaceHeight = 60;
+constexpr int kOceanSeaLevel = 20;
+constexpr int kOceanMaxSurfaceHeight = kOceanSeaLevel;
+
 constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
-    {BiomeId::Grasslands, "Grasslands", BlockId::Grass, BlockId::Grass, false, 0.0f, 16.0f, 1.0f, 2, kChunkSizeY - 3},
-    {BiomeId::Forest, "Forest", BlockId::Grass, BlockId::Grass, true, 3.5f, 18.0f, 1.1f, 3, kChunkSizeY - 3},
-    {BiomeId::Desert, "Desert", BlockId::Sand, BlockId::Sand, false, 0.0f, 12.0f, 0.5f, 1, kChunkSizeY - 4},
-    {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, 20.0f, 0.0f, 6, kChunkSizeY - 2},
+    {BiomeId::Grasslands, "Grasslands", BlockId::Grass, BlockId::Grass, false, 0.0f, 16.0f, 1.0f, 2, kGrasslandsMaxSurfaceHeight},
+    {BiomeId::Forest, "Forest", BlockId::Grass, BlockId::Grass, true, 3.5f, 18.0f, 1.1f, 3, kForestMaxSurfaceHeight},
+    {BiomeId::Desert, "Desert", BlockId::Sand, BlockId::Sand, false, 0.0f, 12.0f, 0.5f, 1, kDesertMaxSurfaceHeight},
+    {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, static_cast<float>(kOceanSeaLevel), 0.0f, kOceanSeaLevel, kOceanMaxSurfaceHeight},
 } };
 
 struct ColumnSample

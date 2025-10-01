@@ -44,7 +44,8 @@ enum class BlockId : std::uint8_t
 {
     Air = 0,
     Grass = 1,
-    Log = 2,
+    Wood = 2,
+    Leaves = 3,
     Count
 };
 

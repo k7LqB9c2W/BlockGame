@@ -1499,11 +1499,105 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
     const int baseX = static_cast<int>(std::floor(worldX));
     const int baseZ = static_cast<int>(std::floor(worldZ));
     int highestSolid = columnManager_.highestSolidBlock(baseX, baseZ);
+
+    auto mergeHeight = [](int current, int candidate)
+    {
+        if (candidate == ColumnManager::kNoHeight)
+        {
+            return current;
+        }
+        if (current == ColumnManager::kNoHeight)
+        {
+            return candidate;
+        }
+        return std::max(current, candidate);
+    };
+
+    const ColumnSample baseSample = sampleColumn(baseX, baseZ);
+
+    auto predictTreeCanopyTop = [&](const ColumnSample& columnSample) -> int
+    {
+        if (!columnSample.dominantBiome || !columnSample.dominantBiome->generatesTrees)
+        {
+            return ColumnManager::kNoHeight;
+        }
+
+        constexpr float kTreeBiomeWeightThreshold = 0.55f;
+        if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
+        {
+            return ColumnManager::kNoHeight;
+        }
+
+        const int groundWorldY = columnSample.surfaceY;
+        if (groundWorldY <= 2)
+        {
+            return ColumnManager::kNoHeight;
+        }
+
+        const BiomeDefinition& biome = *columnSample.dominantBiome;
+
+        const float density = noise_.fbm(static_cast<float>(baseX) * 0.05f,
+                                         static_cast<float>(baseZ) * 0.05f,
+                                         4,
+                                         0.55f,
+                                         2.0f);
+        const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
+        const float randomValue = hashToUnitFloat(baseX, groundWorldY, baseZ);
+        const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
+        const float spawnThreshold =
+            std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
+        if (randomValue > spawnThreshold)
+        {
+            return ColumnManager::kNoHeight;
+        }
+
+        bool terrainSuitable = true;
+        for (int dx = -1; dx <= 1 && terrainSuitable; ++dx)
+        {
+            for (int dz = -1; dz <= 1; ++dz)
+            {
+                if (dx == 0 && dz == 0)
+                {
+                    continue;
+                }
+
+                const ColumnSample neighborSample = sampleColumn(baseX + dx, baseZ + dz);
+                if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
+                {
+                    terrainSuitable = false;
+                    break;
+                }
+            }
+        }
+
+        if (!terrainSuitable)
+        {
+            return ColumnManager::kNoHeight;
+        }
+
+        constexpr int kTreeMinHeight = 6;
+        constexpr int kTreeMaxHeight = 8;
+
+        int trunkHeight = kTreeMinHeight +
+                          static_cast<int>(hashToUnitFloat(baseX, groundWorldY + 1, baseZ) *
+                                           static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
+        trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
+
+        return groundWorldY + trunkHeight;
+    };
+
+    int predictedHighest = ColumnManager::kNoHeight;
+    if (baseSample.dominantBiome)
+    {
+        predictedHighest = mergeHeight(predictedHighest, baseSample.surfaceY);
+        predictedHighest = mergeHeight(predictedHighest, predictTreeCanopyTop(baseSample));
+    }
+
+    highestSolid = mergeHeight(highestSolid, predictedHighest);
     if (highestSolid == ColumnManager::kNoHeight)
     {
-        highestSolid = sampleColumn(baseX, baseZ).surfaceY;
+        highestSolid = 0;
     }
-    highestSolid = std::max(highestSolid, 0);
 
     const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
     const int searchTop = highestSolid + clearanceHeight + 2;
@@ -1564,8 +1658,9 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
         }
     }
 
-    std::cout << "Warning: No safe spawn found, spawning above terrain" << std::endl;
-    const float fallbackY = static_cast<float>(searchTop) + kCameraEyeHeight;
+    std::cout << "Warning: No safe spawn found, spawning above highest predicted block" << std::endl;
+    const int spawnFeetY = highestSolid + 1;
+    const float fallbackY = static_cast<float>(spawnFeetY) + kCameraEyeHeight;
     return glm::vec3(worldX, fallbackY, worldZ);
 }
 

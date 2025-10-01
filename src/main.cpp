@@ -2,6 +2,7 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include "TextureLoader.h"
+#include "camera.h"
 #include "chunk_manager.h"
 
 #include <glm/glm.hpp>
@@ -40,66 +41,6 @@
 
 namespace
 {
-class Camera
-{
-public:
-    glm::vec3 position{0.0f, 10.0f, 5.0f};
-    float yaw{-90.0f};
-    float pitch{0.0f};
-    float moveSpeed{8.0f};
-    float mouseSensitivity{0.12f};
-    
-    // Physics properties
-    glm::vec3 velocity{0.0f, 0.0f, 0.0f};
-    bool onGround{false};
-
-    const glm::vec3& front() const noexcept { return front_; }
-    const glm::vec3& up() const noexcept { return up_; }
-    const glm::vec3& right() const noexcept { return right_; }
-    const glm::vec3& worldUp() const noexcept { return worldUp_; }
-
-    void processMouse(float xoffset, float yoffset)
-    {
-        xoffset *= mouseSensitivity;
-        yoffset *= mouseSensitivity;
-
-        yaw += xoffset;
-        pitch += yoffset;
-        pitch = std::clamp(pitch, -89.0f, 89.0f);
-        updateVectors();
-    }
-
-    void updateVectors()
-    {
-        const float yawRad = glm::radians(yaw);
-        const float pitchRad = glm::radians(pitch);
-
-        glm::vec3 direction;
-        direction.x = std::cos(yawRad) * std::cos(pitchRad);
-        direction.y = std::sin(pitchRad);
-        direction.z = std::sin(yawRad) * std::cos(pitchRad);
-        front_ = glm::normalize(direction);
-
-        glm::vec3 rightCandidate = glm::cross(front_, worldUp_);
-        if (glm::length(rightCandidate) < kEpsilon)
-        {
-            rightCandidate = glm::vec3(1.0f, 0.0f, 0.0f);
-        }
-        else
-        {
-            rightCandidate = glm::normalize(rightCandidate);
-        }
-        right_ = rightCandidate;
-        up_ = glm::normalize(glm::cross(right_, front_));
-    }
-
-private:
-    glm::vec3 front_{0.0f, 0.0f, -1.0f};
-    glm::vec3 up_{0.0f, 1.0f, 0.0f};
-    glm::vec3 right_{1.0f, 0.0f, 0.0f};
-    glm::vec3 worldUp_{0.0f, 1.0f, 0.0f};
-};
-
 struct InputContext
 {
     Camera* camera{nullptr};

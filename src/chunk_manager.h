@@ -37,6 +37,7 @@ inline constexpr int kVerticalViewDistance = 2;
 inline constexpr int kMaxChunkJobsPerFrame = 18;
 inline constexpr int kMaxRingsPerFrame = 2;
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 6ull * 1024ull * 1024ull;
+
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
 inline constexpr std::size_t kChunkPoolSoftCap = 512ull;
 inline constexpr int kMaxUploadsPerColumnPerFrame = 2;

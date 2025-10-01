@@ -31,7 +31,8 @@
 float computeFarPlaneForViewDistance(int viewDistance) noexcept
 {
     const float horizontalSpan = static_cast<float>(viewDistance + 1) * static_cast<float>(std::max(kChunkSizeX, kChunkSizeZ));
-    const float verticalSpan = static_cast<float>(kVerticalViewDistance + 1) * static_cast<float>(kChunkSizeY);
+    const float verticalSpan = static_cast<float>(kVerticalStreamingConfig.maxRadiusChunks + 1)
+                                * static_cast<float>(kChunkSizeY);
     const float diagonal = std::sqrt(horizontalSpan * horizontalSpan + verticalSpan * verticalSpan);
     return std::max(diagonal + kFarPlanePadding, kDefaultFarPlane);
 }
@@ -320,6 +321,8 @@ struct ProfilingCounters
     std::atomic<int> meshedChunks{0};
     std::atomic<int> uploadedChunks{0};
     std::atomic<int> throttledUploads{0};
+    std::atomic<int> deferredUploads{0};
+    std::atomic<int> evictedChunks{0};
 };
 
 struct ChunkHasher
@@ -501,6 +504,13 @@ private:
     void ensureChunkBuffers(Chunk& chunk, std::size_t vertexBytes, std::size_t indexBytes);
     void recycleChunkGPU(Chunk& chunk);
     void destroyBufferPool();
+    int computeVerticalRadius(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
+    int columnRadiusFor(const glm::ivec2& column, int cameraChunkY, int verticalRadius) const;
+    std::pair<int, int> columnSpanFor(const glm::ivec2& column,
+                                      int cameraChunkY,
+                                      int verticalRadius) const;
+    void resetColumnBudgets();
+    int uploadsPerColumnLimit() const noexcept;
 
     struct RingProgress
     {
@@ -573,6 +583,9 @@ private:
     std::vector<std::shared_ptr<Chunk>> chunkPool_;
     std::mutex chunkPoolMutex_;
     ProfilingCounters profilingCounters_{};
+    std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
+    int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
+    int perColumnUploadLimit_{kVerticalStreamingConfig.uploadBasePerColumn};
 };
 
 // JobQueue implementations
@@ -981,7 +994,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     const int worldZ = static_cast<int>(std::floor(cameraPos.z));
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, worldY, worldZ);
 
-    const int verticalRadius = kVerticalViewDistance;
+    resetColumnBudgets();
+    const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, worldY);
+    lastVerticalRadius_ = verticalRadius;
+    perColumnUploadLimit_ = uploadsPerColumnLimit();
 
     jobQueue_.updatePriorityOrigin(centerChunk);
 
@@ -1022,7 +1038,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
         break;
     }
 
-    removeDistantChunks(centerChunk, targetViewDistance_ + 1, verticalRadius + 1);
+    removeDistantChunks(centerChunk,
+                        targetViewDistance_ + kVerticalStreamingConfig.horizontalEvictionSlack,
+                        verticalRadius);
 
     uploadReadyMeshes();
 }
@@ -1562,6 +1580,9 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadedChunks = uploaded;
     snapshot.uploadedBytes = profilingCounters_.uploadedBytes.exchange(0, std::memory_order_relaxed);
     snapshot.throttledUploads = profilingCounters_.throttledUploads.exchange(0, std::memory_order_relaxed);
+    snapshot.deferredUploads = profilingCounters_.deferredUploads.exchange(0, std::memory_order_relaxed);
+    snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
+    snapshot.verticalRadius = lastVerticalRadius_;
 
     const long long genMicros = profilingCounters_.generationMicros.exchange(0, std::memory_order_relaxed);
     const long long meshMicros = profilingCounters_.meshingMicros.exchange(0, std::memory_order_relaxed);
@@ -1949,6 +1970,90 @@ void ChunkManager::Impl::destroyBufferPool()
     bufferPool_.clear();
 }
 
+void ChunkManager::Impl::resetColumnBudgets()
+{
+    jobsScheduledThisFrame_.clear();
+}
+
+int ChunkManager::Impl::uploadsPerColumnLimit() const noexcept
+{
+    const int ramp = std::max(0, lastVerticalRadius_ - kVerticalStreamingConfig.minRadiusChunks);
+    const int divisor = std::max(1, kVerticalStreamingConfig.uploadRampDivisor);
+    const int bonus = ramp / divisor;
+    const int base = kVerticalStreamingConfig.uploadBasePerColumn;
+    const int maxLimit = kVerticalStreamingConfig.uploadMaxPerColumn;
+    return std::clamp(base + bonus, base, maxLimit);
+}
+
+int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
+                                              int horizontalRadius,
+                                              int cameraWorldY)
+{
+    int verticalRadius = kVerticalStreamingConfig.minRadiusChunks;
+
+    const int cameraChunkY = center.y;
+    const int cameraWorldChunk = floorDiv(cameraWorldY, kChunkSizeY);
+    verticalRadius = std::max(verticalRadius,
+                              std::abs(cameraWorldChunk - cameraChunkY) +
+                                  kVerticalStreamingConfig.columnSlackChunks);
+
+    const int sampleRadius = std::max(0,
+                                      std::min(horizontalRadius, kVerticalStreamingConfig.sampleRadiusChunks));
+
+    for (int dx = -sampleRadius; dx <= sampleRadius; ++dx)
+    {
+        for (int dz = -sampleRadius; dz <= sampleRadius; ++dz)
+        {
+            const glm::ivec2 column{center.x + dx, center.z + dz};
+            const int radius = columnRadiusFor(column, cameraChunkY, verticalRadius);
+            verticalRadius = std::max(verticalRadius, radius);
+        }
+    }
+
+    return std::clamp(verticalRadius,
+                      kVerticalStreamingConfig.minRadiusChunks,
+                      kVerticalStreamingConfig.maxRadiusChunks);
+}
+
+int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
+                                        int cameraChunkY,
+                                        int verticalRadius) const
+{
+    int radius = std::max(verticalRadius, kVerticalStreamingConfig.minRadiusChunks);
+
+    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+    const int worldZ = column.z * kChunkSizeZ + kChunkSizeZ / 2;
+
+    int highest = columnManager_.highestSolidBlock(worldX, worldZ);
+    if (highest == ColumnManager::kNoHeight)
+    {
+        const ColumnSample sample = sampleColumn(worldX, worldZ);
+        highest = sample.surfaceY;
+    }
+
+    if (highest != ColumnManager::kNoHeight)
+    {
+        const int highestChunk = floorDiv(highest, kChunkSizeY);
+        const int required = std::abs(highestChunk - cameraChunkY) +
+                             kVerticalStreamingConfig.columnSlackChunks;
+        radius = std::max(radius, required);
+    }
+
+    return std::clamp(radius,
+                      kVerticalStreamingConfig.minRadiusChunks,
+                      kVerticalStreamingConfig.maxRadiusChunks);
+}
+
+std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
+                                                       int cameraChunkY,
+                                                       int verticalRadius) const
+{
+    const int radius = columnRadiusFor(column, cameraChunkY, verticalRadius);
+    const int minChunk = cameraChunkY - radius;
+    const int maxChunk = cameraChunkY + radius;
+    return {minChunk, maxChunk};
+}
+
 ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ivec3& center,
                                                                   int horizontalRadius,
                                                                   int verticalRadius,
@@ -1956,65 +2061,109 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
 {
     bool missingFound = false;
 
-    auto visitCoordinate = [&](const glm::ivec3& coord) -> bool {
-        if (jobBudget <= 0)
-        {
-            return true;
-        }
-
-        if (ensureChunkAsync(coord))
-        {
-            --jobBudget;
-            missingFound = true;
-        }
-
-        return jobBudget <= 0;
+    struct Candidate
+    {
+        glm::ivec3 coord;
+        float priority{0.0f};
     };
 
-    for (int dy = -verticalRadius; dy <= verticalRadius; ++dy)
-    {
-        const glm::ivec3 base = center + glm::ivec3(0, dy, 0);
+    std::vector<Candidate> candidates;
+    candidates.reserve(static_cast<std::size_t>((verticalRadius * 2 + 1) *
+                                                std::max(1, horizontalRadius * 8)));
 
-        if (horizontalRadius == 0)
+    std::unordered_set<glm::ivec2, ColumnHasher> visitedColumns;
+    visitedColumns.reserve(static_cast<std::size_t>(std::max(1, horizontalRadius * 8)));
+    const int maxJobsPerColumn = std::max(0, kVerticalStreamingConfig.maxGenerationJobsPerColumn);
+
+    auto enqueueColumn = [&](int chunkX, int chunkZ) {
+        glm::ivec2 column{chunkX, chunkZ};
+        if (!visitedColumns.insert(column).second)
         {
-            if (visitCoordinate(base))
-            {
-                return RingProgress{false, true};
-            }
-            continue;
+            return;
         }
 
+        const auto [minChunkY, maxChunkY] = columnSpanFor(column, center.y, verticalRadius);
+        for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
+        {
+            const glm::ivec3 coord{chunkX, chunkY, chunkZ};
+            const int dx = coord.x - center.x;
+            const int dy = coord.y - center.y;
+            const int dz = coord.z - center.z;
+            const float horizontal = std::sqrt(static_cast<float>(dx * dx + dz * dz));
+            const float priority = horizontal + 0.5f * static_cast<float>(std::abs(dy));
+            candidates.push_back(Candidate{coord, priority});
+        }
+    };
+
+    if (horizontalRadius == 0)
+    {
+        enqueueColumn(center.x, center.z);
+    }
+    else
+    {
         for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
         {
-            if (visitCoordinate(base + glm::ivec3(dx, 0, -horizontalRadius)))
-            {
-                return RingProgress{false, true};
-            }
-            if (visitCoordinate(base + glm::ivec3(dx, 0, horizontalRadius)))
-            {
-                return RingProgress{false, true};
-            }
+            enqueueColumn(center.x + dx, center.z - horizontalRadius);
+            enqueueColumn(center.x + dx, center.z + horizontalRadius);
         }
-
         for (int dz = -horizontalRadius + 1; dz <= horizontalRadius - 1; ++dz)
         {
-            if (visitCoordinate(base + glm::ivec3(-horizontalRadius, 0, dz)))
-            {
-                return RingProgress{false, true};
-            }
-            if (visitCoordinate(base + glm::ivec3(horizontalRadius, 0, dz)))
-            {
-                return RingProgress{false, true};
-            }
+            enqueueColumn(center.x - horizontalRadius, center.z + dz);
+            enqueueColumn(center.x + horizontalRadius, center.z + dz);
         }
     }
 
-    return RingProgress{!missingFound, false};
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
+        if (lhs.priority == rhs.priority)
+        {
+            if (lhs.coord.y == rhs.coord.y)
+            {
+                if (lhs.coord.x == rhs.coord.x)
+                {
+                    return lhs.coord.z < rhs.coord.z;
+                }
+                return lhs.coord.x < rhs.coord.x;
+            }
+            return lhs.coord.y < rhs.coord.y;
+        }
+        return lhs.priority < rhs.priority;
+    });
+
+    for (const Candidate& candidate : candidates)
+    {
+        if (jobBudget <= 0)
+        {
+            break;
+        }
+
+        const glm::ivec2 columnKey{candidate.coord.x, candidate.coord.z};
+        if (auto existing = getChunkShared(candidate.coord))
+        {
+            (void)existing;
+            continue;
+        }
+
+        missingFound = true;
+
+        int& columnJobs = jobsScheduledThisFrame_[columnKey];
+        if (maxJobsPerColumn > 0 && columnJobs >= maxJobsPerColumn)
+        {
+            continue;
+        }
+
+        if (ensureChunkAsync(candidate.coord))
+        {
+            --jobBudget;
+            ++columnJobs;
+        }
+    }
+
+    return RingProgress{!missingFound, jobBudget <= 0};
 }
 
 void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                                              int horizontalThreshold,
-                                             int verticalThreshold)
+                                             int verticalRadius)
 {
     std::vector<glm::ivec3> toRemove;
     {
@@ -2024,15 +2173,24 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
         {
             const int dx = coord.x - center.x;
             const int dz = coord.z - center.z;
-            const int dy = coord.y - center.y;
             const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
-            if (horizontalDistance > horizontalThreshold || std::abs(dy) > verticalThreshold)
+            if (horizontalDistance > horizontalThreshold)
+            {
+                toRemove.push_back(coord);
+                continue;
+            }
+
+            const glm::ivec2 column{coord.x, coord.z};
+            const auto [minChunkY, maxChunkY] = columnSpanFor(column, center.y, verticalRadius);
+            const int slack = kVerticalStreamingConfig.columnSlackChunks;
+            if (coord.y < (minChunkY - slack) || coord.y > (maxChunkY + slack))
             {
                 toRemove.push_back(coord);
             }
         }
     }
 
+    int evictedCount = 0;
     for (const glm::ivec3& coord : toRemove)
     {
         std::shared_ptr<Chunk> chunk;
@@ -2058,7 +2216,13 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             columnManager_.removeChunk(*chunk);
             recycleChunkGPU(*chunk);
             recycleChunkObject(std::move(chunk));
+            ++evictedCount;
         }
+    }
+
+    if (evictedCount > 0)
+    {
+        profilingCounters_.evictedChunks.fetch_add(evictedCount, std::memory_order_relaxed);
     }
 }
 
@@ -2097,6 +2261,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
     bool uploadedAnything = false;
     std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
     std::size_t attempts = 0;
+    const int columnUploadLimit = std::max(1, perColumnUploadLimit_);
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
@@ -2114,7 +2279,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
 
         const glm::ivec2 columnKey{chunk->coord.x, chunk->coord.z};
         int& columnUploads = uploadsPerColumn[columnKey];
-        if (columnUploads >= kMaxUploadsPerColumnPerFrame)
+        if (columnUploads >= columnUploadLimit)
         {
             requeueChunkForUpload(chunk, false);
             profilingCounters_.throttledUploads.fetch_add(1, std::memory_order_relaxed);
@@ -2133,6 +2298,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         if (uploadedAnything && totalBytes > remainingBudget && totalBytes > 0)
         {
             requeueChunkForUpload(chunk, true);
+            profilingCounters_.deferredUploads.fetch_add(1, std::memory_order_relaxed);
             break;
         }
 

@@ -33,14 +33,26 @@ inline constexpr int kChunkBlockCount = kChunkEdgeLength * kChunkEdgeLength * kC
 inline constexpr int kAtlasTileSizePixels = 16;
 inline constexpr int kDefaultViewDistance = 4;
 inline constexpr int kExtendedViewDistance = 12;
-inline constexpr int kVerticalViewDistance = 2;
+struct VerticalStreamingConfig
+{
+    int minRadiusChunks{2};
+    int maxRadiusChunks{8};
+    int columnSlackChunks{1};
+    int sampleRadiusChunks{3};
+    int horizontalEvictionSlack{1};
+    int uploadBasePerColumn{2};
+    int uploadRampDivisor{2};
+    int uploadMaxPerColumn{6};
+    int maxGenerationJobsPerColumn{3};
+};
+
+inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
 inline constexpr int kMaxChunkJobsPerFrame = 18;
 inline constexpr int kMaxRingsPerFrame = 2;
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 6ull * 1024ull * 1024ull;
 
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
 inline constexpr std::size_t kChunkPoolSoftCap = 512ull;
-inline constexpr int kMaxUploadsPerColumnPerFrame = 2;
 inline constexpr std::size_t kUploadQueueScanLimit = 128ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
@@ -95,6 +107,9 @@ struct ChunkProfilingSnapshot
     int meshedChunks{0};
     int uploadedChunks{0};
     int throttledUploads{0};
+    int deferredUploads{0};
+    int evictedChunks{0};
+    int verticalRadius{0};
 };
 
 struct Frustum

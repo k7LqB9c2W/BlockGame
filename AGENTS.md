@@ -29,3 +29,4 @@
 - Reference issue numbers in the body when relevant and describe gameplay or rendering impact plainly.
 - PRs should include a purpose summary, build mode exercised (debug/release), reproduction steps, and visuals for GPU-facing changes.
 - Keep binaries out of version control unless preparing a release; update `build_blockgame.bat` or `CMakeLists.txt` whenever dependencies shift.
+

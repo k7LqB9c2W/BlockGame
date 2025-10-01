@@ -193,6 +193,10 @@ struct ColumnSample
     const BiomeDefinition* dominantBiome{nullptr};
     float dominantWeight{0.0f};
     int surfaceY{0};
+    int minSurfaceY{0};
+    int maxSurfaceY{0};
+    int slabHighestSolidY{std::numeric_limits<int>::min()};
+    bool slabHasSolid{false};
 };
 
 // To introduce a new biome:
@@ -519,7 +523,10 @@ private:
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
     void generateChunkBlocks(Chunk& chunk);
-    ColumnSample sampleColumn(int worldX, int worldZ) const;
+    ColumnSample sampleColumn(int worldX,
+                              int worldZ,
+                              int slabMinWorldY = std::numeric_limits<int>::min(),
+                              int slabMaxWorldY = std::numeric_limits<int>::max()) const;
     bool applyPendingStructureEditsLocked(Chunk& chunk);
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
@@ -1207,12 +1214,13 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         return false;
     }
 
-    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
-    if (local.y < 0 || local.y >= kChunkSizeY)
+    if (worldPos.y < chunk->minWorldY || worldPos.y > chunk->maxWorldY)
     {
         return false;
     }
-    const std::size_t blockIdx = blockIndex(local.x, local.y, local.z);
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    const int localY = worldPos.y - chunk->minWorldY;
+    const std::size_t blockIdx = blockIndex(local.x, localY, local.z);
 
 
     {
@@ -1233,7 +1241,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
     }
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
-    markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, local.y, local.z);
+    markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
 
     return true;
 }
@@ -1255,12 +1263,13 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         return false;
     }
 
-    const glm::ivec3 local = localBlockCoords(placePos, chunkCoord);
-    if (local.y < 0 || local.y >= kChunkSizeY)
+    if (placePos.y < chunk->minWorldY || placePos.y > chunk->maxWorldY)
     {
         return false;
     }
-    const std::size_t blockIdx = blockIndex(local.x, local.y, local.z);
+    const glm::ivec3 local = localBlockCoords(placePos, chunkCoord);
+    const int localY = placePos.y - chunk->minWorldY;
+    const std::size_t blockIdx = blockIndex(local.x, localY, local.z);
 
 
     {
@@ -1278,7 +1287,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
     }
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
-    markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, local.y, local.z);
+    markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
 
     return true;
 }
@@ -1455,12 +1464,13 @@ BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
         return BlockId::Air;
     }
 
-    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
-    if (local.y < 0 || local.y >= kChunkSizeY)
+    if (worldPos.y < chunk->minWorldY || worldPos.y > chunk->maxWorldY)
     {
         return BlockId::Air;
     }
-    return chunk->blocks[blockIndex(local.x, local.y, local.z)];
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    const int localY = worldPos.y - chunk->minWorldY;
+    return chunk->blocks[blockIndex(local.x, localY, local.z)];
 
 }
 
@@ -2642,212 +2652,239 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
-ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ) const
+ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMinWorldY, int slabMaxWorldY) const
 {
+    if (slabMinWorldY > slabMaxWorldY)
+    {
+        std::swap(slabMinWorldY, slabMaxWorldY);
+    }
 
     auto biomeForRegion = [&](int regionX, int regionZ) -> const BiomeDefinition&
     {
         const float selector = hashToUnitFloat(regionX, 31, regionZ);
         const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
-        const std::size_t biomeIndex = std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
+        const std::size_t biomeIndex =
+            std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
         return kBiomeDefinitions[biomeIndex];
     };
 
-        struct WeightedBiome
+    struct WeightedBiome
+    {
+        const BiomeDefinition* biome;
+        float weight;
+    };
+
+    const int chunkX = floorDiv(worldX, kChunkSizeX);
+    const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
+    const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
+    const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
+
+    const int regionBaseChunkX = biomeRegionX * kBiomeSizeInChunks;
+    const int regionBaseChunkZ = biomeRegionZ * kBiomeSizeInChunks;
+    const int regionBaseBlockX = regionBaseChunkX * kChunkSizeX;
+    const int regionBaseBlockZ = regionBaseChunkZ * kChunkSizeZ;
+
+    const int regionSizeBlocksX = kBiomeSizeInChunks * kChunkSizeX;
+    const int regionSizeBlocksZ = kBiomeSizeInChunks * kChunkSizeZ;
+
+    const int localBlockX = worldX - regionBaseBlockX;
+    const int localBlockZ = worldZ - regionBaseBlockZ;
+
+    constexpr float kBiomeBlendRangeBlocks = 4.0f;
+
+    auto smooth01 = [](float t)
+    {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+
+    auto edgeInfluence = [&](float distance)
+    {
+        if (distance >= kBiomeBlendRangeBlocks)
         {
-            const BiomeDefinition* biome;
-            float weight;
-        };
-
-        const int chunkX = floorDiv(worldX, kChunkSizeX);
-        const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
-        const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
-        const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
-
-        const int regionBaseChunkX = biomeRegionX * kBiomeSizeInChunks;
-        const int regionBaseChunkZ = biomeRegionZ * kBiomeSizeInChunks;
-        const int regionBaseBlockX = regionBaseChunkX * kChunkSizeX;
-        const int regionBaseBlockZ = regionBaseChunkZ * kChunkSizeZ;
-
-        const int regionSizeBlocksX = kBiomeSizeInChunks * kChunkSizeX;
-        const int regionSizeBlocksZ = kBiomeSizeInChunks * kChunkSizeZ;
-
-        const int localBlockX = worldX - regionBaseBlockX;
-        const int localBlockZ = worldZ - regionBaseBlockZ;
-
-        constexpr float kBiomeBlendRangeBlocks = 4.0f;
-
-        auto smooth01 = [](float t)
-        {
-            t = std::clamp(t, 0.0f, 1.0f);
-            return t * t * (3.0f - 2.0f * t);
-        };
-
-        auto edgeInfluence = [&](float distance)
-        {
-            if (distance >= kBiomeBlendRangeBlocks)
-            {
-                return 0.0f;
-            }
-
-            const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
-            return smooth01(normalized);
-        };
-
-        const float distanceLeft = static_cast<float>(localBlockX);
-        const float distanceRight = static_cast<float>((regionSizeBlocksX - 1) - localBlockX);
-        const float distanceNorth = static_cast<float>(localBlockZ);
-        const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
-
-        auto edgeVariation = [&](int offsetX, int offsetZ)
-        {
-            const float sampleX = static_cast<float>(worldX + offsetX * 31);
-            const float sampleZ = static_cast<float>(worldZ + offsetZ * 31);
-            const float variationNoise = noise_.fbm(sampleX * 0.07f, sampleZ * 0.07f, 3, 0.55f, 2.0f);
-            return std::clamp(variationNoise * 0.5f + 0.5f, 0.0f, 1.0f);
-        };
-
-        float leftWeightAxis = edgeInfluence(distanceLeft);
-        float rightWeightAxis = edgeInfluence(distanceRight);
-        float northWeightAxis = edgeInfluence(distanceNorth);
-        float southWeightAxis = edgeInfluence(distanceSouth);
-
-        leftWeightAxis *= 0.3f + edgeVariation(-1, 0) * 0.7f;
-        rightWeightAxis *= 0.3f + edgeVariation(1, 0) * 0.7f;
-        northWeightAxis *= 0.3f + edgeVariation(0, -1) * 0.7f;
-        southWeightAxis *= 0.3f + edgeVariation(0, 1) * 0.7f;
-
-        float centerWeightAxisX = 1.0f - (leftWeightAxis + rightWeightAxis);
-        float centerWeightAxisZ = 1.0f - (northWeightAxis + southWeightAxis);
-        centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
-        centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
-
-        const float axisSumX = leftWeightAxis + rightWeightAxis + centerWeightAxisX;
-        if (axisSumX > std::numeric_limits<float>::epsilon())
-        {
-            leftWeightAxis /= axisSumX;
-            rightWeightAxis /= axisSumX;
-            centerWeightAxisX /= axisSumX;
+            return 0.0f;
         }
 
-        const float axisSumZ = northWeightAxis + southWeightAxis + centerWeightAxisZ;
-        if (axisSumZ > std::numeric_limits<float>::epsilon())
-        {
-            northWeightAxis /= axisSumZ;
-            southWeightAxis /= axisSumZ;
-            centerWeightAxisZ /= axisSumZ;
-        }
+        const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
+        return smooth01(normalized);
+    };
 
-        std::array<WeightedBiome, 5> weightedBiomes{};
+    const float distanceLeft = static_cast<float>(localBlockX);
+    const float distanceRight = static_cast<float>((regionSizeBlocksX - 1) - localBlockX);
+    const float distanceNorth = static_cast<float>(localBlockZ);
+    const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
 
-        std::size_t weightCount = 0;
+    auto edgeVariation = [&](int offsetX, int offsetZ)
+    {
+        const float sampleX = static_cast<float>(worldX + offsetX * 31);
+        const float sampleZ = static_cast<float>(worldZ + offsetZ * 31);
+        const float variationNoise = noise_.fbm(sampleX * 0.07f, sampleZ * 0.07f, 3, 0.55f, 2.0f);
+        return std::clamp(variationNoise * 0.5f + 0.5f, 0.0f, 1.0f);
+    };
 
-        auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
-        {
-            if (weight <= 0.0f)
-            {
-                return;
-            }
+    float leftWeightAxis = edgeInfluence(distanceLeft);
+    float rightWeightAxis = edgeInfluence(distanceRight);
+    float northWeightAxis = edgeInfluence(distanceNorth);
+    float southWeightAxis = edgeInfluence(distanceSouth);
 
-            const float scatterNoise = hashToUnitFloat(worldX + regionOffsetX * 53,
-                                                       157 + regionOffsetX * 31 + regionOffsetZ * 17,
-                                                       worldZ + regionOffsetZ * 71);
-            const bool isCenterRegion = (regionOffsetX == 0) && (regionOffsetZ == 0);
-            const float scatterMin = isCenterRegion ? 0.85f : 0.4f;
-            const float scatterMax = isCenterRegion ? 1.1f : 1.25f;
-            const float scatter = scatterMin + (scatterMax - scatterMin) * scatterNoise;
-            weight *= scatter;
+    leftWeightAxis *= 0.3f + edgeVariation(-1, 0) * 0.7f;
+    rightWeightAxis *= 0.3f + edgeVariation(1, 0) * 0.7f;
+    northWeightAxis *= 0.3f + edgeVariation(0, -1) * 0.7f;
+    southWeightAxis *= 0.3f + edgeVariation(0, 1) * 0.7f;
 
-            if (weight <= 0.0f)
-            {
-                return;
-            }
+    float centerWeightAxisX = 1.0f - (leftWeightAxis + rightWeightAxis);
+    float centerWeightAxisZ = 1.0f - (northWeightAxis + southWeightAxis);
+    centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
+    centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
 
-            const BiomeDefinition& biome = biomeForRegion(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);
-            weightedBiomes[weightCount++] = WeightedBiome{&biome, weight};
-        };
-
-        addBiomeWeight(0, 0, centerWeightAxisX * centerWeightAxisZ);
-        addBiomeWeight(-1, 0, leftWeightAxis * centerWeightAxisZ);
-        addBiomeWeight(1, 0, rightWeightAxis * centerWeightAxisZ);
-        addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
-        addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
-
-        if (weightCount == 0)
-        {
-            addBiomeWeight(0, 0, 1.0f);
-        }
-
-        float totalWeight = 0.0f;
-        for (std::size_t i = 0; i < weightCount; ++i)
-        {
-            totalWeight += weightedBiomes[i].weight;
-        }
-
-        if (totalWeight <= std::numeric_limits<float>::epsilon())
-        {
-            totalWeight = 1.0f;
-        }
-
-        for (std::size_t i = 0; i < weightCount; ++i)
-        {
-            weightedBiomes[i].weight /= totalWeight;
-        }
-
-        const float nx = static_cast<float>(worldX) * 0.01f;
-        const float nz = static_cast<float>(worldZ) * 0.01f;
-
-        const float mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
-        const float mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
-        const float detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
-        const float mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
-
-        const float combined = mainTerrain * 12.0f +
-                               mountainNoise * 8.0f +
-                               mediumNoise * 4.0f +
-                               detailNoise * 2.0f;
-
-        float blendedOffset = 0.0f;
-        float blendedScale = 0.0f;
-        float blendedMinHeight = 0.0f;
-        float blendedMaxHeight = 0.0f;
-        const BiomeDefinition* dominantBiome = nullptr;
-        float dominantWeight = -1.0f;
-
-        for (std::size_t i = 0; i < weightCount; ++i)
-        {
-            const auto& weightedBiome = weightedBiomes[i];
-            blendedOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-            blendedScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-            blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-            blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-
-            if (weightedBiome.weight > dominantWeight)
-            {
-                dominantWeight = weightedBiome.weight;
-                dominantBiome = weightedBiome.biome;
-            }
-        }
-
-        dominantWeight = std::max(dominantWeight, 0.0f);
-        if (dominantBiome == nullptr)
-        {
-            dominantBiome = &biomeForRegion(biomeRegionX, biomeRegionZ);
-        }
-
-        const float minHeight = std::clamp(blendedMinHeight, 0.0f, static_cast<float>(kChunkSizeY - 1));
-        const float maxHeight = std::clamp(blendedMaxHeight, 0.0f, static_cast<float>(kChunkSizeY - 1));
-
-        float targetHeight = blendedOffset + combined * blendedScale;
-        targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
-
-        ColumnSample sample;
-        sample.dominantBiome = dominantBiome;
-        sample.dominantWeight = dominantWeight;
-        sample.surfaceY = std::clamp(static_cast<int>(std::round(targetHeight)), 0, kChunkSizeY - 1);
-        return sample;
-
+    const float axisSumX = leftWeightAxis + rightWeightAxis + centerWeightAxisX;
+    if (axisSumX > std::numeric_limits<float>::epsilon())
+    {
+        leftWeightAxis /= axisSumX;
+        rightWeightAxis /= axisSumX;
+        centerWeightAxisX /= axisSumX;
     }
+
+    const float axisSumZ = northWeightAxis + southWeightAxis + centerWeightAxisZ;
+    if (axisSumZ > std::numeric_limits<float>::epsilon())
+    {
+        northWeightAxis /= axisSumZ;
+        southWeightAxis /= axisSumZ;
+        centerWeightAxisZ /= axisSumZ;
+    }
+
+    std::array<WeightedBiome, 5> weightedBiomes{};
+    std::size_t weightCount = 0;
+
+    auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
+    {
+        if (weight <= 0.0f)
+        {
+            return;
+        }
+
+        const float scatterNoise =
+            hashToUnitFloat(worldX + regionOffsetX * 53, 157 + regionOffsetX * 31 + regionOffsetZ * 17,
+                            worldZ + regionOffsetZ * 71);
+        const bool isCenterRegion = (regionOffsetX == 0) && (regionOffsetZ == 0);
+        const float scatterMin = isCenterRegion ? 0.85f : 0.4f;
+        const float scatterMax = isCenterRegion ? 1.1f : 1.25f;
+        const float scatter = scatterMin + (scatterMax - scatterMin) * scatterNoise;
+        weight *= scatter;
+
+        if (weight <= 0.0f)
+        {
+            return;
+        }
+
+        const BiomeDefinition& biome = biomeForRegion(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);
+        weightedBiomes[weightCount++] = WeightedBiome{&biome, weight};
+    };
+
+    addBiomeWeight(0, 0, centerWeightAxisX * centerWeightAxisZ);
+    addBiomeWeight(-1, 0, leftWeightAxis * centerWeightAxisZ);
+    addBiomeWeight(1, 0, rightWeightAxis * centerWeightAxisZ);
+    addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
+    addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
+
+    if (weightCount == 0)
+    {
+        addBiomeWeight(0, 0, 1.0f);
+    }
+
+    float totalWeight = 0.0f;
+    for (std::size_t i = 0; i < weightCount; ++i)
+    {
+        totalWeight += weightedBiomes[i].weight;
+    }
+
+    if (totalWeight <= std::numeric_limits<float>::epsilon())
+    {
+        totalWeight = 1.0f;
+    }
+
+    for (std::size_t i = 0; i < weightCount; ++i)
+    {
+        weightedBiomes[i].weight /= totalWeight;
+    }
+
+    const float nx = static_cast<float>(worldX) * 0.01f;
+    const float nz = static_cast<float>(worldZ) * 0.01f;
+
+    const float mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
+    const float mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
+    const float detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
+    const float mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+
+    const float combined = mainTerrain * 12.0f +
+                           mountainNoise * 8.0f +
+                           mediumNoise * 4.0f +
+                           detailNoise * 2.0f;
+
+    float blendedOffset = 0.0f;
+    float blendedScale = 0.0f;
+    float blendedMinHeight = 0.0f;
+    float blendedMaxHeight = 0.0f;
+    const BiomeDefinition* dominantBiome = nullptr;
+    float dominantWeight = -1.0f;
+
+    for (std::size_t i = 0; i < weightCount; ++i)
+    {
+        const auto& weightedBiome = weightedBiomes[i];
+        blendedOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+        blendedScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+        blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+        blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
+
+        if (weightedBiome.weight > dominantWeight)
+        {
+            dominantWeight = weightedBiome.weight;
+            dominantBiome = weightedBiome.biome;
+        }
+    }
+
+    dominantWeight = std::max(dominantWeight, 0.0f);
+    if (dominantBiome == nullptr)
+    {
+        dominantBiome = &biomeForRegion(biomeRegionX, biomeRegionZ);
+    }
+
+    float minHeight = blendedMinHeight;
+    float maxHeight = blendedMaxHeight;
+    if (minHeight > maxHeight)
+    {
+        std::swap(minHeight, maxHeight);
+    }
+
+    constexpr float kMinIntAsFloat = static_cast<float>(std::numeric_limits<int>::min());
+    constexpr float kMaxIntAsFloat = static_cast<float>(std::numeric_limits<int>::max());
+
+    minHeight = std::clamp(minHeight, kMinIntAsFloat, kMaxIntAsFloat);
+    maxHeight = std::clamp(maxHeight, kMinIntAsFloat, kMaxIntAsFloat);
+
+    float targetHeight = blendedOffset + combined * blendedScale;
+    targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+
+    ColumnSample sample;
+    sample.dominantBiome = dominantBiome;
+    sample.dominantWeight = dominantWeight;
+    sample.minSurfaceY = static_cast<int>(std::floor(minHeight));
+    sample.maxSurfaceY = static_cast<int>(std::ceil(maxHeight));
+
+    const float roundedSurface = std::round(targetHeight);
+    const float clampedSurface = std::clamp(roundedSurface, kMinIntAsFloat, kMaxIntAsFloat);
+    sample.surfaceY = static_cast<int>(clampedSurface);
+
+    if (sample.dominantBiome)
+    {
+        sample.slabHasSolid = slabMinWorldY <= sample.surfaceY;
+        if (sample.slabHasSolid)
+        {
+            sample.slabHighestSolidY = std::min(sample.surfaceY, slabMaxWorldY);
+        }
+    }
+
+    return sample;
 }
 
 void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
@@ -2861,18 +2898,69 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         const int baseWorldX = chunk.coord.x * kChunkSizeX;
         const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
+        const int slabMinWorldY = chunk.minWorldY;
+        const int slabMaxWorldY = chunk.maxWorldY;
 
         std::array<ColumnSample, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnSamples{};
+        bool slabContainsTerrain = false;
+
         for (int x = 0; x < kChunkSizeX; ++x)
         {
             for (int z = 0; z < kChunkSizeZ; ++z)
             {
                 const int worldX = baseWorldX + x;
                 const int worldZ = baseWorldZ + z;
-                columnSamples[columnIndex(x, z)] = sampleColumn(worldX, worldZ);
+                ColumnSample sample = sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
+                slabContainsTerrain = slabContainsTerrain || sample.slabHasSolid;
+                columnSamples[columnIndex(x, z)] = sample;
             }
         }
 
+        if (slabContainsTerrain)
+        {
+            for (int x = 0; x < kChunkSizeX; ++x)
+            {
+                for (int z = 0; z < kChunkSizeZ; ++z)
+                {
+                    const ColumnSample& columnSample = columnSamples[columnIndex(x, z)];
+                    if (!columnSample.dominantBiome || !columnSample.slabHasSolid)
+                    {
+                        continue;
+                    }
+
+                    const BiomeDefinition& biome = *columnSample.dominantBiome;
+                    const int highestSolidWorld = columnSample.slabHighestSolidY;
+                    if (highestSolidWorld < chunk.minWorldY)
+                    {
+                        continue;
+                    }
+
+                    const int highestSolidLocal = std::min(highestSolidWorld - chunk.minWorldY, kChunkSizeY - 1);
+
+                    for (int localY = 0; localY <= highestSolidLocal; ++localY)
+                    {
+                        const int worldY = chunk.minWorldY + localY;
+                        BlockId block = BlockId::Air;
+                        if (worldY < columnSample.surfaceY)
+                        {
+                            block = biome.fillerBlock;
+                        }
+                        else if (worldY == columnSample.surfaceY)
+                        {
+                            block = biome.surfaceBlock;
+                        }
+
+                        if (block == BlockId::Air)
+                        {
+                            continue;
+                        }
+
+                        chunk.blocks[blockIndex(x, localY, z)] = block;
+                        anySolid = true;
+                    }
+                }
+            }
+        }
 
         auto setOrQueueBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
         {
@@ -2886,13 +2974,14 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             const glm::ivec3 targetChunk = worldToChunkCoords(worldX, worldY, worldZ);
             if (targetChunk == chunk.coord)
             {
-                const glm::ivec3 local = localBlockCoords(worldPos, targetChunk);
-                if (local.y < 0 || local.y >= kChunkSizeY)
+                if (worldY < chunk.minWorldY || worldY > chunk.maxWorldY)
                 {
                     return;
                 }
 
-                BlockId& destination = chunk.blocks[blockIndex(local.x, local.y, local.z)];
+                const glm::ivec3 local = localBlockCoords(worldPos, targetChunk);
+                const int localY = worldY - chunk.minWorldY;
+                BlockId& destination = chunk.blocks[blockIndex(local.x, localY, local.z)];
                 if (!replaceSolid && destination != BlockId::Air)
                 {
                     return;
@@ -2905,203 +2994,145 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                 }
             }
             else
-
             {
                 externalEdits.push_back(PendingStructureEdit{targetChunk, worldPos, block, replaceSolid});
             }
         };
 
-        for (int x = 0; x < kChunkSizeX; ++x)
+        if (slabContainsTerrain)
         {
-            for (int z = 0; z < kChunkSizeZ; ++z)
+            constexpr int kTreeMinHeight = 6;
+            constexpr int kTreeMaxHeight = 8;
+            constexpr int kTreeMaxRadius = 2;
+
+            const int minWorldX = baseWorldX - kTreeMaxRadius;
+            const int maxWorldX = baseWorldX + kChunkSizeX + kTreeMaxRadius - 1;
+            const int minWorldZ = baseWorldZ - kTreeMaxRadius;
+            const int maxWorldZ = baseWorldZ + kChunkSizeZ + kTreeMaxRadius - 1;
+
+            for (int worldX = minWorldX; worldX <= maxWorldX; ++worldX)
             {
-                const ColumnSample& columnSample = columnSamples[columnIndex(x, z)];
-                if (!columnSample.dominantBiome)
-
+                for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
                 {
-                    continue;
-                }
-
-                const BiomeDefinition& biome = *columnSample.dominantBiome;
-                const int surfaceY = columnSample.surfaceY;
-
-                if (surfaceY < chunk.minWorldY)
-                {
-                    continue;
-                }
-
-                const int localSurface = surfaceY - chunk.minWorldY;
-                const int columnFillTop = std::min(localSurface, kChunkSizeY - 1);
-
-                for (int localY = 0; localY <= columnFillTop; ++localY)
-                {
-
-                    const int worldY = chunk.minWorldY + localY;
-                    BlockId block = BlockId::Air;
-                    if (worldY < surfaceY)
-                    {
-                        block = biome.fillerBlock;
-                    }
-                    else if (worldY == surfaceY)
-                    {
-                        block = biome.surfaceBlock;
-                    }
-
-                    if (block != BlockId::Air)
-
-                    {
-                        anySolid = true;
-                    }
-
-                    chunk.blocks[blockIndex(x, localY, z)] = block;
-                }
-
-                if (surfaceY > chunk.maxWorldY)
-                {
-                    for (int localY = columnFillTop + 1; localY < kChunkSizeY; ++localY)
-                    {
-                        chunk.blocks[blockIndex(x, localY, z)] = biome.fillerBlock;
-                        anySolid = true;
-                    }
-                }
-            }
-        }
-
-        constexpr int kTreeMinHeight = 6;
-        constexpr int kTreeMaxHeight = 8;
-        constexpr int kTreeMaxRadius = 2;
-
-        const int minWorldX = baseWorldX - kTreeMaxRadius;
-        const int maxWorldX = baseWorldX + kChunkSizeX + kTreeMaxRadius - 1;
-        const int minWorldZ = baseWorldZ - kTreeMaxRadius;
-        const int maxWorldZ = baseWorldZ + kChunkSizeZ + kTreeMaxRadius - 1;
-
-        for (int worldX = minWorldX; worldX <= maxWorldX; ++worldX)
-        {
-            for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
-            {
-                const ColumnSample columnSample = sampleColumn(worldX, worldZ);
-                const BiomeDefinition& biome = *columnSample.dominantBiome;
-                if (!biome.generatesTrees)
-                {
-                    continue;
-                }
-
-                constexpr float kTreeBiomeWeightThreshold = 0.55f;
-                if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
-                {
-                    continue;
-                }
-
-                const int groundWorldY = columnSample.surfaceY;
-                const int groundLocalY = groundWorldY - chunk.minWorldY;
-                if (groundLocalY < 0 || groundLocalY >= kChunkSizeY)
-                {
-                    continue;
-                }
-
-                if (groundLocalY <= 2)
-
-                {
-                    continue;
-                }
-
-                const int localX = worldX - baseWorldX;
-                const int localZ = worldZ - baseWorldZ;
-                if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
-                {
-
-                    const std::size_t blockIdx = blockIndex(localX, groundLocalY, localZ);
-                    if (chunk.blocks[blockIdx] != biome.surfaceBlock)
+                    const ColumnSample columnSample = sampleColumn(worldX, worldZ);
+                    const BiomeDefinition& biome = *columnSample.dominantBiome;
+                    if (!biome.generatesTrees)
                     {
                         continue;
                     }
-                }
 
-                const float density = noise_.fbm(static_cast<float>(worldX) * 0.05f,
-                                                 static_cast<float>(worldZ) * 0.05f,
-                                                 4,
-                                                 0.55f,
-                                                 2.0f);
-                const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
-                const float randomValue = hashToUnitFloat(worldX, groundWorldY, worldZ);
-                const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
-                const float spawnThreshold = std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
-                if (randomValue > spawnThreshold)
-                {
-                    continue;
-                }
-
-                bool terrainSuitable = true;
-                for (int dx = -1; dx <= 1 && terrainSuitable; ++dx)
-                {
-                    for (int dz = -1; dz <= 1; ++dz)
+                    constexpr float kTreeBiomeWeightThreshold = 0.55f;
+                    if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
                     {
-                        if (dx == 0 && dz == 0)
+                        continue;
+                    }
+
+                    const int groundWorldY = columnSample.surfaceY;
+                    const int groundLocalY = groundWorldY - chunk.minWorldY;
+                    if (groundLocalY < 0 || groundLocalY >= kChunkSizeY)
+                    {
+                        continue;
+                    }
+
+                    if (groundLocalY <= 2)
+                    {
+                        continue;
+                    }
+
+                    const int localX = worldX - baseWorldX;
+                    const int localZ = worldZ - baseWorldZ;
+                    if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
+                    {
+                        const std::size_t blockIdx = blockIndex(localX, groundLocalY, localZ);
+                        if (chunk.blocks[blockIdx] != biome.surfaceBlock)
                         {
                             continue;
                         }
-
-                        const ColumnSample neighborSample = sampleColumn(worldX + dx, worldZ + dz);
-                        const int neighborHeight = neighborSample.surfaceY;
-                        if (std::abs(neighborHeight - groundWorldY) > 1)
-
-                        {
-                            terrainSuitable = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (!terrainSuitable)
-                {
-                    continue;
-                }
-
-                int trunkHeight = kTreeMinHeight +
-                                  static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 1, worldZ) *
-                                                   static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
-                trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
-
-                for (int dy = 0; dy < trunkHeight; ++dy)
-                {
-                    setOrQueueBlock(worldX, groundWorldY + dy, worldZ, BlockId::Wood, true);
-                }
-
-
-                const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
-                const int canopyTopWorld = groundWorldY + trunkHeight;
-                for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
-                {
-                    const int layer = worldY - canopyBaseWorld;
-                    int radius = 2;
-                    if (worldY >= canopyTopWorld - 1)
-                    {
-                        radius = 1;
                     }
 
-                    for (int dx = -radius; dx <= radius; ++dx)
+                    const float density = noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                                                     static_cast<float>(worldZ) * 0.05f,
+                                                     4,
+                                                     0.55f,
+                                                     2.0f);
+                    const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
+                    const float randomValue = hashToUnitFloat(worldX, groundWorldY, worldZ);
+                    const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
+                    const float spawnThreshold =
+                        std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
+                    if (randomValue > spawnThreshold)
                     {
-                        for (int dz = -radius; dz <= radius; ++dz)
+                        continue;
+                    }
+
+                    bool terrainSuitable = true;
+                    for (int dx = -1; dx <= 1 && terrainSuitable; ++dx)
+                    {
+                        for (int dz = -1; dz <= 1; ++dz)
                         {
-                            if (std::abs(dx) == radius && std::abs(dz) == radius && radius > 1)
+                            if (dx == 0 && dz == 0)
                             {
                                 continue;
                             }
 
-                            if (dx == 0 && dz == 0 && worldY <= groundWorldY + trunkHeight - 1)
+                            const ColumnSample neighborSample = sampleColumn(worldX + dx, worldZ + dz);
+                            const int neighborHeight = neighborSample.surfaceY;
+                            if (std::abs(neighborHeight - groundWorldY) > 1)
                             {
-                                continue;
+                                terrainSuitable = false;
+                                break;
                             }
+                        }
+                    }
 
-                            if (layer == 0 && std::abs(dx) + std::abs(dz) > 3)
-                            {
-                                continue;
-                            }
+                    if (!terrainSuitable)
+                    {
+                        continue;
+                    }
 
-                            setOrQueueBlock(worldX + dx, worldY, worldZ + dz, BlockId::Leaves, false);
+                    int trunkHeight = kTreeMinHeight +
+                                      static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 1, worldZ) *
+                                                       static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
+                    trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
+
+                    for (int dy = 0; dy < trunkHeight; ++dy)
+                    {
+                        setOrQueueBlock(worldX, groundWorldY + dy, worldZ, BlockId::Wood, true);
+                    }
+
+                    const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
+                    const int canopyTopWorld = groundWorldY + trunkHeight;
+                    for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+                    {
+                        const int layer = worldY - canopyBaseWorld;
+                        int radius = 2;
+                        if (worldY >= canopyTopWorld - 1)
+                        {
+                            radius = 1;
                         }
 
+                        for (int dx = -radius; dx <= radius; ++dx)
+                        {
+                            for (int dz = -radius; dz <= radius; ++dz)
+                            {
+                                if (std::abs(dx) == radius && std::abs(dz) == radius && radius > 1)
+                                {
+                                    continue;
+                                }
+
+                                if (dx == 0 && dz == 0 && worldY <= groundWorldY + trunkHeight - 1)
+                                {
+                                    continue;
+                                }
+
+                                if (layer == 0 && std::abs(dx) + std::abs(dz) > 3)
+                                {
+                                    continue;
+                                }
+
+                                setOrQueueBlock(worldX + dx, worldY, worldZ + dz, BlockId::Leaves, false);
+                            }
+                        }
                     }
                 }
             }
@@ -3123,6 +3154,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     }
 }
 
+
 bool ChunkManager::Impl::applyPendingStructureEditsLocked(Chunk& chunk)
 {
     std::vector<PendingStructureEdit> edits;
@@ -3141,13 +3173,14 @@ bool ChunkManager::Impl::applyPendingStructureEditsLocked(Chunk& chunk)
     {
         const glm::ivec3 local = localBlockCoords(edit.worldPos, chunk.coord);
         if (local.x < 0 || local.x >= kChunkSizeX ||
-            local.y < 0 || local.y >= kChunkSizeY ||
+            edit.worldPos.y < chunk.minWorldY || edit.worldPos.y > chunk.maxWorldY ||
             local.z < 0 || local.z >= kChunkSizeZ)
         {
             continue;
         }
 
-        BlockId& destination = chunk.blocks[blockIndex(local.x, local.y, local.z)];
+        const int localY = edit.worldPos.y - chunk.minWorldY;
+        BlockId& destination = chunk.blocks[blockIndex(local.x, localY, local.z)];
         if (!edit.replaceSolid && destination != BlockId::Air)
         {
             continue;

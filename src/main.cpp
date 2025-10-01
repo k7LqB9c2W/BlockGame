@@ -4,6 +4,7 @@
 #include "TextureLoader.h"
 #include "camera.h"
 #include "chunk_manager.h"
+#include "input_context.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -41,99 +42,6 @@
 
 namespace
 {
-struct InputContext
-{
-    Camera* camera{nullptr};
-    float lastX{0.0f};
-    float lastY{0.0f};
-    bool firstMouse{true};
-    bool leftMousePressed{false};
-    bool leftMouseJustPressed{false};
-    bool rightMousePressed{false};
-    bool rightMouseJustPressed{false};
-    bool nKeyPressed{false};
-    bool nKeyJustPressed{false};
-    bool f1Pressed{false};
-    bool f1JustPressed{false};
-    bool showCoordinates{false};
-    bool showRenderDistanceGUI{false};
-    std::string inputBuffer{};
-};
-
-void framebufferSizeCallback(GLFWwindow*, int width, int height)
-{
-    glViewport(0, 0, width, height);
-}
-
-void mouseCallback(GLFWwindow* window, double xpos, double ypos)
-{
-    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (input == nullptr || input->camera == nullptr)
-    {
-        return;
-    }
-
-    if (input->firstMouse)
-    {
-        input->lastX = static_cast<float>(xpos);
-        input->lastY = static_cast<float>(ypos);
-        input->firstMouse = false;
-    }
-
-    const float xoffset = static_cast<float>(xpos) - input->lastX;
-    const float yoffset = input->lastY - static_cast<float>(ypos);
-
-    input->lastX = static_cast<float>(xpos);
-    input->lastY = static_cast<float>(ypos);
-
-    input->camera->processMouse(xoffset, yoffset);
-}
-
-void charCallback(GLFWwindow* window, unsigned int codepoint)
-{
-    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (input == nullptr)
-    {
-        return;
-    }
-
-    // Only accept input when GUI is active
-    if (input->showRenderDistanceGUI && codepoint < 128)
-    {
-        // Only accept digits
-        if (codepoint >= '0' && codepoint <= '9')
-        {
-            // Limit input length to prevent overflow
-            if (input->inputBuffer.size() < 10)
-            {
-                input->inputBuffer += static_cast<char>(codepoint);
-            }
-        }
-    }
-}
-
-void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
-{
-    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (input == nullptr)
-    {
-        return;
-    }
-
-    if (button == GLFW_MOUSE_BUTTON_LEFT)
-    {
-        bool wasPressed = input->leftMousePressed;
-        input->leftMousePressed = (action == GLFW_PRESS);
-        input->leftMouseJustPressed = input->leftMousePressed && !wasPressed;
-    }
-    else if (button == GLFW_MOUSE_BUTTON_RIGHT)
-    {
-        bool wasPressed = input->rightMousePressed;
-        input->rightMousePressed = (action == GLFW_PRESS);
-        input->rightMouseJustPressed = input->rightMousePressed && !wasPressed;
-    }
-}
-
 [[nodiscard]] GLuint compileShader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);

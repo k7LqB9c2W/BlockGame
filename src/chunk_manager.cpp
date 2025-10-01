@@ -2327,6 +2327,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
             const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
             return smooth01(normalized);
+
         };
 
         const float distanceLeft = static_cast<float>(localBlockX);
@@ -2335,6 +2336,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
 
         auto edgeVariation = [&](int offsetX, int offsetZ)
+
         {
             const float sampleX = static_cast<float>(worldX + offsetX * 31);
             const float sampleZ = static_cast<float>(worldZ + offsetZ * 31);

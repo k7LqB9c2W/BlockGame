@@ -255,9 +255,36 @@ struct Chunk
           maxWorldY(minWorldY + kChunkSizeY - 1),
           blocks(kChunkBlockCount, BlockId::Air),
           state(ChunkState::Empty)
-
     {
     }
+
+    void reset(const glm::ivec3& c)
+    {
+        coord = c;
+        minWorldY = c.y * kChunkSizeY;
+        maxWorldY = minWorldY + kChunkSizeY - 1;
+        if (blocks.size() != static_cast<std::size_t>(kChunkBlockCount))
+        {
+            blocks.assign(kChunkBlockCount, BlockId::Air);
+        }
+        else
+        {
+            std::fill(blocks.begin(), blocks.end(), BlockId::Air);
+        }
+        state.store(ChunkState::Empty, std::memory_order_relaxed);
+        meshData.clear();
+        meshReady = false;
+        hasBlocks = false;
+        queuedForUpload = false;
+        indexCount = 0;
+        vertexCapacity = 0;
+        indexCapacity = 0;
+        vao = 0;
+        vbo = 0;
+        ibo = 0;
+        inFlight.store(0, std::memory_order_relaxed);
+    }
+
 
     glm::ivec3 coord;
     int minWorldY{0};
@@ -278,6 +305,17 @@ struct Chunk
     bool meshReady{false};
     bool hasBlocks{false};
     std::atomic<int> inFlight{0};
+};
+
+struct ProfilingCounters
+{
+    std::atomic<long long> generationMicros{0};
+    std::atomic<long long> meshingMicros{0};
+    std::atomic<std::size_t> uploadedBytes{0};
+    std::atomic<int> generatedChunks{0};
+    std::atomic<int> meshedChunks{0};
+    std::atomic<int> uploadedChunks{0};
+    std::atomic<int> throttledUploads{0};
 };
 
 struct ChunkHasher
@@ -432,6 +470,7 @@ struct ChunkManager::Impl
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
+    ChunkProfilingSnapshot sampleProfilingSnapshot();
 
 private:
     void startWorkerThreads();
@@ -472,6 +511,8 @@ private:
     void uploadChunkMesh(Chunk& chunk);
     void buildChunkMeshAsync(Chunk& chunk);
     static glm::ivec3 worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept;
+    std::shared_ptr<Chunk> acquireChunk(const glm::ivec3& coord);
+
     std::shared_ptr<Chunk> getChunkShared(const glm::ivec3& coord) noexcept;
     std::shared_ptr<const Chunk> getChunkShared(const glm::ivec3& coord) const noexcept;
     Chunk* getChunk(const glm::ivec3& coord) noexcept;
@@ -482,6 +523,7 @@ private:
     bool applyPendingStructureEditsLocked(Chunk& chunk);
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
+    void recycleChunkObject(std::shared_ptr<Chunk> chunk);
 
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
@@ -521,6 +563,9 @@ private:
 
     int viewDistance_;
     int targetViewDistance_;
+    std::vector<std::shared_ptr<Chunk>> chunkPool_;
+    std::mutex chunkPoolMutex_;
+    ProfilingCounters profilingCounters_{};
 };
 
 // JobQueue implementations
@@ -1125,8 +1170,10 @@ void ChunkManager::Impl::clear()
         {
             columnManager_.removeChunk(*chunk);
             recycleChunkGPU(*chunk);
+            recycleChunkObject(std::move(chunk));
+
         }
-        }
+    }
 
         if (!removedAny)
         {
@@ -1492,6 +1539,37 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
     return glm::vec3(worldX, fallbackY, worldZ);
 }
 
+ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
+{
+    ChunkProfilingSnapshot snapshot{};
+
+    const int generated = profilingCounters_.generatedChunks.exchange(0, std::memory_order_relaxed);
+    const int meshed = profilingCounters_.meshedChunks.exchange(0, std::memory_order_relaxed);
+    const int uploaded = profilingCounters_.uploadedChunks.exchange(0, std::memory_order_relaxed);
+
+    snapshot.generatedChunks = generated;
+    snapshot.meshedChunks = meshed;
+    snapshot.uploadedChunks = uploaded;
+    snapshot.uploadedBytes = profilingCounters_.uploadedBytes.exchange(0, std::memory_order_relaxed);
+    snapshot.throttledUploads = profilingCounters_.throttledUploads.exchange(0, std::memory_order_relaxed);
+
+    const long long genMicros = profilingCounters_.generationMicros.exchange(0, std::memory_order_relaxed);
+    const long long meshMicros = profilingCounters_.meshingMicros.exchange(0, std::memory_order_relaxed);
+
+    if (generated > 0)
+    {
+        snapshot.averageGenerationMs = static_cast<double>(genMicros) /
+                                       (1000.0 * static_cast<double>(generated));
+    }
+    if (meshed > 0)
+    {
+        snapshot.averageMeshingMs = static_cast<double>(meshMicros) /
+                                    (1000.0 * static_cast<double>(meshed));
+    }
+
+    return snapshot;
+}
+
 void ChunkManager::Impl::startWorkerThreads()
 {
     const unsigned numThreads = std::max(1u, std::thread::hardware_concurrency() / 2);
@@ -1580,14 +1658,43 @@ void ChunkManager::Impl::processJob(const Job& job)
 
     if (job.type == JobType::Generate)
     {
+        const auto start = std::chrono::steady_clock::now();
         generateChunkBlocks(*chunk);
-        chunk->state.store(ChunkState::Meshing, std::memory_order_release);
+        const auto end = std::chrono::steady_clock::now();
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        profilingCounters_.generationMicros.fetch_add(micros, std::memory_order_relaxed);
+        profilingCounters_.generatedChunks.fetch_add(1, std::memory_order_relaxed);
 
-        enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
+        if (chunk->hasBlocks)
+        {
+            chunk->state.store(ChunkState::Meshing, std::memory_order_release);
+            enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
+        }
+        else
+        {
+            chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
+            chunk->meshReady = false;
+            chunk->indexCount = 0;
+        }
     }
     else if (job.type == JobType::Mesh)
     {
+        const auto start = std::chrono::steady_clock::now();
         buildChunkMeshAsync(*chunk);
+        const auto end = std::chrono::steady_clock::now();
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        profilingCounters_.meshingMicros.fetch_add(micros, std::memory_order_relaxed);
+        profilingCounters_.meshedChunks.fetch_add(1, std::memory_order_relaxed);
+
+        if (chunk->meshData.empty())
+        {
+            recycleChunkGPU(*chunk);
+            chunk->meshReady = false;
+            chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
+            chunk->indexCount = 0;
+            return;
+        }
+
         chunk->state.store(ChunkState::Ready, std::memory_order_release);
         queueChunkForUpload(chunk);
     }
@@ -1789,6 +1896,25 @@ void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
     chunk.indexCount = 0;
 }
 
+void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
+{
+    if (!chunk)
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+        chunk->reset(chunk->coord);
+    }
+
+    std::lock_guard<std::mutex> lock(chunkPoolMutex_);
+    if (chunkPool_.size() < kChunkPoolSoftCap)
+    {
+        chunkPool_.push_back(std::move(chunk));
+    }
+}
+
 void ChunkManager::Impl::destroyBufferPool()
 {
     std::lock_guard<std::mutex> lock(bufferPoolMutex_);
@@ -1921,6 +2047,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
         {
             columnManager_.removeChunk(*chunk);
             recycleChunkGPU(*chunk);
+            recycleChunkObject(std::move(chunk));
         }
     }
 }
@@ -1938,7 +2065,7 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
                 return false;
             }
 
-            chunk = std::make_shared<Chunk>(coord);
+            chunk = acquireChunk(coord);
             chunk->state.store(ChunkState::Generating, std::memory_order_release);
             chunks_.emplace(coord, chunk);
         }
@@ -1958,9 +2085,12 @@ void ChunkManager::Impl::uploadReadyMeshes()
 {
     std::size_t remainingBudget = kUploadBudgetBytesPerFrame;
     bool uploadedAnything = false;
+    std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
+    std::size_t attempts = 0;
 
-    while (remainingBudget > 0 || !uploadedAnything)
+    while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
+        ++attempts;
         std::shared_ptr<Chunk> chunk = popNextChunkForUpload();
         if (!chunk)
         {
@@ -1969,6 +2099,15 @@ void ChunkManager::Impl::uploadReadyMeshes()
 
         if (!chunk->meshReady || chunk->state.load() != ChunkState::Ready)
         {
+            continue;
+        }
+
+        const glm::ivec2 columnKey{chunk->coord.x, chunk->coord.z};
+        int& columnUploads = uploadsPerColumn[columnKey];
+        if (columnUploads >= kMaxUploadsPerColumnPerFrame)
+        {
+            requeueChunkForUpload(chunk, false);
+            profilingCounters_.throttledUploads.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
@@ -1991,6 +2130,10 @@ void ChunkManager::Impl::uploadReadyMeshes()
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
         chunk->meshReady = false;
         uploadedAnything = true;
+        ++columnUploads;
+
+        profilingCounters_.uploadedChunks.fetch_add(1, std::memory_order_relaxed);
+        profilingCounters_.uploadedBytes.fetch_add(totalBytes, std::memory_order_relaxed);
 
         if (totalBytes >= remainingBudget)
         {
@@ -2389,6 +2532,28 @@ glm::ivec3 ChunkManager::Impl::worldToChunkCoords(int worldX, int worldY, int wo
     return {floorDiv(worldX, kChunkSizeX), floorDiv(worldY, kChunkSizeY), floorDiv(worldZ, kChunkSizeZ)};
 }
 
+std::shared_ptr<Chunk> ChunkManager::Impl::acquireChunk(const glm::ivec3& coord)
+{
+    std::shared_ptr<Chunk> chunk;
+    {
+        std::lock_guard<std::mutex> lock(chunkPoolMutex_);
+        if (!chunkPool_.empty())
+        {
+            chunk = std::move(chunkPool_.back());
+            chunkPool_.pop_back();
+        }
+    }
+
+    if (!chunk)
+    {
+        chunk = std::make_shared<Chunk>(coord);
+    }
+
+    chunk->reset(coord);
+    return chunk;
+
+}
+
 std::shared_ptr<Chunk> ChunkManager::Impl::getChunkShared(const glm::ivec3& coord) noexcept
 {
     std::lock_guard<std::mutex> lock(chunksMutex);
@@ -2706,8 +2871,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                 const int worldZ = baseWorldZ + z;
                 columnSamples[columnIndex(x, z)] = sampleColumn(worldX, worldZ);
             }
-
         }
+
 
         auto setOrQueueBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
         {
@@ -2760,7 +2925,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                 const BiomeDefinition& biome = *columnSample.dominantBiome;
                 const int surfaceY = columnSample.surfaceY;
 
-
                 if (surfaceY < chunk.minWorldY)
                 {
                     continue;
@@ -2771,6 +2935,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
                 for (int localY = 0; localY <= columnFillTop; ++localY)
                 {
+
                     const int worldY = chunk.minWorldY + localY;
                     BlockId block = BlockId::Air;
                     if (worldY < surfaceY)
@@ -2845,6 +3010,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                 const int localZ = worldZ - baseWorldZ;
                 if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
                 {
+
                     const std::size_t blockIdx = blockIndex(localX, groundLocalY, localZ);
                     if (chunk.blocks[blockIdx] != biome.surfaceBlock)
                     {
@@ -2901,6 +3067,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                 {
                     setOrQueueBlock(worldX, groundWorldY + dy, worldZ, BlockId::Wood, true);
                 }
+
 
                 const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
                 const int canopyTopWorld = groundWorldY + trunkHeight;
@@ -3143,5 +3310,10 @@ BlockId ChunkManager::blockAt(const glm::ivec3& worldPos) const noexcept
 glm::vec3 ChunkManager::findSafeSpawnPosition(float worldX, float worldZ) const
 {
     return impl_->findSafeSpawnPosition(worldX, worldZ);
+}
+
+ChunkProfilingSnapshot ChunkManager::sampleProfilingSnapshot()
+{
+    return impl_->sampleProfilingSnapshot();
 }
 

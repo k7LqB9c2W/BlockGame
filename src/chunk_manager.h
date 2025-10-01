@@ -25,13 +25,15 @@ inline constexpr float kHorizontalDamping = 0.80f;
 inline constexpr float kGroundSnapTolerance = 1e-3f;
 inline constexpr float kAxisCollisionEpsilon = 1e-4f;
 
-inline constexpr int kChunkSizeX = 16;
+inline constexpr int kChunkEdgeLength = 16;
+inline constexpr int kChunkSizeX = kChunkEdgeLength;
 inline constexpr int kChunkSizeY = 64;
-inline constexpr int kChunkSizeZ = 16;
+inline constexpr int kChunkSizeZ = kChunkEdgeLength;
 inline constexpr int kChunkBlockCount = kChunkSizeX * kChunkSizeY * kChunkSizeZ;
 inline constexpr int kAtlasTileSizePixels = 16;
 inline constexpr int kDefaultViewDistance = 4;
 inline constexpr int kExtendedViewDistance = 12;
+inline constexpr int kVerticalViewDistance = 2;
 inline constexpr int kMaxChunkJobsPerFrame = 12;
 inline constexpr int kMaxRingsPerFrame = 1;
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 4ull * 1024ull * 1024ull;

@@ -2307,10 +2307,10 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const int localBlockX = worldX - regionBaseBlockX;
         const int localBlockZ = worldZ - regionBaseBlockZ;
 
-        constexpr float kBiomeBlendRadiusChunks = 2.0f;
-        const float blendRadiusBlocksX = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeX);
-        const float blendRadiusBlocksZ = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeZ);
-
+        // Only allow biome weights to mix within a very small strip hugging the
+        // border between regions so that a neighbouring biome never dominates
+        // deep inside a region.
+        constexpr float kBiomeBlendRangeBlocks = 4.0f;
 
         auto smooth01 = [](float t)
         {
@@ -2318,13 +2318,14 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             return t * t * (3.0f - 2.0f * t);
         };
 
-        auto edgeInfluence = [&](float distance, float blendRadius)
+        auto edgeInfluence = [&](float distance)
         {
-            if (distance >= blendRadius)
+            if (distance >= kBiomeBlendRangeBlocks)
             {
                 return 0.0f;
             }
-            const float normalized = 1.0f - (distance / blendRadius);
+
+            const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
             return smooth01(normalized);
         };
 
@@ -2333,28 +2334,44 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const float distanceNorth = static_cast<float>(localBlockZ);
         const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
 
-        float leftWeightAxis = edgeInfluence(distanceLeft, blendRadiusBlocksX);
-        float rightWeightAxis = edgeInfluence(distanceRight, blendRadiusBlocksX);
-        float northWeightAxis = edgeInfluence(distanceNorth, blendRadiusBlocksZ);
-        float southWeightAxis = edgeInfluence(distanceSouth, blendRadiusBlocksZ);
+        auto edgeVariation = [&](int offsetX, int offsetZ)
+        {
+            const float sampleX = static_cast<float>(worldX + offsetX * 31);
+            const float sampleZ = static_cast<float>(worldZ + offsetZ * 31);
+            const float variationNoise = noise_.fbm(sampleX * 0.07f, sampleZ * 0.07f, 3, 0.55f, 2.0f);
+            return std::clamp(variationNoise * 0.5f + 0.5f, 0.0f, 1.0f);
+        };
 
-        const float edgeSumX = leftWeightAxis + rightWeightAxis;
-        const float edgeSumZ = northWeightAxis + southWeightAxis;
-        if (edgeSumX > 1.0f)
-        {
-            leftWeightAxis /= edgeSumX;
-            rightWeightAxis /= edgeSumX;
-        }
-        if (edgeSumZ > 1.0f)
-        {
-            northWeightAxis /= edgeSumZ;
-            southWeightAxis /= edgeSumZ;
-        }
+        float leftWeightAxis = edgeInfluence(distanceLeft);
+        float rightWeightAxis = edgeInfluence(distanceRight);
+        float northWeightAxis = edgeInfluence(distanceNorth);
+        float southWeightAxis = edgeInfluence(distanceSouth);
+
+        leftWeightAxis *= 0.3f + edgeVariation(-1, 0) * 0.7f;
+        rightWeightAxis *= 0.3f + edgeVariation(1, 0) * 0.7f;
+        northWeightAxis *= 0.3f + edgeVariation(0, -1) * 0.7f;
+        southWeightAxis *= 0.3f + edgeVariation(0, 1) * 0.7f;
 
         float centerWeightAxisX = 1.0f - (leftWeightAxis + rightWeightAxis);
         float centerWeightAxisZ = 1.0f - (northWeightAxis + southWeightAxis);
         centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
         centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
+
+        const float axisSumX = leftWeightAxis + rightWeightAxis + centerWeightAxisX;
+        if (axisSumX > std::numeric_limits<float>::epsilon())
+        {
+            leftWeightAxis /= axisSumX;
+            rightWeightAxis /= axisSumX;
+            centerWeightAxisX /= axisSumX;
+        }
+
+        const float axisSumZ = northWeightAxis + southWeightAxis + centerWeightAxisZ;
+        if (axisSumZ > std::numeric_limits<float>::epsilon())
+        {
+            northWeightAxis /= axisSumZ;
+            southWeightAxis /= axisSumZ;
+            centerWeightAxisZ /= axisSumZ;
+        }
 
         std::array<WeightedBiome, 5> weightedBiomes{};
 
@@ -2362,6 +2379,20 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
         {
+            if (weight <= 0.0f)
+            {
+                return;
+            }
+
+            const float scatterNoise = hashToUnitFloat(worldX + regionOffsetX * 53,
+                                                       157 + regionOffsetX * 31 + regionOffsetZ * 17,
+                                                       worldZ + regionOffsetZ * 71);
+            const bool isCenterRegion = (regionOffsetX == 0) && (regionOffsetZ == 0);
+            const float scatterMin = isCenterRegion ? 0.85f : 0.4f;
+            const float scatterMax = isCenterRegion ? 1.1f : 1.25f;
+            const float scatter = scatterMin + (scatterMax - scatterMin) * scatterNoise;
+            weight *= scatter;
+
             if (weight <= 0.0f)
             {
                 return;

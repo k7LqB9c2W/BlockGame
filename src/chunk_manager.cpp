@@ -992,10 +992,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     const int worldX = static_cast<int>(std::floor(cameraPos.x));
     const int worldY = static_cast<int>(std::floor(cameraPos.y));
     const int worldZ = static_cast<int>(std::floor(cameraPos.z));
-    const glm::ivec3 centerChunk = worldToChunkCoords(worldX, worldY, worldZ);
+    const int clampedWorldY = std::max(worldY, 0);
+    const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
 
     resetColumnBudgets();
-    const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, worldY);
+    const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
     lastVerticalRadius_ = verticalRadius;
     perColumnUploadLimit_ = uploadsPerColumnLimit();
 
@@ -1502,6 +1503,7 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
     {
         highestSolid = sampleColumn(baseX, baseZ).surfaceY;
     }
+    highestSolid = std::max(highestSolid, 0);
 
     const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
     const int searchTop = highestSolid + clearanceHeight + 2;
@@ -1511,7 +1513,7 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
         searchBottom = searchTop - 1;
     }
     searchBottom = std::max(searchBottom, highestSolid - 2 * kChunkSizeY);
-    searchBottom = std::max(searchBottom, -256);
+    searchBottom = std::max(searchBottom, 0);
 
     for (int y = searchTop; y >= searchBottom; --y)
     {
@@ -2049,8 +2051,8 @@ std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
                                                        int verticalRadius) const
 {
     const int radius = columnRadiusFor(column, cameraChunkY, verticalRadius);
-    const int minChunk = cameraChunkY - radius;
-    const int maxChunk = cameraChunkY + radius;
+    const int minChunk = std::max(0, cameraChunkY - radius);
+    const int maxChunk = std::max(minChunk, cameraChunkY + radius);
     return {minChunk, maxChunk};
 }
 
@@ -2171,6 +2173,12 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
         toRemove.reserve(chunks_.size());
         for (const auto& [coord, chunkPtr] : chunks_)
         {
+            if (coord.y < 0)
+            {
+                toRemove.push_back(coord);
+                continue;
+            }
+
             const int dx = coord.x - center.x;
             const int dz = coord.z - center.z;
             const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
@@ -2228,6 +2236,11 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
 
 bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 {
+    if (coord.y < 0)
+    {
+        return false;
+    }
+
     try
     {
         std::shared_ptr<Chunk> chunk;

@@ -2324,8 +2324,21 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             {
                 return 0.0f;
             }
+
             const float normalized = 1.0f - (distance / blendRadius);
-            return smooth01(normalized);
+            float weight = smooth01(normalized);
+
+            // The easing curve above still gives neighbouring biomes a large
+            // influence several blocks away from the actual edge.  That was
+            // causing wide "strips" of a biome to bleed deep into adjacent
+            // regions.  Emphasise the falloff towards the edge so that a
+            // biome only wins dominance when we are truly hugging the
+            // boundary.  A higher-order power keeps the transition smooth
+            // while clamping the influence well within the blend radius.
+            weight *= weight;
+            weight *= weight;
+
+            return weight;
         };
 
         const float distanceLeft = static_cast<float>(localBlockX);

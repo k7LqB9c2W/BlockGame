@@ -3199,6 +3199,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     float landTarget = targetHeight;
     if (hasLandContribution)
     {
+
         float landMin = landMinHeight;
         float landMax = landMaxHeight;
         if (landMin > landMax)
@@ -3254,6 +3255,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     else if (hasOceanContribution)
     {
         targetHeight = oceanTarget;
+
     }
 
     ColumnSample sample;

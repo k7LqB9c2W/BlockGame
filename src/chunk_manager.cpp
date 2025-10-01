@@ -140,6 +140,48 @@ inline std::size_t columnIndex(int x, int z) noexcept
     return static_cast<std::size_t>(z) * kChunkSizeX + static_cast<std::size_t>(x);
 }
 
+enum class BiomeId : std::uint8_t
+{
+    Grasslands = 0,
+    Forest,
+    Desert,
+    Ocean,
+    Count
+};
+
+constexpr std::size_t toIndex(BiomeId biome) noexcept
+{
+    return static_cast<std::size_t>(biome);
+}
+
+struct BiomeDefinition
+{
+    BiomeId id;
+    const char* name;
+    BlockId surfaceBlock;
+    BlockId fillerBlock;
+    bool generatesTrees;
+    float treeDensityMultiplier;
+    float heightOffset;
+    float heightScale;
+    int minHeight;
+    int maxHeight;
+};
+
+constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
+
+constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
+    {BiomeId::Grasslands, "Grasslands", BlockId::Grass, BlockId::Grass, false, 0.0f, 16.0f, 1.0f, 2, kChunkSizeY - 3},
+    {BiomeId::Forest, "Forest", BlockId::Grass, BlockId::Grass, true, 3.5f, 18.0f, 1.1f, 3, kChunkSizeY - 3},
+    {BiomeId::Desert, "Desert", BlockId::Sand, BlockId::Sand, false, 0.0f, 12.0f, 0.5f, 1, kChunkSizeY - 4},
+    {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, 20.0f, 0.0f, 6, kChunkSizeY - 2},
+} };
+
+// To introduce a new biome:
+// 1. Extend BiomeId before Count.
+// 2. Append a definition to kBiomeDefinitions with the desired blocks and tuning parameters.
+// 3. Provide textures for any new blocks in setBlockTextureAtlasConfig.
+
 inline float hashToUnitFloat(int x, int y, int z) noexcept
 {
     std::uint32_t h = static_cast<std::uint32_t>(x * 374761393 + y * 668265263 + z * 2147483647);
@@ -677,6 +719,16 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSiz
     for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
     {
         assignFace(BlockId::Leaves, face, {0, 5});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::Sand, face, {0, 6});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::Water, face, {0, 7});
     }
 
     blockAtlasConfigured_ = true;
@@ -2216,7 +2268,19 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     const int baseWorldX = chunk.coord.x * kChunkSizeX;
     const int baseWorldZ = chunk.coord.y * kChunkSizeZ;
 
-    auto terrainHeightAt = [&](int worldX, int worldZ) -> int
+    auto selectBiomeFor = [&](int worldX, int worldZ) -> const BiomeDefinition&
+    {
+        const int chunkX = floorDiv(worldX, kChunkSizeX);
+        const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
+        const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
+        const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
+        const float selector = hashToUnitFloat(biomeRegionX, 31, biomeRegionZ);
+        const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
+        const std::size_t biomeIndex = std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
+        return kBiomeDefinitions[biomeIndex];
+    };
+
+    auto columnHeightForBiome = [&](const BiomeDefinition& biome, int worldX, int worldZ) -> int
     {
         const float nx = static_cast<float>(worldX) * 0.01f;
         const float nz = static_cast<float>(worldZ) * 0.01f;
@@ -2231,10 +2295,19 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                                mediumNoise * 4.0f +
                                detailNoise * 2.0f;
 
-        float targetHeight = 16.0f + combined;
-        targetHeight = std::clamp(targetHeight, 2.0f, static_cast<float>(kChunkSizeY - 3));
-        const int columnHeight = std::max(1, static_cast<int>(std::round(targetHeight)));
-        return std::clamp(columnHeight, 0, kChunkSizeY - 1);
+        float targetHeight = biome.heightOffset + combined * biome.heightScale;
+        targetHeight = std::clamp(targetHeight,
+                                  static_cast<float>(biome.minHeight),
+                                  static_cast<float>(biome.maxHeight));
+
+        return std::clamp(static_cast<int>(std::round(targetHeight)), 0, kChunkSizeY - 1);
+    };
+
+    auto biomeAndHeightAt = [&](int worldX, int worldZ)
+    {
+        const BiomeDefinition& biome = selectBiomeFor(worldX, worldZ);
+        const int columnHeight = columnHeightForBiome(biome, worldX, worldZ);
+        return std::pair<const BiomeDefinition*, int>{&biome, columnHeight};
     };
 
     for (int x = 0; x < kChunkSizeX; ++x)
@@ -2243,12 +2316,24 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         {
             const int worldX = baseWorldX + x;
             const int worldZ = baseWorldZ + z;
-            const int topBlock = terrainHeightAt(worldX, worldZ);
+            const auto biomeSample = biomeAndHeightAt(worldX, worldZ);
+            const BiomeDefinition& biome = *biomeSample.first;
+            const int topBlock = biomeSample.second;
             chunk.columnMaxHeights[columnIndex(x, z)] = topBlock;
 
             for (int y = 0; y < kChunkSizeY; ++y)
             {
-                chunk.blocks[blockIndex(x, y, z)] = (y <= topBlock) ? BlockId::Grass : BlockId::Air;
+                BlockId block = BlockId::Air;
+                if (y < topBlock)
+                {
+                    block = biome.fillerBlock;
+                }
+                else if (y == topBlock)
+                {
+                    block = biome.surfaceBlock;
+                }
+
+                chunk.blocks[blockIndex(x, y, z)] = block;
             }
         }
     }
@@ -2294,10 +2379,28 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     {
         for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
         {
-            const int groundY = terrainHeightAt(worldX, worldZ);
+            const auto biomeSample = biomeAndHeightAt(worldX, worldZ);
+            const BiomeDefinition& biome = *biomeSample.first;
+            if (!biome.generatesTrees)
+            {
+                continue;
+            }
+
+            const int groundY = biomeSample.second;
             if (groundY <= 2 || groundY >= kChunkSizeY - (kTreeMaxHeight + 1))
             {
                 continue;
+            }
+
+            const int localX = worldX - baseWorldX;
+            const int localZ = worldZ - baseWorldZ;
+            if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
+            {
+                const std::size_t blockIdx = blockIndex(localX, groundY, localZ);
+                if (chunk.blocks[blockIdx] != biome.surfaceBlock)
+                {
+                    continue;
+                }
             }
 
             const float density = noise_.fbm(static_cast<float>(worldX) * 0.05f,
@@ -2307,7 +2410,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                                              2.0f);
             const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
             const float randomValue = hashToUnitFloat(worldX, groundY, worldZ);
-            const float spawnThreshold = 0.015f + normalizedDensity * 0.02f;
+            const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
+            const float spawnThreshold = std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
             if (randomValue > spawnThreshold)
             {
                 continue;
@@ -2323,7 +2427,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         continue;
                     }
 
-                    const int neighborHeight = terrainHeightAt(worldX + dx, worldZ + dz);
+                    const auto neighborSample = biomeAndHeightAt(worldX + dx, worldZ + dz);
+                    const int neighborHeight = neighborSample.second;
                     if (std::abs(neighborHeight - groundY) > 1)
                     {
                         terrainSuitable = false;

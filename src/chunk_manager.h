@@ -36,6 +36,7 @@ inline constexpr int kMaxChunkJobsPerFrame = 12;
 inline constexpr int kMaxRingsPerFrame = 1;
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 4ull * 1024ull * 1024ull;
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
+inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept;
 extern float kFarPlane;
@@ -46,6 +47,8 @@ enum class BlockId : std::uint8_t
     Grass = 1,
     Wood = 2,
     Leaves = 3,
+    Sand = 4,
+    Water = 5,
     Count
 };
 

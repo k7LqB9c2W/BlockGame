@@ -112,6 +112,15 @@ inline int wrapIndex(int value, int modulus) noexcept
     return result;
 }
 
+inline glm::ivec3 localBlockCoords(const glm::ivec3& worldPos, const glm::ivec3& chunkCoord) noexcept
+{
+    return {
+        worldPos.x - chunkCoord.x * kChunkSizeX,
+        worldPos.y - chunkCoord.y * kChunkSizeY,
+        worldPos.z - chunkCoord.z * kChunkSizeZ
+    };
+}
+
 enum class BlockFace : std::uint8_t
 {
     Top = 0,
@@ -177,6 +186,13 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
     {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, 20.0f, 0.0f, 6, kChunkSizeY - 2},
 } };
 
+struct ColumnSample
+{
+    const BiomeDefinition* dominantBiome{nullptr};
+    float dominantWeight{0.0f};
+    int surfaceY{0};
+};
+
 // To introduce a new biome:
 // 1. Extend BiomeId before Count.
 // 2. Append a definition to kBiomeDefinitions with the desired blocks and tuning parameters.
@@ -236,8 +252,8 @@ struct Chunk
           minWorldY(c.y * kChunkSizeY),
           maxWorldY(minWorldY + kChunkSizeY - 1),
           blocks(kChunkBlockCount, BlockId::Air),
-          state(ChunkState::Empty),
-          columnMaxHeights(kChunkSizeX * kChunkSizeZ, -1)
+          state(ChunkState::Empty)
+
     {
     }
 
@@ -246,7 +262,6 @@ struct Chunk
     int maxWorldY{0};
     std::vector<BlockId> blocks;
     std::atomic<ChunkState> state;
-    std::vector<int> columnMaxHeights;
 
     GLuint vao{0};
     GLuint vbo{0};
@@ -269,6 +284,17 @@ struct ChunkHasher
         std::size_t hash = static_cast<std::size_t>(v.x) * 73856093u;
         hash ^= static_cast<std::size_t>(v.y) * 19349663u;
         hash ^= static_cast<std::size_t>(v.z) * 83492791u;
+        return hash;
+    }
+};
+
+struct ColumnHasher
+{
+    std::size_t operator()(const glm::ivec2& v) const noexcept
+    {
+        std::size_t hash = static_cast<std::size_t>(v.x) * 73856093u;
+        hash ^= static_cast<std::size_t>(v.y) * 19349663u;
+
         return hash;
     }
 };
@@ -317,6 +343,34 @@ private:
     glm::ivec3 priorityOrigin_{0, 0, 0};
     std::priority_queue<PrioritizedJob, std::vector<PrioritizedJob>, JobComparer> priorityQueue_;
     std::uint64_t nextSequence_{0};
+};
+
+class ColumnManager
+{
+public:
+    static constexpr int kNoHeight = std::numeric_limits<int>::min();
+
+    void updateChunk(const Chunk& chunk);
+    void updateColumn(const Chunk& chunk, int localX, int localZ);
+    void removeChunk(const Chunk& chunk);
+    void clear();
+
+    int highestSolidBlock(int worldX, int worldZ) const noexcept;
+
+private:
+    struct ColumnData
+    {
+        std::unordered_map<int, int> slabHeights;
+        int highestWorldY{kNoHeight};
+    };
+
+    static glm::ivec2 columnKey(const glm::ivec3& chunkCoord, int localX, int localZ) noexcept;
+    static int scanColumnHighestWorld(const Chunk& chunk, int localX, int localZ) noexcept;
+    static int computeHighest(const ColumnData& data) noexcept;
+    void applyHeightLocked(const glm::ivec2& key, int chunkY, int highestWorldY);
+
+    mutable std::mutex mutex_;
+    std::unordered_map<glm::ivec2, ColumnData, ColumnHasher> columns_;
 };
 
 class PerlinNoise
@@ -412,8 +466,9 @@ private:
     Chunk* getChunk(const glm::ivec3& coord) noexcept;
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
-    void recomputeColumnHeight(Chunk& chunk, int localX, int localZ) noexcept;
+
     void generateChunkBlocks(Chunk& chunk);
+    ColumnSample sampleColumn(int worldX, int worldZ) const;
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
     struct FaceUV
@@ -440,6 +495,7 @@ private:
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
     GLuint atlasTexture_{0};
     JobQueue jobQueue_;
+    ColumnManager columnManager_;
     std::vector<std::thread> workerThreads_;
     std::atomic<bool> shouldStop_;
 
@@ -557,6 +613,111 @@ void JobQueue::rebuildLocked()
         prioritized.distance = manhattanDistance(prioritized.job.chunkCoord, priorityOrigin_);
         priorityQueue_.push(std::move(prioritized));
     }
+}
+
+glm::ivec2 ColumnManager::columnKey(const glm::ivec3& chunkCoord, int localX, int localZ) noexcept
+{
+    return {chunkCoord.x * kChunkSizeX + localX, chunkCoord.z * kChunkSizeZ + localZ};
+}
+
+int ColumnManager::scanColumnHighestWorld(const Chunk& chunk, int localX, int localZ) noexcept
+{
+    for (int y = kChunkSizeY - 1; y >= 0; --y)
+    {
+        if (isSolid(chunk.blocks[blockIndex(localX, y, localZ)]))
+        {
+            return chunk.minWorldY + y;
+        }
+    }
+    return kNoHeight;
+}
+
+int ColumnManager::computeHighest(const ColumnData& data) noexcept
+{
+    int highest = kNoHeight;
+    for (const auto& entry : data.slabHeights)
+    {
+        highest = std::max(highest, entry.second);
+    }
+    return highest;
+}
+
+void ColumnManager::applyHeightLocked(const glm::ivec2& key, int chunkY, int highestWorldY)
+{
+    if (highestWorldY == kNoHeight)
+    {
+        auto it = columns_.find(key);
+        if (it == columns_.end())
+        {
+            return;
+        }
+
+        it->second.slabHeights.erase(chunkY);
+        if (it->second.slabHeights.empty())
+        {
+            columns_.erase(it);
+        }
+        else
+        {
+            it->second.highestWorldY = computeHighest(it->second);
+        }
+        return;
+    }
+
+    auto [it, inserted] = columns_.try_emplace(key);
+    it->second.slabHeights[chunkY] = highestWorldY;
+    it->second.highestWorldY = computeHighest(it->second);
+}
+
+void ColumnManager::updateChunk(const Chunk& chunk)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int x = 0; x < kChunkSizeX; ++x)
+    {
+        for (int z = 0; z < kChunkSizeZ; ++z)
+        {
+            const glm::ivec2 key = columnKey(chunk.coord, x, z);
+            const int highestWorld = scanColumnHighestWorld(chunk, x, z);
+            applyHeightLocked(key, chunk.coord.y, highestWorld);
+        }
+    }
+}
+
+void ColumnManager::updateColumn(const Chunk& chunk, int localX, int localZ)
+{
+    const int highestWorld = scanColumnHighestWorld(chunk, localX, localZ);
+    std::lock_guard<std::mutex> lock(mutex_);
+    applyHeightLocked(columnKey(chunk.coord, localX, localZ), chunk.coord.y, highestWorld);
+}
+
+void ColumnManager::removeChunk(const Chunk& chunk)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int x = 0; x < kChunkSizeX; ++x)
+    {
+        for (int z = 0; z < kChunkSizeZ; ++z)
+        {
+            applyHeightLocked(columnKey(chunk.coord, x, z), chunk.coord.y, kNoHeight);
+        }
+    }
+}
+
+void ColumnManager::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    columns_.clear();
+}
+
+int ColumnManager::highestSolidBlock(int worldX, int worldZ) const noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const glm::ivec2 key{worldX, worldZ};
+    auto it = columns_.find(key);
+    if (it == columns_.end())
+    {
+        return kNoHeight;
+    }
+    return it->second.highestWorldY;
 }
 
 // PerlinNoise implementations
@@ -890,31 +1051,16 @@ float ChunkManager::Impl::surfaceHeight(float worldX, float worldZ) const noexce
 {
     const int wx = static_cast<int>(std::floor(worldX));
     const int wz = static_cast<int>(std::floor(worldZ));
-    const glm::ivec3 chunkCoord = worldToChunkCoords(wx, 0, wz);
-    const int localX = wrapIndex(wx, kChunkSizeX);
-    const int localZ = wrapIndex(wz, kChunkSizeZ);
+    const int cachedHeight = columnManager_.highestSolidBlock(wx, wz);
+    if (cachedHeight != ColumnManager::kNoHeight)
 
-    auto chunk = getChunkShared(chunkCoord);
-    if (!chunk)
     {
-        return 0.0f;
+        return static_cast<float>(cachedHeight + 1);
     }
 
-    int topBlock = -1;
-    {
-        std::lock_guard<std::mutex> lock(chunk->meshMutex);
-        if (!chunk->columnMaxHeights.empty())
-        {
-            topBlock = chunk->columnMaxHeights[columnIndex(localX, localZ)];
-        }
-    }
+    const ColumnSample sample = sampleColumn(wx, wz);
+    return static_cast<float>(sample.surfaceY + 1);
 
-    if (topBlock < 0)
-    {
-        return 0.0f;
-    }
-
-    return static_cast<float>(chunk->minWorldY + topBlock + 1);
 }
 
 void ChunkManager::Impl::clear()
@@ -958,10 +1104,11 @@ void ChunkManager::Impl::clear()
                 removedAny = true;
             }
 
-            if (chunk)
-            {
-                recycleChunkGPU(*chunk);
-            }
+        if (chunk)
+        {
+            columnManager_.removeChunk(*chunk);
+            recycleChunkGPU(*chunk);
+        }
         }
 
         if (!removedAny)
@@ -973,6 +1120,7 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(uploadQueueMutex_);
         uploadQueue_.clear();
     }
+    columnManager_.clear();
 }
 
 bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
@@ -990,14 +1138,13 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         return false;
     }
 
-    const int localX = wrapIndex(worldPos.x, kChunkSizeX);
-    const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
-    const int localY = worldPos.y - chunk->minWorldY;
-    if (localY < 0 || localY >= kChunkSizeY)
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    if (local.y < 0 || local.y >= kChunkSizeY)
     {
         return false;
     }
-    const std::size_t blockIdx = blockIndex(localX, localY, localZ);
+    const std::size_t blockIdx = blockIndex(local.x, local.y, local.z);
+
 
     {
         std::lock_guard<std::mutex> lock(chunk->meshMutex);
@@ -1007,12 +1154,13 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         }
 
         chunk->blocks[blockIdx] = BlockId::Air;
-        recomputeColumnHeight(*chunk, localX, localZ);
+        columnManager_.updateColumn(*chunk, local.x, local.z);
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
     }
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
-    markNeighborsForRemeshingIfNeeded(chunkCoord, localX, localY, localZ);
+    markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, local.y, local.z);
+
     return true;
 }
 
@@ -1033,14 +1181,13 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         return false;
     }
 
-    const int localX = wrapIndex(placePos.x, kChunkSizeX);
-    const int localZ = wrapIndex(placePos.z, kChunkSizeZ);
-    const int localY = placePos.y - chunk->minWorldY;
-    if (localY < 0 || localY >= kChunkSizeY)
+    const glm::ivec3 local = localBlockCoords(placePos, chunkCoord);
+    if (local.y < 0 || local.y >= kChunkSizeY)
     {
         return false;
     }
-    const std::size_t blockIdx = blockIndex(localX, localY, localZ);
+    const std::size_t blockIdx = blockIndex(local.x, local.y, local.z);
+
 
     {
         std::lock_guard<std::mutex> lock(chunk->meshMutex);
@@ -1050,12 +1197,13 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         }
 
         chunk->blocks[blockIdx] = BlockId::Grass;
-        recomputeColumnHeight(*chunk, localX, localZ);
+        columnManager_.updateColumn(*chunk, local.x, local.z);
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
     }
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
-    markNeighborsForRemeshingIfNeeded(chunkCoord, localX, localY, localZ);
+    markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, local.y, local.z);
+
     return true;
 }
 
@@ -1231,65 +1379,75 @@ BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
         return BlockId::Air;
     }
 
-    const int localX = wrapIndex(worldPos.x, kChunkSizeX);
-    const int localZ = wrapIndex(worldPos.z, kChunkSizeZ);
-    const int localY = worldPos.y - chunk->minWorldY;
-    if (localY < 0 || localY >= kChunkSizeY)
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    if (local.y < 0 || local.y >= kChunkSizeY)
     {
         return BlockId::Air;
     }
-    return chunk->blocks[blockIndex(localX, localY, localZ)];
+    return chunk->blocks[blockIndex(local.x, local.y, local.z)];
+
 }
 
 glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) const
 {
     const float halfWidth = kPlayerWidth * 0.5f;
+    const int baseX = static_cast<int>(std::floor(worldX));
+    const int baseZ = static_cast<int>(std::floor(worldZ));
+    int highestSolid = columnManager_.highestSolidBlock(baseX, baseZ);
+    if (highestSolid == ColumnManager::kNoHeight)
+    {
+        highestSolid = sampleColumn(baseX, baseZ).surfaceY;
+    }
 
-    for (int y = kChunkSizeY - 3; y >= 2; --y)
+    const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
+    const int searchTop = highestSolid + clearanceHeight + 2;
+    int searchBottom = highestSolid - 64;
+    if (searchBottom > searchTop)
+    {
+        searchBottom = searchTop - 1;
+    }
+    searchBottom = std::max(searchBottom, highestSolid - 128);
+    searchBottom = std::max(searchBottom, -256);
+
+    for (int y = searchTop; y >= searchBottom; --y)
     {
         bool hasGround = false;
-        for (int dx = -1; dx <= 1; ++dx)
+        for (int dx = -1; dx <= 1 && !hasGround; ++dx)
         {
             for (int dz = -1; dz <= 1; ++dz)
             {
-                if (isSolid(blockAt(glm::ivec3(
-                    static_cast<int>(std::floor(worldX + dx * halfWidth)),
-                    y - 1,
-                    static_cast<int>(std::floor(worldZ + dz * halfWidth))))))
+                const int checkX = static_cast<int>(std::floor(worldX + dx * halfWidth));
+                const int checkZ = static_cast<int>(std::floor(worldZ + dz * halfWidth));
+                if (isSolid(blockAt(glm::ivec3(checkX, y - 1, checkZ))))
                 {
                     hasGround = true;
                     break;
                 }
             }
-            if (hasGround) break;
         }
 
-        if (!hasGround) continue;
+        if (!hasGround)
+        {
+            continue;
+        }
 
         bool canFit = true;
-        const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
-
-        for (int checkY = y; checkY < y + clearanceHeight && checkY < kChunkSizeY; ++checkY)
+        for (int dy = 0; dy < clearanceHeight && canFit; ++dy)
         {
-            for (int dx = -1; dx <= 1; ++dx)
+            const int checkY = y + dy;
+            for (int dx = -1; dx <= 1 && canFit; ++dx)
             {
                 for (int dz = -1; dz <= 1; ++dz)
                 {
-                    const float checkX = worldX + dx * halfWidth;
-                    const float checkZ = worldZ + dz * halfWidth;
-
-                    if (isSolid(blockAt(glm::ivec3(
-                        static_cast<int>(std::floor(checkX)),
-                        checkY,
-                        static_cast<int>(std::floor(checkZ))))))
+                    const int checkX = static_cast<int>(std::floor(worldX + dx * halfWidth));
+                    const int checkZ = static_cast<int>(std::floor(worldZ + dz * halfWidth));
+                    if (isSolid(blockAt(glm::ivec3(checkX, checkY, checkZ))))
                     {
                         canFit = false;
                         break;
                     }
                 }
-                if (!canFit) break;
             }
-            if (!canFit) break;
         }
 
         if (canFit)
@@ -1301,7 +1459,7 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
     }
 
     std::cout << "Warning: No safe spawn found, spawning above terrain" << std::endl;
-    const float fallbackY = static_cast<float>(kChunkSizeY - 5) + kCameraEyeHeight;
+    const float fallbackY = static_cast<float>(searchTop) + kCameraEyeHeight;
     return glm::vec3(worldX, fallbackY, worldZ);
 }
 
@@ -1732,6 +1890,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
 
         if (chunk)
         {
+            columnManager_.removeChunk(*chunk);
             recycleChunkGPU(*chunk);
         }
     }
@@ -2269,6 +2428,7 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     if (localZ == kChunkSizeZ - 1)
     {
         queueNeighbor(coord + glm::ivec3{0, 0, 1});
+
     }
 
     if (localY == 0)
@@ -2282,26 +2442,8 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
-void ChunkManager::Impl::recomputeColumnHeight(Chunk& chunk, int localX, int localZ) noexcept
+ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ) const
 {
-    const std::size_t idx = columnIndex(localX, localZ);
-    int top = -1;
-    for (int y = kChunkSizeY - 1; y >= 0; --y)
-    {
-        if (isSolid(chunk.blocks[blockIndex(localX, y, localZ)]))
-        {
-            top = y;
-            break;
-        }
-    }
-    chunk.columnMaxHeights[idx] = top;
-}
-
-void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
-{
-    std::lock_guard<std::mutex> lock(chunk.meshMutex);
-    const int baseWorldX = chunk.coord.x * kChunkSizeX;
-    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
 
     auto biomeForRegion = [&](int regionX, int regionZ) -> const BiomeDefinition&
     {
@@ -2311,15 +2453,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         return kBiomeDefinitions[biomeIndex];
     };
 
-    struct ColumnSample
-    {
-        const BiomeDefinition* dominantBiome = nullptr;
-        float dominantWeight = 0.0f;
-        int topBlock = 0;
-    };
-
-    auto sampleColumn = [&](int worldX, int worldZ) -> ColumnSample
-    {
         struct WeightedBiome
         {
             const BiomeDefinition* biome;
@@ -2342,9 +2475,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const int localBlockX = worldX - regionBaseBlockX;
         const int localBlockZ = worldZ - regionBaseBlockZ;
 
-        // Only allow biome weights to mix within a very small strip hugging the
-        // border between regions so that a neighbouring biome never dominates
-        // deep inside a region.
         constexpr float kBiomeBlendRangeBlocks = 4.0f;
 
         auto smooth01 = [](float t)
@@ -2362,7 +2492,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
             const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
             return smooth01(normalized);
-
         };
 
         const float distanceLeft = static_cast<float>(localBlockX);
@@ -2371,7 +2500,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
 
         auto edgeVariation = [&](int offsetX, int offsetZ)
-
         {
             const float sampleX = static_cast<float>(worldX + offsetX * 31);
             const float sampleZ = static_cast<float>(worldZ + offsetZ * 31);
@@ -2445,7 +2573,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
         addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
 
-
         if (weightCount == 0)
         {
             addBiomeWeight(0, 0, 1.0f);
@@ -2517,34 +2644,81 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         ColumnSample sample;
         sample.dominantBiome = dominantBiome;
         sample.dominantWeight = dominantWeight;
-        sample.topBlock = std::clamp(static_cast<int>(std::round(targetHeight)), 0, kChunkSizeY - 1);
+        sample.surfaceY = std::clamp(static_cast<int>(std::round(targetHeight)), 0, kChunkSizeY - 1);
         return sample;
-    };
+    }
+}
 
+void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
+{
+    std::lock_guard<std::mutex> lock(chunk.meshMutex);
+    std::fill(chunk.blocks.begin(), chunk.blocks.end(), BlockId::Air);
+
+    const int baseWorldX = chunk.coord.x * kChunkSizeX;
+    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
+
+    std::array<ColumnSample, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnSamples{};
     for (int x = 0; x < kChunkSizeX; ++x)
     {
         for (int z = 0; z < kChunkSizeZ; ++z)
         {
             const int worldX = baseWorldX + x;
             const int worldZ = baseWorldZ + z;
-            const ColumnSample columnSample = sampleColumn(worldX, worldZ);
-            const BiomeDefinition& biome = *columnSample.dominantBiome;
-            const int topBlock = columnSample.topBlock;
-            chunk.columnMaxHeights[columnIndex(x, z)] = topBlock;
+            columnSamples[columnIndex(x, z)] = sampleColumn(worldX, worldZ);
+        }
+    }
 
-            for (int y = 0; y < kChunkSizeY; ++y)
+    bool anySolid = false;
+
+    for (int x = 0; x < kChunkSizeX; ++x)
+    {
+        for (int z = 0; z < kChunkSizeZ; ++z)
+        {
+            const ColumnSample& columnSample = columnSamples[columnIndex(x, z)];
+            if (!columnSample.dominantBiome)
             {
+                continue;
+            }
+
+            const BiomeDefinition& biome = *columnSample.dominantBiome;
+            const int surfaceY = columnSample.surfaceY;
+
+            if (surfaceY < chunk.minWorldY)
+            {
+                continue;
+            }
+
+            const int localSurface = surfaceY - chunk.minWorldY;
+            const int columnFillTop = std::min(localSurface, kChunkSizeY - 1);
+
+            for (int localY = 0; localY <= columnFillTop; ++localY)
+            {
+                const int worldY = chunk.minWorldY + localY;
                 BlockId block = BlockId::Air;
-                if (y < topBlock)
+                if (worldY < surfaceY)
                 {
                     block = biome.fillerBlock;
                 }
-                else if (y == topBlock)
+                else if (worldY == surfaceY)
                 {
                     block = biome.surfaceBlock;
                 }
 
-                chunk.blocks[blockIndex(x, y, z)] = block;
+                if (block != BlockId::Air)
+                {
+                    anySolid = true;
+                }
+
+                chunk.blocks[blockIndex(x, localY, z)] = block;
+            }
+
+            if (surfaceY > chunk.maxWorldY)
+            {
+                for (int localY = columnFillTop + 1; localY < kChunkSizeY; ++localY)
+                {
+                    chunk.blocks[blockIndex(x, localY, z)] = biome.fillerBlock;
+                    anySolid = true;
+                }
             }
         }
     }
@@ -2575,10 +2749,10 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         }
 
         destination = block;
-        auto& columnMax = chunk.columnMaxHeights[columnIndex(localX, localZ)];
-        if (isSolid(block))
+        if (block != BlockId::Air)
         {
-            columnMax = std::max(columnMax, localY);
+            anySolid = true;
+
         }
     };
 
@@ -2604,8 +2778,14 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                 continue;
             }
 
-            const int groundY = columnSample.topBlock;
-            if (groundY <= 2 || groundY >= kChunkSizeY - (kTreeMaxHeight + 1))
+            const int groundWorldY = columnSample.surfaceY;
+            const int groundLocalY = groundWorldY - chunk.minWorldY;
+            if (groundLocalY < 0 || groundLocalY >= kChunkSizeY)
+            {
+                continue;
+            }
+
+            if (groundLocalY <= 2 || groundLocalY >= kChunkSizeY - (kTreeMaxHeight + 1))
             {
                 continue;
             }
@@ -2616,7 +2796,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             const int localZ = worldZ - baseWorldZ;
             if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
             {
-                const std::size_t blockIdx = blockIndex(localX, groundY, localZ);
+                const std::size_t blockIdx = blockIndex(localX, groundLocalY, localZ);
                 if (chunk.blocks[blockIdx] != biome.surfaceBlock)
                 {
                     continue;
@@ -2648,8 +2828,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                     }
 
                     const ColumnSample neighborSample = sampleColumn(worldX + dx, worldZ + dz);
-                    const int neighborHeight = neighborSample.topBlock;
-                    if (std::abs(neighborHeight - groundY) > 1)
+                    const int neighborHeight = neighborSample.surfaceY;
+                    if (std::abs(neighborHeight - groundWorldY) > 1)
                     {
                         terrainSuitable = false;
                         break;
@@ -2667,24 +2847,24 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                                                static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
             trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
 
-            const int canopyTop = groundY + trunkHeight;
-            if (canopyTop >= kChunkSizeY)
+            const int canopyTopLocal = groundLocalY + trunkHeight;
+            if (canopyTopLocal >= kChunkSizeY)
             {
                 continue;
             }
 
-            const int trunkTop = groundY + trunkHeight - 1;
             for (int dy = 0; dy < trunkHeight; ++dy)
             {
                 trySetBlock(worldX, groundWorldY + dy, worldZ, BlockId::Wood, true);
             }
 
-            const int canopyBase = groundY + trunkHeight - 3;
-            for (int y = canopyBase; y <= canopyTop; ++y)
+            const int canopyBaseLocal = groundLocalY + trunkHeight - 3;
+            for (int y = canopyBaseLocal; y <= canopyTopLocal; ++y)
             {
-                const int layer = y - canopyBase;
+                const int worldY = chunk.minWorldY + y;
+                const int layer = y - canopyBaseLocal;
                 int radius = 2;
-                if (y >= canopyTop - 1)
+                if (y >= canopyTopLocal - 1)
                 {
                     radius = 1;
                 }
@@ -2698,7 +2878,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                             continue;
                         }
 
-                        if (dx == 0 && dz == 0 && y <= trunkTop)
+                        if (dx == 0 && dz == 0 && y <= groundLocalY + trunkHeight - 1)
                         {
                             continue;
                         }
@@ -2708,12 +2888,21 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                             continue;
                         }
 
-                        trySetBlock(worldX + dx, chunk.minWorldY + y, worldZ + dz, BlockId::Leaves, false);
+                        trySetBlock(worldX + dx, worldY, worldZ + dz, BlockId::Leaves, false);
+
                     }
                 }
             }
         }
     }
+
+    if (!anySolid)
+    {
+        columnManager_.updateChunk(chunk);
+        return;
+    }
+
+    columnManager_.updateChunk(chunk);
 }
 
 ChunkManager::ChunkManager(unsigned seed)

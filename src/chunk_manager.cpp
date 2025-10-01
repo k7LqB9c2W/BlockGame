@@ -3099,6 +3099,18 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     float blendedScale = 0.0f;
     float blendedMinHeight = 0.0f;
     float blendedMaxHeight = 0.0f;
+
+    float oceanWeight = 0.0f;
+    float oceanOffset = 0.0f;
+    float oceanScale = 0.0f;
+    float oceanMinHeight = 0.0f;
+    float oceanMaxHeight = 0.0f;
+
+    float landWeight = 0.0f;
+    float landOffset = 0.0f;
+    float landScale = 0.0f;
+    float landMinHeight = 0.0f;
+    float landMaxHeight = 0.0f;
     const BiomeDefinition* dominantBiome = nullptr;
     float dominantWeight = -1.0f;
 
@@ -3110,12 +3122,46 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
         blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
 
+        if (weightedBiome.biome->id == BiomeId::Ocean)
+        {
+            oceanWeight += weightedBiome.weight;
+            oceanOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+            oceanScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+            oceanMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+            oceanMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
+        }
+        else
+        {
+            landWeight += weightedBiome.weight;
+            landOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+            landScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+            landMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+            landMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
+        }
+
         if (weightedBiome.weight > dominantWeight)
         {
             dominantWeight = weightedBiome.weight;
             dominantBiome = weightedBiome.biome;
         }
     }
+
+    auto normalizeCategory = [](float weight, float& offset, float& scale, float& minHeight, float& maxHeight)
+    {
+        if (weight <= 0.0f)
+        {
+            return;
+        }
+
+        const float invWeight = 1.0f / weight;
+        offset *= invWeight;
+        scale *= invWeight;
+        minHeight *= invWeight;
+        maxHeight *= invWeight;
+    };
+
+    normalizeCategory(oceanWeight, oceanOffset, oceanScale, oceanMinHeight, oceanMaxHeight);
+    normalizeCategory(landWeight, landOffset, landScale, landMinHeight, landMaxHeight);
 
     dominantWeight = std::max(dominantWeight, 0.0f);
     if (dominantBiome == nullptr)
@@ -3138,6 +3184,77 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
 
     float targetHeight = blendedOffset + combined * blendedScale;
     targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+
+    const bool hasOceanContribution = oceanWeight > 0.0f;
+    const bool hasLandContribution = landWeight > 0.0f;
+
+    float oceanTarget = targetHeight;
+    if (hasOceanContribution)
+    {
+        oceanTarget = std::clamp(oceanOffset + combined * oceanScale, oceanMinHeight, oceanMaxHeight);
+        minHeight = std::min(minHeight, oceanTarget);
+        maxHeight = std::max(maxHeight, oceanTarget);
+    }
+
+    float landTarget = targetHeight;
+    if (hasLandContribution)
+    {
+        float landMin = landMinHeight;
+        float landMax = landMaxHeight;
+        if (landMin > landMax)
+        {
+            std::swap(landMin, landMax);
+        }
+
+        landMin = std::clamp(landMin, kMinIntAsFloat, kMaxIntAsFloat);
+        landMax = std::clamp(landMax, kMinIntAsFloat, kMaxIntAsFloat);
+
+        landTarget = landOffset + combined * landScale;
+        landTarget = std::clamp(landTarget, landMin, landMax);
+        minHeight = std::min(minHeight, landTarget);
+        maxHeight = std::max(maxHeight, landTarget);
+    }
+
+    if (hasOceanContribution && hasLandContribution)
+    {
+        const float totalCategoryWeight = oceanWeight + landWeight;
+        if (totalCategoryWeight > std::numeric_limits<float>::epsilon())
+        {
+            const float oceanShare = oceanWeight / totalCategoryWeight;
+            const float landShare = landWeight / totalCategoryWeight;
+
+            auto shorelineRamp = [](float share)
+            {
+                const float t = std::clamp((share - 0.3f) / 0.2f, 0.0f, 1.0f);
+                return t * t * (3.0f - 2.0f * t);
+            };
+
+            const float shorelineBlend = shorelineRamp(oceanShare) * shorelineRamp(landShare);
+            if (shorelineBlend > 0.0f)
+            {
+                const float easedBlend = shorelineBlend * shorelineBlend * (3.0f - 2.0f * shorelineBlend);
+                const float shorelineLandHeight = oceanTarget + (landTarget - oceanTarget) * (1.0f - easedBlend);
+                const float clampedShoreline = std::max(shorelineLandHeight, oceanTarget);
+
+                landTarget = clampedShoreline;
+                minHeight = std::min(minHeight, clampedShoreline);
+                maxHeight = std::max(maxHeight, clampedShoreline);
+            }
+        }
+    }
+
+    if (dominantBiome && dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
+    {
+        targetHeight = oceanTarget;
+    }
+    else if (hasLandContribution)
+    {
+        targetHeight = landTarget;
+    }
+    else if (hasOceanContribution)
+    {
+        targetHeight = oceanTarget;
+    }
 
     ColumnSample sample;
     sample.dominantBiome = dominantBiome;

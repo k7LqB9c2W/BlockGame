@@ -2327,6 +2327,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
             const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
             return smooth01(normalized);
+
         };
 
         const float distanceLeft = static_cast<float>(localBlockX);

@@ -4,6 +4,7 @@
 #include "TextureLoader.h"
 #include "camera.h"
 #include "chunk_manager.h"
+#include "input_context.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -41,99 +42,6 @@
 
 namespace
 {
-struct InputContext
-{
-    Camera* camera{nullptr};
-    float lastX{0.0f};
-    float lastY{0.0f};
-    bool firstMouse{true};
-    bool leftMousePressed{false};
-    bool leftMouseJustPressed{false};
-    bool rightMousePressed{false};
-    bool rightMouseJustPressed{false};
-    bool nKeyPressed{false};
-    bool nKeyJustPressed{false};
-    bool f1Pressed{false};
-    bool f1JustPressed{false};
-    bool showCoordinates{false};
-    bool showRenderDistanceGUI{false};
-    std::string inputBuffer{};
-};
-
-void framebufferSizeCallback(GLFWwindow*, int width, int height)
-{
-    glViewport(0, 0, width, height);
-}
-
-void mouseCallback(GLFWwindow* window, double xpos, double ypos)
-{
-    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (input == nullptr || input->camera == nullptr)
-    {
-        return;
-    }
-
-    if (input->firstMouse)
-    {
-        input->lastX = static_cast<float>(xpos);
-        input->lastY = static_cast<float>(ypos);
-        input->firstMouse = false;
-    }
-
-    const float xoffset = static_cast<float>(xpos) - input->lastX;
-    const float yoffset = input->lastY - static_cast<float>(ypos);
-
-    input->lastX = static_cast<float>(xpos);
-    input->lastY = static_cast<float>(ypos);
-
-    input->camera->processMouse(xoffset, yoffset);
-}
-
-void charCallback(GLFWwindow* window, unsigned int codepoint)
-{
-    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (input == nullptr)
-    {
-        return;
-    }
-
-    // Only accept input when GUI is active
-    if (input->showRenderDistanceGUI && codepoint < 128)
-    {
-        // Only accept digits
-        if (codepoint >= '0' && codepoint <= '9')
-        {
-            // Limit input length to prevent overflow
-            if (input->inputBuffer.size() < 10)
-            {
-                input->inputBuffer += static_cast<char>(codepoint);
-            }
-        }
-    }
-}
-
-void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
-{
-    auto* input = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-    if (input == nullptr)
-    {
-        return;
-    }
-
-    if (button == GLFW_MOUSE_BUTTON_LEFT)
-    {
-        bool wasPressed = input->leftMousePressed;
-        input->leftMousePressed = (action == GLFW_PRESS);
-        input->leftMouseJustPressed = input->leftMousePressed && !wasPressed;
-    }
-    else if (button == GLFW_MOUSE_BUTTON_RIGHT)
-    {
-        bool wasPressed = input->rightMousePressed;
-        input->rightMousePressed = (action == GLFW_PRESS);
-        input->rightMouseJustPressed = input->rightMousePressed && !wasPressed;
-    }
-}
-
 [[nodiscard]] GLuint compileShader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
@@ -341,12 +249,6 @@ struct AABB
     glm::vec3 max;
 };
 
-struct PlayerInputState
-{
-    glm::vec3 moveDirection{0.0f};
-    bool jumpHeld{false};
-};
-
 inline AABB makePlayerAABB(const glm::vec3& position) noexcept
 {
     const float halfWidth = kPlayerWidth * 0.5f;
@@ -499,113 +401,6 @@ AxisMoveResult sweepPlayerAABB(AABB& box,
     box.max[axis] += allowed;
     result.actualMove = allowed;
     return result;
-}
-
-PlayerInputState computePlayerInputState(GLFWwindow* window,
-                                         InputContext& inputContext,
-                                         Camera& camera,
-                                         ChunkManager& chunkManager)
-{
-    PlayerInputState state;
-
-    bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
-    inputContext.nKeyJustPressed = nKeyCurrentlyPressed && !inputContext.nKeyPressed;
-    inputContext.nKeyPressed = nKeyCurrentlyPressed;
-    if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI)
-    {
-        // Show the GUI
-        inputContext.showRenderDistanceGUI = true;
-        inputContext.inputBuffer.clear();
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-    }
-    
-    // Handle GUI input
-    if (inputContext.showRenderDistanceGUI)
-    {
-        // Enter key to apply
-        static bool enterKeyPressed = false;
-        bool enterKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS || 
-                                          glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS);
-        if (enterKeyCurrentlyPressed && !enterKeyPressed)
-        {
-            if (!inputContext.inputBuffer.empty())
-            {
-                try
-                {
-                    int distance = std::stoi(inputContext.inputBuffer);
-                    chunkManager.setRenderDistance(distance);
-                }
-                catch (const std::exception& e)
-                {
-                    std::cerr << "Invalid render distance input: " << e.what() << std::endl;
-                }
-            }
-            inputContext.showRenderDistanceGUI = false;
-            inputContext.inputBuffer.clear();
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        }
-        enterKeyPressed = enterKeyCurrentlyPressed;
-        
-        // Escape key to cancel
-        static bool escapeKeyPressed = false;
-        bool escapeKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
-        if (escapeKeyCurrentlyPressed && !escapeKeyPressed)
-        {
-            inputContext.showRenderDistanceGUI = false;
-            inputContext.inputBuffer.clear();
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        }
-        escapeKeyPressed = escapeKeyCurrentlyPressed;
-        
-        // Backspace to delete characters
-        static bool backspaceKeyPressed = false;
-        bool backspaceKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
-        if (backspaceKeyCurrentlyPressed && !backspaceKeyPressed)
-        {
-            if (!inputContext.inputBuffer.empty())
-            {
-                inputContext.inputBuffer.pop_back();
-            }
-        }
-        backspaceKeyPressed = backspaceKeyCurrentlyPressed;
-    }
-
-    glm::vec3 forward = camera.front();
-    forward.y = 0.0f;
-    if (glm::length(forward) > kEpsilon)
-    {
-        forward = glm::normalize(forward);
-    }
-
-    glm::vec3 right = glm::cross(forward, camera.worldUp());
-    if (glm::length(right) > kEpsilon)
-    {
-        right = glm::normalize(right);
-    }
-    else
-    {
-        right = camera.right();
-    }
-
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-    {
-        state.moveDirection += forward;
-    }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-    {
-        state.moveDirection -= forward;
-    }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-    {
-        state.moveDirection -= right;
-    }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-    {
-        state.moveDirection += right;
-    }
-
-    state.jumpHeld = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-    return state;
 }
 
 void applyGroundSnap(Camera& camera, const ChunkManager& chunkManager)

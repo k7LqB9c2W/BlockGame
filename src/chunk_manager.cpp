@@ -1477,12 +1477,12 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
 
     const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
     const int searchTop = highestSolid + clearanceHeight + 2;
-    int searchBottom = highestSolid - 64;
+    int searchBottom = highestSolid - kChunkSizeY;
     if (searchBottom > searchTop)
     {
         searchBottom = searchTop - 1;
     }
-    searchBottom = std::max(searchBottom, highestSolid - 128);
+    searchBottom = std::max(searchBottom, highestSolid - 2 * kChunkSizeY);
     searchBottom = std::max(searchBottom, -256);
 
     for (int y = searchTop; y >= searchBottom; --y)

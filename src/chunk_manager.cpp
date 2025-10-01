@@ -2307,10 +2307,10 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const int localBlockX = worldX - regionBaseBlockX;
         const int localBlockZ = worldZ - regionBaseBlockZ;
 
-        constexpr float kBiomeBlendRadiusChunks = 2.0f;
-        const float blendRadiusBlocksX = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeX);
-        const float blendRadiusBlocksZ = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeZ);
-
+        // Only allow biome weights to mix within a very small strip hugging the
+        // border between regions so that a neighbouring biome never dominates
+        // deep inside a region.
+        constexpr float kBiomeBlendRangeBlocks = 4.0f;
 
         auto smooth01 = [](float t)
         {
@@ -2318,13 +2318,14 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             return t * t * (3.0f - 2.0f * t);
         };
 
-        auto edgeInfluence = [&](float distance, float blendRadius)
+        auto edgeInfluence = [&](float distance)
         {
-            if (distance >= blendRadius)
+            if (distance >= kBiomeBlendRangeBlocks)
             {
                 return 0.0f;
             }
-            const float normalized = 1.0f - (distance / blendRadius);
+
+            const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
             return smooth01(normalized);
         };
 
@@ -2333,10 +2334,10 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const float distanceNorth = static_cast<float>(localBlockZ);
         const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
 
-        float leftWeightAxis = edgeInfluence(distanceLeft, blendRadiusBlocksX);
-        float rightWeightAxis = edgeInfluence(distanceRight, blendRadiusBlocksX);
-        float northWeightAxis = edgeInfluence(distanceNorth, blendRadiusBlocksZ);
-        float southWeightAxis = edgeInfluence(distanceSouth, blendRadiusBlocksZ);
+        float leftWeightAxis = edgeInfluence(distanceLeft);
+        float rightWeightAxis = edgeInfluence(distanceRight);
+        float northWeightAxis = edgeInfluence(distanceNorth);
+        float southWeightAxis = edgeInfluence(distanceSouth);
 
         const float edgeSumX = leftWeightAxis + rightWeightAxis;
         const float edgeSumZ = northWeightAxis + southWeightAxis;

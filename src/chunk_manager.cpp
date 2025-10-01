@@ -2311,6 +2311,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const float blendRadiusBlocksX = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeX);
         const float blendRadiusBlocksZ = kBiomeBlendRadiusChunks * static_cast<float>(kChunkSizeZ);
 
+
         auto smooth01 = [](float t)
         {
             t = std::clamp(t, 0.0f, 1.0f);
@@ -2356,6 +2357,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
 
         std::array<WeightedBiome, 5> weightedBiomes{};
+
         std::size_t weightCount = 0;
 
         auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
@@ -2374,6 +2376,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         addBiomeWeight(1, 0, rightWeightAxis * centerWeightAxisZ);
         addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
         addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
+
 
         if (weightCount == 0)
         {

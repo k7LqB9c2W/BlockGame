@@ -4257,12 +4257,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         auto setOrQueueBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
         {
-            if (worldX < baseWorldX || worldX >= baseWorldX + kChunkSizeX ||
-                worldZ < baseWorldZ || worldZ >= baseWorldZ + kChunkSizeZ)
-            {
-                return;
-            }
-
             const glm::ivec3 worldPos{worldX, worldY, worldZ};
             const glm::ivec3 targetChunk = worldToChunkCoords(worldX, worldY, worldZ);
             if (targetChunk == chunk.coord)
@@ -4288,6 +4282,11 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             }
             else
             {
+                if (block == BlockId::Air)
+                {
+                    return;
+                }
+
                 externalEdits.push_back(PendingStructureEdit{targetChunk, worldPos, block, replaceSolid});
             }
         };

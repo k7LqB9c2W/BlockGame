@@ -4440,6 +4440,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
 
     const BiomeDefinition* littleMountainsDefinition{nullptr};
     float littleMountainsWeight = 0.0f;
+    bool hasNonLittleMountainsBiome = false;
     for (std::size_t i = 0; i < weightCount; ++i)
     {
         const WeightedBiome& weightedBiome = weightedBiomes[i];
@@ -4456,8 +4457,15 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                 littleMountainsDefinition = weightedBiome.biome;
             }
         }
+        else if (weightedBiome.weight > 0.0f)
+        {
+            hasNonLittleMountainsBiome = true;
+        }
     }
     littleMountainsWeight = std::clamp(littleMountainsWeight, 0.0f, 1.0f);
+
+    float enforcedLittleMountainFloor = std::numeric_limits<float>::lowest();
+    bool enforceLittleMountainFloor = false;
 
     auto logHeightClamp = [&](const char* stage, float candidate, float minBound, float maxBound)
     {
@@ -4598,6 +4606,12 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             maxHeight = std::max(maxHeight, mountainHeight);
             macroStageHeight = std::clamp(macroStageHeight, minHeight, maxHeight);
             targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+
+            if (hasNonLittleMountainsBiome)
+            {
+                enforcedLittleMountainFloor = entryFloor;
+                enforceLittleMountainFloor = true;
+            }
         }
     }
 
@@ -4661,6 +4675,35 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             const float blendScale = std::clamp(shorelineBlend, 0.0f, 1.0f);
             // Areas with stronger ocean/land mixing should be considered closer to the coast.
             distanceToShore /= std::max(blendScale, 0.0001f);
+        }
+    }
+
+    if (enforceLittleMountainFloor)
+    {
+        const float floorHeight = enforcedLittleMountainFloor;
+        minHeight = std::max(minHeight, floorHeight);
+        maxHeight = std::max(maxHeight, minHeight);
+        macroStageHeight = std::max(macroStageHeight, floorHeight);
+        targetHeight = std::max(targetHeight, floorHeight);
+        if (hasLandContribution)
+        {
+            landTarget = std::max(landTarget, floorHeight);
+            maxHeight = std::max(maxHeight, landTarget);
+        }
+        if (hasOceanContribution)
+        {
+            oceanTarget = std::max(oceanTarget, floorHeight);
+            maxHeight = std::max(maxHeight, oceanTarget);
+        }
+        macroStageHeight = std::clamp(macroStageHeight, minHeight, maxHeight);
+        targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+        if (hasLandContribution)
+        {
+            landTarget = std::clamp(landTarget, minHeight, maxHeight);
+        }
+        if (hasOceanContribution)
+        {
+            oceanTarget = std::clamp(oceanTarget, minHeight, maxHeight);
         }
     }
 

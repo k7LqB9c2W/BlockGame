@@ -251,8 +251,8 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      BlockId::Stone,
      false,
      0.0f,
-     640.0f,
-     210.0f,
+     180.0f,
+     620.0f,
      kLittleMountainsMinSurfaceHeight,
      kLittleMountainsMaxSurfaceHeight,
      0.1f,
@@ -4421,7 +4421,7 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     const float minHeight = static_cast<float>(definition.minHeight);
     const float maxHeight = static_cast<float>(definition.maxHeight);
     const float range = std::max(maxHeight - minHeight, 1.0f);
-    const float floorRange = std::min(20.0f, range);
+    const float floorRange = std::clamp(range * 0.12f, 32.0f, 120.0f);
 
     auto sampleColumn = [&](float sampleX, float sampleZ) -> LittleMountainSample {
         const float normalized = computeLittleMountainsNormalized(sampleX, sampleZ);
@@ -4432,7 +4432,9 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
                                                            0.5f,
                                                            2.0f);
         const float floorT = std::clamp(floorNoise * 0.5f + 0.5f, 0.0f, 1.0f);
-        const float entryFloor = minHeight + floorT * floorRange;
+        const float foothillLow = std::clamp(minHeight + std::min(floorRange * 0.35f, 36.0f), minHeight, maxHeight);
+        const float foothillHigh = std::clamp(minHeight + floorRange, minHeight, maxHeight);
+        const float entryFloor = glm::mix(foothillLow, foothillHigh, floorT);
         if (height < entryFloor)
         {
             height = entryFloor;
@@ -4445,14 +4447,13 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     const float entryFloor = baseSample.entryFloor;
 
     const float sampleStep = 12.0f;
-    const float gentleTalusAngle = glm::radians(5.0f);
-    const float upperTalusAngle = glm::radians(10.0f);
-    const float gentleMaxDiff = std::min(std::tan(gentleTalusAngle) * sampleStep, 0.85f);
-    const float upperMaxDiff = std::min(std::tan(upperTalusAngle) * sampleStep, 1.0f);
-    const float highSlopeStart = minHeight + range * 0.65f;
+    const float highSlopeStart = minHeight + range * 0.50f;
     const float highSlopeEnd = minHeight + range * 0.90f;
-    const float altitudeT = std::clamp((baseHeight - highSlopeStart) / (highSlopeEnd - highSlopeStart), 0.0f, 1.0f);
-    const float maxDiff = std::lerp(gentleMaxDiff, upperMaxDiff, altitudeT);
+    const float altitudeT = glm::smoothstep(highSlopeStart, highSlopeEnd, baseHeight);
+    const float lowTalusAngle = glm::radians(3.0f);
+    const float peakTalusAngle = glm::radians(12.0f);
+    const float talusAngle = glm::mix(lowTalusAngle, peakTalusAngle, altitudeT);
+    const float baseMaxDiff = std::clamp(std::tan(talusAngle) * sampleStep, 0.0f, 1.0f);
 
     auto sampleNeighbor = [&](float offsetX, float offsetZ) {
         const auto neighborSample =
@@ -4466,6 +4467,15 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
         sampleNeighbor(0.0f, sampleStep),
         sampleNeighbor(0.0f, -sampleStep),
     };
+
+    const float neighborAverage = std::accumulate(neighbors.begin(), neighbors.end(), 0.0f) /
+                                  static_cast<float>(neighbors.size());
+    const float positiveCurvature = std::max(baseHeight - neighborAverage, 0.0f);
+    const float lowAltitudeInfluence = 1.0f - altitudeT;
+    const float curvatureResponse = glm::smoothstep(0.0f, sampleStep * 0.9f, positiveCurvature);
+    const float curvatureMultiplier =
+        std::clamp(1.0f - lowAltitudeInfluence * 0.45f * curvatureResponse, 0.4f, 1.0f);
+    const float maxDiff = baseMaxDiff * curvatureMultiplier;
 
     float relaxedHeight = baseHeight;
     auto relaxWithNeighbors = [&](const std::array<float, 4>& neighborHeights, float allowedDiff) {

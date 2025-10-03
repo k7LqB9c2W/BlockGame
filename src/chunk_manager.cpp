@@ -1092,7 +1092,7 @@ float PerlinNoise::grad(int hash, float x, float y) noexcept
     const int h = hash & 7;
     const float u = h < 4 ? x : y;
     const float v = h < 4 ? y : x;
-    return ((h & 1) ? -u : u) + ((h & 2) ? -2.0f * v : 2.0f * v);
+    return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
 }
 
 // ChunkManager::Impl methods (to be filled)

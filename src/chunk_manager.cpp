@@ -28,13 +28,22 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+namespace
+{
+std::atomic<int> gActiveVerticalRadius{kVerticalStreamingConfig.minRadiusChunks};
+}
+
 float computeFarPlaneForViewDistance(int viewDistance) noexcept
 {
-    const float horizontalSpan = static_cast<float>(viewDistance + 1) * static_cast<float>(std::max(kChunkSizeX, kChunkSizeZ));
-    const float verticalSpan = static_cast<float>(kVerticalStreamingConfig.maxRadiusChunks + 1)
-                                * static_cast<float>(kChunkSizeY);
-    const float diagonal = std::sqrt(horizontalSpan * horizontalSpan + verticalSpan * verticalSpan);
-    return std::max(diagonal + kFarPlanePadding, kDefaultFarPlane);
+    const int verticalRadius = std::max(gActiveVerticalRadius.load(std::memory_order_relaxed),
+                                        kVerticalStreamingConfig.minRadiusChunks);
+    const double horizontalSpan = static_cast<double>(viewDistance + 1)
+                                  * static_cast<double>(std::max(kChunkSizeX, kChunkSizeZ));
+    const double verticalSpan = static_cast<double>(verticalRadius + 1) * static_cast<double>(kChunkSizeY);
+    const double diagonal = std::hypot(horizontalSpan, verticalSpan);
+    const double farPlane = std::max(diagonal + static_cast<double>(kFarPlanePadding),
+                                     static_cast<double>(kDefaultFarPlane));
+    return static_cast<float>(farPlane);
 }
 
 float kFarPlane = computeFarPlaneForViewDistance(kDefaultViewDistance);
@@ -316,6 +325,37 @@ enum class JobType : std::uint8_t
     Mesh = 1
 };
 
+struct FarChunk
+{
+    static constexpr int kColumnStep = 4;
+    static constexpr int kColumnsX = kChunkSizeX / kColumnStep;
+    static constexpr int kColumnsZ = kChunkSizeZ / kColumnStep;
+
+    struct SurfaceCell
+    {
+        int worldY{std::numeric_limits<int>::min()};
+        BlockId block{BlockId::Air};
+    };
+
+    glm::vec3 origin{0.0f};
+    glm::ivec3 size{kChunkSizeX, kChunkSizeY, kChunkSizeZ};
+    int lodStep{kColumnStep};
+    int thickness{1};
+    std::array<SurfaceCell, kColumnsX * kColumnsZ> strata{};
+    GLuint opaqueVao{0};
+    GLuint opaqueVbo{0};
+    GLuint opaqueIbo{0};
+    GLuint cutoutVao{0};
+    GLuint cutoutVbo{0};
+    GLuint cutoutIbo{0};
+
+    static constexpr std::size_t index(int x, int z) noexcept
+    {
+        return static_cast<std::size_t>(z) * static_cast<std::size_t>(kColumnsX) +
+               static_cast<std::size_t>(x);
+    }
+};
+
 struct Chunk
 {
     explicit Chunk(const glm::ivec3& c)
@@ -352,6 +392,8 @@ struct Chunk
         vbo = 0;
         ibo = 0;
         inFlight.store(0, std::memory_order_relaxed);
+        surfaceOnly = false;
+        lodData.reset();
     }
 
 
@@ -374,6 +416,8 @@ struct Chunk
     bool meshReady{false};
     bool hasBlocks{false};
     std::atomic<int> inFlight{0};
+    bool surfaceOnly{false};
+    std::unique_ptr<FarChunk> lodData;
 };
 
 struct ProfilingCounters
@@ -574,7 +618,20 @@ private:
                                       int cameraChunkY,
                                       int verticalRadius) const;
     void resetColumnBudgets();
-    int uploadsPerColumnLimit() const noexcept;
+    int baseUploadsPerColumnLimit(int verticalRadius) const noexcept;
+    std::size_t estimateUploadQueueSize();
+    struct UploadBudgets
+    {
+        std::size_t byteBudget{kUploadBudgetBytesPerFrame};
+        int columnLimit{kVerticalStreamingConfig.uploadBasePerColumn};
+        std::size_t queueSize{0};
+    };
+    UploadBudgets computeUploadBudgets(int verticalRadius);
+    static int computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept;
+    int computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const;
+    int computeRingExpansionBudget(int backlogChunks) const;
+    int computeColumnJobCap(int backlogSteps, int backlogChunks) const;
+    int estimateMissingChunks(const glm::ivec3& center, int horizontalRadius, int verticalRadius) const;
 
     struct RingProgress
     {
@@ -584,7 +641,7 @@ private:
 
     RingProgress ensureVolume(const glm::ivec3& center, int horizontalRadius, int verticalRadius, int& jobBudget);
     void removeDistantChunks(const glm::ivec3& center, int horizontalThreshold, int verticalThreshold);
-    bool ensureChunkAsync(const glm::ivec3& coord);
+    bool ensureChunkAsync(const glm::ivec3& coord, bool surfaceOnly);
     void uploadReadyMeshes();
     void uploadChunkMesh(Chunk& chunk);
     void buildChunkMeshAsync(Chunk& chunk);
@@ -597,6 +654,7 @@ private:
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
     void generateChunkBlocks(Chunk& chunk);
+    void generateSurfaceOnlyChunk(Chunk& chunk);
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
@@ -605,6 +663,10 @@ private:
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
+    void buildSurfaceOnlyMesh(Chunk& chunk);
+    bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
+    void setLodEnabled(bool enabled);
+    bool lodEnabled() const noexcept;
 
     struct WeightedBiome
     {
@@ -671,6 +733,9 @@ private:
 
     std::array<BlockUVSet, toIndex(BlockId::Count)> blockUVTable_{};
     bool blockAtlasConfigured_{false};
+    bool lodEnabled_{false};
+    int lodNearRadius_{8};
+    bool lodModeDirty_{false};
 
     std::deque<std::weak_ptr<Chunk>> uploadQueue_;
     std::mutex uploadQueueMutex_;
@@ -687,6 +752,7 @@ private:
     mutable std::mutex pendingStructureMutex_;
 
     std::vector<std::thread> workerThreads_;
+    std::size_t workerThreadCount_{0};
     std::atomic<bool> shouldStop_;
 
     glm::ivec3 highlightedBlock_{0};
@@ -699,7 +765,21 @@ private:
     ProfilingCounters profilingCounters_{};
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
-    int perColumnUploadLimit_{kVerticalStreamingConfig.uploadBasePerColumn};
+    int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
+    std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
+    std::size_t lastUploadBytesUsed_{0};
+    std::size_t pendingUploadsLastFrame_{0};
+    int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
+    int lastGenerationBudget_{kVerticalStreamingConfig.generationBudget.baseJobsPerFrame};
+    int lastGenerationJobsIssued_{0};
+    int lastRingBudget_{kVerticalStreamingConfig.generationBudget.minRingExpansionsPerFrame};
+    int lastRingExpansionsUsed_{0};
+    int lastMissingChunks_{0};
+    int lastColumnCap_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
+    int lastBacklogSteps_{0};
+    int lastLoggedGenerationBudget_{-1};
+    int lastLoggedRingBudget_{-1};
+    int lastLoggedColumnCap_{-1};
 };
 
 // JobQueue implementations
@@ -1023,6 +1103,7 @@ ChunkManager::Impl::Impl(unsigned seed)
       viewDistance_(kDefaultViewDistance),
       targetViewDistance_(kDefaultViewDistance)
 {
+    gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
     startWorkerThreads();
 }
@@ -1109,10 +1190,27 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     const int clampedWorldY = std::max(worldY, 0);
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
 
+    if (lodModeDirty_)
+    {
+        clear();
+        lodModeDirty_ = false;
+    }
+
+    if (lodEnabled_)
+    {
+        lodNearRadius_ = std::max(4, targetViewDistance_ / 2);
+    }
+
     resetColumnBudgets();
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
     lastVerticalRadius_ = verticalRadius;
-    perColumnUploadLimit_ = uploadsPerColumnLimit();
+    gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
+    kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+
+    UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
+    uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
+    uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
+    pendingUploadsLastFrame_ = uploadBudgets.queueSize;
 
     jobQueue_.updatePriorityOrigin(centerChunk);
 
@@ -1121,7 +1219,53 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
         viewDistance_ = targetViewDistance_;
     }
 
-    int jobBudget = kMaxChunkJobsPerFrame;
+    const int missingChunks = estimateMissingChunks(centerChunk, targetViewDistance_, verticalRadius);
+    const int backlogSteps = computeBacklogSteps(missingChunks,
+                                                 kVerticalStreamingConfig.generationBudget.backlogStartThreshold,
+                                                 kVerticalStreamingConfig.generationBudget.backlogStepSize);
+    int columnCap = computeColumnJobCap(backlogSteps, missingChunks);
+    if (columnCap <= 0)
+    {
+        columnCap = std::numeric_limits<int>::max();
+    }
+
+    generationColumnCapThisFrame_ = columnCap;
+
+    const int generationBudgetTarget =
+        computeGenerationBudget(targetViewDistance_, verticalRadius, backlogSteps);
+    const int ringBudget = computeRingExpansionBudget(missingChunks);
+
+    lastGenerationBudget_ = generationBudgetTarget;
+    lastRingBudget_ = ringBudget;
+    lastMissingChunks_ = missingChunks;
+    lastColumnCap_ = generationColumnCapThisFrame_;
+    lastBacklogSteps_ = backlogSteps;
+
+    if (generationBudgetTarget != lastLoggedGenerationBudget_ ||
+        ringBudget != lastLoggedRingBudget_ ||
+        lastColumnCap_ != lastLoggedColumnCap_)
+    {
+        std::cout << "[ChunkManager] Adaptive streaming budgets -- backlog: " << missingChunks
+                  << " chunks, steps: " << backlogSteps
+                  << ", jobBudget: " << generationBudgetTarget
+                  << ", ringBudget: " << ringBudget
+                  << ", columnCap: ";
+        if (generationColumnCapThisFrame_ >= std::numeric_limits<int>::max())
+        {
+            std::cout << "unlimited";
+        }
+        else
+        {
+            std::cout << generationColumnCapThisFrame_;
+        }
+        std::cout << ", verticalRadius: " << verticalRadius << std::endl;
+
+        lastLoggedGenerationBudget_ = generationBudgetTarget;
+        lastLoggedRingBudget_ = ringBudget;
+        lastLoggedColumnCap_ = lastColumnCap_;
+    }
+
+    int jobBudget = generationBudgetTarget;
 
     for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
     {
@@ -1133,7 +1277,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     }
 
     int ringsExpanded = 0;
-    while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < kMaxRingsPerFrame)
+    while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < ringBudget)
     {
         const int nextRing = viewDistance_ + 1;
         RingProgress progress = ensureVolume(centerChunk, nextRing, verticalRadius, jobBudget);
@@ -1152,6 +1296,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 
         break;
     }
+
+    lastGenerationJobsIssued_ = std::clamp(generationBudgetTarget - jobBudget, 0, generationBudgetTarget);
+    lastRingExpansionsUsed_ = ringsExpanded;
 
     removeDistantChunks(centerChunk,
                         targetViewDistance_ + kVerticalStreamingConfig.horizontalEvictionSlack,
@@ -1329,6 +1476,11 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
         pendingStructureEdits_.clear();
     }
+
+    uploadBudgetBytesThisFrame_ = kUploadBudgetBytesPerFrame;
+    uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
+    lastUploadBytesUsed_ = 0;
+    pendingUploadsLastFrame_ = 0;
 
 }
 
@@ -1535,8 +1687,10 @@ void ChunkManager::Impl::toggleViewDistance()
 
             targetViewDistance_ = kExtendedViewDistance;
             kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+            const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
+            const long long totalColumns = width * width;
             std::cout << "Extended render distance target: " << targetViewDistance_ << " chunks (total: "
-                      << (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1) << " chunks)" << std::endl;
+                      << totalColumns << " chunks)" << std::endl;
         }
         else
         {
@@ -1544,7 +1698,10 @@ void ChunkManager::Impl::toggleViewDistance()
 
             targetViewDistance_ = kDefaultViewDistance;
             kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
-            std::cout << "Default render distance target: " << targetViewDistance_ << " chunks" << std::endl;
+            const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
+            const long long totalColumns = width * width;
+            std::cout << "Default render distance target: " << targetViewDistance_
+                      << " chunks (total: " << totalColumns << " chunks)" << std::endl;
         }
 
         if (viewDistance_ > targetViewDistance_)
@@ -1570,7 +1727,7 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
 {
     try
     {
-        const int clampedDistance = std::max(1, std::min(distance, 200));
+        const int clampedDistance = std::max(distance, 1);
         targetViewDistance_ = clampedDistance;
         kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
 
@@ -1579,13 +1736,35 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
             viewDistance_ = targetViewDistance_;
         }
 
+        const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
+        const long long totalColumns = width * width;
         std::cout << "Render distance set to: " << targetViewDistance_ << " chunks (total: "
-                  << (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1) << " chunks)" << std::endl;
+                  << totalColumns << " chunks)" << std::endl;
     }
     catch (const std::exception& ex)
     {
         std::cerr << "Error setting render distance: " << ex.what() << std::endl;
     }
+}
+
+void ChunkManager::Impl::setLodEnabled(bool enabled)
+{
+    if (lodEnabled_ == enabled)
+    {
+        return;
+    }
+
+    lodEnabled_ = enabled;
+    lodNearRadius_ = enabled ? std::max(4, targetViewDistance_ / 2) : 0;
+    lodModeDirty_ = true;
+
+    std::cout << "[ChunkManager] Surface LOD " << (enabled ? "enabled" : "disabled")
+              << " via F3 toggle" << std::endl;
+}
+
+bool ChunkManager::Impl::lodEnabled() const noexcept
+{
+    return lodEnabled_;
 }
 
 BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
@@ -1794,6 +1973,15 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.deferredUploads = profilingCounters_.deferredUploads.exchange(0, std::memory_order_relaxed);
     snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
     snapshot.verticalRadius = lastVerticalRadius_;
+    snapshot.generationBudget = lastGenerationBudget_;
+    snapshot.generationJobsIssued = lastGenerationJobsIssued_;
+    snapshot.ringExpansionBudget = lastRingBudget_;
+    snapshot.ringExpansionsUsed = lastRingExpansionsUsed_;
+    snapshot.missingChunks = lastMissingChunks_;
+    snapshot.generationBacklogSteps = lastBacklogSteps_;
+    snapshot.generationColumnCap =
+        (lastColumnCap_ >= std::numeric_limits<int>::max()) ? -1 : std::max(lastColumnCap_, 0);
+    snapshot.workerThreads = static_cast<int>(workerThreadCount_);
 
     const long long genMicros = profilingCounters_.generationMicros.exchange(0, std::memory_order_relaxed);
     const long long meshMicros = profilingCounters_.meshingMicros.exchange(0, std::memory_order_relaxed);
@@ -1809,15 +1997,39 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
                                     (1000.0 * static_cast<double>(meshed));
     }
 
+    snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
+    snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
+    const std::size_t pendingUploads = pendingUploadsLastFrame_;
+    snapshot.pendingUploadChunks = static_cast<int>(
+        std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+
     return snapshot;
 }
 
 void ChunkManager::Impl::startWorkerThreads()
 {
-    const unsigned numThreads = std::max(1u, std::thread::hardware_concurrency() / 2);
-    workerThreads_.reserve(numThreads);
+    shouldStop_.store(false, std::memory_order_release);
 
-    for (unsigned i = 0; i < numThreads; ++i)
+    unsigned concurrency = std::thread::hardware_concurrency();
+    if (concurrency == 0)
+    {
+        concurrency = 2;
+    }
+
+    const unsigned minimum = 2u;
+    unsigned desired = std::max(minimum, concurrency);
+
+    if (kVerticalStreamingConfig.maxWorkerThreads > 0)
+    {
+        desired = std::min(desired, static_cast<unsigned>(kVerticalStreamingConfig.maxWorkerThreads));
+    }
+
+    desired = std::max(minimum, desired);
+
+    workerThreadCount_ = static_cast<std::size_t>(desired);
+    workerThreads_.reserve(workerThreadCount_);
+
+    for (std::size_t i = 0; i < workerThreadCount_; ++i)
     {
         workerThreads_.emplace_back(&ChunkManager::Impl::workerThreadFunction, this);
     }
@@ -1836,6 +2048,7 @@ void ChunkManager::Impl::stopWorkerThreads()
         }
     }
     workerThreads_.clear();
+    workerThreadCount_ = 0;
 }
 
 void ChunkManager::Impl::workerThreadFunction()
@@ -2186,14 +2399,197 @@ void ChunkManager::Impl::resetColumnBudgets()
     jobsScheduledThisFrame_.clear();
 }
 
-int ChunkManager::Impl::uploadsPerColumnLimit() const noexcept
+int ChunkManager::Impl::baseUploadsPerColumnLimit(int verticalRadius) const noexcept
 {
-    const int ramp = std::max(0, lastVerticalRadius_ - kVerticalStreamingConfig.minRadiusChunks);
+    const int ramp = std::max(0, verticalRadius - kVerticalStreamingConfig.minRadiusChunks);
     const int divisor = std::max(1, kVerticalStreamingConfig.uploadRampDivisor);
     const int bonus = ramp / divisor;
     const int base = kVerticalStreamingConfig.uploadBasePerColumn;
     const int maxLimit = kVerticalStreamingConfig.uploadMaxPerColumn;
     return std::clamp(base + bonus, base, maxLimit);
+}
+
+std::size_t ChunkManager::Impl::estimateUploadQueueSize()
+{
+    std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+    std::size_t count = 0;
+    for (const auto& entry : uploadQueue_)
+    {
+        if (!entry.expired())
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int verticalRadius)
+{
+    UploadBudgets budgets{};
+    budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
+    budgets.byteBudget = kUploadBudgetBytesPerFrame;
+    budgets.queueSize = estimateUploadQueueSize();
+
+    const std::size_t queueSize = budgets.queueSize;
+    const std::size_t baseBudget = kUploadBudgetBytesPerFrame;
+
+    constexpr std::size_t kQueueThreshold = 12;
+    constexpr std::size_t kQueueStep = 8;
+    constexpr int kMaxBurstSteps = 3;
+    constexpr int kBurstMaxPerColumn = 12;
+
+    int backlogSteps = 0;
+    if (queueSize > kQueueThreshold)
+    {
+        backlogSteps = static_cast<int>((queueSize - kQueueThreshold + kQueueStep - 1) / kQueueStep);
+    }
+
+    if (queueSize > 0)
+    {
+        const bool hasFrameHeadroom = lastUploadBytesUsed_ + (baseBudget / 4) <= baseBudget;
+        if (hasFrameHeadroom)
+        {
+            backlogSteps = std::max(backlogSteps, 1);
+        }
+    }
+
+    backlogSteps = std::clamp(backlogSteps, 0, kMaxBurstSteps);
+
+    const int multiplier = std::clamp(1 + backlogSteps, 1, kMaxBurstSteps + 1);
+    budgets.byteBudget = baseBudget * static_cast<std::size_t>(multiplier);
+
+    if (backlogSteps > 0)
+    {
+        const int boostedLimit = budgets.columnLimit + backlogSteps;
+        budgets.columnLimit = std::min(boostedLimit, kBurstMaxPerColumn);
+    }
+
+    return budgets;
+}
+
+int ChunkManager::Impl::computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept
+{
+    if (backlog <= threshold)
+    {
+        return 0;
+    }
+
+    if (stepSize <= 0)
+    {
+        return 1;
+    }
+
+    const long long safeOver = static_cast<long long>(backlog) - static_cast<long long>(threshold);
+    const long long safeStep = std::max(stepSize, 1);
+    const long long steps = (safeOver + safeStep - 1) / safeStep;
+    return static_cast<int>(std::min(steps, static_cast<long long>(std::numeric_limits<int>::max())));
+}
+
+int ChunkManager::Impl::computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const
+{
+    const auto& tuning = kVerticalStreamingConfig.generationBudget;
+    const int safeHorizontal = std::max(horizontalRadius, 0);
+    const int safeVertical = std::max(verticalRadius, 0);
+
+    double budget = static_cast<double>(tuning.baseJobsPerFrame);
+    budget += static_cast<double>(tuning.jobsPerHorizontalRing) * static_cast<double>(safeHorizontal);
+    budget += static_cast<double>(tuning.jobsPerVerticalLayer) * static_cast<double>(safeVertical);
+    budget += static_cast<double>(tuning.backlogBoostPerStep)
+              * static_cast<double>(std::max(backlogSteps, 0));
+
+    long long result = static_cast<long long>(std::ceil(budget));
+    if (tuning.maxJobsPerFrame > 0)
+    {
+        result = std::min(result, static_cast<long long>(tuning.maxJobsPerFrame));
+    }
+
+    result = std::max(result, 1ll);
+    return static_cast<int>(std::min(result, static_cast<long long>(std::numeric_limits<int>::max())));
+}
+
+int ChunkManager::Impl::computeRingExpansionBudget(int backlogChunks) const
+{
+    const auto& tuning = kVerticalStreamingConfig.generationBudget;
+    const int minRings = std::max(0, tuning.minRingExpansionsPerFrame);
+    const int maxRings = std::max(minRings, tuning.maxRingExpansionsPerFrame);
+
+    if (maxRings == 0)
+    {
+        return 0;
+    }
+
+    if (tuning.backlogRingStepSize <= 0)
+    {
+        return maxRings;
+    }
+
+    const int steps = computeBacklogSteps(backlogChunks,
+                                          tuning.backlogStartThreshold,
+                                          tuning.backlogRingStepSize);
+
+    int budget = minRings + steps;
+    budget = std::clamp(budget, minRings, maxRings);
+    return budget;
+}
+
+int ChunkManager::Impl::computeColumnJobCap(int backlogSteps, int backlogChunks) const
+{
+    int baseCap = kVerticalStreamingConfig.maxGenerationJobsPerColumn;
+    if (baseCap <= 0)
+    {
+        return std::numeric_limits<int>::max();
+    }
+
+    if (kVerticalStreamingConfig.backlogColumnCapReleaseThreshold > 0 &&
+        backlogChunks >= kVerticalStreamingConfig.backlogColumnCapReleaseThreshold)
+    {
+        return std::numeric_limits<int>::max();
+    }
+
+    const int boostPerStep = kVerticalStreamingConfig.generationBudget.columnCapBoostPerStep;
+    if (boostPerStep > 0 && backlogSteps > 0)
+    {
+        const long long boosted = static_cast<long long>(baseCap) +
+                                  static_cast<long long>(backlogSteps) *
+                                      static_cast<long long>(boostPerStep);
+        baseCap = static_cast<int>(std::min(boosted, static_cast<long long>(std::numeric_limits<int>::max())));
+    }
+
+    return std::max(baseCap, 0);
+}
+
+int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
+                                              int horizontalRadius,
+                                              int verticalRadius) const
+{
+    const int minChunkY = std::max(0, center.y - std::max(verticalRadius, 0));
+    const int maxChunkY = std::max(minChunkY, center.y + std::max(verticalRadius, 0));
+
+    int missing = 0;
+    std::lock_guard<std::mutex> lock(chunksMutex);
+    for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
+    {
+        for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
+        {
+            if (std::max(std::abs(dx), std::abs(dz)) > horizontalRadius)
+            {
+                continue;
+            }
+
+            const int chunkX = center.x + dx;
+            const int chunkZ = center.z + dz;
+            for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
+            {
+                const glm::ivec3 coord{chunkX, chunkY, chunkZ};
+                if (chunks_.find(coord) == chunks_.end())
+                {
+                    ++missing;
+                }
+            }
+        }
+    }
+
+    return missing;
 }
 
 int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
@@ -2284,7 +2680,9 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
 
     std::unordered_set<glm::ivec2, ColumnHasher> visitedColumns;
     visitedColumns.reserve(static_cast<std::size_t>(std::max(1, horizontalRadius * 8)));
-    const int maxJobsPerColumn = std::max(0, kVerticalStreamingConfig.maxGenerationJobsPerColumn);
+    const int maxJobsPerColumn = generationColumnCapThisFrame_;
+    const bool enforceColumnCap = maxJobsPerColumn > 0 &&
+                                  maxJobsPerColumn < std::numeric_limits<int>::max();
 
     auto enqueueColumn = [&](int chunkX, int chunkZ) {
         glm::ivec2 column{chunkX, chunkZ};
@@ -2348,21 +2746,54 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         }
 
         const glm::ivec2 columnKey{candidate.coord.x, candidate.coord.z};
+        int& columnJobs = jobsScheduledThisFrame_[columnKey];
+        const bool surfaceOnly = shouldUseSurfaceOnly(center, candidate.coord);
+
         if (auto existing = getChunkShared(candidate.coord))
         {
-            (void)existing;
+            if (existing->surfaceOnly != surfaceOnly && existing->inFlight.load(std::memory_order_acquire) == 0)
+            {
+                if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
+                {
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> meshLock(existing->meshMutex);
+                    std::fill(existing->blocks.begin(), existing->blocks.end(), BlockId::Air);
+                    existing->meshData.clear();
+                    existing->hasBlocks = false;
+                    if (surfaceOnly)
+                    {
+                        if (!existing->lodData)
+                        {
+                            existing->lodData = std::make_unique<FarChunk>();
+                        }
+                    }
+                    else
+                    {
+                        existing->lodData.reset();
+                    }
+                }
+
+                existing->surfaceOnly = surfaceOnly;
+                existing->state.store(ChunkState::Generating, std::memory_order_release);
+                enqueueJob(existing, JobType::Generate, candidate.coord);
+                --jobBudget;
+                ++columnJobs;
+                missingFound = true;
+            }
             continue;
         }
 
         missingFound = true;
 
-        int& columnJobs = jobsScheduledThisFrame_[columnKey];
-        if (maxJobsPerColumn > 0 && columnJobs >= maxJobsPerColumn)
+        if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
         {
             continue;
         }
 
-        if (ensureChunkAsync(candidate.coord))
+        if (ensureChunkAsync(candidate.coord, surfaceOnly))
         {
             --jobBudget;
             ++columnJobs;
@@ -2443,7 +2874,18 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
     }
 }
 
-bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
+bool ChunkManager::Impl::shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept
+{
+    if (!lodEnabled_)
+    {
+        return false;
+    }
+
+    const int horizontalDistance = std::max(std::abs(coord.x - center.x), std::abs(coord.z - center.z));
+    return horizontalDistance > lodNearRadius_;
+}
+
+bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool surfaceOnly)
 {
     if (coord.y < 0)
     {
@@ -2463,6 +2905,18 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
             chunk = acquireChunk(coord);
             chunk->state.store(ChunkState::Generating, std::memory_order_release);
+            chunk->surfaceOnly = surfaceOnly;
+            if (surfaceOnly)
+            {
+                if (!chunk->lodData)
+                {
+                    chunk->lodData = std::make_unique<FarChunk>();
+                }
+            }
+            else
+            {
+                chunk->lodData.reset();
+            }
             chunks_.emplace(coord, chunk);
         }
 
@@ -2479,11 +2933,12 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
 void ChunkManager::Impl::uploadReadyMeshes()
 {
-    std::size_t remainingBudget = kUploadBudgetBytesPerFrame;
+    const std::size_t initialBudget = uploadBudgetBytesThisFrame_;
+    std::size_t remainingBudget = initialBudget;
     bool uploadedAnything = false;
     std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
     std::size_t attempts = 0;
-    const int columnUploadLimit = std::max(1, perColumnUploadLimit_);
+    const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
@@ -2542,6 +2997,16 @@ void ChunkManager::Impl::uploadReadyMeshes()
             remainingBudget -= totalBytes;
         }
     }
+    if (initialBudget > remainingBudget)
+    {
+        lastUploadBytesUsed_ = initialBudget - remainingBudget;
+    }
+    else
+    {
+        lastUploadBytesUsed_ = 0;
+    }
+
+    pendingUploadsLastFrame_ = estimateUploadQueueSize();
 }
 
 void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
@@ -2580,6 +3045,60 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
     chunk.meshData.clear();
 }
 
+void ChunkManager::Impl::buildSurfaceOnlyMesh(Chunk& chunk)
+{
+    if (!chunk.lodData)
+    {
+        chunk.meshData.clear();
+        return;
+    }
+
+    FarChunk& lod = *chunk.lodData;
+    chunk.meshData.clear();
+
+    const glm::vec3 baseOrigin = lod.origin;
+    const glm::vec3 normal{0.0f, 1.0f, 0.0f};
+    const float step = static_cast<float>(lod.lodStep);
+
+    for (int rx = 0; rx < FarChunk::kColumnsX; ++rx)
+    {
+        for (int rz = 0; rz < FarChunk::kColumnsZ; ++rz)
+        {
+            const FarChunk::SurfaceCell& cell = lod.strata[FarChunk::index(rx, rz)];
+            if (cell.block == BlockId::Air || cell.worldY == std::numeric_limits<int>::min())
+            {
+                continue;
+            }
+
+            const float worldY = static_cast<float>(cell.worldY + 1);
+            const float minX = baseOrigin.x + static_cast<float>(rx) * step;
+            const float maxX = baseOrigin.x + static_cast<float>(rx + 1) * step;
+            const float minZ = baseOrigin.z + static_cast<float>(rz) * step;
+            const float maxZ = baseOrigin.z + static_cast<float>(rz + 1) * step;
+
+            const glm::vec3 p0{minX, worldY, minZ};
+            const glm::vec3 p1{maxX, worldY, minZ};
+            const glm::vec3 p2{maxX, worldY, maxZ};
+            const glm::vec3 p3{minX, worldY, maxZ};
+
+            const auto& uv = blockUVTable_[toIndex(cell.block)].faces[toIndex(BlockFace::Top)];
+
+            const std::uint32_t baseIndex = static_cast<std::uint32_t>(chunk.meshData.vertices.size());
+            chunk.meshData.vertices.push_back(Vertex{p0, normal, glm::vec2{0.0f, 0.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p1, normal, glm::vec2{1.0f, 0.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p2, normal, glm::vec2{1.0f, 1.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p3, normal, glm::vec2{0.0f, 1.0f}, uv.base, uv.size});
+
+            chunk.meshData.indices.push_back(baseIndex + 0);
+            chunk.meshData.indices.push_back(baseIndex + 1);
+            chunk.meshData.indices.push_back(baseIndex + 2);
+            chunk.meshData.indices.push_back(baseIndex + 0);
+            chunk.meshData.indices.push_back(baseIndex + 2);
+            chunk.meshData.indices.push_back(baseIndex + 3);
+        }
+    }
+}
+
 void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 {
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
@@ -2587,6 +3106,13 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 
     if (!chunk.hasBlocks)
     {
+        chunk.meshReady = true;
+        return;
+    }
+
+    if (chunk.surfaceOnly)
+    {
+        buildSurfaceOnlyMesh(chunk);
         chunk.meshReady = true;
         return;
     }
@@ -3520,10 +4046,126 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     return sample;
 }
 
+void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
+{
+    std::lock_guard<std::mutex> lock(chunk.meshMutex);
+    std::fill(chunk.blocks.begin(), chunk.blocks.end(), BlockId::Air);
+
+    if (!chunk.lodData)
+    {
+        chunk.lodData = std::make_unique<FarChunk>();
+    }
+
+    FarChunk& lod = *chunk.lodData;
+    lod.origin = glm::vec3(static_cast<float>(chunk.coord.x * kChunkSizeX),
+                           static_cast<float>(chunk.minWorldY),
+                           static_cast<float>(chunk.coord.z * kChunkSizeZ));
+    lod.size = glm::ivec3{kChunkSizeX, kChunkSizeY, kChunkSizeZ};
+    lod.lodStep = FarChunk::kColumnStep;
+    lod.thickness = 1;
+
+    const int baseWorldX = chunk.coord.x * kChunkSizeX;
+    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
+    const int slabMinWorldY = chunk.minWorldY;
+    const int slabMaxWorldY = chunk.maxWorldY;
+
+    bool anySolid = false;
+
+    for (int rx = 0; rx < FarChunk::kColumnsX; ++rx)
+    {
+        for (int rz = 0; rz < FarChunk::kColumnsZ; ++rz)
+        {
+            int bestWorldY = std::numeric_limits<int>::min();
+            BlockId bestBlock = BlockId::Air;
+            int bestLocalX = -1;
+            int bestLocalZ = -1;
+
+            for (int localX = rx * FarChunk::kColumnStep;
+                 localX < (rx + 1) * FarChunk::kColumnStep && localX < kChunkSizeX;
+                 ++localX)
+            {
+                for (int localZ = rz * FarChunk::kColumnStep;
+                     localZ < (rz + 1) * FarChunk::kColumnStep && localZ < kChunkSizeZ;
+                     ++localZ)
+                {
+                    const int worldX = baseWorldX + localX;
+                    const int worldZ = baseWorldZ + localZ;
+
+                    ColumnSample sample = sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
+                    if (!sample.dominantBiome || !sample.slabHasSolid)
+                    {
+                        continue;
+                    }
+
+                    BlockId surfaceBlock = sample.dominantBiome->surfaceBlock;
+                    if (sample.dominantBiome->id != BiomeId::Ocean)
+                    {
+                        constexpr float kBeachDistanceRange = 6.0f;
+                        constexpr int kBeachHeightBand = 2;
+                        const bool nearSeaLevel = std::abs(sample.surfaceY - kGlobalSeaLevel) <= kBeachHeightBand;
+                        if (nearSeaLevel && sample.distanceToShore <= kBeachDistanceRange)
+                        {
+                            const float beachNoise = hashToUnitFloat(worldX, sample.surfaceY, worldZ);
+                            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
+                        }
+                    }
+
+                    const int highestSolidWorld = sample.slabHighestSolidY;
+                    if (highestSolidWorld < slabMinWorldY || highestSolidWorld > slabMaxWorldY)
+                    {
+                        continue;
+                    }
+
+                    if (highestSolidWorld > bestWorldY)
+                    {
+                        bestWorldY = highestSolidWorld;
+                        bestBlock = surfaceBlock;
+                        bestLocalX = localX;
+                        bestLocalZ = localZ;
+                    }
+                }
+            }
+
+            FarChunk::SurfaceCell cell{};
+
+            if (bestLocalX >= 0 && bestBlock != BlockId::Air)
+            {
+                cell.worldY = bestWorldY;
+                cell.block = bestBlock;
+
+                const int localY = bestWorldY - chunk.minWorldY;
+                if (localY >= 0 && localY < kChunkSizeY)
+                {
+                    chunk.blocks[blockIndex(bestLocalX, localY, bestLocalZ)] = bestBlock;
+                    anySolid = true;
+                }
+            }
+
+            lod.strata[FarChunk::index(rx, rz)] = cell;
+        }
+    }
+
+    chunk.hasBlocks = anySolid;
+    if (anySolid)
+    {
+        columnManager_.updateChunk(chunk);
+    }
+    else
+    {
+        columnManager_.removeChunk(chunk);
+    }
+}
+
 void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 {
     std::vector<PendingStructureEdit> externalEdits;
     bool anySolid = false;
+
+    if (chunk.surfaceOnly)
+    {
+        generateSurfaceOnlyChunk(chunk);
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
@@ -3984,6 +4626,16 @@ int ChunkManager::viewDistance() const noexcept
 void ChunkManager::setRenderDistance(int distance) noexcept
 {
     impl_->setRenderDistance(distance);
+}
+
+void ChunkManager::setLodEnabled(bool enabled)
+{
+    impl_->setLodEnabled(enabled);
+}
+
+bool ChunkManager::lodEnabled() const noexcept
+{
+    return impl_->lodEnabled();
 }
 
 BlockId ChunkManager::blockAt(const glm::ivec3& worldPos) const noexcept

@@ -783,6 +783,11 @@ void main()
                 profilingStream << " Evict " << snapshot.evictedChunks;
             }
 
+            if (snapshot.workerThreads > 0)
+            {
+                profilingStream << " | Workers " << snapshot.workerThreads;
+            }
+
             const int verticalSpan = (snapshot.verticalRadius * 2 + 1) * kChunkSizeY;
             profilingStream << " | View " << chunkManager.viewDistance()
                             << "x" << snapshot.verticalRadius
@@ -803,6 +808,16 @@ void main()
         }
         inputContext.f1JustPressed = f1JustPressed;
         inputContext.f1Pressed = f1CurrentlyPressed;
+
+        bool f3CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
+        bool f3JustPressed = f3CurrentlyPressed && !inputContext.f3Pressed;
+        if (f3JustPressed)
+        {
+            inputContext.lodEnabled = !inputContext.lodEnabled;
+            chunkManager.setLodEnabled(inputContext.lodEnabled);
+        }
+        inputContext.f3JustPressed = f3JustPressed;
+        inputContext.f3Pressed = f3CurrentlyPressed;
 
         // Only close window with ESC if GUI is not active
         // (ESC to close GUI is handled in computePlayerInputState)

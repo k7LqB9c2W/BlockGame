@@ -783,6 +783,11 @@ void main()
                 profilingStream << " Evict " << snapshot.evictedChunks;
             }
 
+            if (snapshot.workerThreads > 0)
+            {
+                profilingStream << " | Workers " << snapshot.workerThreads;
+            }
+
             const int verticalSpan = (snapshot.verticalRadius * 2 + 1) * kChunkSizeY;
             profilingStream << " | View " << chunkManager.viewDistance()
                             << "x" << snapshot.verticalRadius

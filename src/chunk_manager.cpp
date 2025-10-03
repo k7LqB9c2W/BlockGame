@@ -668,6 +668,17 @@ private:
     void buildSurfaceOnlyMesh(Chunk& chunk);
     bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
 
+    struct BiomeSite
+    {
+        glm::vec2 worldPosXZ{0.0f};
+    };
+
+    struct BiomeRegionInfo
+    {
+        const BiomeDefinition* definition{nullptr};
+        BiomeSite site{};
+    };
+
     struct WeightedBiome
     {
         const BiomeDefinition* biome{nullptr};
@@ -716,6 +727,8 @@ private:
                                                     std::size_t weightCount,
                                                     int biomeRegionX,
                                                     int biomeRegionZ) const;
+    static BiomeSite computeBiomeSite(int regionX, int regionZ) noexcept;
+    const BiomeRegionInfo& biomeRegionInfo(int regionX, int regionZ) const;
     const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
 
 
@@ -750,6 +763,8 @@ private:
     ColumnManager columnManager_;
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
+    mutable std::unordered_map<glm::ivec2, BiomeRegionInfo, ColumnHasher> biomeRegionCache_;
+    mutable std::mutex biomeRegionCacheMutex_;
 
     std::vector<std::thread> workerThreads_;
     std::size_t workerThreadCount_{0};
@@ -3566,13 +3581,51 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
-const BiomeDefinition& ChunkManager::Impl::biomeForRegion(int regionX, int regionZ) const
+ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(int regionX, int regionZ) noexcept
 {
+    constexpr float kMarginRatio = 0.2f;
+    const float regionWidth = static_cast<float>(kBiomeSizeInChunks * kChunkSizeX);
+    const float regionDepth = static_cast<float>(kBiomeSizeInChunks * kChunkSizeZ);
+    const float marginX = regionWidth * kMarginRatio;
+    const float marginZ = regionDepth * kMarginRatio;
+    const float jitterX = hashToUnitFloat(regionX, 137, regionZ);
+    const float jitterZ = hashToUnitFloat(regionX, 613, regionZ);
+    const float availableWidth = std::max(regionWidth - marginX * 2.0f, 0.0f);
+    const float availableDepth = std::max(regionDepth - marginZ * 2.0f, 0.0f);
+    const float baseX = static_cast<float>(regionX) * regionWidth;
+    const float baseZ = static_cast<float>(regionZ) * regionDepth;
+
+    BiomeSite site{};
+    site.worldPosXZ.x = baseX + marginX + availableWidth * jitterX;
+    site.worldPosXZ.y = baseZ + marginZ + availableDepth * jitterZ;
+    return site;
+}
+
+const ChunkManager::Impl::BiomeRegionInfo& ChunkManager::Impl::biomeRegionInfo(int regionX, int regionZ) const
+{
+    const glm::ivec2 key{regionX, regionZ};
+    std::lock_guard<std::mutex> lock(biomeRegionCacheMutex_);
+    auto it = biomeRegionCache_.find(key);
+    if (it != biomeRegionCache_.end())
+    {
+        return it->second;
+    }
+
+    BiomeRegionInfo info{};
     const float selector = hashToUnitFloat(regionX, 31, regionZ);
     const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
     const std::size_t biomeIndex =
         std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
-    return kBiomeDefinitions[biomeIndex];
+    info.definition = &kBiomeDefinitions[biomeIndex];
+    info.site = computeBiomeSite(regionX, regionZ);
+
+    auto [insertedIt, inserted] = biomeRegionCache_.emplace(key, info);
+    return insertedIt->second;
+}
+
+const BiomeDefinition& ChunkManager::Impl::biomeForRegion(int regionX, int regionZ) const
+{
+    return *biomeRegionInfo(regionX, regionZ).definition;
 }
 
 ChunkManager::Impl::TerrainBasisSample ChunkManager::Impl::computeTerrainBasis(int worldX, int worldZ) const
@@ -3708,133 +3761,104 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
     const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
 
-    const int regionBaseChunkX = biomeRegionX * kBiomeSizeInChunks;
-    const int regionBaseChunkZ = biomeRegionZ * kBiomeSizeInChunks;
-    const int regionBaseBlockX = regionBaseChunkX * kChunkSizeX;
-    const int regionBaseBlockZ = regionBaseChunkZ * kChunkSizeZ;
+    const glm::vec2 columnPosition{static_cast<float>(worldX) + 0.5f, static_cast<float>(worldZ) + 0.5f};
 
-    const int regionSizeBlocksX = kBiomeSizeInChunks * kChunkSizeX;
-    const int regionSizeBlocksZ = kBiomeSizeInChunks * kChunkSizeZ;
-
-    const int localBlockX = worldX - regionBaseBlockX;
-    const int localBlockZ = worldZ - regionBaseBlockZ;
-
-    constexpr float kBiomeBlendRangeBlocks = 4.0f;
-
-    auto smooth01 = [](float t)
+    struct CandidateSite
     {
-        t = std::clamp(t, 0.0f, 1.0f);
-        return t * t * (3.0f - 2.0f * t);
+        const BiomeDefinition* biome{nullptr};
+        glm::vec2 positionXZ{0.0f};
+        float distanceSquared{std::numeric_limits<float>::max()};
     };
 
-    auto edgeInfluence = [&](float distance)
+    std::array<CandidateSite, 9> candidateSites{};
+    std::size_t candidateCount = 0;
+    for (int regionOffsetZ = -1; regionOffsetZ <= 1; ++regionOffsetZ)
     {
-        if (distance >= kBiomeBlendRangeBlocks)
+        for (int regionOffsetX = -1; regionOffsetX <= 1; ++regionOffsetX)
         {
-            return 0.0f;
+            const BiomeRegionInfo& info =
+                biomeRegionInfo(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);
+
+            CandidateSite site{};
+            site.biome = info.definition;
+            site.positionXZ = info.site.worldPosXZ;
+            const glm::vec2 delta = site.positionXZ - columnPosition;
+            site.distanceSquared = delta.x * delta.x + delta.y * delta.y;
+            candidateSites[candidateCount++] = site;
         }
-
-        const float normalized = 1.0f - (distance / kBiomeBlendRangeBlocks);
-        return smooth01(normalized);
-    };
-
-    const float distanceLeft = static_cast<float>(localBlockX);
-    const float distanceRight = static_cast<float>((regionSizeBlocksX - 1) - localBlockX);
-    const float distanceNorth = static_cast<float>(localBlockZ);
-    const float distanceSouth = static_cast<float>((regionSizeBlocksZ - 1) - localBlockZ);
-
-    auto edgeVariation = [&](int offsetX, int offsetZ)
-    {
-        const float sampleX = static_cast<float>(worldX + offsetX * 31);
-        const float sampleZ = static_cast<float>(worldZ + offsetZ * 31);
-        const float variationNoise = noise_.fbm(sampleX * 0.07f, sampleZ * 0.07f, 3, 0.55f, 2.0f);
-        return std::clamp(variationNoise * 0.5f + 0.5f, 0.0f, 1.0f);
-    };
-
-    float leftWeightAxis = edgeInfluence(distanceLeft);
-    float rightWeightAxis = edgeInfluence(distanceRight);
-    float northWeightAxis = edgeInfluence(distanceNorth);
-    float southWeightAxis = edgeInfluence(distanceSouth);
-
-    leftWeightAxis *= 0.3f + edgeVariation(-1, 0) * 0.7f;
-    rightWeightAxis *= 0.3f + edgeVariation(1, 0) * 0.7f;
-    northWeightAxis *= 0.3f + edgeVariation(0, -1) * 0.7f;
-    southWeightAxis *= 0.3f + edgeVariation(0, 1) * 0.7f;
-
-    float centerWeightAxisX = 1.0f - (leftWeightAxis + rightWeightAxis);
-    float centerWeightAxisZ = 1.0f - (northWeightAxis + southWeightAxis);
-    centerWeightAxisX = std::clamp(centerWeightAxisX, 0.0f, 1.0f);
-    centerWeightAxisZ = std::clamp(centerWeightAxisZ, 0.0f, 1.0f);
-
-    const float axisSumX = leftWeightAxis + rightWeightAxis + centerWeightAxisX;
-    if (axisSumX > std::numeric_limits<float>::epsilon())
-    {
-        leftWeightAxis /= axisSumX;
-        rightWeightAxis /= axisSumX;
-        centerWeightAxisX /= axisSumX;
     }
 
-    const float axisSumZ = northWeightAxis + southWeightAxis + centerWeightAxisZ;
-    if (axisSumZ > std::numeric_limits<float>::epsilon())
+    constexpr std::size_t kMaxConsideredSites = 3;
+    std::size_t sitesToConsider = std::min<std::size_t>(kMaxConsideredSites, candidateCount);
+    if (sitesToConsider > 0)
     {
-        northWeightAxis /= axisSumZ;
-        southWeightAxis /= axisSumZ;
-        centerWeightAxisZ /= axisSumZ;
+        std::partial_sort(candidateSites.begin(), candidateSites.begin() + sitesToConsider,
+                          candidateSites.begin() + candidateCount,
+                          [](const CandidateSite& lhs, const CandidateSite& rhs)
+                          {
+                              return lhs.distanceSquared < rhs.distanceSquared;
+                          });
     }
 
     std::array<WeightedBiome, 5> weightedBiomes{};
     std::size_t weightCount = 0;
 
-    auto addBiomeWeight = [&](int regionOffsetX, int regionOffsetZ, float weight)
+    if (sitesToConsider == 0)
     {
-        if (weight <= 0.0f)
+        const BiomeDefinition& fallbackBiome = biomeForRegion(biomeRegionX, biomeRegionZ);
+        weightedBiomes[weightCount++] = WeightedBiome{&fallbackBiome, 1.0f};
+    }
+    else
+    {
+        std::array<float, kMaxConsideredSites> rawWeights{};
+        std::array<float, kMaxConsideredSites> distances{};
+        for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
-            return;
+            distances[i] = std::sqrt(candidateSites[i].distanceSquared);
         }
 
-        const float scatterNoise =
-            hashToUnitFloat(worldX + regionOffsetX * 53, 157 + regionOffsetX * 31 + regionOffsetZ * 17,
-                            worldZ + regionOffsetZ * 71);
-        const bool isCenterRegion = (regionOffsetX == 0) && (regionOffsetZ == 0);
-        const float scatterMin = isCenterRegion ? 0.85f : 0.4f;
-        const float scatterMax = isCenterRegion ? 1.1f : 1.25f;
-        const float scatter = scatterMin + (scatterMax - scatterMin) * scatterNoise;
-        weight *= scatter;
+        const float baseDistance = distances[0];
+        const float farthestDistance = distances[sitesToConsider - 1];
+        const float denom = std::max(farthestDistance - baseDistance, 1e-3f);
 
-        if (weight <= 0.0f)
+        rawWeights[0] = 1.0f;
+        for (std::size_t i = 1; i < sitesToConsider; ++i)
         {
-            return;
+            const float normalizedGap = (distances[i] - baseDistance) / denom;
+            const float blend = std::clamp(1.0f - normalizedGap, 0.0f, 1.0f);
+            rawWeights[i] = blend * 0.6f;
         }
 
-        const BiomeDefinition& biome = biomeForRegion(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);
-        weightedBiomes[weightCount++] = WeightedBiome{&biome, weight};
-    };
+        float totalWeight = 0.0f;
+        for (std::size_t i = 0; i < sitesToConsider; ++i)
+        {
+            totalWeight += rawWeights[i];
+        }
 
-    addBiomeWeight(0, 0, centerWeightAxisX * centerWeightAxisZ);
-    addBiomeWeight(-1, 0, leftWeightAxis * centerWeightAxisZ);
-    addBiomeWeight(1, 0, rightWeightAxis * centerWeightAxisZ);
-    addBiomeWeight(0, -1, centerWeightAxisX * northWeightAxis);
-    addBiomeWeight(0, 1, centerWeightAxisX * southWeightAxis);
+        if (totalWeight <= std::numeric_limits<float>::epsilon())
+        {
+            rawWeights.fill(0.0f);
+            rawWeights[0] = 1.0f;
+            sitesToConsider = 1;
+            totalWeight = 1.0f;
+        }
+
+        for (std::size_t i = 0; i < sitesToConsider; ++i)
+        {
+            const float normalizedWeight = rawWeights[i] / totalWeight;
+            if (normalizedWeight <= 0.0f || candidateSites[i].biome == nullptr)
+            {
+                continue;
+            }
+
+            weightedBiomes[weightCount++] = WeightedBiome{candidateSites[i].biome, normalizedWeight};
+        }
+    }
 
     if (weightCount == 0)
     {
-        addBiomeWeight(0, 0, 1.0f);
-    }
-
-    float totalWeight = 0.0f;
-    for (std::size_t i = 0; i < weightCount; ++i)
-    {
-        totalWeight += weightedBiomes[i].weight;
-    }
-
-    if (totalWeight <= std::numeric_limits<float>::epsilon())
-    {
-        totalWeight = 1.0f;
-    }
-
-    for (std::size_t i = 0; i < weightCount; ++i)
-    {
-        weightedBiomes[i].weight /= totalWeight;
+        const BiomeDefinition& fallbackBiome = biomeForRegion(biomeRegionX, biomeRegionZ);
+        weightedBiomes[weightCount++] = WeightedBiome{&fallbackBiome, 1.0f};
     }
 
     const TerrainBasisSample basis = computeTerrainBasis(worldX, worldZ);

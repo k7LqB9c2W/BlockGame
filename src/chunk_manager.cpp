@@ -178,6 +178,8 @@ struct BiomeDefinition
     float heightScale;
     int minHeight;
     int maxHeight;
+    float baseSlopeBias; // Bias toward flattening macro terrain (0 = legacy shaping, 1 = offset-driven)
+    float maxGradient;   // Maximum deviation from the local base height before clamping (blocks)
 };
 
 constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
@@ -189,14 +191,58 @@ constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
 constexpr int kGrasslandsMaxSurfaceHeight = 61;
 constexpr int kForestMaxSurfaceHeight = 61;
 constexpr int kDesertMaxSurfaceHeight = 60;
-constexpr int kOceanSeaLevel = 20;
-constexpr int kOceanMaxSurfaceHeight = kOceanSeaLevel;
+constexpr int kGlobalSeaLevel = 20;
+constexpr int kOceanMaxSurfaceHeight = kGlobalSeaLevel;
 
 constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
-    {BiomeId::Grasslands, "Grasslands", BlockId::Grass, BlockId::Grass, false, 0.0f, 16.0f, 1.0f, 2, kGrasslandsMaxSurfaceHeight},
-    {BiomeId::Forest, "Forest", BlockId::Grass, BlockId::Grass, true, 3.5f, 18.0f, 1.1f, 3, kForestMaxSurfaceHeight},
-    {BiomeId::Desert, "Desert", BlockId::Sand, BlockId::Sand, false, 0.0f, 12.0f, 0.5f, 1, kDesertMaxSurfaceHeight},
-    {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, static_cast<float>(kOceanSeaLevel), 0.0f, kOceanSeaLevel, kOceanMaxSurfaceHeight},
+    {BiomeId::Grasslands,
+     "Grasslands",
+     BlockId::Grass,
+     BlockId::Grass,
+     false,
+     0.0f,
+     16.0f,
+     0.35f,
+     2,
+     kGrasslandsMaxSurfaceHeight,
+     0.65f,
+     6.0f},
+    {BiomeId::Forest,
+     "Forest",
+     BlockId::Grass,
+     BlockId::Grass,
+     true,
+     3.5f,
+     19.0f,
+     0.45f,
+     3,
+     kForestMaxSurfaceHeight,
+     0.45f,
+     9.0f},
+    {BiomeId::Desert,
+     "Desert",
+     BlockId::Sand,
+     BlockId::Sand,
+     false,
+     0.0f,
+     12.0f,
+     0.35f,
+     1,
+     kDesertMaxSurfaceHeight,
+     0.7f,
+     5.0f},
+    {BiomeId::Ocean,
+     "Ocean",
+     BlockId::Water,
+     BlockId::Water,
+     false,
+     0.0f,
+     static_cast<float>(kGlobalSeaLevel),
+     0.0f,
+     kGlobalSeaLevel,
+     kOceanMaxSurfaceHeight,
+     1.0f,
+     1.0f},
 } };
 
 struct ColumnSample
@@ -207,6 +253,14 @@ struct ColumnSample
     int minSurfaceY{0};
     int maxSurfaceY{0};
     int slabHighestSolidY{std::numeric_limits<int>::min()};
+    float continentMask{0.0f};
+    float baseElevation{0.0f};
+    float oceanContribution{0.0f};
+    float landContribution{0.0f};
+    float oceanShare{0.0f};
+    float landShare{0.0f};
+    float shorelineBlend{0.0f};
+    float distanceToShore{0.0f};
     bool slabHasSolid{false};
 };
 
@@ -551,6 +605,56 @@ private:
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
+
+    struct WeightedBiome
+    {
+        const BiomeDefinition* biome{nullptr};
+        float weight{0.0f};
+    };
+
+    struct TerrainBasisSample
+    {
+        float continentMask{0.0f};
+        float mainTerrain{0.0f};
+        float mountainNoise{0.0f};
+        float mediumNoise{0.0f};
+        float detailNoise{0.0f};
+        float combinedNoise{0.0f};
+        float baseElevation{0.0f};
+    };
+
+    struct BiomePerturbationSample
+    {
+        float blendedOffset{0.0f};
+        float blendedScale{0.0f};
+        float blendedMinHeight{0.0f};
+        float blendedMaxHeight{0.0f};
+        float blendedSlopeBias{0.0f};
+        float blendedMaxGradient{0.0f};
+        float oceanWeight{0.0f};
+        float oceanOffset{0.0f};
+        float oceanScale{0.0f};
+        float oceanMinHeight{0.0f};
+        float oceanMaxHeight{0.0f};
+        float oceanSlopeBias{0.0f};
+        float oceanMaxGradient{0.0f};
+        float landWeight{0.0f};
+        float landOffset{0.0f};
+        float landScale{0.0f};
+        float landMinHeight{0.0f};
+        float landMaxHeight{0.0f};
+        float landSlopeBias{0.0f};
+        float landMaxGradient{0.0f};
+        const BiomeDefinition* dominantBiome{nullptr};
+        float dominantWeight{0.0f};
+    };
+
+    TerrainBasisSample computeTerrainBasis(int worldX, int worldZ) const;
+    BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
+                                                    std::size_t weightCount,
+                                                    int biomeRegionX,
+                                                    int biomeRegionZ) const;
+    const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
 
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
@@ -2936,27 +3040,142 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
+const BiomeDefinition& ChunkManager::Impl::biomeForRegion(int regionX, int regionZ) const
+{
+    const float selector = hashToUnitFloat(regionX, 31, regionZ);
+    const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
+    const std::size_t biomeIndex =
+        std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
+    return kBiomeDefinitions[biomeIndex];
+}
+
+ChunkManager::Impl::TerrainBasisSample ChunkManager::Impl::computeTerrainBasis(int worldX, int worldZ) const
+{
+    TerrainBasisSample basis{};
+
+    const float nx = static_cast<float>(worldX) * 0.01f;
+    const float nz = static_cast<float>(worldZ) * 0.01f;
+
+    basis.mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
+    basis.mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
+    basis.detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
+    basis.mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+
+    basis.combinedNoise = basis.mainTerrain * 12.0f +
+                          basis.mountainNoise * 8.0f +
+                          basis.mediumNoise * 4.0f +
+                          basis.detailNoise * 2.0f;
+
+    basis.baseElevation = basis.combinedNoise;
+    basis.continentMask = 1.0f;
+
+    return basis;
+}
+
+ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePerturbations(
+    const std::array<WeightedBiome, 5>& weightedBiomes,
+    std::size_t weightCount,
+    int biomeRegionX,
+    int biomeRegionZ) const
+{
+    BiomePerturbationSample result{};
+    result.dominantWeight = -1.0f;
+    float totalBlendWeight = 0.0f;
+
+    for (std::size_t i = 0; i < weightCount; ++i)
+    {
+        const WeightedBiome& weightedBiome = weightedBiomes[i];
+        if (weightedBiome.biome == nullptr || weightedBiome.weight <= 0.0f)
+        {
+            continue;
+        }
+
+        result.blendedOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+        result.blendedScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+        result.blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+        result.blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
+        result.blendedSlopeBias += weightedBiome.biome->baseSlopeBias * weightedBiome.weight;
+        result.blendedMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
+        totalBlendWeight += weightedBiome.weight;
+
+        if (weightedBiome.biome->id == BiomeId::Ocean)
+        {
+            result.oceanWeight += weightedBiome.weight;
+            result.oceanOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+            result.oceanScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+            result.oceanMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+            result.oceanMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
+            result.oceanSlopeBias += weightedBiome.biome->baseSlopeBias * weightedBiome.weight;
+            result.oceanMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
+        }
+        else
+        {
+            result.landWeight += weightedBiome.weight;
+            result.landOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
+            result.landScale += weightedBiome.biome->heightScale * weightedBiome.weight;
+            result.landMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
+            result.landMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
+            result.landSlopeBias += weightedBiome.biome->baseSlopeBias * weightedBiome.weight;
+            result.landMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
+        }
+
+        if (weightedBiome.weight > result.dominantWeight)
+        {
+            result.dominantWeight = weightedBiome.weight;
+            result.dominantBiome = weightedBiome.biome;
+        }
+    }
+
+    auto normalizeCategory = [](float weight, float& offset, float& scale, float& minHeight, float& maxHeight)
+    {
+        if (weight <= 0.0f)
+        {
+            return;
+        }
+
+        const float invWeight = 1.0f / weight;
+        offset *= invWeight;
+        scale *= invWeight;
+        minHeight *= invWeight;
+        maxHeight *= invWeight;
+    };
+
+    normalizeCategory(result.oceanWeight, result.oceanOffset, result.oceanScale, result.oceanMinHeight, result.oceanMaxHeight);
+    normalizeCategory(result.landWeight, result.landOffset, result.landScale, result.landMinHeight, result.landMaxHeight);
+
+    auto normalizeSlope = [](float weight, float& slopeBias, float& maxGradient)
+    {
+        if (weight <= 0.0f)
+        {
+            slopeBias = 0.0f;
+            maxGradient = 0.0f;
+            return;
+        }
+
+        const float invWeight = 1.0f / weight;
+        slopeBias = std::clamp(slopeBias * invWeight, 0.0f, 1.0f);
+        maxGradient = std::max(maxGradient * invWeight, 0.0f);
+    };
+
+    normalizeSlope(totalBlendWeight, result.blendedSlopeBias, result.blendedMaxGradient);
+    normalizeSlope(result.oceanWeight, result.oceanSlopeBias, result.oceanMaxGradient);
+    normalizeSlope(result.landWeight, result.landSlopeBias, result.landMaxGradient);
+
+    result.dominantWeight = std::max(result.dominantWeight, 0.0f);
+    if (result.dominantBiome == nullptr)
+    {
+        result.dominantBiome = &biomeForRegion(biomeRegionX, biomeRegionZ);
+    }
+
+    return result;
+}
+
 ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMinWorldY, int slabMaxWorldY) const
 {
     if (slabMinWorldY > slabMaxWorldY)
     {
         std::swap(slabMinWorldY, slabMaxWorldY);
     }
-
-    auto biomeForRegion = [&](int regionX, int regionZ) -> const BiomeDefinition&
-    {
-        const float selector = hashToUnitFloat(regionX, 31, regionZ);
-        const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
-        const std::size_t biomeIndex =
-            std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
-        return kBiomeDefinitions[biomeIndex];
-    };
-
-    struct WeightedBiome
-    {
-        const BiomeDefinition* biome;
-        float weight;
-    };
 
     const int chunkX = floorDiv(worldX, kChunkSizeX);
     const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
@@ -3092,95 +3311,38 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         weightedBiomes[i].weight /= totalWeight;
     }
 
-    const float nx = static_cast<float>(worldX) * 0.01f;
-    const float nz = static_cast<float>(worldZ) * 0.01f;
+    const TerrainBasisSample basis = computeTerrainBasis(worldX, worldZ);
+    const BiomePerturbationSample perturbations =
+        applyBiomePerturbations(weightedBiomes, weightCount, biomeRegionX, biomeRegionZ);
 
-    const float mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
-    const float mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
-    const float detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
-    const float mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+    const BiomeDefinition* clampBiomePtr =
+        perturbations.dominantBiome ? perturbations.dominantBiome : &biomeForRegion(biomeRegionX, biomeRegionZ);
+    const BiomeDefinition& clampBiome = *clampBiomePtr;
 
-    const float combined = mainTerrain * 12.0f +
-                           mountainNoise * 8.0f +
-                           mediumNoise * 4.0f +
-                           detailNoise * 2.0f;
-
-    float blendedOffset = 0.0f;
-    float blendedScale = 0.0f;
-    float blendedMinHeight = 0.0f;
-    float blendedMaxHeight = 0.0f;
-
-    float oceanWeight = 0.0f;
-    float oceanOffset = 0.0f;
-    float oceanScale = 0.0f;
-    float oceanMinHeight = 0.0f;
-    float oceanMaxHeight = 0.0f;
-
-    float landWeight = 0.0f;
-    float landOffset = 0.0f;
-    float landScale = 0.0f;
-    float landMinHeight = 0.0f;
-    float landMaxHeight = 0.0f;
-    const BiomeDefinition* dominantBiome = nullptr;
-    float dominantWeight = -1.0f;
-
-    for (std::size_t i = 0; i < weightCount; ++i)
+    auto logHeightClamp = [&](const char* stage, float candidate, float minBound, float maxBound)
     {
-        const auto& weightedBiome = weightedBiomes[i];
-        blendedOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-        blendedScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-        blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-        blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-
-        if (weightedBiome.biome->id == BiomeId::Ocean)
-        {
-            oceanWeight += weightedBiome.weight;
-            oceanOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-            oceanScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-            oceanMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-            oceanMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-        }
-        else
-        {
-            landWeight += weightedBiome.weight;
-            landOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-            landScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-            landMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-            landMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-        }
-
-        if (weightedBiome.weight > dominantWeight)
-        {
-            dominantWeight = weightedBiome.weight;
-            dominantBiome = weightedBiome.biome;
-        }
-    }
-
-    auto normalizeCategory = [](float weight, float& offset, float& scale, float& minHeight, float& maxHeight)
-    {
-        if (weight <= 0.0f)
+        const float localMin = std::min(minBound, maxBound);
+        const float localMax = std::max(minBound, maxBound);
+        if (candidate >= localMin && candidate <= localMax)
         {
             return;
         }
 
-        const float invWeight = 1.0f / weight;
-        offset *= invWeight;
-        scale *= invWeight;
-        minHeight *= invWeight;
-        maxHeight *= invWeight;
+        static std::atomic<int> clampWarnings{0};
+        const int warningIndex = clampWarnings.fetch_add(1, std::memory_order_relaxed);
+        if (warningIndex < 8)
+        {
+            std::cerr << "[BiomeHeightWarning] " << clampBiome.name << ' ' << stage << " candidate " << candidate
+                      << " outside [" << localMin << ", " << localMax << ']" << std::endl;
+            if (warningIndex == 7)
+            {
+                std::cerr << "[BiomeHeightWarning] Further biome height warnings suppressed" << std::endl;
+            }
+        }
     };
 
-    normalizeCategory(oceanWeight, oceanOffset, oceanScale, oceanMinHeight, oceanMaxHeight);
-    normalizeCategory(landWeight, landOffset, landScale, landMinHeight, landMaxHeight);
-
-    dominantWeight = std::max(dominantWeight, 0.0f);
-    if (dominantBiome == nullptr)
-    {
-        dominantBiome = &biomeForRegion(biomeRegionX, biomeRegionZ);
-    }
-
-    float minHeight = blendedMinHeight;
-    float maxHeight = blendedMaxHeight;
+    float minHeight = perturbations.blendedMinHeight;
+    float maxHeight = perturbations.blendedMaxHeight;
     if (minHeight > maxHeight)
     {
         std::swap(minHeight, maxHeight);
@@ -3192,16 +3354,40 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     minHeight = std::clamp(minHeight, kMinIntAsFloat, kMaxIntAsFloat);
     maxHeight = std::clamp(maxHeight, kMinIntAsFloat, kMaxIntAsFloat);
 
-    float targetHeight = blendedOffset + combined * blendedScale;
-    targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+    const float slopeBias = std::clamp(perturbations.blendedSlopeBias, 0.0f, 1.0f);
+    const float lowAmplitudeCombined = basis.mainTerrain * 3.0f + basis.mountainNoise * 1.5f + basis.mediumNoise * 1.0f +
+                                       basis.detailNoise * 0.5f;
+    const float blendedTerrain = std::lerp(basis.combinedNoise, lowAmplitudeCombined, slopeBias);
+    const float unclampedMacroHeight = perturbations.blendedOffset + blendedTerrain * perturbations.blendedScale;
+    logHeightClamp("macro", unclampedMacroHeight, minHeight, maxHeight);
+    float macroStageHeight = std::clamp(unclampedMacroHeight, minHeight, maxHeight);
+    float targetHeight = macroStageHeight;
 
-    const bool hasOceanContribution = oceanWeight > 0.0f;
-    const bool hasLandContribution = landWeight > 0.0f;
+    const bool hasOceanContribution = perturbations.oceanWeight > 0.0f;
+    const bool hasLandContribution = perturbations.landWeight > 0.0f;
+
+    const float oceanSlopeBias = std::clamp(hasOceanContribution ? perturbations.oceanSlopeBias : slopeBias, 0.0f, 1.0f);
+    const float landSlopeBias = std::clamp(hasLandContribution ? perturbations.landSlopeBias : slopeBias, 0.0f, 1.0f);
+    const float oceanGradientWindow =
+        std::max(hasOceanContribution ? perturbations.oceanMaxGradient : perturbations.blendedMaxGradient, 0.0f);
+    const float landGradientWindow =
+        std::max(hasLandContribution ? perturbations.landMaxGradient : perturbations.blendedMaxGradient, 0.0f);
 
     float oceanTarget = targetHeight;
     if (hasOceanContribution)
     {
-        oceanTarget = std::clamp(oceanOffset + combined * oceanScale, oceanMinHeight, oceanMaxHeight);
+        const float oceanVariation = std::lerp(basis.combinedNoise, lowAmplitudeCombined, oceanSlopeBias);
+        float rawOceanTarget = perturbations.oceanOffset + oceanVariation * perturbations.oceanScale;
+        if (oceanGradientWindow > 0.0f)
+        {
+            const float oceanGradientMin = perturbations.oceanOffset - oceanGradientWindow;
+            const float oceanGradientMax = perturbations.oceanOffset + oceanGradientWindow;
+            logHeightClamp("ocean-gradient", rawOceanTarget, oceanGradientMin, oceanGradientMax);
+            rawOceanTarget = std::clamp(rawOceanTarget, oceanGradientMin, oceanGradientMax);
+        }
+
+        logHeightClamp("ocean", rawOceanTarget, perturbations.oceanMinHeight, perturbations.oceanMaxHeight);
+        oceanTarget = std::clamp(rawOceanTarget, perturbations.oceanMinHeight, perturbations.oceanMaxHeight);
         minHeight = std::min(minHeight, oceanTarget);
         maxHeight = std::max(maxHeight, oceanTarget);
     }
@@ -3209,9 +3395,8 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     float landTarget = targetHeight;
     if (hasLandContribution)
     {
-
-        float landMin = landMinHeight;
-        float landMax = landMaxHeight;
+        float landMin = perturbations.landMinHeight;
+        float landMax = perturbations.landMaxHeight;
         if (landMin > landMax)
         {
             std::swap(landMin, landMax);
@@ -3220,19 +3405,54 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         landMin = std::clamp(landMin, kMinIntAsFloat, kMaxIntAsFloat);
         landMax = std::clamp(landMax, kMinIntAsFloat, kMaxIntAsFloat);
 
-        landTarget = landOffset + combined * landScale;
-        landTarget = std::clamp(landTarget, landMin, landMax);
+        const float lowFrequencyNoise = basis.mainTerrain * 0.3f + basis.mediumNoise * 0.4f + basis.detailNoise * 0.3f;
+        const float slopeNoise = basis.mountainNoise * 0.15f;
+        const float landBaseHeight = std::lerp(macroStageHeight, perturbations.landOffset, landSlopeBias);
+        float rawLandTarget = landBaseHeight + (lowFrequencyNoise + slopeNoise) * perturbations.landScale;
+
+        if (landGradientWindow > 0.0f)
+        {
+            const float landGradientMin = landBaseHeight - landGradientWindow;
+            const float landGradientMax = landBaseHeight + landGradientWindow;
+            logHeightClamp("land-gradient", rawLandTarget, landGradientMin, landGradientMax);
+            rawLandTarget = std::clamp(rawLandTarget, landGradientMin, landGradientMax);
+        }
+
+        logHeightClamp("land", rawLandTarget, landMin, landMax);
+        landTarget = std::clamp(rawLandTarget, landMin, landMax);
         minHeight = std::min(minHeight, landTarget);
         maxHeight = std::max(maxHeight, landTarget);
     }
 
+    const float globalSeaLevelF = static_cast<float>(kGlobalSeaLevel);
+    float shorelineDistance = std::abs(macroStageHeight - globalSeaLevelF);
+
+    if (hasLandContribution && landTarget > globalSeaLevelF)
+    {
+        constexpr float kShorelineEaseRange = 8.0f;
+        if (shorelineDistance < kShorelineEaseRange)
+        {
+            const float normalized = 1.0f - std::clamp(shorelineDistance / kShorelineEaseRange, 0.0f, 1.0f);
+            const float easing = normalized * normalized * normalized;
+            const float easedLandHeight = globalSeaLevelF + (landTarget - globalSeaLevelF) * (1.0f - easing);
+            const float loweredLandHeight = std::min(landTarget, easedLandHeight);
+            landTarget = loweredLandHeight;
+            minHeight = std::min(minHeight, landTarget);
+            maxHeight = std::max(maxHeight, landTarget);
+        }
+    }
+
+    float shorelineBlend = 0.0f;
+    float oceanShare = 0.0f;
+    float landShare = 0.0f;
+
     if (hasOceanContribution && hasLandContribution)
     {
-        const float totalCategoryWeight = oceanWeight + landWeight;
+        const float totalCategoryWeight = perturbations.oceanWeight + perturbations.landWeight;
         if (totalCategoryWeight > std::numeric_limits<float>::epsilon())
         {
-            const float oceanShare = oceanWeight / totalCategoryWeight;
-            const float landShare = landWeight / totalCategoryWeight;
+            oceanShare = perturbations.oceanWeight / totalCategoryWeight;
+            landShare = perturbations.landWeight / totalCategoryWeight;
 
             auto shorelineRamp = [](float share)
             {
@@ -3240,7 +3460,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                 return t * t * (3.0f - 2.0f * t);
             };
 
-            const float shorelineBlend = shorelineRamp(oceanShare) * shorelineRamp(landShare);
+            shorelineBlend = shorelineRamp(oceanShare) * shorelineRamp(landShare);
             if (shorelineBlend > 0.0f)
             {
                 const float easedBlend = shorelineBlend * shorelineBlend * (3.0f - 2.0f * shorelineBlend);
@@ -3254,7 +3474,9 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         }
     }
 
-    if (dominantBiome && dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
+    float distanceToShore = shorelineDistance;
+
+    if (perturbations.dominantBiome && perturbations.dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
     {
         targetHeight = oceanTarget;
     }
@@ -3265,18 +3487,26 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     else if (hasOceanContribution)
     {
         targetHeight = oceanTarget;
-
     }
 
     ColumnSample sample;
-    sample.dominantBiome = dominantBiome;
-    sample.dominantWeight = dominantWeight;
+    sample.dominantBiome = perturbations.dominantBiome;
+    sample.dominantWeight = perturbations.dominantWeight;
     sample.minSurfaceY = static_cast<int>(std::floor(minHeight));
     sample.maxSurfaceY = static_cast<int>(std::ceil(maxHeight));
 
     const float roundedSurface = std::round(targetHeight);
     const float clampedSurface = std::clamp(roundedSurface, kMinIntAsFloat, kMaxIntAsFloat);
     sample.surfaceY = static_cast<int>(clampedSurface);
+
+    sample.continentMask = basis.continentMask;
+    sample.baseElevation = macroStageHeight;
+    sample.oceanContribution = perturbations.oceanWeight;
+    sample.landContribution = perturbations.landWeight;
+    sample.oceanShare = oceanShare;
+    sample.landShare = landShare;
+    sample.shorelineBlend = shorelineBlend;
+    sample.distanceToShore = distanceToShore;
 
     if (sample.dominantBiome)
     {
@@ -3325,6 +3555,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             {
                 for (int z = 0; z < kChunkSizeZ; ++z)
                 {
+                    const int worldX = baseWorldX + x;
+                    const int worldZ = baseWorldZ + z;
                     const ColumnSample& columnSample = columnSamples[columnIndex(x, z)];
                     if (!columnSample.dominantBiome || !columnSample.slabHasSolid)
                     {
@@ -3332,6 +3564,22 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                     }
 
                     const BiomeDefinition& biome = *columnSample.dominantBiome;
+                    BlockId surfaceBlock = biome.surfaceBlock;
+                    BlockId fillerBlock = biome.fillerBlock;
+
+                    if (biome.id != BiomeId::Ocean)
+                    {
+                        constexpr float kBeachDistanceRange = 6.0f;
+                        constexpr int kBeachHeightBand = 2;
+                        const bool nearSeaLevel = std::abs(columnSample.surfaceY - kGlobalSeaLevel) <= kBeachHeightBand;
+                        if (nearSeaLevel && columnSample.distanceToShore <= kBeachDistanceRange)
+                        {
+                            const float beachNoise = hashToUnitFloat(worldX, columnSample.surfaceY, worldZ);
+                            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
+                            fillerBlock = BlockId::Sand;
+                        }
+                    }
+
                     const int highestSolidWorld = columnSample.slabHighestSolidY;
                     if (highestSolidWorld < chunk.minWorldY)
                     {
@@ -3346,11 +3594,11 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         BlockId block = BlockId::Air;
                         if (worldY < columnSample.surfaceY)
                         {
-                            block = biome.fillerBlock;
+                            block = fillerBlock;
                         }
                         else if (worldY == columnSample.surfaceY)
                         {
-                            block = biome.surfaceBlock;
+                            block = surfaceBlock;
                         }
 
                         if (block == BlockId::Air)

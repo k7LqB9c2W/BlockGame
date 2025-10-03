@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -192,6 +193,7 @@ struct BiomeDefinition
     int maxHeight;
     float baseSlopeBias; // Bias toward flattening macro terrain (0 = legacy shaping, 1 = offset-driven)
     float maxGradient;   // Maximum deviation from the local base height before clamping (blocks)
+    float footprintMultiplier{1.0f};
 };
 
 constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
@@ -220,7 +222,8 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      2,
      kGrasslandsMaxSurfaceHeight,
      0.65f,
-     6.0f},
+     6.0f,
+     1.0f},
     {BiomeId::Forest,
      "Forest",
      BlockId::Grass,
@@ -232,7 +235,8 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      3,
      kForestMaxSurfaceHeight,
      0.45f,
-     9.0f},
+     9.0f,
+     1.0f},
     {BiomeId::Desert,
      "Desert",
      BlockId::Sand,
@@ -244,7 +248,8 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      1,
      kDesertMaxSurfaceHeight,
      0.30f,
-     14.0f},
+     14.0f,
+     1.0f},
     {BiomeId::LittleMountains,
      "Little Mountains",
      BlockId::Grass,
@@ -256,7 +261,8 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      kLittleMountainsMinSurfaceHeight,
      kLittleMountainsMaxSurfaceHeight,
      0.1f,
-     320.0f},
+     320.0f,
+     1.6f},
     {BiomeId::Ocean,
      "Ocean",
      BlockId::Water,
@@ -267,6 +273,7 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      0.0f,
      kGlobalSeaLevel,
      kOceanMaxSurfaceHeight,
+     1.0f,
      1.0f,
      1.0f},
 } };
@@ -741,6 +748,7 @@ private:
     struct BiomeSite
     {
         glm::vec2 worldPosXZ{0.0f};
+        glm::vec2 halfExtents{0.0f};
     };
 
     struct BiomeRegionInfo
@@ -810,7 +818,7 @@ private:
                                                     std::size_t weightCount,
                                                     int biomeRegionX,
                                                     int biomeRegionZ) const;
-    static BiomeSite computeBiomeSite(int regionX, int regionZ) noexcept;
+    static BiomeSite computeBiomeSite(const BiomeDefinition& definition, int regionX, int regionZ) noexcept;
     const BiomeRegionInfo& biomeRegionInfo(int regionX, int regionZ) const;
     const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
 
@@ -4210,11 +4218,15 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
-ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(int regionX, int regionZ) noexcept
+ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(const BiomeDefinition& definition,
+                                                                   int regionX,
+                                                                   int regionZ) noexcept
 {
     constexpr float kMarginRatio = 0.2f;
-    const float regionWidth = static_cast<float>(kBiomeSizeInChunks * kChunkSizeX);
-    const float regionDepth = static_cast<float>(kBiomeSizeInChunks * kChunkSizeZ);
+    const float footprintMultiplier = std::max(definition.footprintMultiplier, 0.001f);
+    const float scaledBiomeSizeInChunks = static_cast<float>(kBiomeSizeInChunks) * footprintMultiplier;
+    const float regionWidth = static_cast<float>(kChunkSizeX) * scaledBiomeSizeInChunks;
+    const float regionDepth = static_cast<float>(kChunkSizeZ) * scaledBiomeSizeInChunks;
     const float marginX = regionWidth * kMarginRatio;
     const float marginZ = regionDepth * kMarginRatio;
     const float jitterX = hashToUnitFloat(regionX, 137, regionZ);
@@ -4227,6 +4239,7 @@ ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(int regionX, 
     BiomeSite site{};
     site.worldPosXZ.x = baseX + marginX + availableWidth * jitterX;
     site.worldPosXZ.y = baseZ + marginZ + availableDepth * jitterZ;
+    site.halfExtents = glm::vec2(regionWidth * 0.5f, regionDepth * 0.5f);
     return site;
 }
 
@@ -4246,7 +4259,7 @@ const ChunkManager::Impl::BiomeRegionInfo& ChunkManager::Impl::biomeRegionInfo(i
     const std::size_t biomeIndex =
         std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
     info.definition = &kBiomeDefinitions[biomeIndex];
-    info.site = computeBiomeSite(regionX, regionZ);
+    info.site = computeBiomeSite(*info.definition, regionX, regionZ);
 
     auto [insertedIt, inserted] = biomeRegionCache_.emplace(key, info);
     return insertedIt->second;
@@ -4627,10 +4640,15 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         const BiomeDefinition* biome{nullptr};
         glm::vec2 positionXZ{0.0f};
         float distanceSquared{std::numeric_limits<float>::max()};
+        float normalizedDistance{1.0f};
     };
 
     std::array<CandidateSite, 9> candidateSites{};
     std::size_t candidateCount = 0;
+    auto littleMountainInfluence = [](float normalizedDistance) {
+        const float clamped = std::clamp(normalizedDistance, 0.0f, 1.0f);
+        return 1.0f - glm::smoothstep(0.55f, 0.95f, clamped);
+    };
     for (int regionOffsetZ = -1; regionOffsetZ <= 1; ++regionOffsetZ)
     {
         for (int regionOffsetX = -1; regionOffsetX <= 1; ++regionOffsetX)
@@ -4641,12 +4659,11 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             CandidateSite site{};
             site.biome = info.definition;
             site.positionXZ = info.site.worldPosXZ;
-            const glm::vec2 delta = site.positionXZ - columnPosition;
-            site.distanceSquared = delta.x * delta.x + delta.y * delta.y;
-            if (site.biome && site.biome->id == BiomeId::LittleMountains)
-            {
-                site.distanceSquared *= 0.6f;
-            }
+            const glm::vec2 delta = columnPosition - site.positionXZ;
+            const glm::vec2 halfExtents = glm::max(info.site.halfExtents, glm::vec2(1.0f));
+            const glm::vec2 normalizedDelta = delta / halfExtents;
+            site.distanceSquared = glm::dot(delta, delta);
+            site.normalizedDistance = glm::length(normalizedDelta);
             candidateSites[candidateCount++] = site;
         }
     }
@@ -4688,14 +4705,15 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         for (std::size_t i = 1; i < sitesToConsider; ++i)
         {
             const float normalizedGap = (distances[i] - baseDistance) / denom;
-            const float blend = std::clamp(1.0f - normalizedGap, 0.0f, 1.0f);
-            rawWeights[i] = blend * 0.6f;
+            rawWeights[i] = std::clamp(1.0f - normalizedGap, 0.0f, 1.0f);
         }
 
         for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
             if (candidateSites[i].biome && candidateSites[i].biome->id == BiomeId::LittleMountains)
             {
+                const float influence = littleMountainInfluence(candidateSites[i].normalizedDistance);
+                rawWeights[i] *= influence;
                 rawWeights[i] *= 1.15f;
             }
         }
@@ -4769,8 +4787,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     float littleMountainInteriorMask = 0.0f;
     if (littleMountainsDefinition)
     {
-        constexpr float kLittleMountainInteriorRamp = 1140.0f;
-        float closestDistance = std::numeric_limits<float>::infinity();
+        float closestNormalizedDistance = std::numeric_limits<float>::infinity();
         for (std::size_t i = 0; i < candidateCount; ++i)
         {
             const CandidateSite& site = candidateSites[i];
@@ -4779,18 +4796,12 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                 continue;
             }
 
-            const float distance = glm::distance(columnPosition, site.positionXZ);
-            if (distance < closestDistance)
-            {
-                closestDistance = distance;
-            }
+            closestNormalizedDistance = std::min(closestNormalizedDistance, site.normalizedDistance);
         }
 
-        if (std::isfinite(closestDistance))
+        if (std::isfinite(closestNormalizedDistance))
         {
-            const float normalized = std::clamp(closestDistance / kLittleMountainInteriorRamp, 0.0f, 1.0f);
-            const float inverted = std::clamp(1.0f - normalized, 0.0f, 1.0f);
-            littleMountainInteriorMask = glm::smoothstep(0.0f, 1.0f, inverted);
+            littleMountainInteriorMask = littleMountainInfluence(closestNormalizedDistance);
         }
     }
 

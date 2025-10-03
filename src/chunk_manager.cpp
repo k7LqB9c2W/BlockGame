@@ -372,6 +372,8 @@ struct FarChunk
     }
 };
 
+constexpr std::uint32_t kInvalidChunkBufferPage = std::numeric_limits<std::uint32_t>::max();
+
 struct Chunk
 {
     explicit Chunk(const glm::ivec3& c)
@@ -402,11 +404,10 @@ struct Chunk
         hasBlocks = false;
         queuedForUpload = false;
         indexCount = 0;
-        vertexCapacity = 0;
-        indexCapacity = 0;
-        vao = 0;
-        vbo = 0;
-        ibo = 0;
+        vertexCount = 0;
+        bufferPageIndex = kInvalidChunkBufferPage;
+        vertexOffset = 0;
+        indexOffset = 0;
         inFlight.store(0, std::memory_order_relaxed);
         surfaceOnly = false;
         lodData.reset();
@@ -419,12 +420,11 @@ struct Chunk
     std::vector<BlockId> blocks;
     std::atomic<ChunkState> state;
 
-    GLuint vao{0};
-    GLuint vbo{0};
-    GLuint ibo{0};
     GLsizei indexCount{0};
-    std::size_t vertexCapacity{0};
-    std::size_t indexCapacity{0};
+    std::size_t vertexCount{0};
+    std::uint32_t bufferPageIndex{kInvalidChunkBufferPage};
+    std::size_t vertexOffset{0};
+    std::size_t indexOffset{0};
     bool queuedForUpload{false};
 
     mutable std::mutex meshMutex;
@@ -615,21 +615,39 @@ private:
     void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk);
     void requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront);
 
-    struct BufferEntry
+    struct ChunkBufferPage
     {
+        struct Range
+        {
+            std::size_t offset{0};
+            std::size_t size{0};
+        };
+
         GLuint vao{0};
         GLuint vbo{0};
         GLuint ibo{0};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
+        std::size_t vertexCursor{0};
+        std::size_t indexCursor{0};
+        std::vector<Range> freeVertices;
+        std::vector<Range> freeIndices;
+        std::size_t activeChunks{0};
     };
 
-    static std::size_t bucketForSize(std::size_t bytes) noexcept;
-    BufferEntry acquireBufferEntry(std::size_t vertexBytes, std::size_t indexBytes);
-    void releaseChunkBuffers(Chunk& chunk);
-    void ensureChunkBuffers(Chunk& chunk, std::size_t vertexBytes, std::size_t indexBytes);
+    struct ChunkAllocation
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::size_t vertexOffset{0};
+        std::size_t indexOffset{0};
+    };
+
+    static std::size_t nextPowerOfTwo(std::size_t value) noexcept;
+    ChunkBufferPage createBufferPage(std::size_t vertexCount, std::size_t indexCount);
+    ChunkAllocation acquireChunkAllocation(std::size_t vertexCount, std::size_t indexCount);
+    void releaseChunkAllocation(Chunk& chunk);
     void recycleChunkGPU(Chunk& chunk);
-    void destroyBufferPool();
+    void destroyBufferPages();
     int computeVerticalRadius(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
     int columnRadiusFor(const glm::ivec2& column,
                         const glm::ivec2& cameraColumn,
@@ -788,8 +806,8 @@ private:
 
     std::deque<std::weak_ptr<Chunk>> uploadQueue_;
     std::mutex uploadQueueMutex_;
-    std::map<std::size_t, std::vector<BufferEntry>> bufferPool_;
-    std::mutex bufferPoolMutex_;
+    std::vector<ChunkBufferPage> bufferPages_;
+    std::mutex bufferPageMutex_;
     PerlinNoise noise_;
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
@@ -1165,7 +1183,7 @@ ChunkManager::Impl::~Impl()
 {
     stopWorkerThreads();
     clear();
-    destroyBufferPool();
+    destroyBufferPages();
 }
 
 void ChunkManager::Impl::setAtlasTexture(GLuint texture) noexcept
@@ -1417,6 +1435,26 @@ void ChunkManager::Impl::render(GLuint shaderProgram,
         }
     }
 
+    struct DrawBatch
+    {
+        std::vector<GLsizei> counts;
+        std::vector<const void*> offsets;
+        std::vector<GLint> baseVertices;
+    };
+
+    std::vector<DrawBatch> drawBatches;
+    std::vector<GLuint> pageVaos;
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        const std::size_t pageCount = bufferPages_.size();
+        drawBatches.resize(pageCount);
+        pageVaos.resize(pageCount, 0);
+        for (std::size_t i = 0; i < pageCount; ++i)
+        {
+            pageVaos[i] = bufferPages_[i].vao;
+        }
+    }
+
     for (const auto& [coord, chunkPtr] : snapshot)
     {
         if (!chunkPtr)
@@ -1442,8 +1480,38 @@ void ChunkManager::Impl::render(GLuint shaderProgram,
             continue;
         }
 
-        glBindVertexArray(chunkPtr->vao);
-        glDrawElements(GL_TRIANGLES, chunkPtr->indexCount, GL_UNSIGNED_INT, nullptr);
+        const std::uint32_t pageIndex = chunkPtr->bufferPageIndex;
+        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= drawBatches.size())
+        {
+            continue;
+        }
+
+        if (chunkPtr->vertexOffset > static_cast<std::size_t>(std::numeric_limits<GLint>::max()))
+        {
+            continue;
+        }
+
+        DrawBatch& batch = drawBatches[pageIndex];
+        batch.counts.push_back(chunkPtr->indexCount);
+        batch.offsets.push_back(reinterpret_cast<const void*>(chunkPtr->indexOffset * sizeof(std::uint32_t)));
+        batch.baseVertices.push_back(static_cast<GLint>(chunkPtr->vertexOffset));
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < drawBatches.size(); ++pageIndex)
+    {
+        const DrawBatch& batch = drawBatches[pageIndex];
+        if (batch.counts.empty())
+        {
+            continue;
+        }
+
+        glBindVertexArray(pageVaos[pageIndex]);
+        glMultiDrawElementsBaseVertex(GL_TRIANGLES,
+                                      batch.counts.data(),
+                                      GL_UNSIGNED_INT,
+                                      batch.offsets.data(),
+                                      static_cast<GLsizei>(batch.counts.size()),
+                                      batch.baseVertices.data());
     }
 
     glBindVertexArray(0);
@@ -2281,62 +2349,45 @@ void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chu
     chunk->queuedForUpload = true;
 }
 
-std::size_t ChunkManager::Impl::bucketForSize(std::size_t bytes) noexcept
+std::size_t ChunkManager::Impl::nextPowerOfTwo(std::size_t value) noexcept
 {
-    bytes = std::max(bytes, kMinBufferSizeBytes);
-    bytes -= 1;
-    bytes |= bytes >> 1;
-    bytes |= bytes >> 2;
-    bytes |= bytes >> 4;
-    bytes |= bytes >> 8;
-    bytes |= bytes >> 16;
-#if SIZE_MAX > 0xffffffffu
-    bytes |= bytes >> 32;
-#endif
-    return bytes + 1;
-}
-
-ChunkManager::Impl::BufferEntry ChunkManager::Impl::acquireBufferEntry(std::size_t vertexBytes, std::size_t indexBytes)
-{
-    const std::size_t vertexBucket = bucketForSize(vertexBytes);
-    const std::size_t indexBucket = bucketForSize(indexBytes);
-
+    if (value <= 1)
     {
-        std::lock_guard<std::mutex> lock(bufferPoolMutex_);
-        auto it = bufferPool_.lower_bound(vertexBucket);
-        while (it != bufferPool_.end())
-        {
-            auto& pool = it->second;
-            for (std::size_t i = 0; i < pool.size(); ++i)
-            {
-                if (pool[i].indexCapacity >= indexBucket)
-                {
-                    auto itEntry = pool.begin() + static_cast<std::ptrdiff_t>(i);
-                    BufferEntry entry = *itEntry;
-                    pool.erase(itEntry);
-                    if (pool.empty())
-                    {
-                        bufferPool_.erase(it);
-                    }
-                    return entry;
-                }
-            }
-            ++it;
-        }
+        return 1;
     }
 
-    BufferEntry entry;
-    entry.vertexCapacity = vertexBucket;
-    entry.indexCapacity = indexBucket;
+    value -= 1;
+    value |= value >> 1;
+    value |= value >> 2;
+    value |= value >> 4;
+    value |= value >> 8;
+    value |= value >> 16;
+#if SIZE_MAX > 0xffffffffu
+    value |= value >> 32;
+#endif
+    return value + 1;
+}
 
-    glGenVertexArrays(1, &entry.vao);
-    glGenBuffers(1, &entry.vbo);
-    glGenBuffers(1, &entry.ibo);
+ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::size_t vertexCount, std::size_t indexCount)
+{
+    static constexpr std::size_t kDefaultVertexCapacity = 262144;
+    static constexpr std::size_t kDefaultIndexCapacity = 393216;
 
-    glBindVertexArray(entry.vao);
+    ChunkBufferPage page;
+    page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
+    page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
 
-    glBindBuffer(GL_ARRAY_BUFFER, entry.vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(entry.vertexCapacity), nullptr, GL_DYNAMIC_DRAW);
+    glGenVertexArrays(1, &page.vao);
+    glGenBuffers(1, &page.vbo);
+    glGenBuffers(1, &page.ibo);
+
+    glBindVertexArray(page.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(page.vertexCapacity * sizeof(Vertex)),
+                 nullptr,
+                 GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
@@ -2348,74 +2399,223 @@ ChunkManager::Impl::BufferEntry ChunkManager::Impl::acquireBufferEntry(std::size
     glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
     glEnableVertexAttribArray(4);
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, entry.ibo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(entry.indexCapacity), nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, page.ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(page.indexCapacity * sizeof(std::uint32_t)),
+                 nullptr,
+                 GL_DYNAMIC_DRAW);
 
     glBindVertexArray(0);
 
-    return entry;
+    return page;
 }
 
-void ChunkManager::Impl::releaseChunkBuffers(Chunk& chunk)
+ChunkManager::Impl::ChunkAllocation ChunkManager::Impl::acquireChunkAllocation(std::size_t vertexCount,
+                                                                               std::size_t indexCount)
 {
-    if (chunk.vao == 0)
+    ChunkAllocation allocation{};
+    if (vertexCount == 0 || indexCount == 0)
     {
-        chunk.vertexCapacity = 0;
-        chunk.indexCapacity = 0;
+        return allocation;
+    }
+
+    auto tryAllocateRange = [](std::vector<ChunkBufferPage::Range>& ranges,
+                               std::size_t& cursor,
+                               std::size_t capacity,
+                               std::size_t count,
+                               std::size_t& outOffset) -> bool
+    {
+        if (count == 0)
+        {
+            outOffset = cursor;
+            return true;
+        }
+
+        for (auto it = ranges.begin(); it != ranges.end(); ++it)
+        {
+            if (it->size >= count)
+            {
+                outOffset = it->offset;
+                it->offset += count;
+                it->size -= count;
+                if (it->size == 0)
+                {
+                    ranges.erase(it);
+                }
+                return true;
+            }
+        }
+
+        if (cursor + count <= capacity)
+        {
+            outOffset = cursor;
+            cursor += count;
+            return true;
+        }
+
+        return false;
+    };
+
+    auto mergeRange = [](std::vector<ChunkBufferPage::Range>& ranges,
+                         std::size_t offset,
+                         std::size_t size)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        ChunkBufferPage::Range range{offset, size};
+        auto it = std::lower_bound(ranges.begin(), ranges.end(), range.offset,
+                                   [](const ChunkBufferPage::Range& lhs, std::size_t value)
+                                   {
+                                       return lhs.offset < value;
+                                   });
+        it = ranges.insert(it, range);
+
+        if (it != ranges.begin())
+        {
+            auto prev = std::prev(it);
+            if (prev->offset + prev->size == it->offset)
+            {
+                prev->size += it->size;
+                it = ranges.erase(it);
+                it = prev;
+            }
+        }
+
+        auto next = std::next(it);
+        if (next != ranges.end() && it->offset + it->size == next->offset)
+        {
+            it->size += next->size;
+            ranges.erase(next);
+        }
+    };
+
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
+    {
+        ChunkBufferPage& page = bufferPages_[pageIndex];
+        std::size_t vertexOffset = 0;
+        if (!tryAllocateRange(page.freeVertices, page.vertexCursor, page.vertexCapacity, vertexCount, vertexOffset))
+        {
+            continue;
+        }
+
+        std::size_t indexOffset = 0;
+        if (!tryAllocateRange(page.freeIndices, page.indexCursor, page.indexCapacity, indexCount, indexOffset))
+        {
+            mergeRange(page.freeVertices, vertexOffset, vertexCount);
+            continue;
+        }
+
+        ++page.activeChunks;
+        allocation.pageIndex = pageIndex;
+        allocation.vertexOffset = vertexOffset;
+        allocation.indexOffset = indexOffset;
+        return allocation;
+    }
+
+    ChunkBufferPage newPage = createBufferPage(vertexCount, indexCount);
+    bufferPages_.push_back(std::move(newPage));
+    const std::uint32_t newIndex = static_cast<std::uint32_t>(bufferPages_.size() - 1);
+    ChunkBufferPage& page = bufferPages_.back();
+
+    std::size_t vertexOffset = 0;
+    std::size_t indexOffset = 0;
+    const bool vertexSuccess = tryAllocateRange(page.freeVertices, page.vertexCursor, page.vertexCapacity, vertexCount, vertexOffset);
+    const bool indexSuccess = tryAllocateRange(page.freeIndices, page.indexCursor, page.indexCapacity, indexCount, indexOffset);
+    (void)vertexSuccess;
+    (void)indexSuccess;
+
+    ++page.activeChunks;
+    allocation.pageIndex = newIndex;
+    allocation.vertexOffset = vertexOffset;
+    allocation.indexOffset = indexOffset;
+    return allocation;
+}
+
+void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
+{
+    const std::uint32_t pageIndex = chunk.bufferPageIndex;
+    if (pageIndex == kInvalidChunkBufferPage)
+    {
+        chunk.vertexCount = 0;
+        chunk.indexCount = 0;
+        chunk.vertexOffset = 0;
+        chunk.indexOffset = 0;
         return;
     }
 
-    BufferEntry entry{};
-    entry.vao = chunk.vao;
-    entry.vbo = chunk.vbo;
-    entry.ibo = chunk.ibo;
-    entry.vertexCapacity = chunk.vertexCapacity;
-    entry.indexCapacity = chunk.indexCapacity;
+    const std::size_t vertexCount = chunk.vertexCount;
+    const std::size_t indexCount = static_cast<std::size_t>(chunk.indexCount);
+    const std::size_t vertexOffset = chunk.vertexOffset;
+    const std::size_t indexOffset = chunk.indexOffset;
 
-    chunk.vao = 0;
-    chunk.vbo = 0;
-    chunk.ibo = 0;
-    chunk.vertexCapacity = 0;
-    chunk.indexCapacity = 0;
+    chunk.bufferPageIndex = kInvalidChunkBufferPage;
+    chunk.vertexCount = 0;
     chunk.indexCount = 0;
+    chunk.vertexOffset = 0;
+    chunk.indexOffset = 0;
 
-    std::lock_guard<std::mutex> lock(bufferPoolMutex_);
-    bufferPool_[entry.vertexCapacity].push_back(entry);
-}
+    auto mergeRange = [](std::vector<ChunkBufferPage::Range>& ranges,
+                         std::size_t offset,
+                         std::size_t size)
+    {
+        if (size == 0)
+        {
+            return;
+        }
 
-void ChunkManager::Impl::ensureChunkBuffers(Chunk& chunk, std::size_t vertexBytes, std::size_t indexBytes)
-{
-    const std::size_t requiredVertex = std::max(vertexBytes, static_cast<std::size_t>(sizeof(Vertex)));
-    const std::size_t requiredIndex = std::max(indexBytes, static_cast<std::size_t>(sizeof(std::uint32_t)));
+        ChunkBufferPage::Range range{offset, size};
+        auto it = std::lower_bound(ranges.begin(), ranges.end(), range.offset,
+                                   [](const ChunkBufferPage::Range& lhs, std::size_t value)
+                                   {
+                                       return lhs.offset < value;
+                                   });
+        it = ranges.insert(it, range);
 
-    if (chunk.vao != 0 &&
-        chunk.vertexCapacity >= requiredVertex &&
-        chunk.indexCapacity >= requiredIndex)
+        if (it != ranges.begin())
+        {
+            auto prev = std::prev(it);
+            if (prev->offset + prev->size == it->offset)
+            {
+                prev->size += it->size;
+                it = ranges.erase(it);
+                it = prev;
+            }
+        }
+
+        auto next = std::next(it);
+        if (next != ranges.end() && it->offset + it->size == next->offset)
+        {
+            it->size += next->size;
+            ranges.erase(next);
+        }
+    };
+
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    if (pageIndex >= bufferPages_.size())
     {
         return;
     }
 
-    if (chunk.vao != 0)
+    ChunkBufferPage& page = bufferPages_[pageIndex];
+    mergeRange(page.freeVertices, vertexOffset, vertexCount);
+    mergeRange(page.freeIndices, indexOffset, indexCount);
+    if (page.activeChunks > 0)
     {
-        releaseChunkBuffers(chunk);
+        --page.activeChunks;
     }
-
-    BufferEntry entry = acquireBufferEntry(requiredVertex, requiredIndex);
-    chunk.vao = entry.vao;
-    chunk.vbo = entry.vbo;
-    chunk.ibo = entry.ibo;
-    chunk.vertexCapacity = entry.vertexCapacity;
-    chunk.indexCapacity = entry.indexCapacity;
 }
 
 void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
 {
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
-    releaseChunkBuffers(chunk);
+    releaseChunkAllocation(chunk);
     chunk.meshData.clear();
     chunk.meshReady = false;
     chunk.queuedForUpload = false;
-    chunk.indexCount = 0;
 }
 
 void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
@@ -2437,28 +2637,25 @@ void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
     }
 }
 
-void ChunkManager::Impl::destroyBufferPool()
+void ChunkManager::Impl::destroyBufferPages()
 {
-    std::lock_guard<std::mutex> lock(bufferPoolMutex_);
-    for (auto& [_, entries] : bufferPool_)
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    for (auto& page : bufferPages_)
     {
-        for (auto& entry : entries)
+        if (page.ibo != 0)
         {
-            if (entry.ibo != 0)
-            {
-                glDeleteBuffers(1, &entry.ibo);
-            }
-            if (entry.vbo != 0)
-            {
-                glDeleteBuffers(1, &entry.vbo);
-            }
-            if (entry.vao != 0)
-            {
-                glDeleteVertexArrays(1, &entry.vao);
-            }
+            glDeleteBuffers(1, &page.ibo);
+        }
+        if (page.vbo != 0)
+        {
+            glDeleteBuffers(1, &page.vbo);
+        }
+        if (page.vao != 0)
+        {
+            glDeleteVertexArrays(1, &page.vao);
         }
     }
-    bufferPool_.clear();
+    bufferPages_.clear();
 }
 
 void ChunkManager::Impl::resetColumnBudgets()
@@ -3191,31 +3388,61 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
 
     if (chunk.meshData.empty())
     {
-        releaseChunkBuffers(chunk);
+        releaseChunkAllocation(chunk);
         chunk.meshData.clear();
-        chunk.indexCount = 0;
         return;
     }
 
-    const std::size_t vertexBytes = chunk.meshData.vertices.size() * sizeof(Vertex);
-    const std::size_t indexBytes = chunk.meshData.indices.size() * sizeof(std::uint32_t);
+    const std::size_t vertexCount = chunk.meshData.vertices.size();
+    const std::size_t indexCount = chunk.meshData.indices.size();
 
-    ensureChunkBuffers(chunk, vertexBytes, indexBytes);
-
-    glBindVertexArray(chunk.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
-    if (vertexBytes > 0)
+    releaseChunkAllocation(chunk);
+    ChunkAllocation allocation = acquireChunkAllocation(vertexCount, indexCount);
+    if (allocation.pageIndex == kInvalidChunkBufferPage)
     {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(vertexBytes), chunk.meshData.vertices.data());
+        chunk.meshData.clear();
+        return;
     }
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
-    if (indexBytes > 0)
+    chunk.bufferPageIndex = allocation.pageIndex;
+    chunk.vertexOffset = allocation.vertexOffset;
+    chunk.indexOffset = allocation.indexOffset;
+    chunk.vertexCount = vertexCount;
+
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLuint ibo = 0;
     {
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(indexBytes), chunk.meshData.indices.data());
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        if (allocation.pageIndex < bufferPages_.size())
+        {
+            ChunkBufferPage& page = bufferPages_[allocation.pageIndex];
+            vao = page.vao;
+            vbo = page.vbo;
+            ibo = page.ibo;
+        }
     }
 
-    chunk.indexCount = static_cast<GLsizei>(chunk.meshData.indices.size());
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    if (vertexCount > 0)
+    {
+        glBufferSubData(GL_ARRAY_BUFFER,
+                        static_cast<GLintptr>(chunk.vertexOffset * sizeof(Vertex)),
+                        static_cast<GLsizeiptr>(vertexCount * sizeof(Vertex)),
+                        chunk.meshData.vertices.data());
+    }
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    if (indexCount > 0)
+    {
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,
+                        static_cast<GLintptr>(chunk.indexOffset * sizeof(std::uint32_t)),
+                        static_cast<GLsizeiptr>(indexCount * sizeof(std::uint32_t)),
+                        chunk.meshData.indices.data());
+    }
+
+    chunk.indexCount = static_cast<GLsizei>(indexCount);
     glBindVertexArray(0);
 
     chunk.meshData.clear();

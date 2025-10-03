@@ -574,7 +574,15 @@ private:
                                       int cameraChunkY,
                                       int verticalRadius) const;
     void resetColumnBudgets();
-    int uploadsPerColumnLimit() const noexcept;
+    int baseUploadsPerColumnLimit(int verticalRadius) const noexcept;
+    std::size_t estimateUploadQueueSize();
+    struct UploadBudgets
+    {
+        std::size_t byteBudget{kUploadBudgetBytesPerFrame};
+        int columnLimit{kVerticalStreamingConfig.uploadBasePerColumn};
+        std::size_t queueSize{0};
+    };
+    UploadBudgets computeUploadBudgets(int verticalRadius);
     static int computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept;
     int computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const;
     int computeRingExpansionBudget(int backlogChunks) const;
@@ -705,7 +713,10 @@ private:
     ProfilingCounters profilingCounters_{};
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
-    int perColumnUploadLimit_{kVerticalStreamingConfig.uploadBasePerColumn};
+    int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
+    std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
+    std::size_t lastUploadBytesUsed_{0};
+    std::size_t pendingUploadsLastFrame_{0};
     int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
     int lastGenerationBudget_{kVerticalStreamingConfig.generationBudget.baseJobsPerFrame};
     int lastGenerationJobsIssued_{0};
@@ -1129,7 +1140,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     resetColumnBudgets();
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
     lastVerticalRadius_ = verticalRadius;
-    perColumnUploadLimit_ = uploadsPerColumnLimit();
+
+    UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
+    uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
+    uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
+    pendingUploadsLastFrame_ = uploadBudgets.queueSize;
 
     jobQueue_.updatePriorityOrigin(centerChunk);
 
@@ -1395,6 +1410,11 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
         pendingStructureEdits_.clear();
     }
+
+    uploadBudgetBytesThisFrame_ = kUploadBudgetBytesPerFrame;
+    uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
+    lastUploadBytesUsed_ = 0;
+    pendingUploadsLastFrame_ = 0;
 
 }
 
@@ -1884,6 +1904,12 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
                                     (1000.0 * static_cast<double>(meshed));
     }
 
+    snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
+    snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
+    const std::size_t pendingUploads = pendingUploadsLastFrame_;
+    snapshot.pendingUploadChunks = static_cast<int>(
+        std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+
     return snapshot;
 }
 
@@ -2280,14 +2306,72 @@ void ChunkManager::Impl::resetColumnBudgets()
     jobsScheduledThisFrame_.clear();
 }
 
-int ChunkManager::Impl::uploadsPerColumnLimit() const noexcept
+int ChunkManager::Impl::baseUploadsPerColumnLimit(int verticalRadius) const noexcept
 {
-    const int ramp = std::max(0, lastVerticalRadius_ - kVerticalStreamingConfig.minRadiusChunks);
+    const int ramp = std::max(0, verticalRadius - kVerticalStreamingConfig.minRadiusChunks);
     const int divisor = std::max(1, kVerticalStreamingConfig.uploadRampDivisor);
     const int bonus = ramp / divisor;
     const int base = kVerticalStreamingConfig.uploadBasePerColumn;
     const int maxLimit = kVerticalStreamingConfig.uploadMaxPerColumn;
     return std::clamp(base + bonus, base, maxLimit);
+}
+
+std::size_t ChunkManager::Impl::estimateUploadQueueSize()
+{
+    std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+    std::size_t count = 0;
+    for (const auto& entry : uploadQueue_)
+    {
+        if (!entry.expired())
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int verticalRadius)
+{
+    UploadBudgets budgets{};
+    budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
+    budgets.byteBudget = kUploadBudgetBytesPerFrame;
+    budgets.queueSize = estimateUploadQueueSize();
+
+    const std::size_t queueSize = budgets.queueSize;
+    const std::size_t baseBudget = kUploadBudgetBytesPerFrame;
+
+    constexpr std::size_t kQueueThreshold = 12;
+    constexpr std::size_t kQueueStep = 8;
+    constexpr int kMaxBurstSteps = 3;
+    constexpr int kBurstMaxPerColumn = 12;
+
+    int backlogSteps = 0;
+    if (queueSize > kQueueThreshold)
+    {
+        backlogSteps = static_cast<int>((queueSize - kQueueThreshold + kQueueStep - 1) / kQueueStep);
+    }
+
+    if (queueSize > 0)
+    {
+        const bool hasFrameHeadroom = lastUploadBytesUsed_ + (baseBudget / 4) <= baseBudget;
+        if (hasFrameHeadroom)
+        {
+            backlogSteps = std::max(backlogSteps, 1);
+        }
+    }
+
+    backlogSteps = std::clamp(backlogSteps, 0, kMaxBurstSteps);
+
+    const int multiplier = std::clamp(1 + backlogSteps, 1, kMaxBurstSteps + 1);
+    budgets.byteBudget = baseBudget * static_cast<std::size_t>(multiplier);
+
+    if (backlogSteps > 0)
+    {
+        const int boostedLimit = budgets.columnLimit + backlogSteps;
+        budgets.columnLimit = std::min(boostedLimit, kBurstMaxPerColumn);
+    }
+
+    return budgets;
 }
 
 int ChunkManager::Impl::computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept
@@ -2696,11 +2780,12 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
 void ChunkManager::Impl::uploadReadyMeshes()
 {
-    std::size_t remainingBudget = kUploadBudgetBytesPerFrame;
+    const std::size_t initialBudget = uploadBudgetBytesThisFrame_;
+    std::size_t remainingBudget = initialBudget;
     bool uploadedAnything = false;
     std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
     std::size_t attempts = 0;
-    const int columnUploadLimit = std::max(1, perColumnUploadLimit_);
+    const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
@@ -2759,6 +2844,16 @@ void ChunkManager::Impl::uploadReadyMeshes()
             remainingBudget -= totalBytes;
         }
     }
+    if (initialBudget > remainingBudget)
+    {
+        lastUploadBytesUsed_ = initialBudget - remainingBudget;
+    }
+    else
+    {
+        lastUploadBytesUsed_ = 0;
+    }
+
+    pendingUploadsLastFrame_ = estimateUploadQueueSize();
 }
 
 void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)

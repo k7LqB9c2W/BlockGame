@@ -554,6 +554,23 @@ private:
     std::unordered_map<glm::ivec2, ColumnData, ColumnHasher> columns_;
 };
 
+class OpenSimplexNoise
+{
+public:
+    explicit OpenSimplexNoise(unsigned seed = 2025u);
+
+    float noise(float x, float y) const noexcept;
+    float fbm(float x, float y, int octaves, float persistence, float lacunarity) const noexcept;
+    float ridge(float x, float y, int octaves, float lacunarity, float gain) const noexcept;
+    glm::vec2 sampleGradient(float x, float y) const noexcept;
+
+private:
+    std::array<int, 512> permutation_{};
+    std::array<int, 512> permutationMod8_{};
+
+    static const std::array<glm::vec2, 8> kGradients;
+};
+
 class PerlinNoise
 {
 public:
@@ -821,6 +838,9 @@ private:
     std::vector<ChunkBufferPage> bufferPages_;
     mutable std::mutex bufferPageMutex_;
 
+    OpenSimplexNoise littleMountainsNoise_;
+    OpenSimplexNoise littleMountainsWarpNoise_;
+    OpenSimplexNoise littleMountainsOrientationNoise_;
     PerlinNoise noise_;
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
@@ -1080,6 +1100,211 @@ int ColumnManager::highestSolidBlock(int worldX, int worldZ) const noexcept
     return it->second.highestWorldY;
 }
 
+// OpenSimplexNoise implementations
+const std::array<glm::vec2, 8> OpenSimplexNoise::kGradients = {
+    glm::vec2(1.0f, 0.0f),
+    glm::vec2(-1.0f, 0.0f),
+    glm::vec2(0.0f, 1.0f),
+    glm::vec2(0.0f, -1.0f),
+    glm::vec2(0.70710678f, 0.70710678f),
+    glm::vec2(-0.70710678f, 0.70710678f),
+    glm::vec2(0.70710678f, -0.70710678f),
+    glm::vec2(-0.70710678f, -0.70710678f)
+};
+
+OpenSimplexNoise::OpenSimplexNoise(unsigned seed)
+{
+    std::array<int, 256> temp;
+    std::iota(temp.begin(), temp.end(), 0);
+
+    std::mt19937 rng(seed);
+    std::shuffle(temp.begin(), temp.end(), rng);
+
+    for (int i = 0; i < 256; ++i)
+    {
+        const int value = temp[static_cast<std::size_t>(i)];
+        permutation_[i] = permutation_[i + 256] = value;
+        permutationMod8_[i] = permutationMod8_[i + 256] = value & 7;
+    }
+}
+
+float OpenSimplexNoise::noise(float x, float y) const noexcept
+{
+    constexpr float F2 = 0.3660254037844386f;
+    constexpr float G2 = 0.21132486540518713f;
+
+    const float s = (x + y) * F2;
+    const int i = static_cast<int>(std::floor(x + s));
+    const int j = static_cast<int>(std::floor(y + s));
+    const float t = static_cast<float>(i + j) * G2;
+    const float X0 = static_cast<float>(i) - t;
+    const float Y0 = static_cast<float>(j) - t;
+    const float x0 = x - X0;
+    const float y0 = y - Y0;
+
+    const int i1 = x0 > y0 ? 1 : 0;
+    const int j1 = x0 > y0 ? 0 : 1;
+
+    const float x1 = x0 - static_cast<float>(i1) + G2;
+    const float y1 = y0 - static_cast<float>(j1) + G2;
+    const float x2 = x0 - 1.0f + 2.0f * G2;
+    const float y2 = y0 - 1.0f + 2.0f * G2;
+
+    const int ii = i & 255;
+    const int jj = j & 255;
+
+    const int gi0 = permutationMod8_[ii + permutation_[jj]];
+    const int gi1 = permutationMod8_[ii + i1 + permutation_[jj + j1]];
+    const int gi2 = permutationMod8_[ii + 1 + permutation_[jj + 1]];
+
+    float n0 = 0.0f;
+    float n1 = 0.0f;
+    float n2 = 0.0f;
+
+    float t0 = 0.5f - x0 * x0 - y0 * y0;
+    if (t0 > 0.0f)
+    {
+        const float t0Sq = t0 * t0;
+        const float t0Pow4 = t0Sq * t0Sq;
+        n0 = t0Pow4 * glm::dot(kGradients[static_cast<std::size_t>(gi0)], glm::vec2(x0, y0));
+    }
+
+    float t1 = 0.5f - x1 * x1 - y1 * y1;
+    if (t1 > 0.0f)
+    {
+        const float t1Sq = t1 * t1;
+        const float t1Pow4 = t1Sq * t1Sq;
+        n1 = t1Pow4 * glm::dot(kGradients[static_cast<std::size_t>(gi1)], glm::vec2(x1, y1));
+    }
+
+    float t2 = 0.5f - x2 * x2 - y2 * y2;
+    if (t2 > 0.0f)
+    {
+        const float t2Sq = t2 * t2;
+        const float t2Pow4 = t2Sq * t2Sq;
+        n2 = t2Pow4 * glm::dot(kGradients[static_cast<std::size_t>(gi2)], glm::vec2(x2, y2));
+    }
+
+    return 70.0f * (n0 + n1 + n2);
+}
+
+float OpenSimplexNoise::fbm(float x, float y, int octaves, float persistence, float lacunarity) const noexcept
+{
+    float amplitude = 1.0f;
+    float frequency = 1.0f;
+    float sum = 0.0f;
+    float maxValue = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        sum += noise(x * frequency, y * frequency) * amplitude;
+        maxValue += amplitude;
+        amplitude *= persistence;
+        frequency *= lacunarity;
+    }
+
+    if (maxValue > 0.0f)
+    {
+        sum /= maxValue;
+    }
+
+    return sum;
+}
+
+float OpenSimplexNoise::ridge(float x, float y, int octaves, float lacunarity, float gain) const noexcept
+{
+    float sum = 0.0f;
+    float amplitude = 0.5f;
+    float frequency = 1.0f;
+    float prev = 1.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        float n = noise(x * frequency, y * frequency);
+        n = 1.0f - std::abs(n);
+        n *= n;
+        sum += n * amplitude * prev;
+        prev = n;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return sum;
+}
+
+glm::vec2 OpenSimplexNoise::sampleGradient(float x, float y) const noexcept
+{
+    constexpr float F2 = 0.3660254037844386f;
+    constexpr float G2 = 0.21132486540518713f;
+
+    const float s = (x + y) * F2;
+    const int i = static_cast<int>(std::floor(x + s));
+    const int j = static_cast<int>(std::floor(y + s));
+    const float t = static_cast<float>(i + j) * G2;
+    const float X0 = static_cast<float>(i) - t;
+    const float Y0 = static_cast<float>(j) - t;
+    const float x0 = x - X0;
+    const float y0 = y - Y0;
+
+    const int i1 = x0 > y0 ? 1 : 0;
+    const int j1 = x0 > y0 ? 0 : 1;
+
+    const float x1 = x0 - static_cast<float>(i1) + G2;
+    const float y1 = y0 - static_cast<float>(j1) + G2;
+    const float x2 = x0 - 1.0f + 2.0f * G2;
+    const float y2 = y0 - 1.0f + 2.0f * G2;
+
+    const int ii = i & 255;
+    const int jj = j & 255;
+
+    const int gi0 = permutationMod8_[ii + permutation_[jj]];
+    const int gi1 = permutationMod8_[ii + i1 + permutation_[jj + j1]];
+    const int gi2 = permutationMod8_[ii + 1 + permutation_[jj + 1]];
+
+    glm::vec2 gradient{0.0f, 0.0f};
+
+    float t0 = 0.5f - x0 * x0 - y0 * y0;
+    if (t0 > 0.0f)
+    {
+        const float t0Sq = t0 * t0;
+        const float t0Pow3 = t0Sq * t0;
+        const float t0Pow4 = t0Sq * t0Sq;
+        const glm::vec2 grad = kGradients[static_cast<std::size_t>(gi0)];
+        const float dot = grad.x * x0 + grad.y * y0;
+        const float influence = -8.0f * t0Pow3 * dot;
+        gradient.x += influence * x0 + t0Pow4 * grad.x;
+        gradient.y += influence * y0 + t0Pow4 * grad.y;
+    }
+
+    float t1 = 0.5f - x1 * x1 - y1 * y1;
+    if (t1 > 0.0f)
+    {
+        const float t1Sq = t1 * t1;
+        const float t1Pow3 = t1Sq * t1;
+        const float t1Pow4 = t1Sq * t1Sq;
+        const glm::vec2 grad = kGradients[static_cast<std::size_t>(gi1)];
+        const float dot = grad.x * x1 + grad.y * y1;
+        const float influence = -8.0f * t1Pow3 * dot;
+        gradient.x += influence * x1 + t1Pow4 * grad.x;
+        gradient.y += influence * y1 + t1Pow4 * grad.y;
+    }
+
+    float t2 = 0.5f - x2 * x2 - y2 * y2;
+    if (t2 > 0.0f)
+    {
+        const float t2Sq = t2 * t2;
+        const float t2Pow3 = t2Sq * t2;
+        const float t2Pow4 = t2Sq * t2Sq;
+        const glm::vec2 grad = kGradients[static_cast<std::size_t>(gi2)];
+        const float dot = grad.x * x2 + grad.y * y2;
+        const float influence = -8.0f * t2Pow3 * dot;
+        gradient.x += influence * x2 + t2Pow4 * grad.x;
+        gradient.y += influence * y2 + t2Pow4 * grad.y;
+    }
+
+    return gradient * 70.0f;
+}
+
 // PerlinNoise implementations
 
 PerlinNoise::PerlinNoise(unsigned seed)
@@ -1182,7 +1407,10 @@ float PerlinNoise::grad(int hash, float x, float y) noexcept
 // ChunkManager::Impl methods (to be filled)
 
 ChunkManager::Impl::Impl(unsigned seed)
-    : noise_(seed),
+    : littleMountainsNoise_(seed ^ 0x9E3779B9u),
+      littleMountainsWarpNoise_(seed ^ 0x7F4A7C15u),
+      littleMountainsOrientationNoise_(seed ^ 0xDD62BBA1u),
+      noise_(seed),
       shouldStop_(false),
       viewDistance_(kDefaultViewDistance),
       targetViewDistance_(kDefaultViewDistance)
@@ -4056,72 +4284,132 @@ float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float w
 {
     const glm::vec2 worldPos{worldX, worldZ};
 
-    const float largeScale = noise_.fbm(worldPos.x * 0.00045f, worldPos.y * 0.00045f, 5, 0.55f, 2.0f);
-    const float upliftRaw = noise_.fbm(worldPos.x * 0.00028f + 17.0f, worldPos.y * 0.00028f - 13.0f, 4, 0.6f, 2.1f);
-    const float uplift = std::clamp(upliftRaw * 0.5f + 0.5f, 0.0f, 1.0f);
+    const glm::vec2 kilometerField = worldPos * 0.001f;
+    glm::vec2 orientationWarp{
+        littleMountainsWarpNoise_.fbm(worldPos.x * 0.00035f + 103.0f,
+                                      worldPos.y * 0.00035f - 77.0f,
+                                      3,
+                                      0.55f,
+                                      2.15f),
+        littleMountainsWarpNoise_.fbm(worldPos.x * 0.00035f - 59.0f,
+                                      worldPos.y * 0.00035f + 43.0f,
+                                      3,
+                                      0.55f,
+                                      2.15f)};
+    orientationWarp *= 0.35f;
+    const glm::vec2 orientationSample = kilometerField + orientationWarp;
 
-    glm::vec2 warpBase{
-        noise_.noise(worldPos.x * 0.0023f, worldPos.y * 0.0023f),
-        noise_.noise(worldPos.x * 0.0023f + 67.0f, worldPos.y * 0.0023f + 23.0f)};
-    const float warpStrengthA = 80.0f + (warpBase.x * 0.5f + 0.5f) * 120.0f;
-    glm::vec2 warped = worldPos + warpBase * warpStrengthA;
-
-    glm::vec2 warpDetail{
-        noise_.noise(worldPos.x * 0.0041f - 11.0f, worldPos.y * 0.0041f + 19.0f),
-        noise_.noise(worldPos.x * 0.0041f + 103.0f, worldPos.y * 0.0041f - 59.0f)};
-    const float warpStrengthB = 30.0f + (warpDetail.x * 0.5f + 0.5f) * 60.0f;
-    warped += warpDetail * warpStrengthB;
-
-    const float ridgePrimary = noise_.ridge(warped.x * 0.012f, warped.y * 0.012f, 6, 2.0f, 0.5f);
-    const float ridgeSecondary = noise_.ridge(warped.x * 0.021f + 37.0f, warped.y * 0.021f - 73.0f, 5, 2.2f, 0.45f);
-
-    const float dirNoiseX = noise_.fbm(worldPos.x * 0.0008f + 91.0f, worldPos.y * 0.0008f - 17.0f, 3, 0.55f, 2.1f);
-    const float dirNoiseY = noise_.fbm(worldPos.x * 0.0008f - 41.0f, worldPos.y * 0.0008f + 57.0f, 3, 0.55f, 2.1f);
-    glm::vec2 ridgeDirection = glm::normalize(glm::vec2(dirNoiseX, dirNoiseY));
-    if (!std::isfinite(ridgeDirection.x) || !std::isfinite(ridgeDirection.y))
+    glm::vec2 orientationGradient =
+        littleMountainsOrientationNoise_.sampleGradient(orientationSample.x, orientationSample.y);
+    if (!std::isfinite(orientationGradient.x) || !std::isfinite(orientationGradient.y)
+        || glm::dot(orientationGradient, orientationGradient) < 1e-6f)
     {
-        ridgeDirection = glm::vec2(1.0f, 0.0f);
+        orientationGradient = glm::vec2(1.0f, 0.0f);
     }
+    glm::vec2 ridgeDirection = glm::normalize(orientationGradient);
     const glm::vec2 ridgePerpendicular{-ridgeDirection.y, ridgeDirection.x};
+
+    glm::vec2 warpPrimary{
+        littleMountainsWarpNoise_.fbm(worldPos.x * 0.0011f + 19.0f,
+                                      worldPos.y * 0.0011f + 87.0f,
+                                      4,
+                                      0.6f,
+                                      2.15f),
+        littleMountainsWarpNoise_.fbm(worldPos.x * 0.0011f - 71.0f,
+                                      worldPos.y * 0.0011f - 29.0f,
+                                      4,
+                                      0.6f,
+                                      2.15f)};
+    glm::vec2 warpDetail{
+        littleMountainsWarpNoise_.fbm(worldPos.x * 0.0045f - 11.0f,
+                                      worldPos.y * 0.0045f + 53.0f,
+                                      3,
+                                      0.5f,
+                                      2.3f),
+        littleMountainsWarpNoise_.fbm(worldPos.x * 0.0045f + 67.0f,
+                                      worldPos.y * 0.0045f - 41.0f,
+                                      3,
+                                      0.5f,
+                                      2.3f)};
+    glm::vec2 warped = worldPos + warpPrimary * 180.0f + warpDetail * 28.0f;
+
     const float alongRidge = glm::dot(warped, ridgeDirection);
     const float acrossRidge = glm::dot(warped, ridgePerpendicular);
-    const float directionalRidge =
-        noise_.ridge(alongRidge * 0.018f, acrossRidge * 0.018f, 5, 2.0f, 0.5f);
 
+    const float ridgePrimary = littleMountainsNoise_.ridge(alongRidge * 0.016f,
+                                                           acrossRidge * 0.016f,
+                                                           5,
+                                                           2.05f,
+                                                           0.55f);
+    const float ridgeSecondary = littleMountainsNoise_.ridge(alongRidge * 0.028f + 57.0f,
+                                                             acrossRidge * 0.028f - 113.0f,
+                                                             4,
+                                                             2.2f,
+                                                             0.6f);
+    const float ridgeMicro = littleMountainsNoise_.ridge(alongRidge * 0.043f - 211.0f,
+                                                         acrossRidge * 0.021f + 167.0f,
+                                                         3,
+                                                         2.1f,
+                                                         0.5f);
 
-    const float ridgeMask = std::clamp(std::pow(uplift, 2.0f), 0.0f, 1.0f);
-    const float ridgeCombined = std::clamp((ridgePrimary * 0.7f + ridgeSecondary * 0.3f) * ridgeMask +
-                                               directionalRidge * 0.6f * ridgeMask,
-                                           0.0f,
-                                           1.0f);
+    float ridgeStack = ridgePrimary * 0.6f + ridgeSecondary * 0.3f + ridgeMicro * 0.25f;
+    ridgeStack = std::clamp(ridgeStack, 0.0f, 1.3f);
+    ridgeStack = std::clamp(ridgeStack, 0.0f, 1.0f);
 
-    const float slopeFill = noise_.fbm(warped.x * 0.04f, warped.y * 0.04f, 5, 0.5f, 2.0f);
-    const float slopes = slopeFill * 0.5f + 0.5f;
+    const float valleyFill = littleMountainsNoise_.fbm(warped.x * 0.0032f - 401.0f,
+                                                       warped.y * 0.0032f + 245.0f,
+                                                       4,
+                                                       0.5f,
+                                                       2.1f)
+                             * 0.5f
+                             + 0.5f;
 
-    float base = std::clamp(largeScale * 0.5f + 0.5f, 0.0f, 1.0f);
-    const float upliftBias = std::clamp(std::pow(uplift, 1.5f), 0.0f, 1.0f);
-    const float quietFactor = glm::smoothstep(0.1f, 0.4f, base);
+    const float macroRamps = littleMountainsNoise_.fbm(worldPos.x * 0.00042f + 11.0f,
+                                                       worldPos.y * 0.00042f - 37.0f,
+                                                       5,
+                                                       0.55f,
+                                                       2.05f)
+                             * 0.5f
+                             + 0.5f;
 
-    const float foothillMask = glm::smoothstep(0.25f, 0.7f, base);
-    const float gatedRidges = std::clamp(glm::mix(base, ridgeCombined, quietFactor * foothillMask), 0.0f, 1.0f);
+    const float uplift = littleMountainsNoise_.fbm(worldPos.x * 0.00078f - 91.0f,
+                                                   worldPos.y * 0.00078f + 133.0f,
+                                                   4,
+                                                   0.6f,
+                                                   2.15f)
+                         * 0.5f
+                         + 0.5f;
 
-    const float ridgeWeight = glm::mix(0.26f, 0.14f, quietFactor);
-    const float slopeWeight = glm::mix(0.22f, 0.3f, quietFactor);
+    const float ridgeMask = glm::smoothstep(0.3f, 0.72f, macroRamps);
+    const float valleyMask = 1.0f - glm::smoothstep(0.1f, 0.4f, macroRamps);
 
-    const float combinedRaw = std::clamp(base * 0.45f + gatedRidges * ridgeWeight + slopes * slopeWeight, 0.0f, 1.0f);
+    float ridged = glm::mix(valleyFill, ridgeStack, ridgeMask);
+    ridged = std::clamp(ridged, 0.0f, 1.0f);
 
-    const float shapedPeaks = 1.0f - std::pow(1.0f - combinedRaw, 3.0f);
-    const float peakBlendControl = glm::smoothstep(0.6f, 0.95f, combinedRaw);
-    const float peakBlend = glm::mix(0.35f, 0.15f, peakBlendControl);
-    float combined = std::clamp(std::lerp(combinedRaw, shapedPeaks, peakBlend), 0.0f, 1.0f);
+    const float terraces = littleMountainsNoise_.fbm(warped.x * 0.008f + 211.0f,
+                                                     warped.y * 0.008f - 157.0f,
+                                                     3,
+                                                     0.5f,
+                                                     2.3f)
+                        * 0.5f
+                        + 0.5f;
 
-    const float flattenBlend = glm::smoothstep(0.75f, 1.0f, combined);
-    combined = std::clamp(std::lerp(combined, base, flattenBlend * 0.65f), 0.0f, 1.0f);
-    combined = std::clamp(combined + (upliftBias - 0.5f) * 0.15f, 0.0f, 1.0f);
+    float combined = macroRamps * 0.35f + ridged * 0.45f + uplift * 0.15f + terraces * 0.05f;
+    combined = std::clamp(combined, 0.0f, 1.0f);
 
-    const float quieted = std::clamp(glm::mix(base, combined, quietFactor), 0.0f, 1.0f);
+    const float peakBlendControl = glm::smoothstep(0.55f, 0.9f, combined);
+    const float peakShaped = 1.0f - std::pow(1.0f - combined, 3.0f);
+    float finalValue = glm::mix(combined, peakShaped, peakBlendControl);
+    finalValue = std::clamp(finalValue, 0.0f, 1.0f);
 
-    return quieted;
+    const float valleyBlend = glm::smoothstep(0.2f, 0.6f, valleyFill);
+    const float valleyBase = macroRamps * 0.5f + valleyFill * 0.5f;
+    finalValue = glm::mix(valleyBase, finalValue, valleyBlend);
+
+    finalValue = std::clamp(finalValue + (uplift - 0.5f) * 0.08f, 0.0f, 1.0f);
+    finalValue = glm::mix(finalValue, macroRamps, valleyMask * 0.25f);
+
+    return std::clamp(finalValue, 0.0f, 1.0f);
 }
 
 ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMountainsHeight(
@@ -4138,7 +4426,11 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     auto sampleColumn = [&](float sampleX, float sampleZ) -> LittleMountainSample {
         const float normalized = computeLittleMountainsNormalized(sampleX, sampleZ);
         float height = minHeight + normalized * range;
-        const float floorNoise = noise_.noise(sampleX * 0.0015f + 311.0f, sampleZ * 0.0015f - 173.0f);
+        const float floorNoise = littleMountainsNoise_.fbm(sampleX * 0.0013f + 311.0f,
+                                                           sampleZ * 0.0013f - 173.0f,
+                                                           4,
+                                                           0.5f,
+                                                           2.0f);
         const float floorT = std::clamp(floorNoise * 0.5f + 0.5f, 0.0f, 1.0f);
         const float entryFloor = minHeight + floorT * floorRange;
         if (height < entryFloor)

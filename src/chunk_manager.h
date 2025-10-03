@@ -31,28 +31,44 @@ inline constexpr int kChunkSizeY = kChunkEdgeLength;
 inline constexpr int kChunkSizeZ = kChunkEdgeLength;
 inline constexpr int kChunkBlockCount = kChunkEdgeLength * kChunkEdgeLength * kChunkEdgeLength;
 inline constexpr int kAtlasTileSizePixels = 16;
-inline constexpr int kDefaultViewDistance = 4;
-inline constexpr int kExtendedViewDistance = 12;
+inline constexpr int kDefaultViewDistance = 12;
+inline constexpr int kExtendedViewDistance = 320;
 struct VerticalStreamingConfig
 {
     int minRadiusChunks{2};
-    int maxRadiusChunks{8};
+    int maxRadiusChunks{320};
     int columnSlackChunks{1};
     int sampleRadiusChunks{3};
     int horizontalEvictionSlack{1};
-    int uploadBasePerColumn{2};
-    int uploadRampDivisor{2};
-    int uploadMaxPerColumn{6};
-    int maxGenerationJobsPerColumn{3};
+    int uploadBasePerColumn{4};
+    int uploadRampDivisor{1};
+    int uploadMaxPerColumn{24};
+    int maxGenerationJobsPerColumn{12};
+    int backlogColumnCapReleaseThreshold{4096};
+
+    struct GenerationBudgetSettings
+    {
+        int baseJobsPerFrame{64};
+        float jobsPerHorizontalRing{4.0f};
+        float jobsPerVerticalLayer{2.0f};
+        int backlogStartThreshold{128};
+        int backlogStepSize{128};
+        int backlogBoostPerStep{24};
+        int maxJobsPerFrame{768};
+        int minRingExpansionsPerFrame{1};
+        int maxRingExpansionsPerFrame{8};
+        int backlogRingStepSize{128};
+        int columnCapBoostPerStep{4};
+    } generationBudget{};
+
+    int maxWorkerThreads{0};
 };
 
 inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
-inline constexpr int kMaxChunkJobsPerFrame = 18;
-inline constexpr int kMaxRingsPerFrame = 2;
-inline constexpr std::size_t kUploadBudgetBytesPerFrame = 6ull * 1024ull * 1024ull;
+inline constexpr std::size_t kUploadBudgetBytesPerFrame = 64ull * 1024ull * 1024ull;
 
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
-inline constexpr std::size_t kChunkPoolSoftCap = 512ull;
+inline constexpr std::size_t kChunkPoolSoftCap = 1'048'576ull;
 inline constexpr std::size_t kUploadQueueScanLimit = 128ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
@@ -110,6 +126,17 @@ struct ChunkProfilingSnapshot
     int deferredUploads{0};
     int evictedChunks{0};
     int verticalRadius{0};
+    int generationBudget{0};
+    int generationJobsIssued{0};
+    int ringExpansionBudget{0};
+    int ringExpansionsUsed{0};
+    int missingChunks{0};
+    int generationColumnCap{0};
+    int generationBacklogSteps{0};
+    int workerThreads{0};
+    std::size_t uploadBudgetBytes{0};
+    int uploadColumnLimit{0};
+    int pendingUploadChunks{0};
 };
 
 struct Frustum
@@ -152,6 +179,8 @@ public:
     void toggleViewDistance();
     int viewDistance() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setLodEnabled(bool enabled);
+    bool lodEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;

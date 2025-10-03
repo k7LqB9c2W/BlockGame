@@ -807,7 +807,8 @@ private:
     std::deque<std::weak_ptr<Chunk>> uploadQueue_;
     std::mutex uploadQueueMutex_;
     std::vector<ChunkBufferPage> bufferPages_;
-    std::mutex bufferPageMutex_;
+    mutable std::mutex bufferPageMutex_;
+
     PerlinNoise noise_;
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;

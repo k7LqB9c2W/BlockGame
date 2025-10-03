@@ -4945,6 +4945,36 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     const BiomePerturbationSample perturbations =
         applyBiomePerturbations(weightedBiomes, weightCount, biomeRegionX, biomeRegionZ);
 
+    const BiomeDefinition* clampBiomePtr =
+        perturbations.dominantBiome ? perturbations.dominantBiome : &biomeForRegion(biomeRegionX, biomeRegionZ);
+    const BiomeDefinition& clampBiome = *clampBiomePtr;
+
+    const BiomeDefinition* littleMountainsDefinition{nullptr};
+    float littleMountainsWeight = 0.0f;
+    bool hasNonLittleMountainsBiome = false;
+    for (std::size_t i = 0; i < weightCount; ++i)
+    {
+        const WeightedBiome& weightedBiome = weightedBiomes[i];
+        if (!weightedBiome.biome || weightedBiome.weight <= 0.0f)
+        {
+            continue;
+        }
+
+        if (weightedBiome.biome->id == BiomeId::LittleMountains)
+        {
+            littleMountainsWeight += weightedBiome.weight;
+            if (!littleMountainsDefinition)
+            {
+                littleMountainsDefinition = weightedBiome.biome;
+            }
+        }
+        else if (weightedBiome.weight > 0.0f)
+        {
+            hasNonLittleMountainsBiome = true;
+        }
+    }
+    littleMountainsWeight = std::clamp(littleMountainsWeight, 0.0f, 1.0f);
+
     float borderAnchorHeight = std::numeric_limits<float>::quiet_NaN();
     bool hasBorderAnchor = false;
     if (hasNonLittleMountainsBiome)
@@ -4983,36 +5013,6 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             hasBorderAnchor = std::isfinite(borderAnchorHeight);
         }
     }
-
-    const BiomeDefinition* clampBiomePtr =
-        perturbations.dominantBiome ? perturbations.dominantBiome : &biomeForRegion(biomeRegionX, biomeRegionZ);
-    const BiomeDefinition& clampBiome = *clampBiomePtr;
-
-    const BiomeDefinition* littleMountainsDefinition{nullptr};
-    float littleMountainsWeight = 0.0f;
-    bool hasNonLittleMountainsBiome = false;
-    for (std::size_t i = 0; i < weightCount; ++i)
-    {
-        const WeightedBiome& weightedBiome = weightedBiomes[i];
-        if (!weightedBiome.biome || weightedBiome.weight <= 0.0f)
-        {
-            continue;
-        }
-
-        if (weightedBiome.biome->id == BiomeId::LittleMountains)
-        {
-            littleMountainsWeight += weightedBiome.weight;
-            if (!littleMountainsDefinition)
-            {
-                littleMountainsDefinition = weightedBiome.biome;
-            }
-        }
-        else if (weightedBiome.weight > 0.0f)
-        {
-            hasNonLittleMountainsBiome = true;
-        }
-    }
-    littleMountainsWeight = std::clamp(littleMountainsWeight, 0.0f, 1.0f);
 
     float littleMountainInteriorMask = 0.0f;
     if (littleMountainsDefinition)

@@ -692,6 +692,7 @@ private:
     mutable std::mutex pendingStructureMutex_;
 
     std::vector<std::thread> workerThreads_;
+    std::size_t workerThreadCount_{0};
     std::atomic<bool> shouldStop_;
 
     glm::ivec3 highlightedBlock_{0};
@@ -1867,6 +1868,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.generationBacklogSteps = lastBacklogSteps_;
     snapshot.generationColumnCap =
         (lastColumnCap_ >= std::numeric_limits<int>::max()) ? -1 : std::max(lastColumnCap_, 0);
+    snapshot.workerThreads = static_cast<int>(workerThreadCount_);
 
     const long long genMicros = profilingCounters_.generationMicros.exchange(0, std::memory_order_relaxed);
     const long long meshMicros = profilingCounters_.meshingMicros.exchange(0, std::memory_order_relaxed);
@@ -1887,10 +1889,28 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
 
 void ChunkManager::Impl::startWorkerThreads()
 {
-    const unsigned numThreads = std::max(1u, std::thread::hardware_concurrency() / 2);
-    workerThreads_.reserve(numThreads);
+    shouldStop_.store(false, std::memory_order_release);
 
-    for (unsigned i = 0; i < numThreads; ++i)
+    unsigned concurrency = std::thread::hardware_concurrency();
+    if (concurrency == 0)
+    {
+        concurrency = 2;
+    }
+
+    const unsigned minimum = 2u;
+    unsigned desired = std::max(minimum, concurrency);
+
+    if (kVerticalStreamingConfig.maxWorkerThreads > 0)
+    {
+        desired = std::min(desired, static_cast<unsigned>(kVerticalStreamingConfig.maxWorkerThreads));
+    }
+
+    desired = std::max(minimum, desired);
+
+    workerThreadCount_ = static_cast<std::size_t>(desired);
+    workerThreads_.reserve(workerThreadCount_);
+
+    for (std::size_t i = 0; i < workerThreadCount_; ++i)
     {
         workerThreads_.emplace_back(&ChunkManager::Impl::workerThreadFunction, this);
     }
@@ -1909,6 +1929,7 @@ void ChunkManager::Impl::stopWorkerThreads()
         }
     }
     workerThreads_.clear();
+    workerThreadCount_ = 0;
 }
 
 void ChunkManager::Impl::workerThreadFunction()

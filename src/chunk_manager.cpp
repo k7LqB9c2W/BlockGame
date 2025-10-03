@@ -808,6 +808,7 @@ private:
     std::mutex uploadQueueMutex_;
     std::vector<ChunkBufferPage> bufferPages_;
     mutable std::mutex bufferPageMutex_;
+
     PerlinNoise noise_;
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;

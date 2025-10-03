@@ -1195,6 +1195,11 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSiz
         assignFace(BlockId::Water, face, {0, 7});
     }
 
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::Stone, face, {1, 9});
+    }
+
     blockAtlasConfigured_ = true;
 }
 

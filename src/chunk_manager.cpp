@@ -240,6 +240,7 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      kDesertMaxSurfaceHeight,
      0.30f,
      14.0f},
+
     {BiomeId::Ocean,
      "Ocean",
      BlockId::Water,

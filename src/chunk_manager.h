@@ -179,6 +179,8 @@ public:
     void toggleViewDistance();
     int viewDistance() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setLodEnabled(bool enabled);
+    bool lodEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;

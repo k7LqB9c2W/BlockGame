@@ -325,6 +325,37 @@ enum class JobType : std::uint8_t
     Mesh = 1
 };
 
+struct FarChunk
+{
+    static constexpr int kColumnStep = 4;
+    static constexpr int kColumnsX = kChunkSizeX / kColumnStep;
+    static constexpr int kColumnsZ = kChunkSizeZ / kColumnStep;
+
+    struct SurfaceCell
+    {
+        int worldY{std::numeric_limits<int>::min()};
+        BlockId block{BlockId::Air};
+    };
+
+    glm::vec3 origin{0.0f};
+    glm::ivec3 size{kChunkSizeX, kChunkSizeY, kChunkSizeZ};
+    int lodStep{kColumnStep};
+    int thickness{1};
+    std::array<SurfaceCell, kColumnsX * kColumnsZ> strata{};
+    GLuint opaqueVao{0};
+    GLuint opaqueVbo{0};
+    GLuint opaqueIbo{0};
+    GLuint cutoutVao{0};
+    GLuint cutoutVbo{0};
+    GLuint cutoutIbo{0};
+
+    static constexpr std::size_t index(int x, int z) noexcept
+    {
+        return static_cast<std::size_t>(z) * static_cast<std::size_t>(kColumnsX) +
+               static_cast<std::size_t>(x);
+    }
+};
+
 struct Chunk
 {
     explicit Chunk(const glm::ivec3& c)
@@ -361,6 +392,8 @@ struct Chunk
         vbo = 0;
         ibo = 0;
         inFlight.store(0, std::memory_order_relaxed);
+        surfaceOnly = false;
+        lodData.reset();
     }
 
 
@@ -383,6 +416,8 @@ struct Chunk
     bool meshReady{false};
     bool hasBlocks{false};
     std::atomic<int> inFlight{0};
+    bool surfaceOnly{false};
+    std::unique_ptr<FarChunk> lodData;
 };
 
 struct ProfilingCounters
@@ -606,7 +641,7 @@ private:
 
     RingProgress ensureVolume(const glm::ivec3& center, int horizontalRadius, int verticalRadius, int& jobBudget);
     void removeDistantChunks(const glm::ivec3& center, int horizontalThreshold, int verticalThreshold);
-    bool ensureChunkAsync(const glm::ivec3& coord);
+    bool ensureChunkAsync(const glm::ivec3& coord, bool surfaceOnly);
     void uploadReadyMeshes();
     void uploadChunkMesh(Chunk& chunk);
     void buildChunkMeshAsync(Chunk& chunk);
@@ -619,6 +654,7 @@ private:
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
     void generateChunkBlocks(Chunk& chunk);
+    void generateSurfaceOnlyChunk(Chunk& chunk);
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
@@ -627,6 +663,10 @@ private:
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
+    void buildSurfaceOnlyMesh(Chunk& chunk);
+    bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
+    void setLodEnabled(bool enabled);
+    bool lodEnabled() const noexcept;
 
     struct WeightedBiome
     {
@@ -693,6 +733,9 @@ private:
 
     std::array<BlockUVSet, toIndex(BlockId::Count)> blockUVTable_{};
     bool blockAtlasConfigured_{false};
+    bool lodEnabled_{false};
+    int lodNearRadius_{8};
+    bool lodModeDirty_{false};
 
     std::deque<std::weak_ptr<Chunk>> uploadQueue_;
     std::mutex uploadQueueMutex_;
@@ -1146,6 +1189,17 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     const int worldZ = static_cast<int>(std::floor(cameraPos.z));
     const int clampedWorldY = std::max(worldY, 0);
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
+
+    if (lodModeDirty_)
+    {
+        clear();
+        lodModeDirty_ = false;
+    }
+
+    if (lodEnabled_)
+    {
+        lodNearRadius_ = std::max(4, targetViewDistance_ / 2);
+    }
 
     resetColumnBudgets();
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
@@ -1691,6 +1745,26 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
     {
         std::cerr << "Error setting render distance: " << ex.what() << std::endl;
     }
+}
+
+void ChunkManager::Impl::setLodEnabled(bool enabled)
+{
+    if (lodEnabled_ == enabled)
+    {
+        return;
+    }
+
+    lodEnabled_ = enabled;
+    lodNearRadius_ = enabled ? std::max(4, targetViewDistance_ / 2) : 0;
+    lodModeDirty_ = true;
+
+    std::cout << "[ChunkManager] Surface LOD " << (enabled ? "enabled" : "disabled")
+              << " via F3 toggle" << std::endl;
+}
+
+bool ChunkManager::Impl::lodEnabled() const noexcept
+{
+    return lodEnabled_;
 }
 
 BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
@@ -2672,21 +2746,54 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         }
 
         const glm::ivec2 columnKey{candidate.coord.x, candidate.coord.z};
+        int& columnJobs = jobsScheduledThisFrame_[columnKey];
+        const bool surfaceOnly = shouldUseSurfaceOnly(center, candidate.coord);
+
         if (auto existing = getChunkShared(candidate.coord))
         {
-            (void)existing;
+            if (existing->surfaceOnly != surfaceOnly && existing->inFlight.load(std::memory_order_acquire) == 0)
+            {
+                if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
+                {
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> meshLock(existing->meshMutex);
+                    std::fill(existing->blocks.begin(), existing->blocks.end(), BlockId::Air);
+                    existing->meshData.clear();
+                    existing->hasBlocks = false;
+                    if (surfaceOnly)
+                    {
+                        if (!existing->lodData)
+                        {
+                            existing->lodData = std::make_unique<FarChunk>();
+                        }
+                    }
+                    else
+                    {
+                        existing->lodData.reset();
+                    }
+                }
+
+                existing->surfaceOnly = surfaceOnly;
+                existing->state.store(ChunkState::Generating, std::memory_order_release);
+                enqueueJob(existing, JobType::Generate, candidate.coord);
+                --jobBudget;
+                ++columnJobs;
+                missingFound = true;
+            }
             continue;
         }
 
         missingFound = true;
 
-        int& columnJobs = jobsScheduledThisFrame_[columnKey];
         if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
         {
             continue;
         }
 
-        if (ensureChunkAsync(candidate.coord))
+        if (ensureChunkAsync(candidate.coord, surfaceOnly))
         {
             --jobBudget;
             ++columnJobs;
@@ -2767,7 +2874,18 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
     }
 }
 
-bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
+bool ChunkManager::Impl::shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept
+{
+    if (!lodEnabled_)
+    {
+        return false;
+    }
+
+    const int horizontalDistance = std::max(std::abs(coord.x - center.x), std::abs(coord.z - center.z));
+    return horizontalDistance > lodNearRadius_;
+}
+
+bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool surfaceOnly)
 {
     if (coord.y < 0)
     {
@@ -2787,6 +2905,18 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
             chunk = acquireChunk(coord);
             chunk->state.store(ChunkState::Generating, std::memory_order_release);
+            chunk->surfaceOnly = surfaceOnly;
+            if (surfaceOnly)
+            {
+                if (!chunk->lodData)
+                {
+                    chunk->lodData = std::make_unique<FarChunk>();
+                }
+            }
+            else
+            {
+                chunk->lodData.reset();
+            }
             chunks_.emplace(coord, chunk);
         }
 
@@ -2915,6 +3045,60 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
     chunk.meshData.clear();
 }
 
+void ChunkManager::Impl::buildSurfaceOnlyMesh(Chunk& chunk)
+{
+    if (!chunk.lodData)
+    {
+        chunk.meshData.clear();
+        return;
+    }
+
+    FarChunk& lod = *chunk.lodData;
+    chunk.meshData.clear();
+
+    const glm::vec3 baseOrigin = lod.origin;
+    const glm::vec3 normal{0.0f, 1.0f, 0.0f};
+    const float step = static_cast<float>(lod.lodStep);
+
+    for (int rx = 0; rx < FarChunk::kColumnsX; ++rx)
+    {
+        for (int rz = 0; rz < FarChunk::kColumnsZ; ++rz)
+        {
+            const FarChunk::SurfaceCell& cell = lod.strata[FarChunk::index(rx, rz)];
+            if (cell.block == BlockId::Air || cell.worldY == std::numeric_limits<int>::min())
+            {
+                continue;
+            }
+
+            const float worldY = static_cast<float>(cell.worldY + 1);
+            const float minX = baseOrigin.x + static_cast<float>(rx) * step;
+            const float maxX = baseOrigin.x + static_cast<float>(rx + 1) * step;
+            const float minZ = baseOrigin.z + static_cast<float>(rz) * step;
+            const float maxZ = baseOrigin.z + static_cast<float>(rz + 1) * step;
+
+            const glm::vec3 p0{minX, worldY, minZ};
+            const glm::vec3 p1{maxX, worldY, minZ};
+            const glm::vec3 p2{maxX, worldY, maxZ};
+            const glm::vec3 p3{minX, worldY, maxZ};
+
+            const auto& uv = blockUVTable_[toIndex(cell.block)].faces[toIndex(BlockFace::Top)];
+
+            const std::uint32_t baseIndex = static_cast<std::uint32_t>(chunk.meshData.vertices.size());
+            chunk.meshData.vertices.push_back(Vertex{p0, normal, glm::vec2{0.0f, 0.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p1, normal, glm::vec2{1.0f, 0.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p2, normal, glm::vec2{1.0f, 1.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p3, normal, glm::vec2{0.0f, 1.0f}, uv.base, uv.size});
+
+            chunk.meshData.indices.push_back(baseIndex + 0);
+            chunk.meshData.indices.push_back(baseIndex + 1);
+            chunk.meshData.indices.push_back(baseIndex + 2);
+            chunk.meshData.indices.push_back(baseIndex + 0);
+            chunk.meshData.indices.push_back(baseIndex + 2);
+            chunk.meshData.indices.push_back(baseIndex + 3);
+        }
+    }
+}
+
 void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 {
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
@@ -2922,6 +3106,13 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 
     if (!chunk.hasBlocks)
     {
+        chunk.meshReady = true;
+        return;
+    }
+
+    if (chunk.surfaceOnly)
+    {
+        buildSurfaceOnlyMesh(chunk);
         chunk.meshReady = true;
         return;
     }
@@ -3855,10 +4046,126 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     return sample;
 }
 
+void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
+{
+    std::lock_guard<std::mutex> lock(chunk.meshMutex);
+    std::fill(chunk.blocks.begin(), chunk.blocks.end(), BlockId::Air);
+
+    if (!chunk.lodData)
+    {
+        chunk.lodData = std::make_unique<FarChunk>();
+    }
+
+    FarChunk& lod = *chunk.lodData;
+    lod.origin = glm::vec3(static_cast<float>(chunk.coord.x * kChunkSizeX),
+                           static_cast<float>(chunk.minWorldY),
+                           static_cast<float>(chunk.coord.z * kChunkSizeZ));
+    lod.size = glm::ivec3{kChunkSizeX, kChunkSizeY, kChunkSizeZ};
+    lod.lodStep = FarChunk::kColumnStep;
+    lod.thickness = 1;
+
+    const int baseWorldX = chunk.coord.x * kChunkSizeX;
+    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
+    const int slabMinWorldY = chunk.minWorldY;
+    const int slabMaxWorldY = chunk.maxWorldY;
+
+    bool anySolid = false;
+
+    for (int rx = 0; rx < FarChunk::kColumnsX; ++rx)
+    {
+        for (int rz = 0; rz < FarChunk::kColumnsZ; ++rz)
+        {
+            int bestWorldY = std::numeric_limits<int>::min();
+            BlockId bestBlock = BlockId::Air;
+            int bestLocalX = -1;
+            int bestLocalZ = -1;
+
+            for (int localX = rx * FarChunk::kColumnStep;
+                 localX < (rx + 1) * FarChunk::kColumnStep && localX < kChunkSizeX;
+                 ++localX)
+            {
+                for (int localZ = rz * FarChunk::kColumnStep;
+                     localZ < (rz + 1) * FarChunk::kColumnStep && localZ < kChunkSizeZ;
+                     ++localZ)
+                {
+                    const int worldX = baseWorldX + localX;
+                    const int worldZ = baseWorldZ + localZ;
+
+                    ColumnSample sample = sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
+                    if (!sample.dominantBiome || !sample.slabHasSolid)
+                    {
+                        continue;
+                    }
+
+                    BlockId surfaceBlock = sample.dominantBiome->surfaceBlock;
+                    if (sample.dominantBiome->id != BiomeId::Ocean)
+                    {
+                        constexpr float kBeachDistanceRange = 6.0f;
+                        constexpr int kBeachHeightBand = 2;
+                        const bool nearSeaLevel = std::abs(sample.surfaceY - kGlobalSeaLevel) <= kBeachHeightBand;
+                        if (nearSeaLevel && sample.distanceToShore <= kBeachDistanceRange)
+                        {
+                            const float beachNoise = hashToUnitFloat(worldX, sample.surfaceY, worldZ);
+                            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
+                        }
+                    }
+
+                    const int highestSolidWorld = sample.slabHighestSolidY;
+                    if (highestSolidWorld < slabMinWorldY || highestSolidWorld > slabMaxWorldY)
+                    {
+                        continue;
+                    }
+
+                    if (highestSolidWorld > bestWorldY)
+                    {
+                        bestWorldY = highestSolidWorld;
+                        bestBlock = surfaceBlock;
+                        bestLocalX = localX;
+                        bestLocalZ = localZ;
+                    }
+                }
+            }
+
+            FarChunk::SurfaceCell cell{};
+
+            if (bestLocalX >= 0 && bestBlock != BlockId::Air)
+            {
+                cell.worldY = bestWorldY;
+                cell.block = bestBlock;
+
+                const int localY = bestWorldY - chunk.minWorldY;
+                if (localY >= 0 && localY < kChunkSizeY)
+                {
+                    chunk.blocks[blockIndex(bestLocalX, localY, bestLocalZ)] = bestBlock;
+                    anySolid = true;
+                }
+            }
+
+            lod.strata[FarChunk::index(rx, rz)] = cell;
+        }
+    }
+
+    chunk.hasBlocks = anySolid;
+    if (anySolid)
+    {
+        columnManager_.updateChunk(chunk);
+    }
+    else
+    {
+        columnManager_.removeChunk(chunk);
+    }
+}
+
 void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 {
     std::vector<PendingStructureEdit> externalEdits;
     bool anySolid = false;
+
+    if (chunk.surfaceOnly)
+    {
+        generateSurfaceOnlyChunk(chunk);
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
@@ -4319,6 +4626,16 @@ int ChunkManager::viewDistance() const noexcept
 void ChunkManager::setRenderDistance(int distance) noexcept
 {
     impl_->setRenderDistance(distance);
+}
+
+void ChunkManager::setLodEnabled(bool enabled)
+{
+    impl_->setLodEnabled(enabled);
+}
+
+bool ChunkManager::lodEnabled() const noexcept
+{
+    return impl_->lodEnabled();
 }
 
 BlockId ChunkManager::blockAt(const glm::ivec3& worldPos) const noexcept

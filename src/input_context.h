@@ -23,6 +23,9 @@ struct InputContext
     bool nKeyJustPressed{false};
     bool f1Pressed{false};
     bool f1JustPressed{false};
+    bool f3Pressed{false};
+    bool f3JustPressed{false};
+    bool lodEnabled{false};
     bool showCoordinates{false};
     bool showRenderDistanceGUI{false};
     std::string inputBuffer{};

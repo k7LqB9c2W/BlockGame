@@ -776,7 +776,16 @@ private:
 
     TerrainBasisSample computeTerrainBasis(int worldX, int worldZ) const;
     float computeLittleMountainsNormalized(float worldX, float worldZ) const;
-    float computeLittleMountainsHeight(int worldX, int worldZ, const BiomeDefinition& definition) const;
+
+    struct LittleMountainSample
+    {
+        float height{0.0f};
+        float dynamicMin{0.0f};
+    };
+
+    LittleMountainSample computeLittleMountainsHeight(int worldX,
+                                                      int worldZ,
+                                                      const BiomeDefinition& definition) const;
     BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
                                                     std::size_t weightCount,
                                                     int biomeRegionX,
@@ -4101,16 +4110,17 @@ float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float w
     return quieted;
 }
 
-float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
-                                                       int worldZ,
-                                                       const BiomeDefinition& definition) const
+ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMountainsHeight(
+    int worldX,
+    int worldZ,
+    const BiomeDefinition& definition) const
 {
     const float minHeight = static_cast<float>(definition.minHeight);
     const float maxHeight = static_cast<float>(definition.maxHeight);
     const float range = std::max(maxHeight - minHeight, 1.0f);
     const float floorRange = std::min(20.0f, range);
 
-    auto sampleColumn = [&](float sampleX, float sampleZ) {
+    auto sampleColumn = [&](float sampleX, float sampleZ) -> LittleMountainSample {
         const float normalized = computeLittleMountainsNormalized(sampleX, sampleZ);
         float height = minHeight + normalized * range;
         const float floorNoise = noise_.noise(sampleX * 0.0015f + 311.0f, sampleZ * 0.0015f - 173.0f);
@@ -4120,12 +4130,12 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
         {
             height = dynamicMin;
         }
-        return std::pair<float, float>{height, dynamicMin};
+        return LittleMountainSample{height, dynamicMin};
     };
 
     const auto baseSample = sampleColumn(static_cast<float>(worldX), static_cast<float>(worldZ));
-    float baseHeight = baseSample.first;
-    const float dynamicMinHeight = baseSample.second;
+    float baseHeight = baseSample.height;
+    const float dynamicMinHeight = baseSample.dynamicMin;
 
     const float sampleStep = 12.0f;
     const float gentleTalusAngle = glm::radians(9.0f);
@@ -4140,7 +4150,7 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
     auto sampleNeighbor = [&](float offsetX, float offsetZ) {
         const auto neighborSample =
             sampleColumn(static_cast<float>(worldX) + offsetX, static_cast<float>(worldZ) + offsetZ);
-        return neighborSample.first;
+        return neighborSample.height;
     };
 
     std::array<float, 4> neighbors{
@@ -4168,7 +4178,8 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
 
     baseHeight = std::lerp(baseHeight, relaxedHeight, 0.8f);
 
-    return std::clamp(baseHeight, dynamicMinHeight, maxHeight);
+    const float clampedHeight = std::clamp(baseHeight, dynamicMinHeight, maxHeight);
+    return LittleMountainSample{clampedHeight, dynamicMinHeight};
 }
 
 ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePerturbations(
@@ -4532,14 +4543,24 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         const float mountainBlend = std::clamp(std::pow(littleMountainsWeight, 1.35f), 0.0f, 1.0f);
         if (mountainBlend > 0.0f)
         {
-            const float mountainHeight = computeLittleMountainsHeight(worldX, worldZ, *littleMountainsDefinition);
-            macroStageHeight = std::lerp(macroStageHeight, mountainHeight, mountainBlend * 0.45f);
-            targetHeight = std::lerp(targetHeight, mountainHeight, mountainBlend * 0.6f);
+            const LittleMountainSample mountainSample =
+                computeLittleMountainsHeight(worldX, worldZ, *littleMountainsDefinition);
+            const float mountainHeight = mountainSample.height;
+            const float mountainFloor = mountainSample.dynamicMin;
+            constexpr float kMountainEntryExponent = 2.0f;
+            const float entryMix = std::pow(mountainBlend, kMountainEntryExponent);
+            const float entryHeight = std::lerp(mountainFloor, mountainHeight, entryMix);
+            macroStageHeight = std::lerp(macroStageHeight, entryHeight, mountainBlend * 0.45f);
+            targetHeight = std::lerp(targetHeight, entryHeight, mountainBlend * 0.6f);
             if (hasLandContribution)
             {
-                landTarget = std::lerp(landTarget, mountainHeight, mountainBlend);
+                landTarget = std::lerp(landTarget, entryHeight, mountainBlend);
             }
+            minHeight = std::min(minHeight, mountainFloor);
+            minHeight = std::min(minHeight, entryHeight);
             minHeight = std::min(minHeight, mountainHeight);
+            maxHeight = std::max(maxHeight, mountainFloor);
+            maxHeight = std::max(maxHeight, entryHeight);
             maxHeight = std::max(maxHeight, mountainHeight);
             macroStageHeight = std::clamp(macroStageHeight, minHeight, maxHeight);
             targetHeight = std::clamp(targetHeight, minHeight, maxHeight);

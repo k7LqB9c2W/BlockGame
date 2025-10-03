@@ -134,6 +134,9 @@ struct ChunkProfilingSnapshot
     int generationColumnCap{0};
     int generationBacklogSteps{0};
     int workerThreads{0};
+    std::size_t uploadBudgetBytes{0};
+    int uploadColumnLimit{0};
+    int pendingUploadChunks{0};
 };
 
 struct Frustum

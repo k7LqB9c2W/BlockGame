@@ -635,10 +635,20 @@ private:
                         const glm::ivec2& cameraColumn,
                         int cameraChunkY,
                         int verticalRadius) const;
+    int columnRadiusForHeight(const glm::ivec2& column,
+                              const glm::ivec2& cameraColumn,
+                              int cameraChunkY,
+                              int verticalRadius,
+                              int columnHeight) const;
     std::pair<int, int> columnSpanFor(const glm::ivec2& column,
                                       const glm::ivec2& cameraColumn,
                                       int cameraChunkY,
                                       int verticalRadius) const;
+    std::pair<int, int> columnSpanForHeight(const glm::ivec2& column,
+                                            const glm::ivec2& cameraColumn,
+                                            int cameraChunkY,
+                                            int verticalRadius,
+                                            int columnHeight) const;
     void resetColumnBudgets();
     int baseUploadsPerColumnLimit(int verticalRadius) const noexcept;
     std::size_t estimateUploadQueueSize();
@@ -681,6 +691,10 @@ private:
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
                               int slabMaxWorldY = std::numeric_limits<int>::max()) const;
+    int ensureColumnHeightCached(const glm::ivec2& column, int worldX, int worldZ) const;
+    bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
+    int cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const;
+    void invalidatePredictedColumn(const glm::ivec2& column) const;
     bool applyPendingStructureEditsLocked(Chunk& chunk);
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
@@ -783,6 +797,8 @@ private:
     GLuint atlasTexture_{0};
     JobQueue jobQueue_;
     ColumnManager columnManager_;
+    mutable std::mutex predictedColumnMutex_;
+    mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
     mutable std::unordered_map<glm::ivec2, BiomeRegionInfo, ColumnHasher> biomeRegionCache_;
@@ -1498,6 +1514,7 @@ void ChunkManager::Impl::clear()
         if (chunk)
         {
             columnManager_.removeChunk(*chunk);
+            invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             recycleChunkGPU(*chunk);
             recycleChunkObject(std::move(chunk));
 
@@ -1514,6 +1531,10 @@ void ChunkManager::Impl::clear()
         uploadQueue_.clear();
     }
     columnManager_.clear();
+    {
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        predictedColumnHeights_.clear();
+    }
     {
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
         pendingStructureEdits_.clear();
@@ -1567,6 +1588,8 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
     }
 
+    invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
 
@@ -1612,6 +1635,8 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         columnManager_.updateColumn(*chunk, local.x, local.z);
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
     }
+
+    invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
@@ -2621,10 +2646,14 @@ int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
             const int chunkX = center.x + dx;
             const int chunkZ = center.z + dz;
             const glm::ivec2 column{chunkX, chunkZ};
-            const int columnRadius = columnRadiusFor(column,
-                                                     cameraColumn,
-                                                     cameraChunkY,
-                                                     verticalRadius);
+            const int worldX = chunkX * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
+            const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+            const int columnRadius = columnRadiusForHeight(column,
+                                                           cameraColumn,
+                                                           cameraChunkY,
+                                                           verticalRadius,
+                                                           columnHeight);
             const int minChunkY = std::max(0, cameraChunkY - columnRadius);
             const int maxChunkY = std::max(minChunkY, cameraChunkY + columnRadius);
             for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
@@ -2675,10 +2704,71 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
                       kVerticalStreamingConfig.maxRadiusChunks);
 }
 
+bool ChunkManager::Impl::tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const
+{
+    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+    auto it = predictedColumnHeights_.find(column);
+    if (it == predictedColumnHeights_.end())
+    {
+        return false;
+    }
+
+    outHeight = it->second;
+    return true;
+}
+
+int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const
+{
+    const ColumnSample sample = sampleColumn(worldX, worldZ);
+    const int height = sample.surfaceY;
+    {
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        predictedColumnHeights_[column] = height;
+    }
+    return height;
+}
+
+int ChunkManager::Impl::ensureColumnHeightCached(const glm::ivec2& column,
+                                                 int worldX,
+                                                 int worldZ) const
+{
+    int highest = columnManager_.highestSolidBlock(worldX, worldZ);
+    if (highest != ColumnManager::kNoHeight)
+    {
+        return highest;
+    }
+
+    int cachedHeight = ColumnManager::kNoHeight;
+    if (tryGetPredictedColumnHeight(column, cachedHeight))
+    {
+        return cachedHeight;
+    }
+
+    return cacheSampledColumnHeight(column, worldX, worldZ);
+}
+
+void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) const
+{
+    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+    predictedColumnHeights_.erase(column);
+}
+
 int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
                                         const glm::ivec2& cameraColumn,
                                         int cameraChunkY,
                                         int verticalRadius) const
+{
+    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+    const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+    return columnRadiusForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
+}
+
+int ChunkManager::Impl::columnRadiusForHeight(const glm::ivec2& column,
+                                              const glm::ivec2& cameraColumn,
+                                              int cameraChunkY,
+                                              int verticalRadius,
+                                              int columnHeight) const
 {
     int radius = std::max(verticalRadius, kVerticalStreamingConfig.minRadiusChunks);
 
@@ -2697,19 +2787,9 @@ int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
         }
     }
 
-    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-
-    int highest = columnManager_.highestSolidBlock(worldX, worldZ);
-    if (highest == ColumnManager::kNoHeight)
+    if (columnHeight != ColumnManager::kNoHeight)
     {
-        const ColumnSample sample = sampleColumn(worldX, worldZ);
-        highest = sample.surfaceY;
-    }
-
-    if (highest != ColumnManager::kNoHeight)
-    {
-        const int highestChunk = floorDiv(highest, kChunkSizeY);
+        const int highestChunk = floorDiv(columnHeight, kChunkSizeY);
         const int required = std::abs(highestChunk - cameraChunkY) +
                              kVerticalStreamingConfig.columnSlackChunks;
         radius = std::max(radius, required);
@@ -2725,7 +2805,19 @@ std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
                                                        int cameraChunkY,
                                                        int verticalRadius) const
 {
-    const int radius = columnRadiusFor(column, cameraColumn, cameraChunkY, verticalRadius);
+    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+    const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+    return columnSpanForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
+}
+
+std::pair<int, int> ChunkManager::Impl::columnSpanForHeight(const glm::ivec2& column,
+                                                             const glm::ivec2& cameraColumn,
+                                                             int cameraChunkY,
+                                                             int verticalRadius,
+                                                             int columnHeight) const
+{
+    const int radius = columnRadiusForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
     const int minChunk = std::max(0, cameraChunkY - radius);
     const int maxChunk = std::max(minChunk, cameraChunkY + radius);
     return {minChunk, maxChunk};
@@ -2763,10 +2855,14 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
             return;
         }
 
-        const auto [minChunkY, maxChunkY] = columnSpanFor(column,
-                                                          cameraColumn,
-                                                          center.y,
-                                                          verticalRadius);
+        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+        const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+        const auto [minChunkY, maxChunkY] = columnSpanForHeight(column,
+                                                                cameraColumn,
+                                                                center.y,
+                                                                verticalRadius,
+                                                                columnHeight);
         for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
         {
             const glm::ivec3 coord{chunkX, chunkY, chunkZ};
@@ -2941,6 +3037,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
         if (chunk)
         {
             columnManager_.removeChunk(*chunk);
+            invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             recycleChunkGPU(*chunk);
             recycleChunkObject(std::move(chunk));
             ++evictedCount;
@@ -4415,6 +4512,7 @@ void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
     {
         columnManager_.removeChunk(chunk);
     }
+    invalidatePredictedColumn({chunk.coord.x, chunk.coord.z});
 }
 
 void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
@@ -4749,6 +4847,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     {
         dispatchStructureEdits(externalEdits);
     }
+
+    invalidatePredictedColumn({chunk.coord.x, chunk.coord.z});
 }
 
 
@@ -4834,6 +4934,7 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
             {
                 chunk->hasBlocks = true;
                 columnManager_.updateChunk(*chunk);
+                invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             }
         }
 

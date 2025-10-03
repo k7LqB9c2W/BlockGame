@@ -4097,14 +4097,22 @@ float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float w
 
     float base = std::clamp(largeScale * 0.5f + 0.5f, 0.0f, 1.0f);
     const float upliftBias = std::clamp(std::pow(uplift, 1.5f), 0.0f, 1.0f);
+    const float quietFactor = glm::smoothstep(0.1f, 0.4f, base);
 
-    float combined = std::clamp(base * 0.35f + ridgeCombined * 0.45f + slopes * 0.2f, 0.0f, 1.0f);
+    const float ridgeWeight = glm::mix(0.32f, 0.18f, quietFactor);
+    const float slopeWeight = glm::mix(0.22f, 0.3f, quietFactor);
 
-    const float shapedPeaks = 1.0f - std::pow(1.0f - combined, 3.0f);
-    combined = std::clamp(std::lerp(combined, shapedPeaks, 0.65f), 0.0f, 1.0f);
+    const float combinedRaw = std::clamp(base * 0.4f + ridgeCombined * ridgeWeight + slopes * slopeWeight, 0.0f, 1.0f);
+
+    const float shapedPeaks = 1.0f - std::pow(1.0f - combinedRaw, 3.0f);
+    const float peakBlendControl = glm::smoothstep(0.6f, 0.95f, combinedRaw);
+    const float peakBlend = glm::mix(0.45f, 0.2f, peakBlendControl);
+    float combined = std::clamp(std::lerp(combinedRaw, shapedPeaks, peakBlend), 0.0f, 1.0f);
+
+    const float flattenBlend = glm::smoothstep(0.75f, 1.0f, combined);
+    combined = std::clamp(std::lerp(combined, base, flattenBlend * 0.5f), 0.0f, 1.0f);
     combined = std::clamp(combined + (upliftBias - 0.5f) * 0.15f, 0.0f, 1.0f);
 
-    const float quietFactor = glm::smoothstep(0.1f, 0.4f, base);
     const float quieted = std::clamp(glm::mix(base, combined, quietFactor), 0.0f, 1.0f);
 
     return quieted;

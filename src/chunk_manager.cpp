@@ -189,14 +189,14 @@ constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
 constexpr int kGrasslandsMaxSurfaceHeight = 61;
 constexpr int kForestMaxSurfaceHeight = 61;
 constexpr int kDesertMaxSurfaceHeight = 60;
-constexpr int kOceanSeaLevel = 20;
-constexpr int kOceanMaxSurfaceHeight = kOceanSeaLevel;
+constexpr int kGlobalSeaLevel = 20;
+constexpr int kOceanMaxSurfaceHeight = kGlobalSeaLevel;
 
 constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
     {BiomeId::Grasslands, "Grasslands", BlockId::Grass, BlockId::Grass, false, 0.0f, 16.0f, 1.0f, 2, kGrasslandsMaxSurfaceHeight},
     {BiomeId::Forest, "Forest", BlockId::Grass, BlockId::Grass, true, 3.5f, 18.0f, 1.1f, 3, kForestMaxSurfaceHeight},
     {BiomeId::Desert, "Desert", BlockId::Sand, BlockId::Sand, false, 0.0f, 12.0f, 0.5f, 1, kDesertMaxSurfaceHeight},
-    {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, static_cast<float>(kOceanSeaLevel), 0.0f, kOceanSeaLevel, kOceanMaxSurfaceHeight},
+    {BiomeId::Ocean, "Ocean", BlockId::Water, BlockId::Water, false, 0.0f, static_cast<float>(kGlobalSeaLevel), 0.0f, kGlobalSeaLevel, kOceanMaxSurfaceHeight},
 } };
 
 struct ColumnSample
@@ -3250,6 +3250,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     minHeight = std::clamp(minHeight, kMinIntAsFloat, kMaxIntAsFloat);
     maxHeight = std::clamp(maxHeight, kMinIntAsFloat, kMaxIntAsFloat);
 
+    const float macroStageHeight = perturbations.blendedOffset + basis.mainTerrain * perturbations.blendedScale;
     float targetHeight = perturbations.blendedOffset + basis.combinedNoise * perturbations.blendedScale;
     targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
 
@@ -3285,6 +3286,24 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         maxHeight = std::max(maxHeight, landTarget);
     }
 
+    const float globalSeaLevelF = static_cast<float>(kGlobalSeaLevel);
+    float shorelineDistance = std::abs(macroStageHeight - globalSeaLevelF);
+
+    if (hasLandContribution && landTarget > globalSeaLevelF)
+    {
+        constexpr float kShorelineEaseRange = 8.0f;
+        if (shorelineDistance < kShorelineEaseRange)
+        {
+            const float normalized = 1.0f - std::clamp(shorelineDistance / kShorelineEaseRange, 0.0f, 1.0f);
+            const float easing = normalized * normalized * normalized;
+            const float easedLandHeight = globalSeaLevelF + (landTarget - globalSeaLevelF) * (1.0f - easing);
+            const float loweredLandHeight = std::min(landTarget, easedLandHeight);
+            landTarget = loweredLandHeight;
+            minHeight = std::min(minHeight, landTarget);
+            maxHeight = std::max(maxHeight, landTarget);
+        }
+    }
+
     float shorelineBlend = 0.0f;
     float oceanShare = 0.0f;
     float landShare = 0.0f;
@@ -3317,11 +3336,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         }
     }
 
-    float distanceToShore = 0.0f;
-    if (hasOceanContribution && hasLandContribution)
-    {
-        distanceToShore = std::abs(landTarget - oceanTarget);
-    }
+    float distanceToShore = shorelineDistance;
 
     if (perturbations.dominantBiome && perturbations.dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
     {
@@ -3347,7 +3362,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     sample.surfaceY = static_cast<int>(clampedSurface);
 
     sample.continentMask = basis.continentMask;
-    sample.baseElevation = basis.baseElevation;
+    sample.baseElevation = macroStageHeight;
     sample.oceanContribution = perturbations.oceanWeight;
     sample.landContribution = perturbations.landWeight;
     sample.oceanShare = oceanShare;
@@ -3402,6 +3417,8 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             {
                 for (int z = 0; z < kChunkSizeZ; ++z)
                 {
+                    const int worldX = baseWorldX + x;
+                    const int worldZ = baseWorldZ + z;
                     const ColumnSample& columnSample = columnSamples[columnIndex(x, z)];
                     if (!columnSample.dominantBiome || !columnSample.slabHasSolid)
                     {
@@ -3409,6 +3426,22 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                     }
 
                     const BiomeDefinition& biome = *columnSample.dominantBiome;
+                    BlockId surfaceBlock = biome.surfaceBlock;
+                    BlockId fillerBlock = biome.fillerBlock;
+
+                    if (biome.id != BiomeId::Ocean)
+                    {
+                        constexpr float kBeachDistanceRange = 6.0f;
+                        constexpr int kBeachHeightBand = 2;
+                        const bool nearSeaLevel = std::abs(columnSample.surfaceY - kGlobalSeaLevel) <= kBeachHeightBand;
+                        if (nearSeaLevel && columnSample.distanceToShore <= kBeachDistanceRange)
+                        {
+                            const float beachNoise = hashToUnitFloat(worldX, columnSample.surfaceY, worldZ);
+                            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
+                            fillerBlock = BlockId::Sand;
+                        }
+                    }
+
                     const int highestSolidWorld = columnSample.slabHighestSolidY;
                     if (highestSolidWorld < chunk.minWorldY)
                     {
@@ -3423,11 +3456,11 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         BlockId block = BlockId::Air;
                         if (worldY < columnSample.surfaceY)
                         {
-                            block = biome.fillerBlock;
+                            block = fillerBlock;
                         }
                         else if (worldY == columnSample.surfaceY)
                         {
-                            block = biome.surfaceBlock;
+                            block = surfaceBlock;
                         }
 
                         if (block == BlockId::Air)

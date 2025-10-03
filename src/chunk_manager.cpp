@@ -27,6 +27,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/constants.hpp>
 
 namespace
 {
@@ -166,6 +167,7 @@ enum class BiomeId : std::uint8_t
     Grasslands = 0,
     Forest,
     Desert,
+    LittleMountains,
     Ocean,
     Count
 };
@@ -200,6 +202,8 @@ constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
 constexpr int kGrasslandsMaxSurfaceHeight = 61;
 constexpr int kForestMaxSurfaceHeight = 61;
 constexpr int kDesertMaxSurfaceHeight = 60;
+constexpr int kLittleMountainsMinSurfaceHeight = 480;
+constexpr int kLittleMountainsMaxSurfaceHeight = 820;
 constexpr int kGlobalSeaLevel = 20;
 constexpr int kOceanMaxSurfaceHeight = kGlobalSeaLevel;
 
@@ -240,7 +244,18 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      kDesertMaxSurfaceHeight,
      0.30f,
      14.0f},
-
+    {BiomeId::LittleMountains,
+     "Little Mountains",
+     BlockId::Grass,
+     BlockId::Stone,
+     false,
+     0.0f,
+     640.0f,
+     210.0f,
+     kLittleMountainsMinSurfaceHeight,
+     kLittleMountainsMaxSurfaceHeight,
+     0.1f,
+     320.0f},
     {BiomeId::Ocean,
      "Ocean",
      BlockId::Water,
@@ -724,6 +739,8 @@ private:
     };
 
     TerrainBasisSample computeTerrainBasis(int worldX, int worldZ) const;
+    float computeLittleMountainsNormalized(float worldX, float worldZ) const;
+    float computeLittleMountainsHeight(int worldX, int worldZ, const BiomeDefinition& definition) const;
     BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
                                                     std::size_t weightCount,
                                                     int biomeRegionX,
@@ -3657,6 +3674,115 @@ ChunkManager::Impl::TerrainBasisSample ChunkManager::Impl::computeTerrainBasis(i
     return basis;
 }
 
+float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float worldZ) const
+{
+    const glm::vec2 worldPos{worldX, worldZ};
+
+    const float largeScale = noise_.fbm(worldPos.x * 0.00045f, worldPos.y * 0.00045f, 5, 0.55f, 2.0f);
+    const float upliftRaw = noise_.fbm(worldPos.x * 0.00028f + 17.0f, worldPos.y * 0.00028f - 13.0f, 4, 0.6f, 2.1f);
+    const float uplift = std::clamp(upliftRaw * 0.5f + 0.5f, 0.0f, 1.0f);
+
+    glm::vec2 warpBase{
+        noise_.noise(worldPos.x * 0.0023f, worldPos.y * 0.0023f),
+        noise_.noise(worldPos.x * 0.0023f + 67.0f, worldPos.y * 0.0023f + 23.0f)};
+    const float warpStrengthA = 80.0f + (warpBase.x * 0.5f + 0.5f) * 120.0f;
+    glm::vec2 warped = worldPos + warpBase * warpStrengthA;
+
+    glm::vec2 warpDetail{
+        noise_.noise(worldPos.x * 0.0041f - 11.0f, worldPos.y * 0.0041f + 19.0f),
+        noise_.noise(worldPos.x * 0.0041f + 103.0f, worldPos.y * 0.0041f - 59.0f)};
+    const float warpStrengthB = 30.0f + (warpDetail.x * 0.5f + 0.5f) * 60.0f;
+    warped += warpDetail * warpStrengthB;
+
+    const float ridgePrimary = noise_.ridge(warped.x * 0.012f, warped.y * 0.012f, 6, 2.0f, 0.5f);
+    const float ridgeSecondary = noise_.ridge(warped.x * 0.021f + 37.0f, warped.y * 0.021f - 73.0f, 5, 2.2f, 0.45f);
+
+    const float dirNoiseX = noise_.fbm(worldPos.x * 0.0008f + 91.0f, worldPos.y * 0.0008f - 17.0f, 3, 0.55f, 2.1f);
+    const float dirNoiseY = noise_.fbm(worldPos.x * 0.0008f - 41.0f, worldPos.y * 0.0008f + 57.0f, 3, 0.55f, 2.1f);
+    glm::vec2 ridgeDirection = glm::normalize(glm::vec2(dirNoiseX, dirNoiseY));
+    if (!std::isfinite(ridgeDirection.x) || !std::isfinite(ridgeDirection.y))
+    {
+        ridgeDirection = glm::vec2(1.0f, 0.0f);
+    }
+    const glm::vec2 ridgePerpendicular{-ridgeDirection.y, ridgeDirection.x};
+    const float alongRidge = glm::dot(warped, ridgeDirection);
+    const float acrossRidge = glm::dot(warped, ridgePerpendicular);
+    const float directionalRidge =
+        noise_.ridge(alongRidge * 0.018f, acrossRidge * 0.018f, 5, 2.0f, 0.5f);
+
+    const float ridgeMask = std::clamp(std::pow(uplift, 2.0f), 0.0f, 1.0f);
+    const float ridgeCombined = std::clamp((ridgePrimary * 0.7f + ridgeSecondary * 0.3f) * ridgeMask +
+                                               directionalRidge * 0.6f * ridgeMask,
+                                           0.0f,
+                                           1.0f);
+
+    const float slopeFill = noise_.fbm(warped.x * 0.04f, warped.y * 0.04f, 5, 0.5f, 2.0f);
+    const float slopes = slopeFill * 0.5f + 0.5f;
+
+    float base = std::clamp(largeScale * 0.5f + 0.5f, 0.0f, 1.0f);
+    const float upliftBias = std::clamp(std::pow(uplift, 1.5f), 0.0f, 1.0f);
+
+    float combined = std::clamp(base * 0.35f + ridgeCombined * 0.45f + slopes * 0.2f, 0.0f, 1.0f);
+
+    const float shapedPeaks = 1.0f - std::pow(1.0f - combined, 3.0f);
+    combined = std::clamp(std::lerp(combined, shapedPeaks, 0.65f), 0.0f, 1.0f);
+    combined = std::clamp(combined + (upliftBias - 0.5f) * 0.15f, 0.0f, 1.0f);
+
+    const float quietFactor = glm::smoothstep(0.1f, 0.4f, base);
+    const float quieted = std::clamp(glm::mix(base, combined, quietFactor), 0.0f, 1.0f);
+
+    return quieted;
+}
+
+float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
+                                                       int worldZ,
+                                                       const BiomeDefinition& definition) const
+{
+    const float normalized = computeLittleMountainsNormalized(static_cast<float>(worldX),
+                                                              static_cast<float>(worldZ));
+    const float minHeight = static_cast<float>(definition.minHeight);
+    const float maxHeight = static_cast<float>(definition.maxHeight);
+    const float range = std::max(maxHeight - minHeight, 1.0f);
+
+    float baseHeight = minHeight + normalized * range;
+
+    const float sampleStep = 12.0f;
+    const float talusAngle = glm::radians(33.0f);
+    const float maxDiff = std::tan(talusAngle) * sampleStep;
+
+    auto sampleNeighbor = [&](float offsetX, float offsetZ) {
+        const float neighborNormalized =
+            computeLittleMountainsNormalized(static_cast<float>(worldX) + offsetX,
+                                              static_cast<float>(worldZ) + offsetZ);
+        return minHeight + neighborNormalized * range;
+    };
+
+    std::array<float, 4> neighbors{
+        sampleNeighbor(sampleStep, 0.0f),
+        sampleNeighbor(-sampleStep, 0.0f),
+        sampleNeighbor(0.0f, sampleStep),
+        sampleNeighbor(0.0f, -sampleStep),
+    };
+
+    float relaxedHeight = baseHeight;
+    for (float neighborHeight : neighbors)
+    {
+        const float diff = relaxedHeight - neighborHeight;
+        if (diff > maxDiff)
+        {
+            relaxedHeight -= (diff - maxDiff) * 0.5f;
+        }
+        else if (diff < -maxDiff)
+        {
+            relaxedHeight += (-maxDiff - diff) * 0.5f;
+        }
+    }
+
+    baseHeight = std::lerp(baseHeight, relaxedHeight, 0.6f);
+
+    return std::clamp(baseHeight, minHeight, maxHeight);
+}
+
 ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePerturbations(
     const std::array<WeightedBiome, 5>& weightedBiomes,
     std::size_t weightCount,
@@ -3790,6 +3916,10 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             site.positionXZ = info.site.worldPosXZ;
             const glm::vec2 delta = site.positionXZ - columnPosition;
             site.distanceSquared = delta.x * delta.x + delta.y * delta.y;
+            if (site.biome && site.biome->id == BiomeId::LittleMountains)
+            {
+                site.distanceSquared *= 0.6f;
+            }
             candidateSites[candidateCount++] = site;
         }
     }
@@ -3835,6 +3965,14 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             rawWeights[i] = blend * 0.6f;
         }
 
+        for (std::size_t i = 0; i < sitesToConsider; ++i)
+        {
+            if (candidateSites[i].biome && candidateSites[i].biome->id == BiomeId::LittleMountains)
+            {
+                rawWeights[i] *= 1.15f;
+            }
+        }
+
         float totalWeight = 0.0f;
         for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
@@ -3874,6 +4012,27 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     const BiomeDefinition* clampBiomePtr =
         perturbations.dominantBiome ? perturbations.dominantBiome : &biomeForRegion(biomeRegionX, biomeRegionZ);
     const BiomeDefinition& clampBiome = *clampBiomePtr;
+
+    const BiomeDefinition* littleMountainsDefinition{nullptr};
+    float littleMountainsWeight = 0.0f;
+    for (std::size_t i = 0; i < weightCount; ++i)
+    {
+        const WeightedBiome& weightedBiome = weightedBiomes[i];
+        if (!weightedBiome.biome || weightedBiome.weight <= 0.0f)
+        {
+            continue;
+        }
+
+        if (weightedBiome.biome->id == BiomeId::LittleMountains)
+        {
+            littleMountainsWeight += weightedBiome.weight;
+            if (!littleMountainsDefinition)
+            {
+                littleMountainsDefinition = weightedBiome.biome;
+            }
+        }
+    }
+    littleMountainsWeight = std::clamp(littleMountainsWeight, 0.0f, 1.0f);
 
     auto logHeightClamp = [&](const char* stage, float candidate, float minBound, float maxBound)
     {
@@ -3978,6 +4137,25 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         landTarget = std::clamp(rawLandTarget, landMin, landMax);
         minHeight = std::min(minHeight, landTarget);
         maxHeight = std::max(maxHeight, landTarget);
+    }
+
+    if (littleMountainsDefinition && littleMountainsWeight > 0.0f)
+    {
+        const float mountainBlend = std::clamp(std::pow(littleMountainsWeight, 1.35f), 0.0f, 1.0f);
+        if (mountainBlend > 0.0f)
+        {
+            const float mountainHeight = computeLittleMountainsHeight(worldX, worldZ, *littleMountainsDefinition);
+            macroStageHeight = std::lerp(macroStageHeight, mountainHeight, mountainBlend * 0.45f);
+            targetHeight = std::lerp(targetHeight, mountainHeight, mountainBlend * 0.6f);
+            if (hasLandContribution)
+            {
+                landTarget = std::lerp(landTarget, mountainHeight, mountainBlend);
+            }
+            minHeight = std::min(minHeight, mountainHeight);
+            maxHeight = std::max(maxHeight, mountainHeight);
+            macroStageHeight = std::clamp(macroStageHeight, minHeight, maxHeight);
+            targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+        }
     }
 
     const float globalSeaLevelF = static_cast<float>(kGlobalSeaLevel);
@@ -4263,6 +4441,24 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         }
                     }
 
+                    if (biome.id == BiomeId::LittleMountains)
+                    {
+                        const int surfaceHeight = columnSample.surfaceY;
+                        if (surfaceHeight < 140)
+                        {
+                            fillerBlock = BlockId::Grass;
+                            surfaceBlock = BlockId::Grass;
+                        }
+                        else
+                        {
+                            fillerBlock = BlockId::Stone;
+                            if (surfaceHeight >= 200)
+                            {
+                                surfaceBlock = BlockId::Stone;
+                            }
+                        }
+                    }
+
                     const int highestSolidWorld = columnSample.slabHighestSolidY;
                     if (highestSolidWorld < chunk.minWorldY)
                     {
@@ -4287,6 +4483,32 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         if (block == BlockId::Air)
                         {
                             continue;
+                        }
+
+                        if (biome.id == BiomeId::LittleMountains && block != BlockId::Air)
+                        {
+                            const int surfaceHeight = columnSample.surfaceY;
+                            if (surfaceHeight >= 160)
+                            {
+                                const int depthFromSurface = surfaceHeight - worldY;
+                                if (surfaceHeight >= 220 || depthFromSurface <= 2)
+                                {
+                                    if (surfaceHeight >= 220)
+                                    {
+                                        block = BlockId::Stone;
+                                    }
+                                    else
+                                    {
+                                        const float stoneNoise = hashToUnitFloat(worldX, worldY, worldZ);
+                                        const float blend = glm::smoothstep(0.0f, 3.0f,
+                                                                             static_cast<float>(2 - depthFromSurface));
+                                        if (stoneNoise < blend)
+                                        {
+                                            block = BlockId::Stone;
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         chunk.blocks[blockIndex(x, localY, z)] = block;

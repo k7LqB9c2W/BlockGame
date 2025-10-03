@@ -60,6 +60,8 @@ struct VerticalStreamingConfig
         int backlogRingStepSize{24};
         int columnCapBoostPerStep{1};
     } generationBudget{};
+
+    int maxWorkerThreads{0};
 };
 
 inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
@@ -131,6 +133,7 @@ struct ChunkProfilingSnapshot
     int missingChunks{0};
     int generationColumnCap{0};
     int generationBacklogSteps{0};
+    int workerThreads{0};
 };
 
 struct Frustum

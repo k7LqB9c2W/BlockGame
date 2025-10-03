@@ -4024,7 +4024,18 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         }
     }
 
-    float distanceToShore = shorelineDistance;
+    float distanceToShore = std::numeric_limits<float>::infinity();
+
+    if (hasOceanContribution && hasLandContribution)
+    {
+        distanceToShore = shorelineDistance;
+        if (shorelineBlend > std::numeric_limits<float>::epsilon())
+        {
+            const float blendScale = std::clamp(shorelineBlend, 0.0f, 1.0f);
+            // Areas with stronger ocean/land mixing should be considered closer to the coast.
+            distanceToShore /= std::max(blendScale, 0.0001f);
+        }
+    }
 
     if (perturbations.dominantBiome && perturbations.dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
     {

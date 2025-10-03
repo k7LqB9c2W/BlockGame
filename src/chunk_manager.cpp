@@ -631,8 +631,12 @@ private:
     void recycleChunkGPU(Chunk& chunk);
     void destroyBufferPool();
     int computeVerticalRadius(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
-    int columnRadiusFor(const glm::ivec2& column, int cameraChunkY, int verticalRadius) const;
+    int columnRadiusFor(const glm::ivec2& column,
+                        const glm::ivec2& cameraColumn,
+                        int cameraChunkY,
+                        int verticalRadius) const;
     std::pair<int, int> columnSpanFor(const glm::ivec2& column,
+                                      const glm::ivec2& cameraColumn,
                                       int cameraChunkY,
                                       int verticalRadius) const;
     void resetColumnBudgets();
@@ -2600,8 +2604,8 @@ int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
                                               int horizontalRadius,
                                               int verticalRadius) const
 {
-    const int minChunkY = std::max(0, center.y - std::max(verticalRadius, 0));
-    const int maxChunkY = std::max(minChunkY, center.y + std::max(verticalRadius, 0));
+    const glm::ivec2 cameraColumn{center.x, center.z};
+    const int cameraChunkY = center.y;
 
     int missing = 0;
     std::lock_guard<std::mutex> lock(chunksMutex);
@@ -2616,6 +2620,13 @@ int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
 
             const int chunkX = center.x + dx;
             const int chunkZ = center.z + dz;
+            const glm::ivec2 column{chunkX, chunkZ};
+            const int columnRadius = columnRadiusFor(column,
+                                                     cameraColumn,
+                                                     cameraChunkY,
+                                                     verticalRadius);
+            const int minChunkY = std::max(0, cameraChunkY - columnRadius);
+            const int maxChunkY = std::max(minChunkY, cameraChunkY + columnRadius);
             for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
             {
                 const glm::ivec3 coord{chunkX, chunkY, chunkZ};
@@ -2636,6 +2647,7 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
 {
     int verticalRadius = kVerticalStreamingConfig.minRadiusChunks;
 
+    const glm::ivec2 cameraColumn{center.x, center.z};
     const int cameraChunkY = center.y;
     const int cameraWorldChunk = floorDiv(cameraWorldY, kChunkSizeY);
     verticalRadius = std::max(verticalRadius,
@@ -2650,7 +2662,10 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
         for (int dz = -sampleRadius; dz <= sampleRadius; ++dz)
         {
             const glm::ivec2 column{center.x + dx, center.z + dz};
-            const int radius = columnRadiusFor(column, cameraChunkY, verticalRadius);
+            const int radius = columnRadiusFor(column,
+                                               cameraColumn,
+                                               cameraChunkY,
+                                               verticalRadius);
             verticalRadius = std::max(verticalRadius, radius);
         }
     }
@@ -2661,10 +2676,26 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
 }
 
 int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
+                                        const glm::ivec2& cameraColumn,
                                         int cameraChunkY,
                                         int verticalRadius) const
 {
     int radius = std::max(verticalRadius, kVerticalStreamingConfig.minRadiusChunks);
+
+    const int falloffStep = kVerticalStreamingConfig.verticalRadiusFalloffStep;
+    if (falloffStep > 0)
+    {
+        const int horizontalDistance = std::max(std::abs(column.x - cameraColumn.x),
+                                                std::abs(column.y - cameraColumn.y));
+        if (horizontalDistance > 0)
+        {
+            const int reduction = horizontalDistance / falloffStep;
+            if (reduction > 0)
+            {
+                radius = std::max(kVerticalStreamingConfig.minRadiusChunks, radius - reduction);
+            }
+        }
+    }
 
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
@@ -2690,10 +2721,11 @@ int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
 }
 
 std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
+                                                       const glm::ivec2& cameraColumn,
                                                        int cameraChunkY,
                                                        int verticalRadius) const
 {
-    const int radius = columnRadiusFor(column, cameraChunkY, verticalRadius);
+    const int radius = columnRadiusFor(column, cameraColumn, cameraChunkY, verticalRadius);
     const int minChunk = std::max(0, cameraChunkY - radius);
     const int maxChunk = std::max(minChunk, cameraChunkY + radius);
     return {minChunk, maxChunk};
@@ -2705,6 +2737,8 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
                                                                   int& jobBudget)
 {
     bool missingFound = false;
+
+    const glm::ivec2 cameraColumn{center.x, center.z};
 
     struct Candidate
     {
@@ -2729,7 +2763,10 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
             return;
         }
 
-        const auto [minChunkY, maxChunkY] = columnSpanFor(column, center.y, verticalRadius);
+        const auto [minChunkY, maxChunkY] = columnSpanFor(column,
+                                                          cameraColumn,
+                                                          center.y,
+                                                          verticalRadius);
         for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
         {
             const glm::ivec3 coord{chunkX, chunkY, chunkZ};
@@ -2846,6 +2883,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                                              int verticalRadius)
 {
     std::vector<glm::ivec3> toRemove;
+    const glm::ivec2 cameraColumn{center.x, center.z};
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
         toRemove.reserve(chunks_.size());
@@ -2867,7 +2905,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             }
 
             const glm::ivec2 column{coord.x, coord.z};
-            const auto [minChunkY, maxChunkY] = columnSpanFor(column, center.y, verticalRadius);
+            const auto [minChunkY, maxChunkY] = columnSpanFor(column,
+                                                              cameraColumn,
+                                                              center.y,
+                                                              verticalRadius);
             const int slack = kVerticalStreamingConfig.columnSlackChunks;
             if (coord.y < (minChunkY - slack) || coord.y > (maxChunkY + slack))
             {

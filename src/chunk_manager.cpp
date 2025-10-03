@@ -25,9 +25,10 @@
 #include <utility>
 #include <vector>
 
+#include <glm/geometric.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/constants.hpp>
 
 namespace
 {
@@ -781,11 +782,13 @@ private:
     {
         float height{0.0f};
         float entryFloor{0.0f};
+        float interiorMask{0.0f};
     };
 
     LittleMountainSample computeLittleMountainsHeight(int worldX,
                                                       int worldZ,
-                                                      const BiomeDefinition& definition) const;
+                                                      const BiomeDefinition& definition,
+                                                      float interiorMask) const;
     BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
                                                     std::size_t weightCount,
                                                     int biomeRegionX,
@@ -4124,7 +4127,8 @@ float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float w
 ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMountainsHeight(
     int worldX,
     int worldZ,
-    const BiomeDefinition& definition) const
+    const BiomeDefinition& definition,
+    float interiorMask) const
 {
     const float minHeight = static_cast<float>(definition.minHeight);
     const float maxHeight = static_cast<float>(definition.maxHeight);
@@ -4141,7 +4145,7 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
         {
             height = entryFloor;
         }
-        return LittleMountainSample{height, entryFloor};
+        return LittleMountainSample{height, entryFloor, 1.0f};
     };
 
     const auto baseSample = sampleColumn(static_cast<float>(worldX), static_cast<float>(worldZ));
@@ -4205,7 +4209,13 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     baseHeight = std::lerp(baseHeight, relaxedHeight, 0.8f);
 
     const float clampedHeight = std::clamp(baseHeight, entryFloor, maxHeight);
-    return LittleMountainSample{clampedHeight, entryFloor};
+
+    const float maskedInterior = std::clamp(interiorMask, 0.0f, 1.0f);
+    const float maskedEntryFloor = glm::mix(minHeight, entryFloor, maskedInterior);
+    float maskedHeight = glm::mix(minHeight, clampedHeight, maskedInterior);
+    maskedHeight = std::max(maskedHeight, maskedEntryFloor);
+
+    return LittleMountainSample{maskedHeight, maskedEntryFloor, maskedInterior};
 }
 
 ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePerturbations(
@@ -4464,6 +4474,34 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     }
     littleMountainsWeight = std::clamp(littleMountainsWeight, 0.0f, 1.0f);
 
+    float littleMountainInteriorMask = 0.0f;
+    if (littleMountainsDefinition)
+    {
+        constexpr float kLittleMountainInteriorRamp = 1140.0f;
+        float closestDistance = std::numeric_limits<float>::infinity();
+        for (std::size_t i = 0; i < candidateCount; ++i)
+        {
+            const CandidateSite& site = candidateSites[i];
+            if (site.biome != littleMountainsDefinition)
+            {
+                continue;
+            }
+
+            const float distance = glm::distance(columnPosition, site.positionXZ);
+            if (distance < closestDistance)
+            {
+                closestDistance = distance;
+            }
+        }
+
+        if (std::isfinite(closestDistance))
+        {
+            const float normalized = std::clamp(closestDistance / kLittleMountainInteriorRamp, 0.0f, 1.0f);
+            const float inverted = std::clamp(1.0f - normalized, 0.0f, 1.0f);
+            littleMountainInteriorMask = glm::smoothstep(0.0f, 1.0f, inverted);
+        }
+    }
+
     float enforcedLittleMountainFloor = std::numeric_limits<float>::lowest();
     bool enforceLittleMountainFloor = false;
 
@@ -4578,36 +4616,53 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         if (mountainBlend > 0.0f)
         {
             const LittleMountainSample mountainSample =
-                computeLittleMountainsHeight(worldX, worldZ, *littleMountainsDefinition);
+                computeLittleMountainsHeight(worldX, worldZ, *littleMountainsDefinition, littleMountainInteriorMask);
             const float mountainHeight = mountainSample.height;
             const float entryFloor = mountainSample.entryFloor;
-            constexpr float kMacroEntryExponent = 2.0f;
-            constexpr float kTargetEntryExponent = 1.8f;
-            constexpr float kLandEntryExponent = 1.5f;
-
-            const float macroEntryHeight = std::lerp(entryFloor, mountainHeight, std::pow(mountainBlend, kMacroEntryExponent));
-            const float targetEntryHeight = std::lerp(entryFloor, mountainHeight, std::pow(mountainBlend, kTargetEntryExponent));
-            macroStageHeight = std::lerp(macroStageHeight, macroEntryHeight, mountainBlend * 0.45f);
-            targetHeight = std::lerp(targetHeight, targetEntryHeight, mountainBlend * 0.6f);
-            if (hasLandContribution)
+            const float interiorMask = mountainSample.interiorMask;
+            const float maskedMountainBlend = mountainBlend * interiorMask;
+            if (maskedMountainBlend > 0.0f)
             {
-                const float landEntryHeight = std::lerp(entryFloor, mountainHeight, std::pow(mountainBlend, kLandEntryExponent));
-                landTarget = std::lerp(landTarget, landEntryHeight, mountainBlend);
-                minHeight = std::min(minHeight, landEntryHeight);
-                maxHeight = std::max(maxHeight, landEntryHeight);
-            }
-            minHeight = std::min(minHeight, entryFloor);
-            minHeight = std::min(minHeight, macroEntryHeight);
-            minHeight = std::min(minHeight, targetEntryHeight);
-            minHeight = std::min(minHeight, mountainHeight);
-            maxHeight = std::max(maxHeight, entryFloor);
-            maxHeight = std::max(maxHeight, macroEntryHeight);
-            maxHeight = std::max(maxHeight, targetEntryHeight);
-            maxHeight = std::max(maxHeight, mountainHeight);
-            macroStageHeight = std::clamp(macroStageHeight, minHeight, maxHeight);
-            targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+                constexpr float kMacroEntryExponent = 2.0f;
+                constexpr float kTargetEntryExponent = 1.8f;
+                constexpr float kLandEntryExponent = 1.5f;
 
-            if (hasNonLittleMountainsBiome)
+                const float macroBlend =
+                    std::clamp(std::pow(mountainBlend, kMacroEntryExponent) * interiorMask, 0.0f, 1.0f);
+                const float targetBlend =
+                    std::clamp(std::pow(mountainBlend, kTargetEntryExponent) * interiorMask, 0.0f, 1.0f);
+                const float landBlend =
+                    std::clamp(std::pow(mountainBlend, kLandEntryExponent) * interiorMask, 0.0f, 1.0f);
+
+                const float macroEntryHeight = std::lerp(entryFloor, mountainHeight, macroBlend);
+                const float targetEntryHeight = std::lerp(entryFloor, mountainHeight, targetBlend);
+                macroStageHeight = std::lerp(macroStageHeight, macroEntryHeight, maskedMountainBlend * 0.45f);
+                targetHeight = std::lerp(targetHeight, targetEntryHeight, maskedMountainBlend * 0.6f);
+                if (hasLandContribution)
+                {
+                    const float landEntryHeight = std::lerp(entryFloor, mountainHeight, landBlend);
+                    landTarget = std::lerp(landTarget, landEntryHeight, maskedMountainBlend);
+                    minHeight = std::min(minHeight, landEntryHeight);
+                    maxHeight = std::max(maxHeight, landEntryHeight);
+                }
+                minHeight = std::min(minHeight, entryFloor);
+                minHeight = std::min(minHeight, macroEntryHeight);
+                minHeight = std::min(minHeight, targetEntryHeight);
+                minHeight = std::min(minHeight, mountainHeight);
+                maxHeight = std::max(maxHeight, entryFloor);
+                maxHeight = std::max(maxHeight, macroEntryHeight);
+                maxHeight = std::max(maxHeight, targetEntryHeight);
+                maxHeight = std::max(maxHeight, mountainHeight);
+                macroStageHeight = std::clamp(macroStageHeight, minHeight, maxHeight);
+                targetHeight = std::clamp(targetHeight, minHeight, maxHeight);
+
+                if (hasNonLittleMountainsBiome && interiorMask > 0.0f)
+                {
+                    enforcedLittleMountainFloor = entryFloor;
+                    enforceLittleMountainFloor = true;
+                }
+            }
+            else if (hasNonLittleMountainsBiome && interiorMask > 0.0f)
             {
                 enforcedLittleMountainFloor = entryFloor;
                 enforceLittleMountainFloor = true;

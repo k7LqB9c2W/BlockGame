@@ -202,7 +202,7 @@ constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
 constexpr int kGrasslandsMaxSurfaceHeight = 61;
 constexpr int kForestMaxSurfaceHeight = 61;
 constexpr int kDesertMaxSurfaceHeight = 60;
-constexpr int kLittleMountainsMinSurfaceHeight = 480;
+constexpr int kLittleMountainsMinSurfaceHeight = 30;
 constexpr int kLittleMountainsMaxSurfaceHeight = 820;
 constexpr int kGlobalSeaLevel = 20;
 constexpr int kOceanMaxSurfaceHeight = kGlobalSeaLevel;
@@ -4114,8 +4114,14 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
     float baseHeight = minHeight + normalized * range;
 
     const float sampleStep = 12.0f;
-    const float talusAngle = glm::radians(33.0f);
-    const float maxDiff = std::tan(talusAngle) * sampleStep;
+    const float gentleTalusAngle = glm::radians(9.0f);
+    const float upperTalusAngle = glm::radians(14.0f);
+    const float gentleMaxDiff = std::tan(gentleTalusAngle) * sampleStep;
+    const float upperMaxDiff = std::tan(upperTalusAngle) * sampleStep;
+    const float highSlopeStart = minHeight + range * 0.65f;
+    const float highSlopeEnd = minHeight + range * 0.90f;
+    const float altitudeT = std::clamp((baseHeight - highSlopeStart) / (highSlopeEnd - highSlopeStart), 0.0f, 1.0f);
+    const float maxDiff = std::lerp(gentleMaxDiff, upperMaxDiff, altitudeT);
 
     auto sampleNeighbor = [&](float offsetX, float offsetZ) {
         const float neighborNormalized =
@@ -4145,7 +4151,7 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
         }
     }
 
-    baseHeight = std::lerp(baseHeight, relaxedHeight, 0.6f);
+    baseHeight = std::lerp(baseHeight, relaxedHeight, 0.8f);
 
     return std::clamp(baseHeight, minHeight, maxHeight);
 }

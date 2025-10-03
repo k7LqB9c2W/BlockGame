@@ -45,6 +45,7 @@ struct VerticalStreamingConfig
     int uploadMaxPerColumn{24};
     int maxGenerationJobsPerColumn{12};
     int backlogColumnCapReleaseThreshold{4096};
+    int verticalRadiusFalloffStep{8};
 
     struct GenerationBudgetSettings
     {

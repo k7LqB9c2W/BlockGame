@@ -575,6 +575,11 @@ private:
                                       int verticalRadius) const;
     void resetColumnBudgets();
     int uploadsPerColumnLimit() const noexcept;
+    static int computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept;
+    int computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const;
+    int computeRingExpansionBudget(int backlogChunks) const;
+    int computeColumnJobCap(int backlogSteps, int backlogChunks) const;
+    int estimateMissingChunks(const glm::ivec3& center, int horizontalRadius, int verticalRadius) const;
 
     struct RingProgress
     {
@@ -700,6 +705,17 @@ private:
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
     int perColumnUploadLimit_{kVerticalStreamingConfig.uploadBasePerColumn};
+    int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
+    int lastGenerationBudget_{kVerticalStreamingConfig.generationBudget.baseJobsPerFrame};
+    int lastGenerationJobsIssued_{0};
+    int lastRingBudget_{kVerticalStreamingConfig.generationBudget.minRingExpansionsPerFrame};
+    int lastRingExpansionsUsed_{0};
+    int lastMissingChunks_{0};
+    int lastColumnCap_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
+    int lastBacklogSteps_{0};
+    int lastLoggedGenerationBudget_{-1};
+    int lastLoggedRingBudget_{-1};
+    int lastLoggedColumnCap_{-1};
 };
 
 // JobQueue implementations
@@ -1121,7 +1137,53 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
         viewDistance_ = targetViewDistance_;
     }
 
-    int jobBudget = kMaxChunkJobsPerFrame;
+    const int missingChunks = estimateMissingChunks(centerChunk, targetViewDistance_, verticalRadius);
+    const int backlogSteps = computeBacklogSteps(missingChunks,
+                                                 kVerticalStreamingConfig.generationBudget.backlogStartThreshold,
+                                                 kVerticalStreamingConfig.generationBudget.backlogStepSize);
+    int columnCap = computeColumnJobCap(backlogSteps, missingChunks);
+    if (columnCap <= 0)
+    {
+        columnCap = std::numeric_limits<int>::max();
+    }
+
+    generationColumnCapThisFrame_ = columnCap;
+
+    const int generationBudgetTarget =
+        computeGenerationBudget(targetViewDistance_, verticalRadius, backlogSteps);
+    const int ringBudget = computeRingExpansionBudget(missingChunks);
+
+    lastGenerationBudget_ = generationBudgetTarget;
+    lastRingBudget_ = ringBudget;
+    lastMissingChunks_ = missingChunks;
+    lastColumnCap_ = generationColumnCapThisFrame_;
+    lastBacklogSteps_ = backlogSteps;
+
+    if (generationBudgetTarget != lastLoggedGenerationBudget_ ||
+        ringBudget != lastLoggedRingBudget_ ||
+        lastColumnCap_ != lastLoggedColumnCap_)
+    {
+        std::cout << "[ChunkManager] Adaptive streaming budgets -- backlog: " << missingChunks
+                  << " chunks, steps: " << backlogSteps
+                  << ", jobBudget: " << generationBudgetTarget
+                  << ", ringBudget: " << ringBudget
+                  << ", columnCap: ";
+        if (generationColumnCapThisFrame_ >= std::numeric_limits<int>::max())
+        {
+            std::cout << "unlimited";
+        }
+        else
+        {
+            std::cout << generationColumnCapThisFrame_;
+        }
+        std::cout << ", verticalRadius: " << verticalRadius << std::endl;
+
+        lastLoggedGenerationBudget_ = generationBudgetTarget;
+        lastLoggedRingBudget_ = ringBudget;
+        lastLoggedColumnCap_ = lastColumnCap_;
+    }
+
+    int jobBudget = generationBudgetTarget;
 
     for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
     {
@@ -1133,7 +1195,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     }
 
     int ringsExpanded = 0;
-    while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < kMaxRingsPerFrame)
+    while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < ringBudget)
     {
         const int nextRing = viewDistance_ + 1;
         RingProgress progress = ensureVolume(centerChunk, nextRing, verticalRadius, jobBudget);
@@ -1152,6 +1214,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 
         break;
     }
+
+    lastGenerationJobsIssued_ = std::clamp(generationBudgetTarget - jobBudget, 0, generationBudgetTarget);
+    lastRingExpansionsUsed_ = ringsExpanded;
 
     removeDistantChunks(centerChunk,
                         targetViewDistance_ + kVerticalStreamingConfig.horizontalEvictionSlack,
@@ -1794,6 +1859,14 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.deferredUploads = profilingCounters_.deferredUploads.exchange(0, std::memory_order_relaxed);
     snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
     snapshot.verticalRadius = lastVerticalRadius_;
+    snapshot.generationBudget = lastGenerationBudget_;
+    snapshot.generationJobsIssued = lastGenerationJobsIssued_;
+    snapshot.ringExpansionBudget = lastRingBudget_;
+    snapshot.ringExpansionsUsed = lastRingExpansionsUsed_;
+    snapshot.missingChunks = lastMissingChunks_;
+    snapshot.generationBacklogSteps = lastBacklogSteps_;
+    snapshot.generationColumnCap =
+        (lastColumnCap_ >= std::numeric_limits<int>::max()) ? -1 : std::max(lastColumnCap_, 0);
 
     const long long genMicros = profilingCounters_.generationMicros.exchange(0, std::memory_order_relaxed);
     const long long meshMicros = profilingCounters_.meshingMicros.exchange(0, std::memory_order_relaxed);
@@ -2196,6 +2269,127 @@ int ChunkManager::Impl::uploadsPerColumnLimit() const noexcept
     return std::clamp(base + bonus, base, maxLimit);
 }
 
+int ChunkManager::Impl::computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept
+{
+    if (backlog <= threshold)
+    {
+        return 0;
+    }
+
+    if (stepSize <= 0)
+    {
+        return 1;
+    }
+
+    const int over = backlog - threshold;
+    return (over + stepSize - 1) / stepSize;
+}
+
+int ChunkManager::Impl::computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const
+{
+    const auto& tuning = kVerticalStreamingConfig.generationBudget;
+    const int safeHorizontal = std::max(horizontalRadius, 0);
+    const int safeVertical = std::max(verticalRadius, 0);
+
+    float budget = static_cast<float>(tuning.baseJobsPerFrame);
+    budget += tuning.jobsPerHorizontalRing * static_cast<float>(safeHorizontal);
+    budget += tuning.jobsPerVerticalLayer * static_cast<float>(safeVertical);
+    budget += tuning.backlogBoostPerStep * static_cast<float>(std::max(backlogSteps, 0));
+
+    int result = static_cast<int>(std::ceil(budget));
+    if (tuning.maxJobsPerFrame > 0)
+    {
+        result = std::min(result, tuning.maxJobsPerFrame);
+    }
+
+    return std::max(result, 1);
+}
+
+int ChunkManager::Impl::computeRingExpansionBudget(int backlogChunks) const
+{
+    const auto& tuning = kVerticalStreamingConfig.generationBudget;
+    const int minRings = std::max(0, tuning.minRingExpansionsPerFrame);
+    const int maxRings = std::max(minRings, tuning.maxRingExpansionsPerFrame);
+
+    if (maxRings == 0)
+    {
+        return 0;
+    }
+
+    if (tuning.backlogRingStepSize <= 0)
+    {
+        return maxRings;
+    }
+
+    const int steps = computeBacklogSteps(backlogChunks,
+                                          tuning.backlogStartThreshold,
+                                          tuning.backlogRingStepSize);
+
+    int budget = minRings + steps;
+    budget = std::clamp(budget, minRings, maxRings);
+    return budget;
+}
+
+int ChunkManager::Impl::computeColumnJobCap(int backlogSteps, int backlogChunks) const
+{
+    int baseCap = kVerticalStreamingConfig.maxGenerationJobsPerColumn;
+    if (baseCap <= 0)
+    {
+        return std::numeric_limits<int>::max();
+    }
+
+    if (kVerticalStreamingConfig.backlogColumnCapReleaseThreshold > 0 &&
+        backlogChunks >= kVerticalStreamingConfig.backlogColumnCapReleaseThreshold)
+    {
+        return std::numeric_limits<int>::max();
+    }
+
+    const int boostPerStep = kVerticalStreamingConfig.generationBudget.columnCapBoostPerStep;
+    if (boostPerStep > 0 && backlogSteps > 0)
+    {
+        const long long boosted = static_cast<long long>(baseCap) +
+                                  static_cast<long long>(backlogSteps) *
+                                      static_cast<long long>(boostPerStep);
+        baseCap = static_cast<int>(std::min(boosted, static_cast<long long>(std::numeric_limits<int>::max())));
+    }
+
+    return std::max(baseCap, 0);
+}
+
+int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
+                                              int horizontalRadius,
+                                              int verticalRadius) const
+{
+    const int minChunkY = std::max(0, center.y - std::max(verticalRadius, 0));
+    const int maxChunkY = std::max(minChunkY, center.y + std::max(verticalRadius, 0));
+
+    int missing = 0;
+    std::lock_guard<std::mutex> lock(chunksMutex);
+    for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
+    {
+        for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
+        {
+            if (std::max(std::abs(dx), std::abs(dz)) > horizontalRadius)
+            {
+                continue;
+            }
+
+            const int chunkX = center.x + dx;
+            const int chunkZ = center.z + dz;
+            for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
+            {
+                const glm::ivec3 coord{chunkX, chunkY, chunkZ};
+                if (chunks_.find(coord) == chunks_.end())
+                {
+                    ++missing;
+                }
+            }
+        }
+    }
+
+    return missing;
+}
+
 int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
                                               int horizontalRadius,
                                               int cameraWorldY)
@@ -2284,7 +2478,9 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
 
     std::unordered_set<glm::ivec2, ColumnHasher> visitedColumns;
     visitedColumns.reserve(static_cast<std::size_t>(std::max(1, horizontalRadius * 8)));
-    const int maxJobsPerColumn = std::max(0, kVerticalStreamingConfig.maxGenerationJobsPerColumn);
+    const int maxJobsPerColumn = generationColumnCapThisFrame_;
+    const bool enforceColumnCap = maxJobsPerColumn > 0 &&
+                                  maxJobsPerColumn < std::numeric_limits<int>::max();
 
     auto enqueueColumn = [&](int chunkX, int chunkZ) {
         glm::ivec2 column{chunkX, chunkZ};
@@ -2357,7 +2553,7 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         missingFound = true;
 
         int& columnJobs = jobsScheduledThisFrame_[columnKey];
-        if (maxJobsPerColumn > 0 && columnJobs >= maxJobsPerColumn)
+        if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
         {
             continue;
         }

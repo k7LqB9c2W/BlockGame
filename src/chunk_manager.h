@@ -44,11 +44,25 @@ struct VerticalStreamingConfig
     int uploadRampDivisor{2};
     int uploadMaxPerColumn{6};
     int maxGenerationJobsPerColumn{3};
+    int backlogColumnCapReleaseThreshold{96};
+
+    struct GenerationBudgetSettings
+    {
+        int baseJobsPerFrame{18};
+        float jobsPerHorizontalRing{1.5f};
+        float jobsPerVerticalLayer{1.0f};
+        int backlogStartThreshold{12};
+        int backlogStepSize{16};
+        int backlogBoostPerStep{6};
+        int maxJobsPerFrame{96};
+        int minRingExpansionsPerFrame{1};
+        int maxRingExpansionsPerFrame{4};
+        int backlogRingStepSize{24};
+        int columnCapBoostPerStep{1};
+    } generationBudget{};
 };
 
 inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
-inline constexpr int kMaxChunkJobsPerFrame = 18;
-inline constexpr int kMaxRingsPerFrame = 2;
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 6ull * 1024ull * 1024ull;
 
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
@@ -110,6 +124,13 @@ struct ChunkProfilingSnapshot
     int deferredUploads{0};
     int evictedChunks{0};
     int verticalRadius{0};
+    int generationBudget{0};
+    int generationJobsIssued{0};
+    int ringExpansionBudget{0};
+    int ringExpansionsUsed{0};
+    int missingChunks{0};
+    int generationColumnCap{0};
+    int generationBacklogSteps{0};
 };
 
 struct Frustum

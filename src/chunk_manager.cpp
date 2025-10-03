@@ -262,7 +262,7 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      kLittleMountainsMaxSurfaceHeight,
      0.1f,
      320.0f,
-     1.6f},
+     2.4f},
     {BiomeId::Ocean,
      "Ocean",
      BlockId::Water,

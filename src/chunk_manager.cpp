@@ -28,13 +28,22 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+namespace
+{
+std::atomic<int> gActiveVerticalRadius{kVerticalStreamingConfig.minRadiusChunks};
+}
+
 float computeFarPlaneForViewDistance(int viewDistance) noexcept
 {
-    const float horizontalSpan = static_cast<float>(viewDistance + 1) * static_cast<float>(std::max(kChunkSizeX, kChunkSizeZ));
-    const float verticalSpan = static_cast<float>(kVerticalStreamingConfig.maxRadiusChunks + 1)
-                                * static_cast<float>(kChunkSizeY);
-    const float diagonal = std::sqrt(horizontalSpan * horizontalSpan + verticalSpan * verticalSpan);
-    return std::max(diagonal + kFarPlanePadding, kDefaultFarPlane);
+    const int verticalRadius = std::max(gActiveVerticalRadius.load(std::memory_order_relaxed),
+                                        kVerticalStreamingConfig.minRadiusChunks);
+    const double horizontalSpan = static_cast<double>(viewDistance + 1)
+                                  * static_cast<double>(std::max(kChunkSizeX, kChunkSizeZ));
+    const double verticalSpan = static_cast<double>(verticalRadius + 1) * static_cast<double>(kChunkSizeY);
+    const double diagonal = std::hypot(horizontalSpan, verticalSpan);
+    const double farPlane = std::max(diagonal + static_cast<double>(kFarPlanePadding),
+                                     static_cast<double>(kDefaultFarPlane));
+    return static_cast<float>(farPlane);
 }
 
 float kFarPlane = computeFarPlaneForViewDistance(kDefaultViewDistance);
@@ -1051,6 +1060,7 @@ ChunkManager::Impl::Impl(unsigned seed)
       viewDistance_(kDefaultViewDistance),
       targetViewDistance_(kDefaultViewDistance)
 {
+    gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
     startWorkerThreads();
 }
@@ -1140,6 +1150,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     resetColumnBudgets();
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
     lastVerticalRadius_ = verticalRadius;
+    gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
+    kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
 
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
     uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
@@ -1621,8 +1633,10 @@ void ChunkManager::Impl::toggleViewDistance()
 
             targetViewDistance_ = kExtendedViewDistance;
             kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+            const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
+            const long long totalColumns = width * width;
             std::cout << "Extended render distance target: " << targetViewDistance_ << " chunks (total: "
-                      << (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1) << " chunks)" << std::endl;
+                      << totalColumns << " chunks)" << std::endl;
         }
         else
         {
@@ -1630,7 +1644,10 @@ void ChunkManager::Impl::toggleViewDistance()
 
             targetViewDistance_ = kDefaultViewDistance;
             kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
-            std::cout << "Default render distance target: " << targetViewDistance_ << " chunks" << std::endl;
+            const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
+            const long long totalColumns = width * width;
+            std::cout << "Default render distance target: " << targetViewDistance_
+                      << " chunks (total: " << totalColumns << " chunks)" << std::endl;
         }
 
         if (viewDistance_ > targetViewDistance_)
@@ -1656,7 +1673,7 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
 {
     try
     {
-        const int clampedDistance = std::max(1, std::min(distance, 200));
+        const int clampedDistance = std::max(distance, 1);
         targetViewDistance_ = clampedDistance;
         kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
 
@@ -1665,8 +1682,10 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
             viewDistance_ = targetViewDistance_;
         }
 
+        const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
+        const long long totalColumns = width * width;
         std::cout << "Render distance set to: " << targetViewDistance_ << " chunks (total: "
-                  << (2 * targetViewDistance_ + 1) * (2 * targetViewDistance_ + 1) << " chunks)" << std::endl;
+                  << totalColumns << " chunks)" << std::endl;
     }
     catch (const std::exception& ex)
     {
@@ -2386,8 +2405,10 @@ int ChunkManager::Impl::computeBacklogSteps(int backlog, int threshold, int step
         return 1;
     }
 
-    const int over = backlog - threshold;
-    return (over + stepSize - 1) / stepSize;
+    const long long safeOver = static_cast<long long>(backlog) - static_cast<long long>(threshold);
+    const long long safeStep = std::max(stepSize, 1);
+    const long long steps = (safeOver + safeStep - 1) / safeStep;
+    return static_cast<int>(std::min(steps, static_cast<long long>(std::numeric_limits<int>::max())));
 }
 
 int ChunkManager::Impl::computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const
@@ -2396,18 +2417,20 @@ int ChunkManager::Impl::computeGenerationBudget(int horizontalRadius, int vertic
     const int safeHorizontal = std::max(horizontalRadius, 0);
     const int safeVertical = std::max(verticalRadius, 0);
 
-    float budget = static_cast<float>(tuning.baseJobsPerFrame);
-    budget += tuning.jobsPerHorizontalRing * static_cast<float>(safeHorizontal);
-    budget += tuning.jobsPerVerticalLayer * static_cast<float>(safeVertical);
-    budget += tuning.backlogBoostPerStep * static_cast<float>(std::max(backlogSteps, 0));
+    double budget = static_cast<double>(tuning.baseJobsPerFrame);
+    budget += static_cast<double>(tuning.jobsPerHorizontalRing) * static_cast<double>(safeHorizontal);
+    budget += static_cast<double>(tuning.jobsPerVerticalLayer) * static_cast<double>(safeVertical);
+    budget += static_cast<double>(tuning.backlogBoostPerStep)
+              * static_cast<double>(std::max(backlogSteps, 0));
 
-    int result = static_cast<int>(std::ceil(budget));
+    long long result = static_cast<long long>(std::ceil(budget));
     if (tuning.maxJobsPerFrame > 0)
     {
-        result = std::min(result, tuning.maxJobsPerFrame);
+        result = std::min(result, static_cast<long long>(tuning.maxJobsPerFrame));
     }
 
-    return std::max(result, 1);
+    result = std::max(result, 1ll);
+    return static_cast<int>(std::min(result, static_cast<long long>(std::numeric_limits<int>::max())));
 }
 
 int ChunkManager::Impl::computeRingExpansionBudget(int backlogChunks) const

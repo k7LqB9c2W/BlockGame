@@ -4165,6 +4165,7 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
     }
 
     relaxedHeight = std::clamp(relaxedHeight, dynamicMinHeight, maxHeight);
+
     baseHeight = std::lerp(baseHeight, relaxedHeight, 0.8f);
 
     return std::clamp(baseHeight, dynamicMinHeight, maxHeight);

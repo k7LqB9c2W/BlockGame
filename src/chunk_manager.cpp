@@ -4105,13 +4105,27 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
                                                        int worldZ,
                                                        const BiomeDefinition& definition) const
 {
-    const float normalized = computeLittleMountainsNormalized(static_cast<float>(worldX),
-                                                              static_cast<float>(worldZ));
     const float minHeight = static_cast<float>(definition.minHeight);
     const float maxHeight = static_cast<float>(definition.maxHeight);
     const float range = std::max(maxHeight - minHeight, 1.0f);
+    const float floorRange = std::min(20.0f, range);
 
-    float baseHeight = minHeight + normalized * range;
+    auto sampleColumn = [&](float sampleX, float sampleZ) {
+        const float normalized = computeLittleMountainsNormalized(sampleX, sampleZ);
+        float height = minHeight + normalized * range;
+        const float floorNoise = noise_.noise(sampleX * 0.0015f + 311.0f, sampleZ * 0.0015f - 173.0f);
+        const float floorT = std::clamp(floorNoise * 0.5f + 0.5f, 0.0f, 1.0f);
+        const float dynamicMin = minHeight + floorT * floorRange;
+        if (height < dynamicMin)
+        {
+            height = dynamicMin;
+        }
+        return std::pair<float, float>{height, dynamicMin};
+    };
+
+    const auto baseSample = sampleColumn(static_cast<float>(worldX), static_cast<float>(worldZ));
+    float baseHeight = baseSample.first;
+    const float dynamicMinHeight = baseSample.second;
 
     const float sampleStep = 12.0f;
     const float gentleTalusAngle = glm::radians(9.0f);
@@ -4124,10 +4138,9 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
     const float maxDiff = std::lerp(gentleMaxDiff, upperMaxDiff, altitudeT);
 
     auto sampleNeighbor = [&](float offsetX, float offsetZ) {
-        const float neighborNormalized =
-            computeLittleMountainsNormalized(static_cast<float>(worldX) + offsetX,
-                                              static_cast<float>(worldZ) + offsetZ);
-        return minHeight + neighborNormalized * range;
+        const auto neighborSample =
+            sampleColumn(static_cast<float>(worldX) + offsetX, static_cast<float>(worldZ) + offsetZ);
+        return neighborSample.first;
     };
 
     std::array<float, 4> neighbors{
@@ -4151,9 +4164,11 @@ float ChunkManager::Impl::computeLittleMountainsHeight(int worldX,
         }
     }
 
+    relaxedHeight = std::clamp(relaxedHeight, dynamicMinHeight, maxHeight);
+
     baseHeight = std::lerp(baseHeight, relaxedHeight, 0.8f);
 
-    return std::clamp(baseHeight, minHeight, maxHeight);
+    return std::clamp(baseHeight, dynamicMinHeight, maxHeight);
 }
 
 ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePerturbations(

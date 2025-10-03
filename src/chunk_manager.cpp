@@ -582,6 +582,8 @@ struct ChunkManager::Impl
     void toggleViewDistance();
     int viewDistance() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setLodEnabled(bool enabled);
+    bool lodEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
@@ -665,8 +667,6 @@ private:
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
     void buildSurfaceOnlyMesh(Chunk& chunk);
     bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
-    void setLodEnabled(bool enabled);
-    bool lodEnabled() const noexcept;
 
     struct WeightedBiome
     {
@@ -3859,7 +3859,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         if (warningIndex < 8)
         {
             std::cerr << "[BiomeHeightWarning] " << clampBiome.name << ' ' << stage << " candidate " << candidate
-                      << " outside [" << localMin << ", " << localMax << ']" << std::endl;
+                      << " outside [" << localMin << ", " << localMax << ']' << std::endl;
             if (warningIndex == 7)
             {
                 std::cerr << "[BiomeHeightWarning] Further biome height warnings suppressed" << std::endl;

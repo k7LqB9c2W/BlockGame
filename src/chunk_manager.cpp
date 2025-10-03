@@ -810,10 +810,15 @@ private:
         float interiorMask{0.0f};
     };
 
+    float computeBaselineSurfaceHeight(const BiomePerturbationSample& perturbations,
+                                       const TerrainBasisSample& basis) const;
+
     LittleMountainSample computeLittleMountainsHeight(int worldX,
                                                       int worldZ,
                                                       const BiomeDefinition& definition,
-                                                      float interiorMask) const;
+                                                      float interiorMask,
+                                                      bool hasBorderAnchor,
+                                                      float borderAnchorHeight) const;
     BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
                                                     std::size_t weightCount,
                                                     int biomeRegionX,
@@ -4425,11 +4430,163 @@ float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float w
     return std::clamp(finalValue, 0.0f, 1.0f);
 }
 
+float ChunkManager::Impl::computeBaselineSurfaceHeight(const BiomePerturbationSample& perturbations,
+                                                       const TerrainBasisSample& basis) const
+{
+    constexpr float kMinIntAsFloat = static_cast<float>(std::numeric_limits<int>::min());
+    constexpr float kMaxIntAsFloat = static_cast<float>(std::numeric_limits<int>::max());
+
+    float minHeight = perturbations.blendedMinHeight;
+    float maxHeight = perturbations.blendedMaxHeight;
+    if (minHeight > maxHeight)
+    {
+        std::swap(minHeight, maxHeight);
+    }
+
+    minHeight = std::clamp(minHeight, kMinIntAsFloat, kMaxIntAsFloat);
+    maxHeight = std::clamp(maxHeight, kMinIntAsFloat, kMaxIntAsFloat);
+
+    const float slopeBias = std::clamp(perturbations.blendedSlopeBias, 0.0f, 1.0f);
+    const float lowAmplitudeCombined = basis.mainTerrain * 3.0f + basis.mountainNoise * 1.5f +
+                                       basis.mediumNoise * 1.0f + basis.detailNoise * 0.5f;
+    const float blendedTerrain = std::lerp(basis.combinedNoise, lowAmplitudeCombined, slopeBias);
+    const float unclampedMacroHeight = perturbations.blendedOffset + blendedTerrain * perturbations.blendedScale;
+
+    float macroStageHeight = std::clamp(unclampedMacroHeight, minHeight, maxHeight);
+    float targetHeight = macroStageHeight;
+
+    const bool hasOceanContribution = perturbations.oceanWeight > 0.0f;
+    const bool hasLandContribution = perturbations.landWeight > 0.0f;
+
+    const float oceanSlopeBias =
+        std::clamp(hasOceanContribution ? perturbations.oceanSlopeBias : slopeBias, 0.0f, 1.0f);
+    const float landSlopeBias =
+        std::clamp(hasLandContribution ? perturbations.landSlopeBias : slopeBias, 0.0f, 1.0f);
+    const float oceanGradientWindow =
+        std::max(hasOceanContribution ? perturbations.oceanMaxGradient : perturbations.blendedMaxGradient, 0.0f);
+    const float landGradientWindow =
+        std::max(hasLandContribution ? perturbations.landMaxGradient : perturbations.blendedMaxGradient, 0.0f);
+
+    float oceanTarget = targetHeight;
+    if (hasOceanContribution)
+    {
+        const float oceanVariation = std::lerp(basis.combinedNoise, lowAmplitudeCombined, oceanSlopeBias);
+        float rawOceanTarget = perturbations.oceanOffset + oceanVariation * perturbations.oceanScale;
+        if (oceanGradientWindow > 0.0f)
+        {
+            const float oceanGradientMin = perturbations.oceanOffset - oceanGradientWindow;
+            const float oceanGradientMax = perturbations.oceanOffset + oceanGradientWindow;
+            rawOceanTarget = std::clamp(rawOceanTarget, oceanGradientMin, oceanGradientMax);
+        }
+
+        oceanTarget = std::clamp(rawOceanTarget, perturbations.oceanMinHeight, perturbations.oceanMaxHeight);
+        minHeight = std::min(minHeight, oceanTarget);
+        maxHeight = std::max(maxHeight, oceanTarget);
+    }
+
+    float landTarget = targetHeight;
+    if (hasLandContribution)
+    {
+        float landMin = perturbations.landMinHeight;
+        float landMax = perturbations.landMaxHeight;
+        if (landMin > landMax)
+        {
+            std::swap(landMin, landMax);
+        }
+
+        landMin = std::clamp(landMin, kMinIntAsFloat, kMaxIntAsFloat);
+        landMax = std::clamp(landMax, kMinIntAsFloat, kMaxIntAsFloat);
+
+        const float lowFrequencyNoise = basis.mainTerrain * 0.3f + basis.mediumNoise * 0.4f + basis.detailNoise * 0.3f;
+        const float slopeNoise = basis.mountainNoise * 0.15f;
+        const float landBaseHeight = std::lerp(macroStageHeight, perturbations.landOffset, landSlopeBias);
+        float rawLandTarget = landBaseHeight + (lowFrequencyNoise + slopeNoise) * perturbations.landScale;
+
+        if (landGradientWindow > 0.0f)
+        {
+            const float landGradientMin = landBaseHeight - landGradientWindow;
+            const float landGradientMax = landBaseHeight + landGradientWindow;
+            rawLandTarget = std::clamp(rawLandTarget, landGradientMin, landGradientMax);
+        }
+
+        landTarget = std::clamp(rawLandTarget, landMin, landMax);
+        minHeight = std::min(minHeight, landTarget);
+        maxHeight = std::max(maxHeight, landTarget);
+    }
+
+    const float globalSeaLevelF = static_cast<float>(kGlobalSeaLevel);
+    float shorelineDistance = std::abs(macroStageHeight - globalSeaLevelF);
+
+    if (hasLandContribution && landTarget > globalSeaLevelF)
+    {
+        constexpr float kShorelineEaseRange = 8.0f;
+        if (shorelineDistance < kShorelineEaseRange)
+        {
+            const float normalized = 1.0f - std::clamp(shorelineDistance / kShorelineEaseRange, 0.0f, 1.0f);
+            const float easing = normalized * normalized * normalized;
+            const float easedLandHeight = globalSeaLevelF + (landTarget - globalSeaLevelF) * (1.0f - easing);
+            const float loweredLandHeight = std::min(landTarget, easedLandHeight);
+            landTarget = loweredLandHeight;
+            minHeight = std::min(minHeight, landTarget);
+            maxHeight = std::max(maxHeight, landTarget);
+        }
+    }
+
+    float shorelineBlend = 0.0f;
+    float oceanShare = 0.0f;
+    float landShare = 0.0f;
+
+    if (hasOceanContribution && hasLandContribution)
+    {
+        const float totalCategoryWeight = perturbations.oceanWeight + perturbations.landWeight;
+        if (totalCategoryWeight > std::numeric_limits<float>::epsilon())
+        {
+            oceanShare = perturbations.oceanWeight / totalCategoryWeight;
+            landShare = perturbations.landWeight / totalCategoryWeight;
+
+            auto shorelineRamp = [](float share)
+            {
+                const float t = std::clamp((share - 0.3f) / 0.2f, 0.0f, 1.0f);
+                return t * t * (3.0f - 2.0f * t);
+            };
+
+            shorelineBlend = shorelineRamp(oceanShare) * shorelineRamp(landShare);
+            if (shorelineBlend > 0.0f)
+            {
+                const float easedBlend = shorelineBlend * shorelineBlend * (3.0f - 2.0f * shorelineBlend);
+                const float shorelineLandHeight = oceanTarget + (landTarget - oceanTarget) * (1.0f - easedBlend);
+                const float clampedShoreline = std::max(shorelineLandHeight, oceanTarget);
+
+                landTarget = clampedShoreline;
+                minHeight = std::min(minHeight, clampedShoreline);
+                maxHeight = std::max(maxHeight, clampedShoreline);
+            }
+        }
+    }
+
+    if (perturbations.dominantBiome && perturbations.dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
+    {
+        targetHeight = oceanTarget;
+    }
+    else if (hasLandContribution)
+    {
+        targetHeight = landTarget;
+    }
+    else if (hasOceanContribution)
+    {
+        targetHeight = oceanTarget;
+    }
+
+    return targetHeight;
+}
+
 ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMountainsHeight(
     int worldX,
     int worldZ,
     const BiomeDefinition& definition,
-    float interiorMask) const
+    float interiorMask,
+    bool hasBorderAnchor,
+    float borderAnchorHeight) const
 {
     const float minHeight = static_cast<float>(definition.minHeight);
     const float maxHeight = static_cast<float>(definition.maxHeight);
@@ -4534,10 +4691,24 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     const float clampedHeight = std::clamp(baseHeight, entryFloor, maxHeight);
 
     const float maskedInterior = std::clamp(interiorMask, 0.0f, 1.0f);
+
+    float adaptiveMinHeight = minHeight;
+    float adaptiveEntryFloor = entryFloor;
+    if (hasBorderAnchor)
+    {
+        const float anchorMin = std::min(borderAnchorHeight, borderAnchorHeight + 1.0f);
+        const float anchorMax = std::max(borderAnchorHeight, borderAnchorHeight + 1.0f);
+        const float edgeBlend = 1.0f - maskedInterior;
+        const float clampedEdgeFloor = std::clamp(entryFloor, anchorMin, anchorMax);
+        const float clampedEdgeMin = std::clamp(minHeight, anchorMin, anchorMax);
+        adaptiveEntryFloor = glm::mix(entryFloor, clampedEdgeFloor, edgeBlend);
+        adaptiveMinHeight = glm::mix(minHeight, clampedEdgeMin, edgeBlend);
+    }
+
     const float interiorFoothillLift = maskedInterior * maskedInterior * floorRange * 0.65f;
-    const float raisedEntryFloor = std::min(entryFloor + interiorFoothillLift, clampedHeight);
-    const float maskedEntryFloor = glm::mix(minHeight, raisedEntryFloor, maskedInterior);
-    float maskedHeight = glm::mix(minHeight, clampedHeight, maskedInterior);
+    const float raisedEntryFloor = std::min(adaptiveEntryFloor + interiorFoothillLift, clampedHeight);
+    const float maskedEntryFloor = glm::mix(adaptiveMinHeight, raisedEntryFloor, maskedInterior);
+    float maskedHeight = glm::mix(adaptiveMinHeight, clampedHeight, maskedInterior);
     maskedHeight = std::max(maskedHeight, maskedEntryFloor);
 
     return LittleMountainSample{maskedHeight, maskedEntryFloor, maskedInterior};
@@ -4774,6 +4945,45 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     const BiomePerturbationSample perturbations =
         applyBiomePerturbations(weightedBiomes, weightCount, biomeRegionX, biomeRegionZ);
 
+    float borderAnchorHeight = std::numeric_limits<float>::quiet_NaN();
+    bool hasBorderAnchor = false;
+    if (hasNonLittleMountainsBiome)
+    {
+        std::array<WeightedBiome, 5> nonMountainBiomes{};
+        std::size_t nonMountainCount = 0;
+        float nonMountainWeight = 0.0f;
+        for (std::size_t i = 0; i < weightCount; ++i)
+        {
+            const WeightedBiome& weightedBiome = weightedBiomes[i];
+            if (!weightedBiome.biome || weightedBiome.weight <= 0.0f)
+            {
+                continue;
+            }
+
+            if (weightedBiome.biome->id == BiomeId::LittleMountains)
+            {
+                continue;
+            }
+
+            nonMountainBiomes[nonMountainCount++] = weightedBiome;
+            nonMountainWeight += weightedBiome.weight;
+        }
+
+        if (nonMountainCount > 0 && nonMountainWeight > std::numeric_limits<float>::epsilon())
+        {
+            const float invWeight = 1.0f / nonMountainWeight;
+            for (std::size_t i = 0; i < nonMountainCount; ++i)
+            {
+                nonMountainBiomes[i].weight *= invWeight;
+            }
+
+            const BiomePerturbationSample borderPerturbations =
+                applyBiomePerturbations(nonMountainBiomes, nonMountainCount, biomeRegionX, biomeRegionZ);
+            borderAnchorHeight = computeBaselineSurfaceHeight(borderPerturbations, basis);
+            hasBorderAnchor = std::isfinite(borderAnchorHeight);
+        }
+    }
+
     const BiomeDefinition* clampBiomePtr =
         perturbations.dominantBiome ? perturbations.dominantBiome : &biomeForRegion(biomeRegionX, biomeRegionZ);
     const BiomeDefinition& clampBiome = *clampBiomePtr;
@@ -4938,8 +5148,8 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         const float mountainBlend = std::clamp(std::pow(littleMountainsWeight, 1.35f), 0.0f, 1.0f);
         if (mountainBlend > 0.0f)
         {
-            const LittleMountainSample mountainSample =
-                computeLittleMountainsHeight(worldX, worldZ, *littleMountainsDefinition, littleMountainInteriorMask);
+            const LittleMountainSample mountainSample = computeLittleMountainsHeight(
+                worldX, worldZ, *littleMountainsDefinition, littleMountainInteriorMask, hasBorderAnchor, borderAnchorHeight);
             const float mountainHeight = mountainSample.height;
             const float entryFloor = mountainSample.entryFloor;
             const float interiorMask = mountainSample.interiorMask;

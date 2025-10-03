@@ -4138,10 +4138,10 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     const float dynamicMinHeight = baseSample.dynamicMin;
 
     const float sampleStep = 12.0f;
-    const float gentleTalusAngle = glm::radians(9.0f);
-    const float upperTalusAngle = glm::radians(14.0f);
-    const float gentleMaxDiff = std::tan(gentleTalusAngle) * sampleStep;
-    const float upperMaxDiff = std::tan(upperTalusAngle) * sampleStep;
+    const float gentleTalusAngle = glm::radians(5.0f);
+    const float upperTalusAngle = glm::radians(10.0f);
+    const float gentleMaxDiff = std::min(std::tan(gentleTalusAngle) * sampleStep, 0.85f);
+    const float upperMaxDiff = std::min(std::tan(upperTalusAngle) * sampleStep, 1.0f);
     const float highSlopeStart = minHeight + range * 0.65f;
     const float highSlopeEnd = minHeight + range * 0.90f;
     const float altitudeT = std::clamp((baseHeight - highSlopeStart) / (highSlopeEnd - highSlopeStart), 0.0f, 1.0f);
@@ -4161,18 +4161,33 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     };
 
     float relaxedHeight = baseHeight;
-    for (float neighborHeight : neighbors)
-    {
-        const float diff = relaxedHeight - neighborHeight;
-        if (diff > maxDiff)
+    auto relaxWithNeighbors = [&](const std::array<float, 4>& neighborHeights, float allowedDiff) {
+        for (float neighborHeight : neighborHeights)
         {
-            relaxedHeight -= (diff - maxDiff) * 0.5f;
+            const float diff = relaxedHeight - neighborHeight;
+            if (diff > allowedDiff)
+            {
+                relaxedHeight -= (diff - allowedDiff) * 0.5f;
+            }
+            else if (diff < -allowedDiff)
+            {
+                relaxedHeight += (-allowedDiff - diff) * 0.5f;
+            }
         }
-        else if (diff < -maxDiff)
-        {
-            relaxedHeight += (-maxDiff - diff) * 0.5f;
-        }
-    }
+    };
+
+    relaxWithNeighbors(neighbors, maxDiff);
+
+    std::array<float, 4> diagonalNeighbors{
+        sampleNeighbor(sampleStep, sampleStep),
+        sampleNeighbor(sampleStep, -sampleStep),
+        sampleNeighbor(-sampleStep, sampleStep),
+        sampleNeighbor(-sampleStep, -sampleStep),
+    };
+
+    const float diagonalStep = sampleStep * std::sqrt(2.0f);
+    const float diagonalDiff = std::min(maxDiff * (diagonalStep / sampleStep), 1.0f);
+    relaxWithNeighbors(diagonalNeighbors, diagonalDiff);
 
     relaxedHeight = std::clamp(relaxedHeight, dynamicMinHeight, maxHeight);
 

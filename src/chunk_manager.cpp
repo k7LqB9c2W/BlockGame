@@ -3710,6 +3710,7 @@ float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float w
     const float directionalRidge =
         noise_.ridge(alongRidge * 0.018f, acrossRidge * 0.018f, 5, 2.0f, 0.5f);
 
+
     const float ridgeMask = std::clamp(std::pow(uplift, 2.0f), 0.0f, 1.0f);
     const float ridgeCombined = std::clamp((ridgePrimary * 0.7f + ridgeSecondary * 0.3f) * ridgeMask +
                                                directionalRidge * 0.6f * ridgeMask,

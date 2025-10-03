@@ -234,7 +234,7 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      BlockId::Sand,
      false,
      0.0f,
-     12.0f,
+     19.0f,
      0.35f,
      1,
      kDesertMaxSurfaceHeight,

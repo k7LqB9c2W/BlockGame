@@ -83,6 +83,7 @@ enum class BlockId : std::uint8_t
     Leaves = 3,
     Sand = 4,
     Water = 5,
+    Stone = 6,
     Count
 };
 

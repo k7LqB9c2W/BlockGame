@@ -9,8 +9,10 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <exception>
 #include <iostream>
+#include <sstream>
 
 void framebufferSizeCallback(GLFWwindow*, int width, int height)
 {
@@ -59,6 +61,27 @@ void charCallback(GLFWwindow* window, unsigned int codepoint)
             }
         }
     }
+    else if (input->showTeleportGUI && codepoint < 128)
+    {
+        char character = static_cast<char>(codepoint);
+        auto& buffer = input->teleportBuffer;
+        if (buffer.size() >= 32)
+        {
+            return;
+        }
+
+        if ((character >= '0' && character <= '9') || character == ' ' || character == ',' || character == '.')
+        {
+            buffer += character;
+        }
+        else if (character == '-')
+        {
+            if (buffer.empty() || buffer.back() == ' ' || buffer.back() == ',')
+            {
+                buffer += character;
+            }
+        }
+    }
 }
 
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int /*mods*/)
@@ -93,10 +116,20 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
     inputContext.nKeyJustPressed = nKeyCurrentlyPressed && !inputContext.nKeyPressed;
     inputContext.nKeyPressed = nKeyCurrentlyPressed;
-    if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI)
+    if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
     {
         inputContext.showRenderDistanceGUI = true;
         inputContext.inputBuffer.clear();
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+
+    bool f2CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS);
+    inputContext.f2JustPressed = f2CurrentlyPressed && !inputContext.f2Pressed;
+    inputContext.f2Pressed = f2CurrentlyPressed;
+    if (inputContext.f2JustPressed && !inputContext.showTeleportGUI && !inputContext.showRenderDistanceGUI)
+    {
+        inputContext.showTeleportGUI = true;
+        inputContext.teleportBuffer.clear();
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
@@ -147,40 +180,104 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
         backspaceKeyPressed = backspaceKeyCurrentlyPressed;
     }
 
-    glm::vec3 forward = camera.front();
-    forward.y = 0.0f;
-    if (glm::length(forward) > kEpsilon)
+    if (inputContext.showTeleportGUI)
     {
-        forward = glm::normalize(forward);
+        static bool teleportEnterKeyPressed = false;
+        bool enterKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS ||
+                                         glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS);
+        if (enterKeyCurrentlyPressed && !teleportEnterKeyPressed)
+        {
+            if (!inputContext.teleportBuffer.empty())
+            {
+                std::string normalised = inputContext.teleportBuffer;
+                std::replace(normalised.begin(), normalised.end(), ',', ' ');
+                std::istringstream stream(normalised);
+                float x = 0.0f;
+                float y = 0.0f;
+                float z = 0.0f;
+                if (stream >> x >> y >> z)
+                {
+                    camera.position = glm::vec3(x, y, z);
+                    camera.velocity = glm::vec3(0.0f);
+                    camera.onGround = false;
+                }
+                else
+                {
+                    std::cerr << "Invalid teleport input: " << inputContext.teleportBuffer << std::endl;
+                }
+            }
+
+            inputContext.showTeleportGUI = false;
+            inputContext.teleportBuffer.clear();
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        teleportEnterKeyPressed = enterKeyCurrentlyPressed;
+
+        static bool teleportEscapeKeyPressed = false;
+        bool escapeKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+        if (escapeKeyCurrentlyPressed && !teleportEscapeKeyPressed)
+        {
+            inputContext.showTeleportGUI = false;
+            inputContext.teleportBuffer.clear();
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        teleportEscapeKeyPressed = escapeKeyCurrentlyPressed;
+
+        static bool teleportBackspaceKeyPressed = false;
+        bool backspaceKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
+        if (backspaceKeyCurrentlyPressed && !teleportBackspaceKeyPressed)
+        {
+            if (!inputContext.teleportBuffer.empty())
+            {
+                inputContext.teleportBuffer.pop_back();
+            }
+        }
+        teleportBackspaceKeyPressed = backspaceKeyCurrentlyPressed;
     }
 
-    glm::vec3 right = glm::cross(forward, camera.worldUp());
-    if (glm::length(right) > kEpsilon)
+    if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
     {
-        right = glm::normalize(right);
+        glm::vec3 forward = camera.front();
+        forward.y = 0.0f;
+        if (glm::length(forward) > kEpsilon)
+        {
+            forward = glm::normalize(forward);
+        }
+
+        glm::vec3 right = glm::cross(forward, camera.worldUp());
+        if (glm::length(right) > kEpsilon)
+        {
+            right = glm::normalize(right);
+        }
+        else
+        {
+            right = camera.right();
+        }
+
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        {
+            state.moveDirection += forward;
+        }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        {
+            state.moveDirection -= forward;
+        }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        {
+            state.moveDirection -= right;
+        }
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        {
+            state.moveDirection += right;
+        }
+
+        state.jumpHeld = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
     }
     else
     {
-        right = camera.right();
+        state.jumpHeld = false;
     }
 
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-    {
-        state.moveDirection += forward;
-    }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-    {
-        state.moveDirection -= forward;
-    }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-    {
-        state.moveDirection -= right;
-    }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-    {
-        state.moveDirection += right;
-    }
-
-    state.jumpHeld = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
     return state;
 }
+

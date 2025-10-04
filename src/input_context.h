@@ -21,6 +21,8 @@ struct InputContext
     bool rightMouseJustPressed{false};
     bool nKeyPressed{false};
     bool nKeyJustPressed{false};
+    bool f2Pressed{false};
+    bool f2JustPressed{false};
     bool f1Pressed{false};
     bool f1JustPressed{false};
     bool f3Pressed{false};
@@ -28,7 +30,9 @@ struct InputContext
     bool lodEnabled{false};
     bool showCoordinates{false};
     bool showRenderDistanceGUI{false};
+    bool showTeleportGUI{false};
     std::string inputBuffer{};
+    std::string teleportBuffer{};
 };
 
 struct PlayerInputState

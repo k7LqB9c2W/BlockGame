@@ -739,7 +739,7 @@ void main()
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
 #endif
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set render distance, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -821,7 +821,8 @@ void main()
 
         // Only close window with ESC if GUI is not active
         // (ESC to close GUI is handled in computePlayerInputState)
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS && !inputContext.showRenderDistanceGUI)
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS &&
+            !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
         {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
@@ -847,7 +848,7 @@ void main()
         chunkManager.updateHighlight(camera.position, camera.front());
 
         // Handle block destruction
-        if (inputContext.leftMouseJustPressed)
+        if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.leftMouseJustPressed)
         {
             RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
             if (hit.hit)
@@ -856,9 +857,13 @@ void main()
             }
             inputContext.leftMouseJustPressed = false; // Reset the flag
         }
+        else
+        {
+            inputContext.leftMouseJustPressed = false;
+        }
 
         // Handle block placement
-        if (inputContext.rightMouseJustPressed)
+        if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.rightMouseJustPressed)
         {
             RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
             if (hit.hit)
@@ -866,6 +871,10 @@ void main()
                 chunkManager.placeBlock(hit.blockPos, hit.faceNormal);
             }
             inputContext.rightMouseJustPressed = false; // Reset the flag
+        }
+        else
+        {
+            inputContext.rightMouseJustPressed = false;
         }
 
         chunkManager.update(camera.position);
@@ -923,17 +932,17 @@ void main()
             // Calculate center of screen for the GUI
             float centerX = framebufferWidth * 0.5f;
             float centerY = framebufferHeight * 0.5f;
-            
+
             // Draw semi-transparent background (using multiple overlapping lines to create a filled rectangle effect)
             float boxWidth = 400.0f;
             float boxHeight = 100.0f;
             float boxLeft = centerX - boxWidth * 0.5f;
             float boxTop = centerY - boxHeight * 0.5f;
-            
+
             // Draw prompt text
             std::string promptText = "Enter render distance:";
             textOverlay.render(promptText, boxLeft + 20.0f, boxTop + 20.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
-            
+
             // Draw input text with cursor
             std::string inputText = inputContext.inputBuffer;
             if (static_cast<int>(glfwGetTime() * 2) % 2 == 0)  // Blinking cursor
@@ -941,6 +950,39 @@ void main()
                 inputText += "_";
             }
             textOverlay.render(inputText, boxLeft + 20.0f, boxTop + 50.0f, framebufferWidth, framebufferHeight, 10.0f, glm::vec3(0.5f, 1.0f, 0.5f));
+        }
+
+        if (inputContext.showTeleportGUI)
+        {
+            float centerX = framebufferWidth * 0.5f;
+            float centerY = framebufferHeight * 0.5f;
+
+            float boxWidth = 400.0f;
+            float boxHeight = 120.0f;
+            float boxLeft = centerX - boxWidth * 0.5f;
+            float boxTop = centerY - boxHeight * 0.5f;
+
+            std::string promptText = "Enter teleport target (x y z):";
+            textOverlay.render(promptText,
+                               boxLeft + 20.0f,
+                               boxTop + 20.0f,
+                               framebufferWidth,
+                               framebufferHeight,
+                               8.0f,
+                               glm::vec3(1.0f));
+
+            std::string inputText = inputContext.teleportBuffer;
+            if (static_cast<int>(glfwGetTime() * 2) % 2 == 0)
+            {
+                inputText += "_";
+            }
+            textOverlay.render(inputText,
+                               boxLeft + 20.0f,
+                               boxTop + 55.0f,
+                               framebufferWidth,
+                               framebufferHeight,
+                               10.0f,
+                               glm::vec3(0.5f, 0.8f, 1.0f));
         }
 
         glfwSwapBuffers(window);

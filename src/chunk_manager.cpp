@@ -4867,6 +4867,22 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                           candidateSites.begin() + candidateCount,
                           [](const CandidateSite& lhs, const CandidateSite& rhs)
                           {
+                              const bool lhsValid = std::isfinite(lhs.normalizedDistance);
+                              const bool rhsValid = std::isfinite(rhs.normalizedDistance);
+                              if (lhsValid && rhsValid)
+                              {
+                                  if (lhs.normalizedDistance == rhs.normalizedDistance)
+                                  {
+                                      return lhs.distanceSquared < rhs.distanceSquared;
+                                  }
+                                  return lhs.normalizedDistance < rhs.normalizedDistance;
+                              }
+
+                              if (lhsValid != rhsValid)
+                              {
+                                  return lhsValid;
+                              }
+
                               return lhs.distanceSquared < rhs.distanceSquared;
                           });
     }

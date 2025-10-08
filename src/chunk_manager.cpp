@@ -4229,6 +4229,8 @@ ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(const BiomeDe
 {
     constexpr float kMarginRatio = 0.2f;
     const float footprintMultiplier = std::max(definition.footprintMultiplier, 0.001f);
+    const float baseRegionWidth = static_cast<float>(kChunkSizeX * kBiomeSizeInChunks);
+    const float baseRegionDepth = static_cast<float>(kChunkSizeZ * kBiomeSizeInChunks);
     const float scaledBiomeSizeInChunks = static_cast<float>(kBiomeSizeInChunks) * footprintMultiplier;
     const float regionWidth = static_cast<float>(kChunkSizeX) * scaledBiomeSizeInChunks;
     const float regionDepth = static_cast<float>(kChunkSizeZ) * scaledBiomeSizeInChunks;
@@ -4238,8 +4240,8 @@ ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(const BiomeDe
     const float jitterZ = hashToUnitFloat(regionX, 613, regionZ);
     const float availableWidth = std::max(regionWidth - marginX * 2.0f, 0.0f);
     const float availableDepth = std::max(regionDepth - marginZ * 2.0f, 0.0f);
-    const float baseX = static_cast<float>(regionX) * regionWidth;
-    const float baseZ = static_cast<float>(regionZ) * regionDepth;
+    const float baseX = static_cast<float>(regionX) * baseRegionWidth;
+    const float baseZ = static_cast<float>(regionZ) * baseRegionDepth;
 
     BiomeSite site{};
     site.worldPosXZ.x = baseX + marginX + availableWidth * jitterX;

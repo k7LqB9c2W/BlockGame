@@ -4997,7 +4997,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     }
 
     const TerrainBasisSample basis = computeTerrainBasis(worldX, worldZ);
-    const BiomePerturbationSample perturbations =
+    BiomePerturbationSample perturbations =
         applyBiomePerturbations(weightedBiomes, weightCount, biomeRegionX, biomeRegionZ);
 
     const BiomeDefinition* clampBiomePtr =
@@ -5032,6 +5032,9 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
 
     float borderAnchorHeight = std::numeric_limits<float>::quiet_NaN();
     bool hasBorderAnchor = false;
+    BiomePerturbationSample borderPerturbations{};
+    bool hasBorderPerturbations = false;
+
     if (hasNonLittleMountainsBiome)
     {
         std::array<WeightedBiome, 5> nonMountainBiomes{};
@@ -5062,10 +5065,11 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                 nonMountainBiomes[i].weight *= invWeight;
             }
 
-            const BiomePerturbationSample borderPerturbations =
+            borderPerturbations =
                 applyBiomePerturbations(nonMountainBiomes, nonMountainCount, biomeRegionX, biomeRegionZ);
             borderAnchorHeight = computeBaselineSurfaceHeight(borderPerturbations, basis);
             hasBorderAnchor = std::isfinite(borderAnchorHeight);
+            hasBorderPerturbations = true;
         }
     }
 
@@ -5087,6 +5091,45 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         if (std::isfinite(closestNormalizedDistance))
         {
             littleMountainInteriorMask = littleMountainInfluence(closestNormalizedDistance);
+        }
+    }
+
+    if (littleMountainsDefinition && hasNonLittleMountainsBiome && hasBorderPerturbations)
+    {
+        const float maskedInterior = std::clamp(littleMountainInteriorMask, 0.0f, 1.0f);
+        const float interiorBlend = glm::smoothstep(0.2f, 0.75f, maskedInterior);
+        const float weightBlend = glm::smoothstep(0.15f, 0.85f, littleMountainsWeight);
+        const float transitionBlend = std::clamp(interiorBlend * weightBlend, 0.0f, 1.0f);
+
+        if (transitionBlend < 1.0f)
+        {
+            auto mixField = [&](float& target, float borderValue)
+            {
+                target = std::lerp(borderValue, target, transitionBlend);
+            };
+
+            mixField(perturbations.blendedOffset, borderPerturbations.blendedOffset);
+            mixField(perturbations.blendedScale, borderPerturbations.blendedScale);
+            mixField(perturbations.blendedMinHeight, borderPerturbations.blendedMinHeight);
+            mixField(perturbations.blendedMaxHeight, borderPerturbations.blendedMaxHeight);
+            mixField(perturbations.blendedSlopeBias, borderPerturbations.blendedSlopeBias);
+            mixField(perturbations.blendedMaxGradient, borderPerturbations.blendedMaxGradient);
+
+            mixField(perturbations.landWeight, borderPerturbations.landWeight);
+            mixField(perturbations.landOffset, borderPerturbations.landOffset);
+            mixField(perturbations.landScale, borderPerturbations.landScale);
+            mixField(perturbations.landMinHeight, borderPerturbations.landMinHeight);
+            mixField(perturbations.landMaxHeight, borderPerturbations.landMaxHeight);
+            mixField(perturbations.landSlopeBias, borderPerturbations.landSlopeBias);
+            mixField(perturbations.landMaxGradient, borderPerturbations.landMaxGradient);
+
+            mixField(perturbations.oceanWeight, borderPerturbations.oceanWeight);
+            mixField(perturbations.oceanOffset, borderPerturbations.oceanOffset);
+            mixField(perturbations.oceanScale, borderPerturbations.oceanScale);
+            mixField(perturbations.oceanMinHeight, borderPerturbations.oceanMinHeight);
+            mixField(perturbations.oceanMaxHeight, borderPerturbations.oceanMaxHeight);
+            mixField(perturbations.oceanSlopeBias, borderPerturbations.oceanSlopeBias);
+            mixField(perturbations.oceanMaxGradient, borderPerturbations.oceanMaxGradient);
         }
     }
 

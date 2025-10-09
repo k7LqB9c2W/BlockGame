@@ -430,7 +430,8 @@ struct LittleMountainSampler
         talusDeg = std::lerp(talusDeg, highTalusDeg, glm::smoothstep(0.0f, 1.0f, altitudeT));
         const float talusAngle = glm::radians(talusDeg);
         const float rawMaxDiff = std::tan(talusAngle) * sampleStep;
-        const float maxDiff = std::clamp(rawMaxDiff, 0.2f, 0.55f);
+        const float maxTalusDiff = std::tan(glm::radians(highTalusDeg)) * sampleStep;
+        const float maxDiff = std::clamp(rawMaxDiff, 0.2f, maxTalusDiff);
 
         auto sampleNeighbor = [&](float offsetX, float offsetZ) {
             const auto neighborSample =
@@ -483,8 +484,10 @@ struct LittleMountainSampler
         relaxWithNeighbors(neighbors, adjustedMaxDiff);
 
         const float diagonalStep = sampleStep * std::sqrt(2.0f);
-        const float diagonalRawDiff = adjustedMaxDiff * (diagonalStep / sampleStep);
-        const float diagonalDiff = std::clamp(diagonalRawDiff, 0.25f, 0.6f);
+        const float diagonalStepFactor = diagonalStep / sampleStep;
+        const float diagonalRawDiff = adjustedMaxDiff * diagonalStepFactor;
+        const float maxDiagonalDiff = maxDiff * diagonalStepFactor;
+        const float diagonalDiff = std::clamp(diagonalRawDiff, 0.25f, maxDiagonalDiff);
         relaxWithNeighbors(diagonalNeighbors, diagonalDiff);
 
         relaxedHeight = std::clamp(relaxedHeight, entryFloor, maxHeight);

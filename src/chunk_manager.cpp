@@ -278,6 +278,27 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      1.0f},
 } };
 
+constexpr float computeMaxFootprintMultiplier()
+{
+    float maxMultiplier = 0.0f;
+    for (const auto& definition : kBiomeDefinitions)
+    {
+        maxMultiplier = (definition.footprintMultiplier > maxMultiplier) ? definition.footprintMultiplier : maxMultiplier;
+    }
+    return maxMultiplier;
+}
+
+constexpr int ceilToIntPositive(float value)
+{
+    const int truncated = static_cast<int>(value);
+    return (static_cast<float>(truncated) < value) ? truncated + 1 : truncated;
+}
+
+constexpr float kMaxBiomeFootprintMultiplier = computeMaxFootprintMultiplier();
+constexpr int kBiomeRegionSearchRadius = std::max(1, ceilToIntPositive(kMaxBiomeFootprintMultiplier * 0.5f));
+constexpr std::size_t kBiomeRegionCandidateCapacity =
+    static_cast<std::size_t>((kBiomeRegionSearchRadius * 2 + 1) * (kBiomeRegionSearchRadius * 2 + 1));
+
 struct ColumnSample
 {
     const BiomeDefinition* dominantBiome{nullptr};
@@ -4846,16 +4867,17 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         float normalizedDistance{1.0f};
     };
 
-    std::array<CandidateSite, 9> candidateSites{};
+    constexpr int regionRadius = kBiomeRegionSearchRadius;
+    std::array<CandidateSite, kBiomeRegionCandidateCapacity> candidateSites{};
     std::size_t candidateCount = 0;
     auto littleMountainInfluence = [](float normalizedDistance) {
         const float clamped = std::clamp(normalizedDistance, 0.0f, 1.0f);
         const float tapered = 1.0f - glm::smoothstep(0.35f, 0.85f, clamped);
         return std::pow(std::clamp(tapered, 0.0f, 1.0f), 1.75f);
     };
-    for (int regionOffsetZ = -1; regionOffsetZ <= 1; ++regionOffsetZ)
+    for (int regionOffsetZ = -regionRadius; regionOffsetZ <= regionRadius; ++regionOffsetZ)
     {
-        for (int regionOffsetX = -1; regionOffsetX <= 1; ++regionOffsetX)
+        for (int regionOffsetX = -regionRadius; regionOffsetX <= regionRadius; ++regionOffsetX)
         {
             const BiomeRegionInfo& info =
                 biomeRegionInfo(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);

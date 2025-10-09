@@ -262,7 +262,7 @@ constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
      kLittleMountainsMaxSurfaceHeight,
      0.1f,
      320.0f,
-     2.4f},
+     3.3f},
     {BiomeId::Ocean,
      "Ocean",
      BlockId::Water,
@@ -4693,6 +4693,7 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     const float clampedHeight = std::clamp(baseHeight, entryFloor, maxHeight);
 
     const float maskedInterior = std::clamp(interiorMask, 0.0f, 1.0f);
+    const float interiorBlend = std::pow(maskedInterior, 1.75f);
 
     const float relaxedEntryFloor = std::clamp(entryFloor, minHeight, clampedHeight);
     float borderBaseline = relaxedEntryFloor;
@@ -4704,14 +4705,13 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
         borderBaseline = std::clamp(borderBaseline, minHeight, maxHeight);
     }
 
-    const float interiorBlend = maskedInterior * maskedInterior;
     const float baselineEntryFloor = glm::mix(borderBaseline, relaxedEntryFloor, interiorBlend);
     const float baselineMinHeight = glm::mix(borderBaseline, minHeight, interiorBlend);
 
-    const float interiorFoothillLift = maskedInterior * maskedInterior * floorRange * 0.65f;
+    const float interiorFoothillLift = interiorBlend * floorRange * 0.65f;
     const float raisedEntryFloor = std::min(baselineEntryFloor + interiorFoothillLift, clampedHeight);
-    const float maskedEntryFloor = glm::mix(baselineMinHeight, raisedEntryFloor, maskedInterior);
-    float maskedHeight = glm::mix(baselineMinHeight, clampedHeight, maskedInterior);
+    const float maskedEntryFloor = glm::mix(baselineMinHeight, raisedEntryFloor, interiorBlend);
+    float maskedHeight = glm::mix(baselineMinHeight, clampedHeight, interiorBlend);
     maskedHeight = std::max(maskedHeight, maskedEntryFloor);
 
     return LittleMountainSample{maskedHeight, maskedEntryFloor, maskedInterior};
@@ -4841,7 +4841,8 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     std::size_t candidateCount = 0;
     auto littleMountainInfluence = [](float normalizedDistance) {
         const float clamped = std::clamp(normalizedDistance, 0.0f, 1.0f);
-        return 1.0f - glm::smoothstep(0.55f, 0.95f, clamped);
+        const float tapered = 1.0f - glm::smoothstep(0.35f, 0.85f, clamped);
+        return std::pow(std::clamp(tapered, 0.0f, 1.0f), 1.75f);
     };
     for (int regionOffsetZ = -1; regionOffsetZ <= 1; ++regionOffsetZ)
     {

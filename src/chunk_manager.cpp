@@ -4621,15 +4621,15 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     const float highSlopeEnd = minHeight + range * 0.90f;
     const float altitudeT = std::clamp((baseHeight - highSlopeStart) / (highSlopeEnd - highSlopeStart), 0.0f, 1.0f);
     const float normalizedAltitude = std::clamp((baseHeight - minHeight) / range, 0.0f, 1.0f);
-    const float lowTalusDeg = 3.0f;
-    const float midTalusDeg = 7.5f;
-    const float highTalusDeg = 12.0f;
-    const float foothillBlend = glm::smoothstep(0.0f, 0.45f, normalizedAltitude);
+    const float lowTalusDeg = 1.5f;
+    const float midTalusDeg = 4.0f;
+    const float highTalusDeg = 7.0f;
+    const float foothillBlend = glm::smoothstep(0.25f, 0.65f, normalizedAltitude);
     float talusDeg = std::lerp(lowTalusDeg, midTalusDeg, foothillBlend);
     talusDeg = std::lerp(talusDeg, highTalusDeg, glm::smoothstep(0.0f, 1.0f, altitudeT));
     const float talusAngle = glm::radians(talusDeg);
     const float rawMaxDiff = std::tan(talusAngle) * sampleStep;
-    const float maxDiff = std::clamp(rawMaxDiff, 0.45f, 1.15f);
+    const float maxDiff = std::clamp(rawMaxDiff, 0.2f, 0.55f);
 
     auto sampleNeighbor = [&](float offsetX, float offsetZ) {
         const auto neighborSample =
@@ -4683,12 +4683,12 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
 
     const float diagonalStep = sampleStep * std::sqrt(2.0f);
     const float diagonalRawDiff = adjustedMaxDiff * (diagonalStep / sampleStep);
-    const float diagonalDiff = std::clamp(diagonalRawDiff, 0.45f, 1.25f);
+    const float diagonalDiff = std::clamp(diagonalRawDiff, 0.25f, 0.6f);
     relaxWithNeighbors(diagonalNeighbors, diagonalDiff);
 
     relaxedHeight = std::clamp(relaxedHeight, entryFloor, maxHeight);
 
-    baseHeight = std::lerp(baseHeight, relaxedHeight, 0.8f);
+    baseHeight = std::lerp(baseHeight, relaxedHeight, 0.9f);
 
     const float clampedHeight = std::clamp(baseHeight, entryFloor, maxHeight);
 

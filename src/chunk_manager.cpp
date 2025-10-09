@@ -4894,32 +4894,81 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         }
     }
 
-    constexpr std::size_t kMaxConsideredSites = 3;
+    constexpr std::size_t kMaxConsideredSites = 4;
     std::size_t sitesToConsider = std::min<std::size_t>(kMaxConsideredSites, candidateCount);
     if (sitesToConsider > 0)
     {
+        auto candidateLess = [](const CandidateSite& lhs, const CandidateSite& rhs)
+        {
+            const bool lhsValid = std::isfinite(lhs.normalizedDistance);
+            const bool rhsValid = std::isfinite(rhs.normalizedDistance);
+            if (lhsValid && rhsValid)
+            {
+                if (lhs.normalizedDistance == rhs.normalizedDistance)
+                {
+                    return lhs.distanceSquared < rhs.distanceSquared;
+                }
+                return lhs.normalizedDistance < rhs.normalizedDistance;
+            }
+
+            if (lhsValid != rhsValid)
+            {
+                return lhsValid;
+            }
+
+            return lhs.distanceSquared < rhs.distanceSquared;
+        };
+
         std::partial_sort(candidateSites.begin(), candidateSites.begin() + sitesToConsider,
-                          candidateSites.begin() + candidateCount,
-                          [](const CandidateSite& lhs, const CandidateSite& rhs)
-                          {
-                              const bool lhsValid = std::isfinite(lhs.normalizedDistance);
-                              const bool rhsValid = std::isfinite(rhs.normalizedDistance);
-                              if (lhsValid && rhsValid)
-                              {
-                                  if (lhs.normalizedDistance == rhs.normalizedDistance)
-                                  {
-                                      return lhs.distanceSquared < rhs.distanceSquared;
-                                  }
-                                  return lhs.normalizedDistance < rhs.normalizedDistance;
-                              }
+                          candidateSites.begin() + candidateCount, candidateLess);
 
-                              if (lhsValid != rhsValid)
-                              {
-                                  return lhsValid;
-                              }
+        bool allLittleMountains = true;
+        for (std::size_t i = 0; i < sitesToConsider; ++i)
+        {
+            if (candidateSites[i].biome && candidateSites[i].biome->id != BiomeId::LittleMountains)
+            {
+                allLittleMountains = false;
+                break;
+            }
+        }
 
-                              return lhs.distanceSquared < rhs.distanceSquared;
-                          });
+        if (allLittleMountains)
+        {
+            std::size_t bestIndex = candidateCount;
+            CandidateSite bestSite{};
+            bool hasBestSite = false;
+            for (std::size_t i = sitesToConsider; i < candidateCount; ++i)
+            {
+                const CandidateSite& site = candidateSites[i];
+                if (!site.biome || site.biome->id == BiomeId::LittleMountains)
+                {
+                    continue;
+                }
+
+                if (!hasBestSite || candidateLess(site, bestSite))
+                {
+                    bestIndex = i;
+                    bestSite = site;
+                    hasBestSite = true;
+                }
+            }
+
+            if (hasBestSite)
+            {
+                if (sitesToConsider < kMaxConsideredSites)
+                {
+                    std::swap(candidateSites[sitesToConsider], candidateSites[bestIndex]);
+                    ++sitesToConsider;
+                }
+                else if (sitesToConsider > 0)
+                {
+                    std::swap(candidateSites[sitesToConsider - 1], candidateSites[bestIndex]);
+                }
+
+                std::partial_sort(candidateSites.begin(), candidateSites.begin() + sitesToConsider,
+                                  candidateSites.begin() + candidateCount, candidateLess);
+            }
+        }
     }
 
     std::array<WeightedBiome, 5> weightedBiomes{};

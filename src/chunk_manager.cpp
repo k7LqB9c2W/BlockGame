@@ -4704,6 +4704,15 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
         borderBaseline = std::clamp(borderAnchorHeight, anchorMin, anchorMax);
         borderBaseline = std::clamp(borderBaseline, minHeight, maxHeight);
     }
+    else
+    {
+        const float lowInteriorBlend = 0.35f;
+        if (interiorBlend < lowInteriorBlend)
+        {
+            const float ringAverage = (neighborAverage + diagonalAverage) * 0.5f;
+            borderBaseline = std::clamp(ringAverage, entryFloor, maxHeight);
+        }
+    }
 
     const float baselineEntryFloor = glm::mix(borderBaseline, relaxedEntryFloor, interiorBlend);
     const float baselineMinHeight = glm::mix(borderBaseline, minHeight, interiorBlend);

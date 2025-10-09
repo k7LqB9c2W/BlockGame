@@ -4978,9 +4978,24 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             totalWeight = 1.0f;
         }
 
+#if defined(_DEBUG)
+        // Update kDebugWorldX/Z to the column you want to inspect before building.
+        constexpr int kDebugWorldX = std::numeric_limits<int>::min();
+        constexpr int kDebugWorldZ = std::numeric_limits<int>::min();
+#endif
         for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
             const float normalizedWeight = rawWeights[i] / totalWeight;
+#if defined(_DEBUG)
+            if (worldX == kDebugWorldX && worldZ == kDebugWorldZ)
+            {
+                const CandidateSite& site = candidateSites[i];
+                const char* biomeName = site.biome ? site.biome->name : "<null>";
+                std::cout << "[BiomeBlendDebug] column(" << worldX << ", " << worldZ << ") candidate[" << i << "] "
+                          << biomeName << " normDist=" << site.normalizedDistance
+                          << " weight=" << normalizedWeight << std::endl;
+            }
+#endif
             if (normalizedWeight <= 0.0f || candidateSites[i].biome == nullptr)
             {
                 continue;

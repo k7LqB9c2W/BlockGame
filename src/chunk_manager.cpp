@@ -4939,15 +4939,19 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             distances[i] = std::sqrt(candidateSites[i].distanceSquared);
         }
 
-        const float baseDistance = distances[0];
-        const float farthestDistance = distances[sitesToConsider - 1];
-        const float denom = std::max(farthestDistance - baseDistance, 1e-3f);
-
-        rawWeights[0] = 1.0f;
-        for (std::size_t i = 1; i < sitesToConsider; ++i)
+        constexpr float kDistanceBias = 1e-3f;
+        for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
-            const float normalizedGap = (distances[i] - baseDistance) / denom;
-            rawWeights[i] = std::clamp(1.0f - normalizedGap, 0.0f, 1.0f);
+            const float biasedDistance = distances[i] + kDistanceBias;
+            if (!std::isfinite(biasedDistance))
+            {
+                rawWeights[i] = 1.0f / kDistanceBias;
+            }
+            else
+            {
+                const float safeDistance = std::max(biasedDistance, kDistanceBias);
+                rawWeights[i] = 1.0f / safeDistance;
+            }
         }
 
         for (std::size_t i = 0; i < sitesToConsider; ++i)

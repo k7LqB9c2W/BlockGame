@@ -4694,23 +4694,24 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
 
     const float maskedInterior = std::clamp(interiorMask, 0.0f, 1.0f);
 
-    float adaptiveMinHeight = minHeight;
-    float adaptiveEntryFloor = entryFloor;
+    const float relaxedEntryFloor = std::clamp(entryFloor, minHeight, clampedHeight);
+    float borderBaseline = relaxedEntryFloor;
     if (hasBorderAnchor)
     {
-        const float anchorMin = std::min(borderAnchorHeight, borderAnchorHeight + 1.0f);
-        const float anchorMax = std::max(borderAnchorHeight, borderAnchorHeight + 1.0f);
-        const float edgeBlend = 1.0f - maskedInterior;
-        const float clampedEdgeFloor = std::clamp(entryFloor, anchorMin, anchorMax);
-        const float clampedEdgeMin = std::clamp(minHeight, anchorMin, anchorMax);
-        adaptiveEntryFloor = glm::mix(entryFloor, clampedEdgeFloor, edgeBlend);
-        adaptiveMinHeight = glm::mix(minHeight, clampedEdgeMin, edgeBlend);
+        const float anchorMin = relaxedEntryFloor - floorRange;
+        const float anchorMax = relaxedEntryFloor + floorRange;
+        borderBaseline = std::clamp(borderAnchorHeight, anchorMin, anchorMax);
+        borderBaseline = std::clamp(borderBaseline, minHeight, maxHeight);
     }
 
+    const float interiorBlend = maskedInterior * maskedInterior;
+    const float baselineEntryFloor = glm::mix(borderBaseline, relaxedEntryFloor, interiorBlend);
+    const float baselineMinHeight = glm::mix(borderBaseline, minHeight, interiorBlend);
+
     const float interiorFoothillLift = maskedInterior * maskedInterior * floorRange * 0.65f;
-    const float raisedEntryFloor = std::min(adaptiveEntryFloor + interiorFoothillLift, clampedHeight);
-    const float maskedEntryFloor = glm::mix(adaptiveMinHeight, raisedEntryFloor, maskedInterior);
-    float maskedHeight = glm::mix(adaptiveMinHeight, clampedHeight, maskedInterior);
+    const float raisedEntryFloor = std::min(baselineEntryFloor + interiorFoothillLift, clampedHeight);
+    const float maskedEntryFloor = glm::mix(baselineMinHeight, raisedEntryFloor, maskedInterior);
+    float maskedHeight = glm::mix(baselineMinHeight, clampedHeight, maskedInterior);
     maskedHeight = std::max(maskedHeight, maskedEntryFloor);
 
     return LittleMountainSample{maskedHeight, maskedEntryFloor, maskedInterior};

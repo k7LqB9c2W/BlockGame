@@ -244,6 +244,150 @@ struct LittleMountainSample
     float interiorMask{0.0f};
 };
 
+class PerlinNoise
+{
+public:
+    explicit PerlinNoise(unsigned seed = 2025u)
+    {
+        std::array<int, 256> temp;
+        std::iota(temp.begin(), temp.end(), 0);
+
+        std::mt19937 rng(seed);
+        std::shuffle(temp.begin(), temp.end(), rng);
+
+        for (int i = 0; i < 256; ++i)
+        {
+            permutation_[i] = permutation_[i + 256] = temp[static_cast<std::size_t>(i)];
+        }
+    }
+
+    float noise(float x, float y) const noexcept
+    {
+        const int xi = static_cast<int>(std::floor(x)) & 255;
+        const int yi = static_cast<int>(std::floor(y)) & 255;
+
+        const float xf = x - std::floor(x);
+        const float yf = y - std::floor(y);
+
+        const float u = fade(xf);
+        const float v = fade(yf);
+
+        const int aa = permutation_[permutation_[xi] + yi];
+        const int ab = permutation_[permutation_[xi] + yi + 1];
+        const int ba = permutation_[permutation_[xi + 1] + yi];
+        const int bb = permutation_[permutation_[xi + 1] + yi + 1];
+
+        const float x1 = lerp(grad(aa, xf, yf), grad(ba, xf - 1.0f, yf), u);
+        const float x2 = lerp(grad(ab, xf, yf - 1.0f), grad(bb, xf - 1.0f, yf - 1.0f), u);
+        return lerp(x1, x2, v);
+    }
+
+    float fbm(float x, float y, int octaves, float persistence, float lacunarity) const noexcept
+    {
+        float amplitude = 1.0f;
+        float frequency = 1.0f;
+        float sum = 0.0f;
+        float maxValue = 0.0f;
+
+        for (int i = 0; i < octaves; ++i)
+        {
+            sum += noise(x * frequency, y * frequency) * amplitude;
+            maxValue += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+
+        if (maxValue > 0.0f)
+        {
+            sum /= maxValue;
+        }
+
+        return sum;
+    }
+
+    float ridge(float x, float y, int octaves, float lacunarity, float gain) const noexcept
+    {
+        float sum = 0.0f;
+        float amplitude = 0.5f;
+        float frequency = 1.0f;
+        float prev = 1.0f;
+
+        for (int i = 0; i < octaves; ++i)
+        {
+            float n = noise(x * frequency, y * frequency);
+            n = 1.0f - std::abs(n);
+            n *= n;
+            sum += n * amplitude * prev;
+            prev = n;
+            frequency *= lacunarity;
+            amplitude *= gain;
+        }
+
+        return sum;
+    }
+
+private:
+    std::array<int, 512> permutation_{};
+
+    static float fade(float t) noexcept
+    {
+        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    }
+
+    static float lerp(float a, float b, float t) noexcept
+    {
+        return a + t * (b - a);
+    }
+
+    static float grad(int hash, float x, float y) noexcept
+    {
+        const int h = hash & 7;
+        const float u = (h < 4) ? x : y;
+        const float v = (h < 4) ? y : x;
+        return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+    }
+};
+
+struct TerrainBasisSample
+{
+    float mainTerrain{0.0f};
+    float mountainNoise{0.0f};
+    float mediumNoise{0.0f};
+    float detailNoise{0.0f};
+    float combinedNoise{0.0f};
+    float lowAmplitudeCombined{0.0f};
+};
+
+struct TerrainBasisSampler
+{
+    explicit TerrainBasisSampler(unsigned seed)
+        : noise(seed)
+    {
+    }
+
+    TerrainBasisSample sample(int worldX, int worldZ) const
+    {
+        TerrainBasisSample basis{};
+
+        const float nx = static_cast<float>(worldX) * 0.01f;
+        const float nz = static_cast<float>(worldZ) * 0.01f;
+
+        basis.mainTerrain = noise.fbm(nx, nz, 6, 0.5f, 2.0f);
+        basis.mountainNoise = noise.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
+        basis.detailNoise = noise.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
+        basis.mediumNoise = noise.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+
+        basis.combinedNoise = basis.mainTerrain * 12.0f + basis.mountainNoise * 8.0f + basis.mediumNoise * 4.0f
+                              + basis.detailNoise * 2.0f;
+        basis.lowAmplitudeCombined = basis.mainTerrain * 3.0f + basis.mountainNoise * 1.5f + basis.mediumNoise * 1.0f
+                                     + basis.detailNoise * 0.5f;
+
+        return basis;
+    }
+
+    PerlinNoise noise;
+};
+
 struct LittleMountainSampler
 {
     explicit LittleMountainSampler(unsigned seed)
@@ -426,8 +570,8 @@ struct LittleMountainSampler
         const float midTalusDeg = 4.0f;
         const float highTalusDeg = 7.0f;
         const float foothillBlend = glm::smoothstep(0.25f, 0.65f, normalizedAltitude);
-        float talusDeg = std::lerp(lowTalusDeg, midTalusDeg, foothillBlend);
-        talusDeg = std::lerp(talusDeg, highTalusDeg, glm::smoothstep(0.0f, 1.0f, altitudeT));
+        float talusDeg = glm::mix(lowTalusDeg, midTalusDeg, foothillBlend);
+        talusDeg = glm::mix(talusDeg, highTalusDeg, glm::smoothstep(0.0f, 1.0f, altitudeT));
         const float talusAngle = glm::radians(talusDeg);
         const float rawMaxDiff = std::tan(talusAngle) * sampleStep;
         const float maxTalusDiff = std::tan(glm::radians(highTalusDeg)) * sampleStep;
@@ -492,7 +636,7 @@ struct LittleMountainSampler
 
         relaxedHeight = std::clamp(relaxedHeight, entryFloor, maxHeight);
 
-        baseHeight = std::lerp(baseHeight, relaxedHeight, 0.9f);
+        baseHeight = glm::mix(baseHeight, relaxedHeight, 0.9f);
 
         const float clampedHeight = std::clamp(baseHeight, entryFloor, maxHeight);
 
@@ -689,6 +833,7 @@ int main()
     }
 
     LittleMountainSampler sampler(kSeed);
+    TerrainBasisSampler basisSampler(kSeed);
     BiomeDefinition definition{};
 
     // Sample columns moving from the biome edge toward the core along the X axis.
@@ -721,6 +866,65 @@ int main()
         results.push_back(result);
     }
 
+    // Gather blended terrain statistics across the Little Mountains footprint.
+    const int minX = static_cast<int>(std::floor(bestSite.centerX - bestSite.halfExtentX));
+    const int maxX = static_cast<int>(std::ceil(bestSite.centerX + bestSite.halfExtentX));
+    const int minZ = static_cast<int>(std::floor(bestSite.centerZ - bestSite.halfExtentZ));
+    const int maxZ = static_cast<int>(std::ceil(bestSite.centerZ + bestSite.halfExtentZ));
+
+    float minCombined = std::numeric_limits<float>::infinity();
+    float maxCombined = -std::numeric_limits<float>::infinity();
+    float minLowAmplitude = std::numeric_limits<float>::infinity();
+    float maxLowAmplitude = -std::numeric_limits<float>::infinity();
+    float minBlended = std::numeric_limits<float>::infinity();
+    float maxBlended = -std::numeric_limits<float>::infinity();
+    double combinedSum = 0.0;
+    double lowAmplitudeSum = 0.0;
+    double blendedSum = 0.0;
+    float minMacroCandidate = std::numeric_limits<float>::infinity();
+    float maxMacroCandidate = -std::numeric_limits<float>::infinity();
+    std::size_t sampledColumns = 0;
+
+    constexpr float kLittleMountainsSlopeBias = 0.1f;
+    constexpr float kTestOffset = 270.0f;
+    constexpr float kTestScale = 44.0f;
+
+    for (int worldZ = minZ; worldZ <= maxZ; ++worldZ)
+    {
+        for (int worldX = minX; worldX <= maxX; ++worldX)
+        {
+            const float columnCenterX = static_cast<float>(worldX) + 0.5f;
+            const float columnCenterZ = static_cast<float>(worldZ) + 0.5f;
+            const float dx = columnCenterX - bestSite.centerX;
+            const float dz = columnCenterZ - bestSite.centerZ;
+            const float normalizedDistance =
+                std::sqrt((dx / bestSite.halfExtentX) * (dx / bestSite.halfExtentX)
+                          + (dz / bestSite.halfExtentZ) * (dz / bestSite.halfExtentZ));
+
+            if (littleMountainInfluence(normalizedDistance) <= 0.0f)
+            {
+                continue;
+            }
+
+            const TerrainBasisSample basis = basisSampler.sample(worldX, worldZ);
+            minCombined = std::min(minCombined, basis.combinedNoise);
+            maxCombined = std::max(maxCombined, basis.combinedNoise);
+            minLowAmplitude = std::min(minLowAmplitude, basis.lowAmplitudeCombined);
+            maxLowAmplitude = std::max(maxLowAmplitude, basis.lowAmplitudeCombined);
+            combinedSum += basis.combinedNoise;
+            lowAmplitudeSum += basis.lowAmplitudeCombined;
+
+            const float blended = glm::mix(basis.combinedNoise, basis.lowAmplitudeCombined, kLittleMountainsSlopeBias);
+            minBlended = std::min(minBlended, blended);
+            maxBlended = std::max(maxBlended, blended);
+            blendedSum += blended;
+            const float macroCandidate = kTestOffset + blended * kTestScale;
+            minMacroCandidate = std::min(minMacroCandidate, macroCandidate);
+            maxMacroCandidate = std::max(maxMacroCandidate, macroCandidate);
+            ++sampledColumns;
+        }
+    }
+
     std::ofstream out("tools/little_mountains_columns.csv", std::ios::trunc);
     out << "world_x,world_z,normalized_distance,interior_mask,height,entry_floor\n";
     out << std::fixed << std::setprecision(6);
@@ -732,6 +936,16 @@ int main()
     }
 
     std::cout << "Wrote " << results.size() << " samples to tools/little_mountains_columns.csv" << std::endl;
+    std::cout << "Sampled " << sampledColumns << " interior columns for blended terrain statistics" << std::endl;
+    const double invSamples = (sampledColumns > 0) ? 1.0 / static_cast<double>(sampledColumns) : 0.0;
+    std::cout << "Combined noise range: " << minCombined << " .. " << maxCombined
+              << ", mean = " << combinedSum * invSamples << '\n';
+    std::cout << "Low amplitude combined range: " << minLowAmplitude << " .. " << maxLowAmplitude
+              << ", mean = " << lowAmplitudeSum * invSamples << '\n';
+    std::cout << "Blended terrain (slope bias 0.1) range: " << minBlended << " .. " << maxBlended
+              << ", mean = " << blendedSum * invSamples << '\n';
+    std::cout << "Macro height with offset " << kTestOffset << " and scale " << kTestScale << " ranges from "
+              << minMacroCandidate << " to " << maxMacroCandidate << '\n';
     return 0;
 }
 

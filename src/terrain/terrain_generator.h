@@ -32,19 +32,12 @@ struct ColumnSample
     int minSurfaceY{0};
     int maxSurfaceY{0};
     int slabHighestSolidY{std::numeric_limits<int>::min()};
-    float continentMask{0.0f};
-    float baseElevation{0.0f};
-    float oceanContribution{0.0f};
-    float landContribution{0.0f};
-    float oceanShare{0.0f};
-    float landShare{0.0f};
-    float shorelineBlend{0.0f};
-    float distanceToShore{0.0f};
     bool slabHasSolid{false};
     float soilCreepCoefficient{0.0f};
     float roughAmplitude{0.0f};
     float hillAmplitude{0.0f};
     float mountainAmplitude{0.0f};
+    float distanceToShore{0.0f};
 };
 
 struct ColumnBuildResult

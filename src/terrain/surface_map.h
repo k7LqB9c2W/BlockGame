@@ -26,8 +26,6 @@ struct SurfaceColumn
     float dominantWeight{0.0f};
     float surfaceHeight{0.0f};
     int surfaceY{0};
-    float blendedOffset{0.0f};
-    float blendedScale{0.0f};
     float roughAmplitude{0.0f};
     float hillAmplitude{0.0f};
     float mountainAmplitude{0.0f};

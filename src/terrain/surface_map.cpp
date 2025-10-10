@@ -1,6 +1,7 @@
 #include "terrain/surface_map.h"
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <random>
 #include <stdexcept>
@@ -178,25 +179,64 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             const int worldZ = baseWorld.y + localZ * stride;
 
             const ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
-            const TerrainBasisSample& basis = climateSample.basis;
-            const BiomePerturbationSample& perturbations = climateSample.perturbations;
-
-            const BiomeDefinition* dominantBiome = perturbations.dominantBiome;
-            if (!dominantBiome)
+            if (climateSample.blendCount == 0)
             {
-                dominantBiome = climateSample.fallbackBiome;
-            }
-            if (!dominantBiome && biomeDatabase_.biomeCount() > 0)
-            {
-                dominantBiome = &biomeDatabase_.definitionByIndex(0);
+                continue;
             }
 
             SurfaceColumn& outColumn = fragment.column(localX, localZ);
             outColumn = SurfaceColumn{};
 
+            const BiomeBlend& dominantBlend = climateSample.blends[0];
+            const BiomeDefinition* dominantBiome = dominantBlend.biome;
+            if (!dominantBiome && biomeDatabase_.biomeCount() > 0)
+            {
+                dominantBiome = &biomeDatabase_.definitionByIndex(0);
+            }
             if (!dominantBiome)
             {
                 continue;
+            }
+
+            float weightSum = 0.0f;
+            float blendedHeight = 0.0f;
+            float roughStrength = 0.0f;
+            float hillStrength = 0.0f;
+            float mountainStrength = 0.0f;
+            float keepOriginal = 0.0f;
+            for (std::size_t i = 0; i < climateSample.blendCount; ++i)
+            {
+                const BiomeBlend& blend = climateSample.blends[i];
+                const float weight = blend.weight;
+                weightSum += weight;
+                blendedHeight += blend.height * weight;
+                roughStrength += blend.roughness * weight;
+                hillStrength += blend.hills * weight;
+                mountainStrength += blend.mountains * weight;
+                if (blend.biome)
+                {
+                    keepOriginal += blend.biome->keepOriginalTerrain * weight;
+                }
+            }
+            if (weightSum > std::numeric_limits<float>::epsilon())
+            {
+                const float inv = 1.0f / weightSum;
+                blendedHeight *= inv;
+                roughStrength *= inv;
+                hillStrength *= inv;
+                mountainStrength *= inv;
+                keepOriginal *= inv;
+            }
+            else
+            {
+                keepOriginal = 0.0f;
+            }
+
+            if (roughStrength <= 0.0f && hillStrength <= 0.0f && mountainStrength <= 0.0f)
+            {
+                roughStrength = 0.75f;
+                hillStrength = 0.5f;
+                mountainStrength = 0.25f;
             }
 
             const float worldXF = static_cast<float>(worldX);
@@ -226,52 +266,19 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                                                             noiseProfile.mountain.lacunarity,
                                                             noiseProfile.mountain.gain);
 
-            const float roughAmplitude = glm::clamp((roughNoise + 1.0f) * 0.5f, 0.0f, 1.0f);
-            const float hillAmplitude = glm::clamp((hillNoise + 1.0f) * 0.5f, 0.0f, 1.0f);
-            const float mountainAmplitude = glm::clamp(mountainNoise, 0.0f, 1.0f);
-
-            float blendedHeight = perturbations.blendedOffset
-                                   + (basis.mainTerrain * 12.0f + basis.mediumNoise * 6.0f + basis.detailNoise * 3.0f)
-                                         * perturbations.blendedScale;
-            blendedHeight += (roughAmplitude - 0.5f) * 8.0f * perturbations.blendedScale;
-            blendedHeight += (hillAmplitude - 0.5f) * 12.0f * perturbations.blendedScale;
-            blendedHeight += mountainAmplitude * 24.0f * perturbations.blendedScale;
-
-            const bool hasLand = perturbations.landWeight > 0.0f;
-            const bool hasOcean = perturbations.oceanWeight > 0.0f;
-
-            if (hasLand)
-            {
-                const float landHeight = perturbations.landOffset
-                                          + (basis.mainTerrain * 10.0f + hillAmplitude * 8.0f + roughAmplitude * 4.0f)
-                                                * perturbations.landScale;
-                blendedHeight = glm::mix(blendedHeight, landHeight, glm::clamp(perturbations.landWeight, 0.0f, 1.0f));
-            }
-
-            if (hasOcean)
-            {
-                const float oceanHeight = perturbations.oceanOffset
-                                           + (basis.mainTerrain * 6.0f + mountainAmplitude * 4.0f)
-                                                 * perturbations.oceanScale;
-                blendedHeight = glm::mix(blendedHeight,
-                                         oceanHeight,
-                                         glm::clamp(perturbations.oceanWeight, 0.0f, 1.0f));
-            }
-
-            const float minHeight = std::min(perturbations.blendedMinHeight, perturbations.blendedMaxHeight);
-            const float maxHeight = std::max(perturbations.blendedMinHeight, perturbations.blendedMaxHeight);
-            const float clampedHeight = glm::clamp(blendedHeight, minHeight, maxHeight);
+            float surfaceHeight = blendedHeight;
+            surfaceHeight += (roughNoise - 0.5f) * 4.0f * roughStrength;
+            surfaceHeight += (hillNoise - 0.5f) * 6.0f * hillStrength;
+            surfaceHeight += mountainNoise * 12.0f * mountainStrength;
 
             outColumn.dominantBiome = dominantBiome;
-            outColumn.dominantWeight = perturbations.dominantWeight;
-            outColumn.surfaceHeight = clampedHeight;
-            outColumn.surfaceY = static_cast<int>(std::round(clampedHeight));
-            outColumn.blendedOffset = perturbations.blendedOffset;
-            outColumn.blendedScale = perturbations.blendedScale;
-            outColumn.roughAmplitude = roughAmplitude;
-            outColumn.hillAmplitude = hillAmplitude;
-            outColumn.mountainAmplitude = mountainAmplitude;
-            outColumn.soilCreepCoefficient = 1.0f - glm::clamp(perturbations.blendedSlopeBias, 0.0f, 1.0f);
+            outColumn.dominantWeight = dominantBlend.weight;
+            outColumn.surfaceHeight = surfaceHeight;
+            outColumn.surfaceY = static_cast<int>(std::round(surfaceHeight));
+            outColumn.roughAmplitude = std::max(roughStrength, 0.0f);
+            outColumn.hillAmplitude = std::max(hillStrength, 0.0f);
+            outColumn.mountainAmplitude = std::max(mountainStrength, 0.0f);
+            outColumn.soilCreepCoefficient = std::clamp(1.0f - keepOriginal, 0.0f, 1.0f);
         }
     }
 }

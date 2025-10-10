@@ -3,11 +3,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #include <glm/vec2.hpp>
 
@@ -17,54 +17,31 @@
 namespace terrain
 {
 
-struct TerrainBasisSample
+struct BiomeBlend
 {
-    float continentMask{0.0f};
-    float mainTerrain{0.0f};
-    float mountainNoise{0.0f};
-    float mediumNoise{0.0f};
-    float detailNoise{0.0f};
-    float combinedNoise{0.0f};
-    float baseElevation{0.0f};
-};
-
-struct BiomePerturbationSample
-{
-    float blendedOffset{0.0f};
-    float blendedScale{0.0f};
-    float blendedMinHeight{0.0f};
-    float blendedMaxHeight{0.0f};
-    float blendedSlopeBias{0.0f};
-    float blendedMaxGradient{0.0f};
-    float oceanWeight{0.0f};
-    float oceanOffset{0.0f};
-    float oceanScale{0.0f};
-    float oceanMinHeight{0.0f};
-    float oceanMaxHeight{0.0f};
-    float oceanSlopeBias{0.0f};
-    float oceanMaxGradient{0.0f};
-    float landWeight{0.0f};
-    float landOffset{0.0f};
-    float landScale{0.0f};
-    float landMinHeight{0.0f};
-    float landMaxHeight{0.0f};
-    float landSlopeBias{0.0f};
-    float landMaxGradient{0.0f};
-    const BiomeDefinition* dominantBiome{nullptr};
-    float dominantWeight{0.0f};
+    const BiomeDefinition* biome{nullptr};
+    float weight{0.0f};
+    float height{0.0f};
+    float roughness{0.0f};
+    float hills{0.0f};
+    float mountains{0.0f};
+    unsigned seed{0};
 };
 
 struct ClimateSample
 {
-    TerrainBasisSample basis{};
-    BiomePerturbationSample perturbations{};
-    BiomePerturbationSample borderPerturbations{};
-    bool hasBorderPerturbations{false};
-    float littleMountainsWeight{0.0f};
-    const BiomeDefinition* littleMountainsDefinition{nullptr};
-    float littleMountainInteriorMask{0.0f};
-    bool hasNonLittleMountainsBiome{false};
-    const BiomeDefinition* fallbackBiome{nullptr};
+    std::array<BiomeBlend, 4> blends{};
+    std::size_t blendCount{0};
+
+    [[nodiscard]] const BiomeDefinition* dominantBiome() const noexcept
+    {
+        return blendCount > 0 ? blends[0].biome : nullptr;
+    }
+
+    [[nodiscard]] float dominantWeight() const noexcept
+    {
+        return blendCount > 0 ? blends[0].weight : 0.0f;
+    }
 };
 
 class ClimateFragment
@@ -106,10 +83,13 @@ public:
     void generate(ClimateFragment& fragment) override;
 
 private:
-    struct WeightedBiome
+    struct CandidateSite
     {
         const BiomeDefinition* biome{nullptr};
-        float weight{0.0f};
+        glm::vec2 positionXZ{0.0f};
+        glm::vec2 halfExtents{0.0f};
+        float distanceSquared{std::numeric_limits<float>::max()};
+        float normalizedDistance{std::numeric_limits<float>::max()};
     };
 
     struct BiomeSite
@@ -118,35 +98,12 @@ private:
         glm::vec2 halfExtents{0.0f};
     };
 
-    class PerlinNoise
-    {
-    public:
-        explicit PerlinNoise(unsigned seed = 2025u);
-
-        float noise(float x, float y) const noexcept;
-        float fbm(float x, float y, int octaves, float persistence, float lacunarity) const noexcept;
-        float ridge(float x, float y, int octaves, float lacunarity, float gain) const noexcept;
-
-    private:
-        std::array<int, 512> permutation_{};
-
-        static float fade(float t) noexcept;
-        static float lerp(float a, float b, float t) noexcept;
-        static float grad(int hash, float x, float y) noexcept;
-    };
-
-    static int ceilToIntPositive(float value) noexcept;
     static int floorDiv(int value, int divisor) noexcept;
     static float hashToUnitFloat(int x, int y, int z) noexcept;
-    static float littleMountainInfluence(float normalizedDistance) noexcept;
 
-    TerrainBasisSample computeTerrainBasis(int worldX, int worldZ) const;
-    BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
-                                                    std::size_t weightCount,
-                                                    int biomeRegionX,
-                                                    int biomeRegionZ) const;
     BiomeSite computeBiomeSite(const BiomeDefinition& definition, int regionX, int regionZ) const noexcept;
     const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
+    void populateBlends(int worldX, int worldZ, ClimateSample& outSample);
 
     const BiomeDatabase& biomeDatabase_;
     const WorldgenProfile& profile_;
@@ -154,7 +111,7 @@ private:
     int biomeSizeInChunks_{1};
     int biomeRegionSearchRadius_{1};
     std::size_t biomeRegionCandidateCapacity_{1};
-    PerlinNoise noise_;
+    unsigned baseSeed_{0};
 };
 
 class ClimateMap
@@ -183,7 +140,6 @@ private:
     };
 
     static int floorDiv(int value, int divisor) noexcept;
-
     [[nodiscard]] const ClimateFragment& fragmentForColumn(int worldX, int worldZ) const;
     void touch(FragmentCacheEntry& entry) const;
     void evictIfNeeded() const;

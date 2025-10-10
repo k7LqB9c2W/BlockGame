@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -38,6 +40,37 @@ float hashToUnitFloat(int x, int y, int z) noexcept
     h = (h ^ (h >> 13)) * kMixMul;
     h ^= (h >> 16);
     return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
+}
+
+constexpr bool kEnableTerrainDebugLogs = true;
+
+void logTerrainAnomaly(const char* tag,
+                       int worldX,
+                       int worldZ,
+                       int surfaceY,
+                       float neighborAverage,
+                       const ColumnSample& sample)
+{
+    if (!kEnableTerrainDebugLogs)
+    {
+        return;
+    }
+
+    static std::mutex s_logMutex;
+    static std::ofstream s_logFile("debug_terrain.log", std::ios::app);
+    static int s_logCount = 0;
+    if (s_logCount >= 500 || !s_logFile.is_open())
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(s_logMutex);
+    ++s_logCount;
+    s_logFile << tag << " world=(" << worldX << ',' << worldZ << ") surfaceY=" << surfaceY
+              << " neighborAvg=" << neighborAverage
+              << " dominantBiome=" << (sample.dominantBiome ? sample.dominantBiome->id : "<none>")
+              << " weight=" << sample.dominantWeight << " roughAmp=" << sample.roughAmplitude
+              << " hillAmp=" << sample.hillAmplitude << " mountainAmp=" << sample.mountainAmplitude << '\n';
 }
 
 } // namespace
@@ -151,10 +184,10 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
 
             summary.slabContainsTerrain = true;
 
+            const float neighborAverage = computeNeighborAverage(localX, localZ);
             int adjustedSurfaceY = sample.surfaceY;
             if (biome.terrainSettings.soilCreep.strength > 0.0f && sample.soilCreepCoefficient > 0.0f)
             {
-                const float neighborAverage = computeNeighborAverage(localX, localZ);
                 const float strength = std::clamp(sample.soilCreepCoefficient * biome.terrainSettings.soilCreep.strength,
                                                   0.0f,
                                                   1.0f);
@@ -179,6 +212,14 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
             sample.slabHighestSolidY = sample.slabHasSolid ? std::min(adjustedSurfaceY, maxWorldY)
                                                            : std::numeric_limits<int>::min();
             outColumns[columnIdx].sample = sample;
+            if (kEnableTerrainDebugLogs)
+            {
+                const float diff = std::abs(static_cast<float>(adjustedSurfaceY) - neighborAverage);
+                if (adjustedSurfaceY <= minWorldY + 4 || diff > 48.0f)
+                {
+                    logTerrainAnomaly("[HeightDebug]", worldX, worldZ, adjustedSurfaceY, neighborAverage, sample);
+                }
+            }
 
             BlockId surfaceBlock = biome.surfaceBlock;
             BlockId fillerBlock = biome.fillerBlock;

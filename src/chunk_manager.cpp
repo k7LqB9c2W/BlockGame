@@ -4,6 +4,7 @@
 #include "chunk_manager.h"
 
 #include "terrain/biome_database.h"
+#include "terrain/climate_map.h"
 #include "terrain/worldgen_profile.h"
 
 #include <algorithm>
@@ -637,62 +638,9 @@ private:
     void buildSurfaceOnlyMesh(Chunk& chunk);
     bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
 
-    struct BiomeSite
-    {
-        glm::vec2 worldPosXZ{0.0f};
-        glm::vec2 halfExtents{0.0f};
-    };
+    using TerrainBasisSample = terrain::TerrainBasisSample;
+    using BiomePerturbationSample = terrain::BiomePerturbationSample;
 
-    struct BiomeRegionInfo
-    {
-        const BiomeDefinition* definition{nullptr};
-        BiomeSite site{};
-    };
-
-    struct WeightedBiome
-    {
-        const BiomeDefinition* biome{nullptr};
-        float weight{0.0f};
-    };
-
-    struct TerrainBasisSample
-    {
-        float continentMask{0.0f};
-        float mainTerrain{0.0f};
-        float mountainNoise{0.0f};
-        float mediumNoise{0.0f};
-        float detailNoise{0.0f};
-        float combinedNoise{0.0f};
-        float baseElevation{0.0f};
-    };
-
-    struct BiomePerturbationSample
-    {
-        float blendedOffset{0.0f};
-        float blendedScale{0.0f};
-        float blendedMinHeight{0.0f};
-        float blendedMaxHeight{0.0f};
-        float blendedSlopeBias{0.0f};
-        float blendedMaxGradient{0.0f};
-        float oceanWeight{0.0f};
-        float oceanOffset{0.0f};
-        float oceanScale{0.0f};
-        float oceanMinHeight{0.0f};
-        float oceanMaxHeight{0.0f};
-        float oceanSlopeBias{0.0f};
-        float oceanMaxGradient{0.0f};
-        float landWeight{0.0f};
-        float landOffset{0.0f};
-        float landScale{0.0f};
-        float landMinHeight{0.0f};
-        float landMaxHeight{0.0f};
-        float landSlopeBias{0.0f};
-        float landMaxGradient{0.0f};
-        const BiomeDefinition* dominantBiome{nullptr};
-        float dominantWeight{0.0f};
-    };
-
-    TerrainBasisSample computeTerrainBasis(int worldX, int worldZ) const;
     float computeLittleMountainsNormalized(float worldX, float worldZ) const;
 
     struct LittleMountainSample
@@ -711,19 +659,11 @@ private:
                                                       float interiorMask,
                                                       bool hasBorderAnchor,
                                                       float borderAnchorHeight) const;
-    BiomePerturbationSample applyBiomePerturbations(const std::array<WeightedBiome, 5>& weightedBiomes,
-                                                    std::size_t weightCount,
-                                                    int biomeRegionX,
-                                                    int biomeRegionZ) const;
-    static BiomeSite computeBiomeSite(const BiomeDefinition& definition, int regionX, int regionZ) noexcept;
-    const BiomeRegionInfo& biomeRegionInfo(int regionX, int regionZ) const;
-    const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
-
     terrain::WorldgenProfile worldgenProfile_{};
     terrain::BiomeDatabase biomeDatabase_{};
-    int biomeRegionSearchRadius_{1};
-    std::size_t biomeRegionCandidateCapacity_{1};
     int globalSeaLevel_{20};
+
+    std::unique_ptr<terrain::ClimateMap> climateMap_;
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
     struct FaceUV
@@ -762,8 +702,6 @@ private:
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
-    mutable std::unordered_map<glm::ivec2, BiomeRegionInfo, ColumnHasher> biomeRegionCache_;
-    mutable std::mutex biomeRegionCacheMutex_;
 
     std::vector<std::thread> workerThreads_;
     std::size_t workerThreadCount_{0};
@@ -1339,11 +1277,10 @@ ChunkManager::Impl::Impl(unsigned seed)
         throw std::runtime_error("Biome database is empty");
     }
 
-    const float maxFootprint = biomeDatabase_.maxFootprintMultiplier();
-    biomeRegionSearchRadius_ = std::max(1, ceilToIntPositive(maxFootprint * 0.5f));
-    biomeRegionCandidateCapacity_ =
-        static_cast<std::size_t>((biomeRegionSearchRadius_ * 2 + 1) * (biomeRegionSearchRadius_ * 2 + 1));
-    biomeRegionCandidateCapacity_ = std::max<std::size_t>(biomeRegionCandidateCapacity_, 1);
+    climateMap_ = std::make_unique<terrain::ClimateMap>(
+        std::make_unique<terrain::NoiseVoronoiClimateGenerator>(biomeDatabase_, worldgenProfile_, effectiveSeed,
+                                                                kChunkSizeX, kBiomeSizeInChunks),
+        64);
 
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
@@ -1725,6 +1662,11 @@ void ChunkManager::Impl::clear()
     uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
     lastUploadBytesUsed_ = 0;
     pendingUploadsLastFrame_ = 0;
+
+    if (climateMap_)
+    {
+        climateMap_->clear();
+    }
 
 }
 
@@ -4082,101 +4024,6 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
-ChunkManager::Impl::BiomeSite ChunkManager::Impl::computeBiomeSite(const BiomeDefinition& definition,
-                                                                   int regionX,
-                                                                   int regionZ) noexcept
-{
-    constexpr float kMarginRatio = 0.2f;
-    const float footprintMultiplier = std::max(definition.footprintMultiplier, 0.001f);
-    const float baseRegionWidth = static_cast<float>(kChunkSizeX * kBiomeSizeInChunks);
-    const float baseRegionDepth = static_cast<float>(kChunkSizeZ * kBiomeSizeInChunks);
-    const float scaledBiomeSizeInChunks = static_cast<float>(kBiomeSizeInChunks) * footprintMultiplier;
-    const float regionWidth = static_cast<float>(kChunkSizeX) * scaledBiomeSizeInChunks;
-    const float regionDepth = static_cast<float>(kChunkSizeZ) * scaledBiomeSizeInChunks;
-    const float marginX = regionWidth * kMarginRatio;
-    const float marginZ = regionDepth * kMarginRatio;
-    const float jitterX = hashToUnitFloat(regionX, 137, regionZ);
-    const float jitterZ = hashToUnitFloat(regionX, 613, regionZ);
-    const float availableWidth = std::max(regionWidth - marginX * 2.0f, 0.0f);
-    const float availableDepth = std::max(regionDepth - marginZ * 2.0f, 0.0f);
-    const float baseX = static_cast<float>(regionX) * baseRegionWidth;
-    const float baseZ = static_cast<float>(regionZ) * baseRegionDepth;
-
-    BiomeSite site{};
-    site.worldPosXZ.x = baseX + marginX + availableWidth * jitterX;
-    site.worldPosXZ.y = baseZ + marginZ + availableDepth * jitterZ;
-    site.halfExtents = glm::vec2(regionWidth * 0.5f, regionDepth * 0.5f);
-    return site;
-}
-
-const ChunkManager::Impl::BiomeRegionInfo& ChunkManager::Impl::biomeRegionInfo(int regionX, int regionZ) const
-{
-    const glm::ivec2 key{regionX, regionZ};
-    std::lock_guard<std::mutex> lock(biomeRegionCacheMutex_);
-    auto it = biomeRegionCache_.find(key);
-    if (it != biomeRegionCache_.end())
-    {
-        return it->second;
-    }
-
-    BiomeRegionInfo info{};
-    const float selector = hashToUnitFloat(regionX, 31, regionZ);
-    const std::size_t biomeCount = biomeDatabase_.biomeCount();
-    const std::size_t maxIndex = biomeCount - 1;
-    const std::size_t biomeIndex =
-        std::min(static_cast<std::size_t>(selector * static_cast<float>(biomeCount)), maxIndex);
-    info.definition = &biomeDatabase_.definitionByIndex(biomeIndex);
-    info.site = computeBiomeSite(*info.definition, regionX, regionZ);
-
-    auto [insertedIt, inserted] = biomeRegionCache_.emplace(key, info);
-    return insertedIt->second;
-}
-
-const BiomeDefinition& ChunkManager::Impl::biomeForRegion(int regionX, int regionZ) const
-{
-    return *biomeRegionInfo(regionX, regionZ).definition;
-}
-
-ChunkManager::Impl::TerrainBasisSample ChunkManager::Impl::computeTerrainBasis(int worldX, int worldZ) const
-{
-    TerrainBasisSample basis{};
-
-    const auto& noiseSettings = worldgenProfile_.noise;
-    const float worldXF = static_cast<float>(worldX);
-    const float worldZF = static_cast<float>(worldZ);
-
-    basis.mainTerrain = noise_.fbm(worldXF * noiseSettings.main.frequency,
-                                   worldZF * noiseSettings.main.frequency,
-                                   noiseSettings.main.octaves,
-                                   noiseSettings.main.gain,
-                                   noiseSettings.main.lacunarity);
-    basis.mountainNoise = noise_.ridge(worldXF * noiseSettings.mountain.frequency,
-                                       worldZF * noiseSettings.mountain.frequency,
-                                       noiseSettings.mountain.octaves,
-                                       noiseSettings.mountain.lacunarity,
-                                       noiseSettings.mountain.gain);
-    basis.detailNoise = noise_.fbm(worldXF * noiseSettings.detail.frequency,
-                                   worldZF * noiseSettings.detail.frequency,
-                                   noiseSettings.detail.octaves,
-                                   noiseSettings.detail.gain,
-                                   noiseSettings.detail.lacunarity);
-    basis.mediumNoise = noise_.fbm(worldXF * noiseSettings.medium.frequency,
-                                   worldZF * noiseSettings.medium.frequency,
-                                   noiseSettings.medium.octaves,
-                                   noiseSettings.medium.gain,
-                                   noiseSettings.medium.lacunarity);
-
-    basis.combinedNoise = basis.mainTerrain * 12.0f +
-                          basis.mountainNoise * 8.0f +
-                          basis.mediumNoise * 4.0f +
-                          basis.detailNoise * 2.0f;
-
-    basis.baseElevation = basis.combinedNoise;
-    basis.continentMask = 1.0f;
-
-    return basis;
-}
-
 float ChunkManager::Impl::computeLittleMountainsNormalized(float worldX, float worldZ) const
 {
     const glm::vec2 worldPos{worldX, worldZ};
@@ -4606,104 +4453,6 @@ ChunkManager::Impl::LittleMountainSample ChunkManager::Impl::computeLittleMounta
     return LittleMountainSample{maskedHeight, maskedEntryFloor, maskedInterior};
 }
 
-ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePerturbations(
-    const std::array<WeightedBiome, 5>& weightedBiomes,
-    std::size_t weightCount,
-    int biomeRegionX,
-    int biomeRegionZ) const
-{
-    BiomePerturbationSample result{};
-    result.dominantWeight = -1.0f;
-    float totalBlendWeight = 0.0f;
-
-    for (std::size_t i = 0; i < weightCount; ++i)
-    {
-        const WeightedBiome& weightedBiome = weightedBiomes[i];
-        if (weightedBiome.biome == nullptr || weightedBiome.weight <= 0.0f)
-        {
-            continue;
-        }
-
-        result.blendedOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-        result.blendedScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-        result.blendedMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-        result.blendedMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-        result.blendedSlopeBias += weightedBiome.biome->baseSlopeBias * weightedBiome.weight;
-        result.blendedMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
-        totalBlendWeight += weightedBiome.weight;
-
-        if (weightedBiome.biome->isOcean())
-        {
-            result.oceanWeight += weightedBiome.weight;
-            result.oceanOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-            result.oceanScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-            result.oceanMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-            result.oceanMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-            result.oceanSlopeBias += weightedBiome.biome->baseSlopeBias * weightedBiome.weight;
-            result.oceanMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
-        }
-        else
-        {
-            result.landWeight += weightedBiome.weight;
-            result.landOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
-            result.landScale += weightedBiome.biome->heightScale * weightedBiome.weight;
-            result.landMinHeight += static_cast<float>(weightedBiome.biome->minHeight) * weightedBiome.weight;
-            result.landMaxHeight += static_cast<float>(weightedBiome.biome->maxHeight) * weightedBiome.weight;
-            result.landSlopeBias += weightedBiome.biome->baseSlopeBias * weightedBiome.weight;
-            result.landMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
-        }
-
-        if (weightedBiome.weight > result.dominantWeight)
-        {
-            result.dominantWeight = weightedBiome.weight;
-            result.dominantBiome = weightedBiome.biome;
-        }
-    }
-
-    auto normalizeCategory = [](float weight, float& offset, float& scale, float& minHeight, float& maxHeight)
-    {
-        if (weight <= 0.0f)
-        {
-            return;
-        }
-
-        const float invWeight = 1.0f / weight;
-        offset *= invWeight;
-        scale *= invWeight;
-        minHeight *= invWeight;
-        maxHeight *= invWeight;
-    };
-
-    normalizeCategory(result.oceanWeight, result.oceanOffset, result.oceanScale, result.oceanMinHeight, result.oceanMaxHeight);
-    normalizeCategory(result.landWeight, result.landOffset, result.landScale, result.landMinHeight, result.landMaxHeight);
-
-    auto normalizeSlope = [](float weight, float& slopeBias, float& maxGradient)
-    {
-        if (weight <= 0.0f)
-        {
-            slopeBias = 0.0f;
-            maxGradient = 0.0f;
-            return;
-        }
-
-        const float invWeight = 1.0f / weight;
-        slopeBias = std::clamp(slopeBias * invWeight, 0.0f, 1.0f);
-        maxGradient = std::max(maxGradient * invWeight, 0.0f);
-    };
-
-    normalizeSlope(totalBlendWeight, result.blendedSlopeBias, result.blendedMaxGradient);
-    normalizeSlope(result.oceanWeight, result.oceanSlopeBias, result.oceanMaxGradient);
-    normalizeSlope(result.landWeight, result.landSlopeBias, result.landMaxGradient);
-
-    result.dominantWeight = std::max(result.dominantWeight, 0.0f);
-    if (result.dominantBiome == nullptr)
-    {
-        result.dominantBiome = &biomeForRegion(biomeRegionX, biomeRegionZ);
-    }
-
-    return result;
-}
-
 ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMinWorldY, int slabMaxWorldY) const
 {
     if (slabMinWorldY > slabMaxWorldY)
@@ -4711,311 +4460,52 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         std::swap(slabMinWorldY, slabMaxWorldY);
     }
 
-    const int chunkX = floorDiv(worldX, kChunkSizeX);
-    const int chunkZ = floorDiv(worldZ, kChunkSizeZ);
-    const int biomeRegionX = floorDiv(chunkX, kBiomeSizeInChunks);
-    const int biomeRegionZ = floorDiv(chunkZ, kBiomeSizeInChunks);
-
-    const glm::vec2 columnPosition{static_cast<float>(worldX) + 0.5f, static_cast<float>(worldZ) + 0.5f};
-
-    struct CandidateSite
+    if (!climateMap_)
     {
-        const BiomeDefinition* biome{nullptr};
-        glm::vec2 positionXZ{0.0f};
-        float distanceSquared{std::numeric_limits<float>::max()};
-        float normalizedDistance{1.0f};
-    };
-
-    const int regionRadius = biomeRegionSearchRadius_;
-    std::vector<CandidateSite> candidateSites;
-    candidateSites.reserve(biomeRegionCandidateCapacity_);
-    auto littleMountainInfluence = [](float normalizedDistance) {
-        const float clamped = std::clamp(normalizedDistance, 0.0f, 1.0f);
-        const float tapered = 1.0f - glm::smoothstep(0.35f, 0.85f, clamped);
-        return std::pow(std::clamp(tapered, 0.0f, 1.0f), 1.75f);
-    };
-    for (int regionOffsetZ = -regionRadius; regionOffsetZ <= regionRadius; ++regionOffsetZ)
-    {
-        for (int regionOffsetX = -regionRadius; regionOffsetX <= regionRadius; ++regionOffsetX)
-        {
-            const BiomeRegionInfo& info =
-                biomeRegionInfo(biomeRegionX + regionOffsetX, biomeRegionZ + regionOffsetZ);
-
-            CandidateSite site{};
-            site.biome = info.definition;
-            site.positionXZ = info.site.worldPosXZ;
-            const glm::vec2 delta = columnPosition - site.positionXZ;
-            const glm::vec2 halfExtents = glm::max(info.site.halfExtents, glm::vec2(1.0f));
-            const glm::vec2 normalizedDelta = delta / halfExtents;
-            site.distanceSquared = glm::dot(delta, delta);
-            site.normalizedDistance = glm::length(normalizedDelta);
-            candidateSites.push_back(site);
-        }
+        throw std::runtime_error("Climate map is not initialized");
     }
 
-    constexpr std::size_t kMaxConsideredSites = 4;
-    const std::size_t candidateCount = candidateSites.size();
-    std::size_t sitesToConsider = std::min<std::size_t>(kMaxConsideredSites, candidateCount);
-    if (sitesToConsider > 0)
+    const terrain::ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
+    const TerrainBasisSample& basis = climateSample.basis;
+    BiomePerturbationSample perturbations = climateSample.perturbations;
+
+    const BiomeDefinition* fallbackBiome = climateSample.fallbackBiome;
+    if (!fallbackBiome)
     {
-        auto candidateLess = [](const CandidateSite& lhs, const CandidateSite& rhs)
-        {
-            const bool lhsValid = std::isfinite(lhs.normalizedDistance);
-            const bool rhsValid = std::isfinite(rhs.normalizedDistance);
-            if (lhsValid && rhsValid)
-            {
-                if (lhs.normalizedDistance == rhs.normalizedDistance)
-                {
-                    return lhs.distanceSquared < rhs.distanceSquared;
-                }
-                return lhs.normalizedDistance < rhs.normalizedDistance;
-            }
-
-            if (lhsValid != rhsValid)
-            {
-                return lhsValid;
-            }
-
-            return lhs.distanceSquared < rhs.distanceSquared;
-        };
-
-        std::partial_sort(candidateSites.begin(), candidateSites.begin() + sitesToConsider,
-                          candidateSites.begin() + candidateCount, candidateLess);
-
-        bool allLittleMountains = true;
-        for (std::size_t i = 0; i < sitesToConsider; ++i)
-        {
-            if (candidateSites[i].biome && !candidateSites[i].biome->isLittleMountains())
-            {
-                allLittleMountains = false;
-                break;
-            }
-        }
-
-        if (allLittleMountains)
-        {
-            std::size_t bestIndex = candidateCount;
-            CandidateSite bestSite{};
-            bool hasBestSite = false;
-            for (std::size_t i = sitesToConsider; i < candidateCount; ++i)
-            {
-                const CandidateSite& site = candidateSites[i];
-                if (!site.biome || site.biome->isLittleMountains())
-                {
-                    continue;
-                }
-
-                if (!hasBestSite || candidateLess(site, bestSite))
-                {
-                    bestIndex = i;
-                    bestSite = site;
-                    hasBestSite = true;
-                }
-            }
-
-            if (hasBestSite)
-            {
-                if (sitesToConsider < kMaxConsideredSites)
-                {
-                    std::swap(candidateSites[sitesToConsider], candidateSites[bestIndex]);
-                    ++sitesToConsider;
-                }
-                else if (sitesToConsider > 0)
-                {
-                    std::swap(candidateSites[sitesToConsider - 1], candidateSites[bestIndex]);
-                }
-
-                std::partial_sort(candidateSites.begin(), candidateSites.begin() + sitesToConsider,
-                                  candidateSites.begin() + candidateCount, candidateLess);
-            }
-        }
+        fallbackBiome = perturbations.dominantBiome;
+    }
+    if (!fallbackBiome && biomeDatabase_.biomeCount() > 0)
+    {
+        fallbackBiome = &biomeDatabase_.definitionByIndex(0);
     }
 
-    std::array<WeightedBiome, 5> weightedBiomes{};
-    std::size_t weightCount = 0;
-
-    if (sitesToConsider == 0)
+    const BiomeDefinition* clampBiomePtr = perturbations.dominantBiome ? perturbations.dominantBiome : fallbackBiome;
+    const BiomeDefinition* resolvedClamp = clampBiomePtr ? clampBiomePtr : fallbackBiome;
+    if (!resolvedClamp && biomeDatabase_.biomeCount() > 0)
     {
-        const BiomeDefinition& fallbackBiome = biomeForRegion(biomeRegionX, biomeRegionZ);
-        weightedBiomes[weightCount++] = WeightedBiome{&fallbackBiome, 1.0f};
+        resolvedClamp = &biomeDatabase_.definitionByIndex(0);
     }
-    else
+    const BiomeDefinition& clampBiome = resolvedClamp ? *resolvedClamp : *fallbackBiome;
+
+    const BiomeDefinition* littleMountainsDefinition = climateSample.littleMountainsDefinition;
+    float littleMountainsWeight = climateSample.littleMountainsWeight;
+    bool hasNonLittleMountainsBiome = climateSample.hasNonLittleMountainsBiome;
+    float littleMountainInteriorMask = climateSample.littleMountainInteriorMask;
+
+    BiomePerturbationSample borderPerturbations{};
+    bool hasBorderPerturbations = false;
+    if (climateSample.hasBorderPerturbations)
     {
-        std::array<float, kMaxConsideredSites> rawWeights{};
-        std::array<float, kMaxConsideredSites> distances{};
-        for (std::size_t i = 0; i < sitesToConsider; ++i)
-        {
-            distances[i] = std::sqrt(candidateSites[i].distanceSquared);
-        }
-
-        constexpr float kDistanceBias = 1e-3f;
-        for (std::size_t i = 0; i < sitesToConsider; ++i)
-        {
-            const float biasedDistance = distances[i] + kDistanceBias;
-            if (!std::isfinite(biasedDistance))
-            {
-                rawWeights[i] = 1.0f / kDistanceBias;
-            }
-            else
-            {
-                const float safeDistance = std::max(biasedDistance, kDistanceBias);
-                rawWeights[i] = 1.0f / safeDistance;
-            }
-        }
-
-        for (std::size_t i = 0; i < sitesToConsider; ++i)
-        {
-            if (candidateSites[i].biome && candidateSites[i].biome->isLittleMountains())
-            {
-                const float influence = littleMountainInfluence(candidateSites[i].normalizedDistance);
-                rawWeights[i] *= influence;
-                rawWeights[i] *= 1.15f;
-            }
-        }
-
-        float totalWeight = 0.0f;
-        for (std::size_t i = 0; i < sitesToConsider; ++i)
-        {
-            totalWeight += rawWeights[i];
-        }
-
-        if (totalWeight <= std::numeric_limits<float>::epsilon())
-        {
-            rawWeights.fill(0.0f);
-            rawWeights[0] = 1.0f;
-            sitesToConsider = 1;
-            totalWeight = 1.0f;
-        }
-
-#if defined(_DEBUG)
-        // Update kDebugWorldX/Z to the column you want to inspect before building.
-        constexpr int kDebugWorldX = std::numeric_limits<int>::min();
-        constexpr int kDebugWorldZ = std::numeric_limits<int>::min();
-#endif
-        for (std::size_t i = 0; i < sitesToConsider; ++i)
-        {
-            const float normalizedWeight = rawWeights[i] / totalWeight;
-#if defined(_DEBUG)
-            if (worldX == kDebugWorldX && worldZ == kDebugWorldZ)
-            {
-                const CandidateSite& site = candidateSites[i];
-                const char* biomeName = site.biome ? site.biome->name : "<null>";
-                std::cout << "[BiomeBlendDebug] column(" << worldX << ", " << worldZ << ") candidate[" << i << "] "
-                          << biomeName << " normDist=" << site.normalizedDistance
-                          << " weight=" << normalizedWeight << std::endl;
-            }
-#endif
-            if (normalizedWeight <= 0.0f || candidateSites[i].biome == nullptr)
-            {
-                continue;
-            }
-
-            weightedBiomes[weightCount++] = WeightedBiome{candidateSites[i].biome, normalizedWeight};
-        }
+        borderPerturbations = climateSample.borderPerturbations;
+        hasBorderPerturbations = true;
     }
-
-    if (weightCount == 0)
-    {
-        const BiomeDefinition& fallbackBiome = biomeForRegion(biomeRegionX, biomeRegionZ);
-        weightedBiomes[weightCount++] = WeightedBiome{&fallbackBiome, 1.0f};
-    }
-
-    const TerrainBasisSample basis = computeTerrainBasis(worldX, worldZ);
-    BiomePerturbationSample perturbations =
-        applyBiomePerturbations(weightedBiomes, weightCount, biomeRegionX, biomeRegionZ);
-
-    const BiomeDefinition* clampBiomePtr =
-        perturbations.dominantBiome ? perturbations.dominantBiome : &biomeForRegion(biomeRegionX, biomeRegionZ);
-    const BiomeDefinition& clampBiome = *clampBiomePtr;
-
-    const BiomeDefinition* littleMountainsDefinition{nullptr};
-    float littleMountainsWeight = 0.0f;
-    bool hasNonLittleMountainsBiome = false;
-    for (std::size_t i = 0; i < weightCount; ++i)
-    {
-        const WeightedBiome& weightedBiome = weightedBiomes[i];
-        if (!weightedBiome.biome || weightedBiome.weight <= 0.0f)
-        {
-            continue;
-        }
-
-        if (weightedBiome.biome->isLittleMountains())
-        {
-            littleMountainsWeight += weightedBiome.weight;
-            if (!littleMountainsDefinition)
-            {
-                littleMountainsDefinition = weightedBiome.biome;
-            }
-        }
-        else if (weightedBiome.weight > 0.0f)
-        {
-            hasNonLittleMountainsBiome = true;
-        }
-    }
-    littleMountainsWeight = std::clamp(littleMountainsWeight, 0.0f, 1.0f);
 
     float borderAnchorHeight = std::numeric_limits<float>::quiet_NaN();
     bool hasBorderAnchor = false;
-    BiomePerturbationSample borderPerturbations{};
-    bool hasBorderPerturbations = false;
-
-    if (hasNonLittleMountainsBiome)
+    if (hasBorderPerturbations)
     {
-        std::array<WeightedBiome, 5> nonMountainBiomes{};
-        std::size_t nonMountainCount = 0;
-        float nonMountainWeight = 0.0f;
-        for (std::size_t i = 0; i < weightCount; ++i)
-        {
-            const WeightedBiome& weightedBiome = weightedBiomes[i];
-            if (!weightedBiome.biome || weightedBiome.weight <= 0.0f)
-            {
-                continue;
-            }
-
-            if (weightedBiome.biome->isLittleMountains())
-            {
-                continue;
-            }
-
-            nonMountainBiomes[nonMountainCount++] = weightedBiome;
-            nonMountainWeight += weightedBiome.weight;
-        }
-
-        if (nonMountainCount > 0 && nonMountainWeight > std::numeric_limits<float>::epsilon())
-        {
-            const float invWeight = 1.0f / nonMountainWeight;
-            for (std::size_t i = 0; i < nonMountainCount; ++i)
-            {
-                nonMountainBiomes[i].weight *= invWeight;
-            }
-
-            borderPerturbations =
-                applyBiomePerturbations(nonMountainBiomes, nonMountainCount, biomeRegionX, biomeRegionZ);
-            borderAnchorHeight = computeBaselineSurfaceHeight(borderPerturbations, basis);
-            hasBorderAnchor = std::isfinite(borderAnchorHeight);
-            hasBorderPerturbations = true;
-        }
-    }
-
-    float littleMountainInteriorMask = 0.0f;
-    if (littleMountainsDefinition)
-    {
-        float closestNormalizedDistance = std::numeric_limits<float>::infinity();
-        for (std::size_t i = 0; i < candidateCount; ++i)
-        {
-            const CandidateSite& site = candidateSites[i];
-            if (site.biome != littleMountainsDefinition)
-            {
-                continue;
-            }
-
-            closestNormalizedDistance = std::min(closestNormalizedDistance, site.normalizedDistance);
-        }
-
-        if (std::isfinite(closestNormalizedDistance))
-        {
-            littleMountainInteriorMask = littleMountainInfluence(closestNormalizedDistance);
-        }
+        borderAnchorHeight = computeBaselineSurfaceHeight(borderPerturbations, basis);
+        hasBorderAnchor = std::isfinite(borderAnchorHeight);
     }
 
     if (littleMountainsDefinition && hasNonLittleMountainsBiome && hasBorderPerturbations)

@@ -418,8 +418,6 @@ void NoiseVoronoiClimateGenerator::generate(ClimateFragment& fragment)
             const int biomeRegionX = floorDiv(chunkX, biomeSizeInChunks_);
             const int biomeRegionZ = floorDiv(chunkZ, biomeSizeInChunks_);
 
-            candidateSites.clear();
-
             struct CandidateSite
             {
                 const BiomeDefinition* biome{nullptr};

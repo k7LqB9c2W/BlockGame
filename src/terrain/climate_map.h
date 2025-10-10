@@ -27,6 +27,7 @@ struct BiomeBlend
     float mountains{0.0f};
     float normalizedDistance{0.0f};
     unsigned seed{0};
+    float falloff{1.0f};
 };
 
 struct ClimateSample
@@ -91,43 +92,18 @@ public:
     void generate(ClimateFragment& fragment) override;
 
 private:
-    struct CandidateSite
-    {
-        const BiomeDefinition* biome{nullptr};
-        glm::vec2 positionXZ{0.0f};
-        glm::vec2 halfExtents{0.0f};
-        glm::vec2 offsetXZ{0.0f};
-        float distanceSquared{std::numeric_limits<float>::max()};
-        float normalizedDistance{std::numeric_limits<float>::max()};
-        unsigned siteSeed{0};
-        float baseHeight{0.0f};
-    };
-
-    struct BiomeSite
-    {
-        glm::vec2 worldPosXZ{0.0f};
-        glm::vec2 halfExtents{0.0f};
-    };
-
     static int floorDiv(int value, int divisor) noexcept;
-    static float hashToUnitFloat(int x, int y, int z) noexcept;
+    static std::array<float, 2> axisInterpolationWeights(float t, BiomeDefinition::InterpolationCurve curve) noexcept;
 
-    BiomeSite computeBiomeSite(const BiomeDefinition& definition, int regionX, int regionZ) const noexcept;
-    const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
-    void populateBlends(int worldX, int worldZ, ClimateSample& outSample);
-    unsigned computeSiteSeed(const BiomeDefinition& definition,
-                             int regionX,
-                             int regionZ,
-                             std::size_t siteIndex) const noexcept;
-    float computeSiteBaseHeight(const BiomeDefinition& definition, unsigned siteSeed) const noexcept;
-    void applyPostProcessing(ClimateFragment& fragment, int stride) const;
+    const BiomeDefinition& biomeForCell(int cellX, int cellZ) const;
+    float sampleBaseHeight(const BiomeDefinition& definition, int cellX, int cellZ) const noexcept;
+    void populateBlends(int worldX, int worldZ, ClimateSample& outSample) const;
 
     const BiomeDatabase& biomeDatabase_;
     const WorldgenProfile& profile_;
     int chunkSize_{16};
     int biomeSizeInChunks_{1};
-    int biomeRegionSearchRadius_{1};
-    std::size_t biomeRegionCandidateCapacity_{1};
+    float cellSize_{16.0f};
     unsigned baseSeed_{0};
 };
 

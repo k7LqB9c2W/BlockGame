@@ -219,187 +219,12 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                 continue;
             }
 
-            const auto clamp01 = [](float value) noexcept {
-                return std::clamp(value, 0.0f, 1.0f);
-            };
+            float baseHeight = climateSample.aggregatedHeight;
 
-            const BiomeDefinition* fallbackBiome = dominantBiome;
-            if (!fallbackBiome)
-            {
-                for (std::size_t i = 0; i < climateSample.blendCount; ++i)
-                {
-                    if (climateSample.blends[i].biome)
-                    {
-                        fallbackBiome = climateSample.blends[i].biome;
-                        break;
-                    }
-                }
-                if (!fallbackBiome && biomeDatabase_.biomeCount() > 0)
-                {
-                    fallbackBiome = &biomeDatabase_.definitionByIndex(0);
-                }
-                if (!fallbackBiome)
-                {
-                    continue;
-                }
-            }
-
-            std::array<float, 4> adjustedWeights{};
-            std::array<const BiomeDefinition*, 4> blendBiomes{};
-            float weightSum = 0.0f;
-            std::size_t dominantIndex = 0;
-            float bestWeight = -std::numeric_limits<float>::infinity();
-
-            for (std::size_t i = 0; i < climateSample.blendCount; ++i)
-            {
-                const BiomeBlend& blend = climateSample.blends[i];
-                const BiomeDefinition* blendBiome = blend.biome ? blend.biome : fallbackBiome;
-                blendBiomes[i] = blendBiome;
-
-                float adjustedWeight = blend.weight;
-                if (blendBiome)
-                {
-                    const float proximity = clamp01(1.0f - clamp01(blend.normalizedDistance));
-                    float shaped = proximity;
-                    switch (blendBiome->interpolationCurve)
-                    {
-                        case BiomeDefinition::InterpolationCurve::Step:
-                            shaped = glm::smoothstep(0.2f, 0.8f, proximity);
-                            break;
-                        case BiomeDefinition::InterpolationCurve::Linear:
-                            shaped = proximity;
-                            break;
-                        case BiomeDefinition::InterpolationCurve::Square:
-                            shaped = proximity * proximity;
-                            break;
-                    }
-                    const float bias = std::max(blendBiome->interpolationWeight, 1e-3f);
-                    adjustedWeight *= std::max(shaped, 0.0f);
-                    adjustedWeight *= std::max(bias, 0.0f);
-                }
-
-                adjustedWeight = std::max(adjustedWeight, 0.0f);
-                adjustedWeights[i] = adjustedWeight;
-
-                if (adjustedWeight > bestWeight)
-                {
-                    bestWeight = adjustedWeight;
-                    dominantIndex = i;
-                }
-                weightSum += adjustedWeight;
-            }
-
-            if (weightSum <= std::numeric_limits<float>::epsilon())
-            {
-                weightSum = 0.0f;
-                bestWeight = -std::numeric_limits<float>::infinity();
-                dominantIndex = 0;
-                for (std::size_t i = 0; i < climateSample.blendCount; ++i)
-                {
-                    const float fallbackWeight = climateSample.blends[i].weight;
-                    adjustedWeights[i] = fallbackWeight;
-                    if (fallbackWeight > bestWeight)
-                    {
-                        bestWeight = fallbackWeight;
-                        dominantIndex = i;
-                    }
-                    weightSum += fallbackWeight;
-                }
-            }
-
-            if (weightSum <= std::numeric_limits<float>::epsilon())
-            {
-                adjustedWeights.fill(0.0f);
-                adjustedWeights[0] = 1.0f;
-                weightSum = 1.0f;
-                dominantIndex = 0;
-            }
-
-            float blendedHeight = climateSample.aggregatedHeight;
-            float roughStrength = climateSample.aggregatedRoughness;
-            float hillStrength = climateSample.aggregatedHills;
-            float mountainStrength = climateSample.aggregatedMountains;
-            float keepOriginal = climateSample.keepOriginalMix;
-
-            for (std::size_t i = 0; i < climateSample.blendCount; ++i)
-            {
-                const float normalizedWeight = adjustedWeights[i] / weightSum;
-                if (normalizedWeight <= std::numeric_limits<float>::epsilon())
-                {
-                    adjustedWeights[i] = 0.0f;
-                    continue;
-                }
-
-                adjustedWeights[i] = normalizedWeight;
-            }
-
-            float dominantWeight = adjustedWeights[dominantIndex];
-            float dominantBaseHeight = (dominantIndex < climateSample.blendCount)
-                                            ? climateSample.blends[dominantIndex].height
-                                            : blendedHeight;
-
-            std::size_t secondaryIndex = dominantIndex;
-            float secondaryWeight = 0.0f;
-            for (std::size_t i = 0; i < climateSample.blendCount; ++i)
-            {
-                if (i == dominantIndex)
-                {
-                    continue;
-                }
-                if (adjustedWeights[i] > secondaryWeight)
-                {
-                    secondaryWeight = adjustedWeights[i];
-                    secondaryIndex = i;
-                }
-            }
-
-            if (secondaryWeight > 0.0f && secondaryIndex != dominantIndex)
-            {
-                const float prominence = secondaryWeight / (dominantWeight + secondaryWeight + 1e-4f);
-                const float chance = prominence * prominence;
-                const float noiseSample =
-                    hashToUnitFloat(worldX, climateSample.blends[secondaryIndex].seed & 0xFFFF,
-                                    worldZ + static_cast<int>(secondaryIndex) * 31);
-                if (noiseSample < chance * 0.35f)
-                {
-                    blendedHeight = glm::mix(blendedHeight, climateSample.blends[secondaryIndex].height, 0.5f);
-                    adjustedWeights[dominantIndex] = secondaryWeight;
-                    adjustedWeights[secondaryIndex] = dominantWeight;
-                    std::swap(blendBiomes[dominantIndex], blendBiomes[secondaryIndex]);
-                    std::swap(secondaryIndex, dominantIndex);
-                    dominantWeight = adjustedWeights[dominantIndex];
-                    dominantBaseHeight = climateSample.blends[dominantIndex].height;
-                }
-            }
-
-            const BiomeDefinition* dominantSurfaceBiome = blendBiomes[dominantIndex] ? blendBiomes[dominantIndex]
-                                                                                    : fallbackBiome;
-            if (!dominantSurfaceBiome)
-            {
-                continue;
-            }
-
-            dominantBaseHeight = climateSample.blends[dominantIndex].height;
-            dominantWeight = std::clamp(climateSample.blends[dominantIndex].weight, 0.0f, 1.0f);
-            keepOriginal = std::clamp(climateSample.keepOriginalMix, 0.0f, 1.0f);
-
-            float transitionMix = std::clamp(1.0f - dominantWeight, 0.0f, 1.0f);
-            blendedHeight = glm::mix(dominantBaseHeight, blendedHeight, transitionMix);
-
-            const float keepOriginalMix = keepOriginal;
-            blendedHeight = glm::mix(blendedHeight, dominantBaseHeight, keepOriginalMix);
-            roughStrength = glm::mix(roughStrength, std::max(dominantSurfaceBiome->roughness, 0.0f), keepOriginalMix);
-            hillStrength = glm::mix(hillStrength, std::max(dominantSurfaceBiome->hills, 0.0f), keepOriginalMix);
-            mountainStrength = glm::mix(mountainStrength,
-                                        std::max(dominantSurfaceBiome->mountains, 0.0f),
-                                        keepOriginalMix);
-
-            if (roughStrength <= 0.0f && hillStrength <= 0.0f && mountainStrength <= 0.0f)
-            {
-                roughStrength = 0.75f;
-                hillStrength = 0.5f;
-                mountainStrength = 0.25f;
-            }
+            float roughStrength = std::max(climateSample.aggregatedRoughness, 0.0f);
+            float hillStrength = std::max(climateSample.aggregatedHills, 0.0f);
+            float mountainStrength = std::max(climateSample.aggregatedMountains, 0.0f);
+            const float keepOriginal = std::clamp(climateSample.keepOriginalMix, 0.0f, 1.0f);
 
             const float worldXF = static_cast<float>(worldX);
             const float worldZF = static_cast<float>(worldZ);
@@ -428,18 +253,18 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                                                             noiseProfile.mountain.lacunarity,
                                                             noiseProfile.mountain.gain);
 
-            float surfaceHeight = blendedHeight;
+            float surfaceHeight = baseHeight;
             surfaceHeight += (roughNoise - 0.5f) * 4.0f * roughStrength;
             surfaceHeight += (hillNoise - 0.5f) * 6.0f * hillStrength;
             surfaceHeight += mountainNoise * 12.0f * mountainStrength;
 
-            outColumn.dominantBiome = dominantSurfaceBiome;
-            outColumn.dominantWeight = clamp01(dominantWeight);
+            outColumn.dominantBiome = dominantBiome;
+            outColumn.dominantWeight = dominantBlend.weight;
             outColumn.surfaceHeight = surfaceHeight;
             outColumn.surfaceY = static_cast<int>(std::round(surfaceHeight));
-            outColumn.roughAmplitude = std::max(roughStrength, 0.0f);
-            outColumn.hillAmplitude = std::max(hillStrength, 0.0f);
-            outColumn.mountainAmplitude = std::max(mountainStrength, 0.0f);
+            outColumn.roughAmplitude = roughStrength;
+            outColumn.hillAmplitude = hillStrength;
+            outColumn.mountainAmplitude = mountainStrength;
             outColumn.soilCreepCoefficient = std::clamp(1.0f - keepOriginal, 0.0f, 1.0f);
         }
     }

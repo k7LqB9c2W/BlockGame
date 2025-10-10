@@ -5,6 +5,7 @@
 #include "camera.h"
 #include "chunk_manager.h"
 #include "input_context.h"
+#include "renderer.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -896,7 +897,8 @@ void main()
         const glm::mat4 viewProj = projection * view;
         const Frustum frustum = Frustum::fromMatrix(viewProj);
 
-        chunkManager.render(shaderProgram, viewProj, camera.position, frustum, chunkUniforms);
+        const ChunkRenderData renderData = chunkManager.buildRenderData(frustum);
+        renderWorldGeometry(shaderProgram, viewProj, camera.position, chunkUniforms, renderData);
 
         // Render crosshair on top of everything
         crosshair.render(framebufferWidth, framebufferHeight);

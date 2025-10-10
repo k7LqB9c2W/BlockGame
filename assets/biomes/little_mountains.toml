@@ -12,3 +12,21 @@ base_slope_bias = 0.10
 max_gradient = 320.0
 footprint_multiplier = 3.3
 flags = ["land", "little_mountains"]
+smooth_beaches = false
+
+[soil_creep]
+strength = 0.15
+max_step = 1
+max_depth = 2
+
+[stripes]
+enabled = true
+block = "stone"
+period = 4
+thickness = 1
+noise_threshold = 0.6
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

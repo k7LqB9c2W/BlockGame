@@ -6,7 +6,8 @@ set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\To
 set "PROJECT_ROOT=%~dp0"
 set "INCLUDE_DIR=%PROJECT_ROOT%include"
 set "LIB_DIR=%PROJECT_ROOT%libs"
-set "SRC=src\main.cpp src\camera.cpp src\chunk_manager.cpp src\input_context.cpp src\renderer.cpp src\glad.c src\TextureLoader.cpp"
+set "SRC=src\main.cpp src\camera.cpp src\chunk_manager.cpp src\input_context.cpp src\renderer.cpp src\glad.c src\TextureLoader.cpp ^
+ src\terrain\biome_database.cpp src\terrain\climate_map.cpp src\terrain\surface_map.cpp src\terrain\terrain_generator.cpp src\terrain\worldgen_profile.cpp"
 set "OUT=blockgame.exe"
 set "GLFW_LIB=glfw3.lib"
 set "GLFW_DLL=glfw3.dll"

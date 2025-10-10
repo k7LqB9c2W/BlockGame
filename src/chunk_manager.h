@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -116,6 +117,23 @@ struct ChunkShaderUniformLocations
     GLint uHasHighlight{-1};
 };
 
+struct ChunkRenderBatch
+{
+    GLuint vao{0};
+    std::vector<GLsizei> counts;
+    std::vector<const void*> offsets;
+    std::vector<GLint> baseVertices;
+};
+
+struct ChunkRenderData
+{
+    glm::vec3 lightDirection{0.0f};
+    glm::ivec3 highlightedBlock{0};
+    bool hasHighlight{false};
+    GLuint atlasTexture{0};
+    std::vector<ChunkRenderBatch> batches;
+};
+
 struct ChunkProfilingSnapshot
 {
     double averageGenerationMs{0.0};
@@ -163,11 +181,7 @@ public:
     void setAtlasTexture(GLuint texture) noexcept;
     void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
     void update(const glm::vec3& cameraPos);
-    void render(GLuint shaderProgram,
-                const glm::mat4& viewProj,
-                const glm::vec3& cameraPos,
-                const Frustum& frustum,
-                const ChunkShaderUniformLocations& uniforms) const;
+    ChunkRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
     void clear();

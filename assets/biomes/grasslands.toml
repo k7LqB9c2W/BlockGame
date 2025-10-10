@@ -4,15 +4,14 @@ surface_block = "grass"
 filler_block = "grass"
 generates_trees = false
 tree_density_multiplier = 0.0
-height_offset = 16.0
-height_scale = 0.35
-min_height = 2
-max_height = 61
+min_height = 24
+max_height = 52
 base_slope_bias = 0.65
 max_gradient = 6.0
 footprint_multiplier = 1.0
 flags = ["land"]
 smooth_beaches = true
+keep_original_terrain = 0.4
 
 [soil_creep]
 strength = 0.3

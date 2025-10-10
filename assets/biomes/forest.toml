@@ -12,3 +12,21 @@ base_slope_bias = 0.45
 max_gradient = 9.0
 footprint_multiplier = 1.0
 flags = ["land"]
+smooth_beaches = true
+
+[soil_creep]
+strength = 0.4
+max_step = 2
+max_depth = 3
+
+[stripes]
+enabled = false
+block = "grass"
+period = 5
+thickness = 1
+noise_threshold = 0.5
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

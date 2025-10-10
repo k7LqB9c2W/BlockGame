@@ -6,6 +6,7 @@
 #include "terrain/biome_database.h"
 #include "terrain/climate_map.h"
 #include "terrain/surface_map.h"
+#include "terrain/terrain_generator.h"
 #include "terrain/worldgen_profile.h"
 
 #include <algorithm>
@@ -176,29 +177,8 @@ inline int ceilToIntPositive(float value)
 }
 
 using terrain::BiomeDefinition;
-
-struct ColumnSample
-{
-    const BiomeDefinition* dominantBiome{nullptr};
-    float dominantWeight{0.0f};
-    int surfaceY{0};
-    int minSurfaceY{0};
-    int maxSurfaceY{0};
-    int slabHighestSolidY{std::numeric_limits<int>::min()};
-    float continentMask{0.0f};
-    float baseElevation{0.0f};
-    float oceanContribution{0.0f};
-    float landContribution{0.0f};
-    float oceanShare{0.0f};
-    float landShare{0.0f};
-    float shorelineBlend{0.0f};
-    float distanceToShore{0.0f};
-    bool slabHasSolid{false};
-    float soilCreepCoefficient{0.0f};
-    float roughAmplitude{0.0f};
-    float hillAmplitude{0.0f};
-    float mountainAmplitude{0.0f};
-};
+using terrain::ColumnBuildResult;
+using terrain::ColumnSample;
 
 // To introduce a new biome:
 // 1. Create a new TOML file under assets/biomes describing the biome parameters.
@@ -670,6 +650,7 @@ private:
 
     std::unique_ptr<terrain::ClimateMap> climateMap_;
     std::unique_ptr<terrain::SurfaceMap> surfaceMap_;
+    std::unique_ptr<terrain::TerrainGenerator> terrainGenerator_;
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
     struct FaceUV
@@ -1291,6 +1272,15 @@ ChunkManager::Impl::Impl(unsigned seed)
     surfaceMap_ = std::make_unique<terrain::SurfaceMap>(
         std::make_unique<terrain::MapGenV1>(biomeDatabase_, *climateMap_, worldgenProfile_, effectiveSeed),
         64);
+
+    terrainGenerator_ = std::make_unique<terrain::TerrainGenerator>(
+        *climateMap_,
+        *surfaceMap_,
+        biomeDatabase_,
+        globalSeaLevel_,
+        [this](int worldX, int worldZ, int slabMin, int slabMax) {
+            return this->sampleColumn(worldX, worldZ, slabMin, slabMax);
+        });
 
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
@@ -5028,128 +5018,57 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
         const int slabMinWorldY = chunk.minWorldY;
         const int slabMaxWorldY = chunk.maxWorldY;
 
-        std::array<ColumnSample, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnSamples{};
-        bool slabContainsTerrain = false;
-
-        for (int x = 0; x < kChunkSizeX; ++x)
+        if (surfaceMap_)
         {
-            for (int z = 0; z < kChunkSizeZ; ++z)
-            {
-                const int worldX = baseWorldX + x;
-                const int worldZ = baseWorldZ + z;
-                ColumnSample sample = sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
-                slabContainsTerrain = slabContainsTerrain || sample.slabHasSolid;
-                columnSamples[columnIndex(x, z)] = sample;
-            }
-        }
+            const int fragmentSize = terrain::SurfaceFragment::kSize;
+            const int minFragmentX = floorDiv(baseWorldX - 1, fragmentSize);
+            const int maxFragmentX = floorDiv(baseWorldX + kChunkSizeX, fragmentSize);
+            const int minFragmentZ = floorDiv(baseWorldZ - 1, fragmentSize);
+            const int maxFragmentZ = floorDiv(baseWorldZ + kChunkSizeZ, fragmentSize);
 
-        if (slabContainsTerrain)
-        {
-            for (int x = 0; x < kChunkSizeX; ++x)
+            for (int fx = minFragmentX; fx <= maxFragmentX; ++fx)
             {
-                for (int z = 0; z < kChunkSizeZ; ++z)
+                for (int fz = minFragmentZ; fz <= maxFragmentZ; ++fz)
                 {
-                    const int worldX = baseWorldX + x;
-                    const int worldZ = baseWorldZ + z;
-                    const ColumnSample& columnSample = columnSamples[columnIndex(x, z)];
-                    if (!columnSample.dominantBiome || !columnSample.slabHasSolid)
-                    {
-                        continue;
-                    }
-
-                    const BiomeDefinition& biome = *columnSample.dominantBiome;
-                    BlockId surfaceBlock = biome.surfaceBlock;
-                    BlockId fillerBlock = biome.fillerBlock;
-
-                    if (!biome.isOcean())
-                    {
-                        constexpr float kBeachDistanceRange = 6.0f;
-                        constexpr int kBeachHeightBand = 2;
-                        const bool nearSeaLevel = std::abs(columnSample.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
-                        if (nearSeaLevel && columnSample.distanceToShore <= kBeachDistanceRange)
-                        {
-                            const float beachNoise = hashToUnitFloat(worldX, columnSample.surfaceY, worldZ);
-                            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
-                            fillerBlock = BlockId::Sand;
-                        }
-                    }
-
-                    if (biome.isLittleMountains())
-                    {
-                        const int surfaceHeight = columnSample.surfaceY;
-                        if (surfaceHeight < 140)
-                        {
-                            fillerBlock = BlockId::Grass;
-                            surfaceBlock = BlockId::Grass;
-                        }
-                        else
-                        {
-                            fillerBlock = BlockId::Stone;
-                            if (surfaceHeight >= 200)
-                            {
-                                surfaceBlock = BlockId::Stone;
-                            }
-                        }
-                    }
-
-                    const int highestSolidWorld = columnSample.slabHighestSolidY;
-                    if (highestSolidWorld < chunk.minWorldY)
-                    {
-                        continue;
-                    }
-
-                    const int highestSolidLocal = std::min(highestSolidWorld - chunk.minWorldY, kChunkSizeY - 1);
-
-                    for (int localY = 0; localY <= highestSolidLocal; ++localY)
-                    {
-                        const int worldY = chunk.minWorldY + localY;
-                        BlockId block = BlockId::Air;
-                        if (worldY < columnSample.surfaceY)
-                        {
-                            block = fillerBlock;
-                        }
-                        else if (worldY == columnSample.surfaceY)
-                        {
-                            block = surfaceBlock;
-                        }
-
-                        if (block == BlockId::Air)
-                        {
-                            continue;
-                        }
-
-                        if (biome.isLittleMountains() && block != BlockId::Air)
-                        {
-                            const int surfaceHeight = columnSample.surfaceY;
-                            if (surfaceHeight >= 160)
-                            {
-                                const int depthFromSurface = surfaceHeight - worldY;
-                                if (surfaceHeight >= 220 || depthFromSurface <= 2)
-                                {
-                                    if (surfaceHeight >= 220)
-                                    {
-                                        block = BlockId::Stone;
-                                    }
-                                    else
-                                    {
-                                        const float stoneNoise = hashToUnitFloat(worldX, worldY, worldZ);
-                                        const float blend = glm::smoothstep(0.0f, 3.0f,
-                                                                             static_cast<float>(2 - depthFromSurface));
-                                        if (stoneNoise < blend)
-                                        {
-                                            block = BlockId::Stone;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        chunk.blocks[blockIndex(x, localY, z)] = block;
-                        anySolid = true;
-                    }
+                    surfaceMap_->getFragment({fx, fz});
                 }
             }
         }
+
+        std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
+
+        auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
+        {
+            if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
+            {
+                return;
+            }
+            if (localY < 0 || localY >= kChunkSizeY)
+            {
+                return;
+            }
+            chunk.blocks[blockIndex(localX, localY, localZ)] = block;
+            if (block != BlockId::Air)
+            {
+                anySolid = true;
+            }
+        };
+
+        terrain::ChunkGenerationSummary summary{};
+        if (terrainGenerator_)
+        {
+            summary = terrainGenerator_->generateChunkColumns(chunk.coord,
+                                                              chunk.minWorldY,
+                                                              chunk.maxWorldY,
+                                                              kChunkSizeX,
+                                                              kChunkSizeY,
+                                                              kChunkSizeZ,
+                                                              setBlockDirect,
+                                                              columnResults);
+            anySolid = anySolid || summary.anySolid;
+        }
+
+        const bool slabContainsTerrain = summary.slabContainsTerrain;
 
         auto setOrQueueBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
         {
@@ -5187,6 +5106,18 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             }
         };
 
+        auto getLocalColumnSample = [&](int worldX, int worldZ) -> ColumnSample
+        {
+            if (worldX >= baseWorldX && worldX < baseWorldX + kChunkSizeX && worldZ >= baseWorldZ
+                && worldZ < baseWorldZ + kChunkSizeZ)
+            {
+                const int localX = worldX - baseWorldX;
+                const int localZ = worldZ - baseWorldZ;
+                return columnResults[columnIndex(localX, localZ)].sample;
+            }
+            return sampleColumn(worldX, worldZ);
+        };
+
         if (slabContainsTerrain)
         {
             constexpr int kTreeMinHeight = 6;
@@ -5202,7 +5133,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             {
                 for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
                 {
-                    const ColumnSample columnSample = sampleColumn(worldX, worldZ);
+                    const ColumnSample columnSample = getLocalColumnSample(worldX, worldZ);
                     const BiomeDefinition& biome = *columnSample.dominantBiome;
                     if (!biome.generatesTrees)
                     {
@@ -5263,7 +5194,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                                 continue;
                             }
 
-                            const ColumnSample neighborSample = sampleColumn(worldX + dx, worldZ + dz);
+                            const ColumnSample neighborSample = getLocalColumnSample(worldX + dx, worldZ + dz);
                             const int neighborHeight = neighborSample.surfaceY;
                             if (std::abs(neighborHeight - groundWorldY) > 1)
                             {

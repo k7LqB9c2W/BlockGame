@@ -12,3 +12,21 @@ base_slope_bias = 1.0
 max_gradient = 1.0
 footprint_multiplier = 1.0
 flags = ["ocean"]
+smooth_beaches = true
+
+[soil_creep]
+strength = 0.08
+max_step = 1
+max_depth = 2
+
+[stripes]
+enabled = false
+block = "sand"
+period = 4
+thickness = 1
+noise_threshold = 0.4
+
+[water_fill]
+enabled = true
+block = "water"
+max_depth = 32

@@ -12,6 +12,10 @@ set "GLFW_DLL=glfw3.dll"
 set "TMP_DIR=%TEMP%"
 if "%TMP_DIR%"=="" set "TMP_DIR=%PROJECT_ROOT%"
 set "SRC_RSP="
+set "BUILD_DIR=%PROJECT_ROOT%build"
+set "OBJ_DIR=%BUILD_DIR%\obj"
+set "PDB_PATH=%BUILD_DIR%\blockgame.pdb"
+set "COMMON_LINK_LIBS=glfw3.lib opengl32.lib user32.lib gdi32.lib shell32.lib advapi32.lib"
 
 rem ====== Help ======
 if "%~1"=="" goto :usage
@@ -64,6 +68,23 @@ exit /b 0
 popd >nul 2>nul
 exit /b 0
 
+:ensure_build_dirs
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%" >nul 2>nul
+if not exist "%OBJ_DIR%" mkdir "%OBJ_DIR%" >nul 2>nul
+exit /b 0
+
+:configure_cl
+set "PARALLEL_JOBS=%BLOCKGAME_JOBS%"
+if not defined PARALLEL_JOBS set "PARALLEL_JOBS=%NUMBER_OF_PROCESSORS%"
+if not defined PARALLEL_JOBS set "PARALLEL_JOBS=4"
+set "PARALLEL_OPTS=/MP%PARALLEL_JOBS% /FS"
+if defined CL (
+  set "CL=%PARALLEL_OPTS% %CL%"
+) else (
+  set "CL=%PARALLEL_OPTS%"
+)
+exit /b 0
+
 :copy_runtime
 if defined HAS_GLFW_DLL (
   copy /Y "%LIB_DIR%\%GLFW_DLL%" "%PROJECT_ROOT%%GLFW_DLL%" >nul
@@ -104,6 +125,11 @@ exit /b 0
 echo.
 echo === Building Release x64 ===
 call :setup_env || exit /b 1
+call :configure_cl
+call :ensure_build_dirs || (
+  call :teardown_env
+  exit /b 1
+)
 call :build_source_list || (
   call :teardown_env
   exit /b 1
@@ -112,9 +138,11 @@ cl /nologo /EHsc /std:c++20 /O2 /DNDEBUG /MD ^
   /I "%INCLUDE_DIR%" ^
   /I "%PROJECT_ROOT%src" ^
   @"%SRC_RSP%" ^
+  /Fo"%OBJ_DIR%\\" ^
+  /Fd"%PDB_PATH%" ^
   /Fe:%OUT% ^
   /link /LIBPATH:"%LIB_DIR%" ^
-  glfw3.lib opengl32.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+  %COMMON_LINK_LIBS%
 set "ERR=%ERRORLEVEL%"
 call :cleanup_source_list
 call :teardown_env
@@ -126,6 +154,11 @@ exit /b %ERRORLEVEL%
 echo.
 echo === Building Debug x64 ===
 call :setup_env || exit /b 1
+call :configure_cl
+call :ensure_build_dirs || (
+  call :teardown_env
+  exit /b 1
+)
 call :build_source_list || (
   call :teardown_env
   exit /b 1
@@ -134,9 +167,11 @@ cl /nologo /EHsc /std:c++20 /MDd /Zi /Od /DDEBUG ^
   /I "%INCLUDE_DIR%" ^
   /I "%PROJECT_ROOT%src" ^
   @"%SRC_RSP%" ^
+  /Fo"%OBJ_DIR%\\" ^
+  /Fd"%PDB_PATH%" ^
   /Fe:%OUT% ^
   /link /LIBPATH:"%LIB_DIR%" ^
-  glfw3.lib opengl32.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+  %COMMON_LINK_LIBS%
 set "ERR=%ERRORLEVEL%"
 call :cleanup_source_list
 call :teardown_env
@@ -161,6 +196,7 @@ del /q "%PROJECT_ROOT%"*.pdb 2>nul
 del /q "%PROJECT_ROOT%"*.ilk 2>nul
 del /q "%PROJECT_ROOT%%OUT%" 2>nul
 if defined HAS_GLFW_DLL del /q "%PROJECT_ROOT%%GLFW_DLL%" 2>nul
+if exist "%BUILD_DIR%" rd /s /q "%BUILD_DIR%" 2>nul
 echo Done.
 exit /b 0
 
@@ -171,6 +207,9 @@ echo   build_blockgame.bat release   Build release with MSVC and GLFW
 echo   build_blockgame.bat debug     Build debug with MSVC and GLFW
 echo   build_blockgame.bat run       Build release then run the app
 echo   build_blockgame.bat clean     Delete build outputs
+echo.
+echo Optional:
+echo   set BLOCKGAME_JOBS=8 ^& build_blockgame.bat release   ^<-- limit parallel cl jobs
 echo.
 echo Edit VSDEVCMD at the top if your VS path differs.
 exit /b 1

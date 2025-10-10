@@ -33,6 +33,14 @@ struct BiomeDefinition
     float hills{0.0f};
     float mountains{0.0f};
     float keepOriginalTerrain{0.0f};
+    enum class InterpolationCurve
+    {
+        Step,
+        Linear,
+        Square
+    };
+    InterpolationCurve interpolationCurve{InterpolationCurve::Square};
+    float interpolationWeight{1.0f};
     struct SoilCreepSettings
     {
         float strength{0.0f};

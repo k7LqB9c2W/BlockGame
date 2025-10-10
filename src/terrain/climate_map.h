@@ -25,6 +25,7 @@ struct BiomeBlend
     float roughness{0.0f};
     float hills{0.0f};
     float mountains{0.0f};
+    float normalizedDistance{0.0f};
     unsigned seed{0};
 };
 
@@ -90,6 +91,8 @@ private:
         glm::vec2 halfExtents{0.0f};
         float distanceSquared{std::numeric_limits<float>::max()};
         float normalizedDistance{std::numeric_limits<float>::max()};
+        unsigned siteSeed{0};
+        float baseHeight{0.0f};
     };
 
     struct BiomeSite
@@ -104,6 +107,11 @@ private:
     BiomeSite computeBiomeSite(const BiomeDefinition& definition, int regionX, int regionZ) const noexcept;
     const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
     void populateBlends(int worldX, int worldZ, ClimateSample& outSample);
+    unsigned computeSiteSeed(const BiomeDefinition& definition,
+                             int regionX,
+                             int regionZ,
+                             std::size_t siteIndex) const noexcept;
+    float computeSiteBaseHeight(const BiomeDefinition& definition, unsigned siteSeed) const noexcept;
 
     const BiomeDatabase& biomeDatabase_;
     const WorldgenProfile& profile_;

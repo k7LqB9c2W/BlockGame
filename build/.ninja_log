@@ -1,0 +1,14 @@
+# ninja log v5
+99	1741	7818275981370567	CMakeFiles/blockgame.dir/src/glad.c.obj	6eae7d6134564f69
+121	1760	7818275981936842	CMakeFiles/blockgame.dir/src/renderer.cpp.obj	cb3ac307ce55cd17
+107	1772	7818275981984162	CMakeFiles/blockgame.dir/src/camera.cpp.obj	8a509276a504f873
+127	2307	7818275987407481	CMakeFiles/blockgame.dir/src/TextureLoader.cpp.obj	f026bc810902dc19
+116	2393	7818275988278215	CMakeFiles/blockgame.dir/src/input_context.cpp.obj	24a0ff02bb4aec29
+70	5696	7818276021103255	CMakeFiles/blockgame.dir/src/main.cpp.obj	e624fce310d083ee
+1763	7413	7818276038247028	CMakeFiles/blockgame.dir/src/terrain/worldgen_profile.cpp.obj	7c57a9f51fb19e67
+132	9012	7818276054246795	CMakeFiles/blockgame.dir/src/terrain/biome_database.cpp.obj	ff2f6ae17b177d78
+1744	116542	7818277128913386	CMakeFiles/blockgame.dir/src/terrain/terrain_generator.cpp.obj	e18327f981978a7a
+111	153676	7818277500440511	CMakeFiles/blockgame.dir/src/chunk_manager.cpp.obj	62f393727b4eafe5
+143	157180	7818277535818764	CMakeFiles/blockgame.dir/src/terrain/surface_map.cpp.obj	2541cd6450b70762
+138	216043	7818278124564405	CMakeFiles/blockgame.dir/src/terrain/climate_map.cpp.obj	997c2d9e72eb1937
+216044	216963	7818278133091687	blockgame.exe	52f493aa24128ffe

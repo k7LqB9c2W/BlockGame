@@ -7,11 +7,11 @@
 - Root assets (`block_atlas.png`, guides, compiled `.obj` intermediates) support rendering validation; avoid checking new binaries without need.
 
 ## Build, Test, and Development Commands
-- `build_blockgame.bat release` builds an optimized 64-bit executable with `/O2` and copies GLFW runtime when present.
-- `build_blockgame.bat debug` compiles with `/Zi` symbols and `/MDd`; prefer this during feature work to retain asserts and richer logs.
-- `build_blockgame.bat run` performs a release build then launches `blockgame.exe` for fast smoke testing.
-- `build_blockgame.bat clean` clears `.obj/.pdb/.ilk` artifacts so you can verify a fresh compile.
-- Currently we are using the .bat file, not the cmakelists to build.
+- Configure the project with CMake: `cmake -S . -B build`. Pass `-DCMAKE_BUILD_TYPE=Release` (default) or `-DCMAKE_BUILD_TYPE=Debug` when using single-config generators like Ninja.
+- Build with `cmake --build build` (single-config) or `cmake --build build --config Release` when using multi-config generators such as Visual Studio.
+- Clean artifacts via `cmake --build build --target clean` if you need a fresh compile.
+- Run the produced `blockgame.exe` from the `build` output directory for quick smoke tests.
+- The legacy `build_blockgame.bat` script is deprecated; do not use it going forward.
 
 ## Coding Style & Naming Conventions
 - Mirror the existing C++20 style: 4-space indentation, braces on their own lines, and standard headers before local includes.
@@ -20,7 +20,7 @@
 - Keep headers lightweight; inline-only helpers live in `.inl` files (see `text_overlay.inl`).
 
 ## Testing Guidelines
-- No automated suite yet; run `build_blockgame.bat run`, review console output, and inspect `debug_output.txt` when adjusting streaming logic.
+- No automated suite yet; launch the freshly built `blockgame.exe`, review console output, and inspect `debug_output.txt` when adjusting streaming logic.
 - For rendering tweaks, compare against `block_atlas_guide.txt` and capture before/after screenshots to attach to reviews.
 - When adding tests, stage them under a new `tests/` directory and document the invocation alongside the script or CMake target.
 
@@ -28,5 +28,4 @@
 - Follow the Git history: short, imperative titles (`Clamp chunk streaming to non-negative Y`); squash noisy fixups before pushing.
 - Reference issue numbers in the body when relevant and describe gameplay or rendering impact plainly.
 - PRs should include a purpose summary, build mode exercised (debug/release), reproduction steps, and visuals for GPU-facing changes.
-- Keep binaries out of version control unless preparing a release; update `build_blockgame.bat` or `CMakeLists.txt` whenever dependencies shift.
-
+- Keep binaries out of version control unless preparing a release; update `CMakeLists.txt` whenever dependencies shift.

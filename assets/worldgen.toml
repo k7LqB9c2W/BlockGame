@@ -1,0 +1,27 @@
+seed = 2025
+climate_generator = "legacy"
+sea_level = 20
+
+[noise.main]
+frequency = 0.01
+gain = 0.5
+lacunarity = 2.0
+octaves = 6
+
+[noise.medium]
+frequency = 0.008
+gain = 0.5
+lacunarity = 2.0
+octaves = 7
+
+[noise.detail]
+frequency = 0.04
+gain = 0.45
+lacunarity = 2.2
+octaves = 8
+
+[noise.mountain]
+frequency = 0.004
+gain = 0.5
+lacunarity = 2.1
+octaves = 5

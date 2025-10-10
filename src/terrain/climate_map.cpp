@@ -108,10 +108,20 @@ int NoiseVoronoiClimateGenerator::floorDiv(int value, int divisor) noexcept
 
 float NoiseVoronoiClimateGenerator::hashToUnitFloat(int x, int y, int z) noexcept
 {
-    std::uint32_t h = static_cast<std::uint32_t>(x * 374761393 + y * 668265263 + z * 2147483647);
-    h = (h ^ (h >> 13)) * 1274126177u;
+    constexpr std::uint64_t kMulX = 374761393ull;
+    constexpr std::uint64_t kMulY = 668265263ull;
+    constexpr std::uint64_t kMulZ = 2147483647ull;
+    constexpr std::uint64_t kMixMul = 1274126177ull;
+    constexpr std::uint64_t kMask24 = 0xFFFFFFull;
+
+    const auto widen = [](int value) noexcept -> std::uint64_t {
+        return static_cast<std::uint64_t>(static_cast<std::uint32_t>(value));
+    };
+
+    std::uint64_t h = widen(x) * kMulX + widen(y) * kMulY + widen(z) * kMulZ;
+    h = (h ^ (h >> 13)) * kMixMul;
     h ^= (h >> 16);
-    return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
+    return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
 }
 
 NoiseVoronoiClimateGenerator::BiomeSite NoiseVoronoiClimateGenerator::computeBiomeSite(const BiomeDefinition& definition,

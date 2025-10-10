@@ -5,6 +5,7 @@
 
 #include "terrain/biome_database.h"
 #include "terrain/climate_map.h"
+#include "terrain/surface_map.h"
 #include "terrain/worldgen_profile.h"
 
 #include <algorithm>
@@ -193,6 +194,10 @@ struct ColumnSample
     float shorelineBlend{0.0f};
     float distanceToShore{0.0f};
     bool slabHasSolid{false};
+    float soilCreepCoefficient{0.0f};
+    float roughAmplitude{0.0f};
+    float hillAmplitude{0.0f};
+    float mountainAmplitude{0.0f};
 };
 
 // To introduce a new biome:
@@ -664,6 +669,7 @@ private:
     int globalSeaLevel_{20};
 
     std::unique_ptr<terrain::ClimateMap> climateMap_;
+    std::unique_ptr<terrain::SurfaceMap> surfaceMap_;
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
     struct FaceUV
@@ -1282,6 +1288,10 @@ ChunkManager::Impl::Impl(unsigned seed)
                                                                 kChunkSizeX, kBiomeSizeInChunks),
         64);
 
+    surfaceMap_ = std::make_unique<terrain::SurfaceMap>(
+        std::make_unique<terrain::MapGenV1>(biomeDatabase_, *climateMap_, worldgenProfile_, effectiveSeed),
+        64);
+
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
     startWorkerThreads();
@@ -1666,6 +1676,11 @@ void ChunkManager::Impl::clear()
     if (climateMap_)
     {
         climateMap_->clear();
+    }
+
+    if (surfaceMap_)
+    {
+        surfaceMap_->clear();
     }
 
 }
@@ -4465,9 +4480,23 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         throw std::runtime_error("Climate map is not initialized");
     }
 
+    terrain::SurfaceColumn cachedSurfaceColumn{};
+    bool hasCachedSurfaceColumn = false;
+    if (surfaceMap_)
+    {
+        cachedSurfaceColumn = surfaceMap_->column(worldX, worldZ);
+        hasCachedSurfaceColumn = true;
+    }
+
     const terrain::ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
     const TerrainBasisSample& basis = climateSample.basis;
     BiomePerturbationSample perturbations = climateSample.perturbations;
+
+    if (hasCachedSurfaceColumn && cachedSurfaceColumn.dominantBiome)
+    {
+        perturbations.dominantBiome = cachedSurfaceColumn.dominantBiome;
+        perturbations.dominantWeight = cachedSurfaceColumn.dominantWeight;
+    }
 
     const BiomeDefinition* fallbackBiome = climateSample.fallbackBiome;
     if (!fallbackBiome)
@@ -4838,6 +4867,23 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     sample.landShare = landShare;
     sample.shorelineBlend = shorelineBlend;
     sample.distanceToShore = distanceToShore;
+
+    if (hasCachedSurfaceColumn && cachedSurfaceColumn.dominantBiome)
+    {
+        sample.dominantBiome = cachedSurfaceColumn.dominantBiome;
+        if (cachedSurfaceColumn.dominantWeight > 0.0f)
+        {
+            sample.dominantWeight = cachedSurfaceColumn.dominantWeight;
+        }
+
+        sample.surfaceY = static_cast<int>(std::round(cachedSurfaceColumn.surfaceHeight));
+        sample.minSurfaceY = std::min(sample.minSurfaceY, sample.surfaceY);
+        sample.maxSurfaceY = std::max(sample.maxSurfaceY, sample.surfaceY);
+        sample.soilCreepCoefficient = cachedSurfaceColumn.soilCreepCoefficient;
+        sample.roughAmplitude = cachedSurfaceColumn.roughAmplitude;
+        sample.hillAmplitude = cachedSurfaceColumn.hillAmplitude;
+        sample.mountainAmplitude = cachedSurfaceColumn.mountainAmplitude;
+    }
 
     if (sample.dominantBiome)
     {

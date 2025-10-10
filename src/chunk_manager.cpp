@@ -36,6 +36,7 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/noise.hpp>
 
 namespace
 {
@@ -476,6 +477,71 @@ struct ChunkManager::Impl
     ChunkProfilingSnapshot sampleProfilingSnapshot();
 
 private:
+    struct TreeDensityNoise
+    {
+        TreeDensityNoise() = default;
+
+        explicit TreeDensityNoise(unsigned seed)
+        {
+            reseed(seed);
+        }
+
+        void reseed(unsigned seed)
+        {
+            seed_ = seed;
+
+            std::mt19937 rng(seed_);
+            std::uniform_real_distribution<float> dist(-1000.0f, 1000.0f);
+            for (auto& offset : octaveOffsets_)
+            {
+                offset = {dist(rng), dist(rng)};
+            }
+        }
+
+        [[nodiscard]] float fbm(float x,
+                                float y,
+                                int octaves,
+                                float persistence,
+                                float lacunarity) const noexcept
+        {
+            float amplitude = 1.0f;
+            float frequency = 1.0f;
+            float value = 0.0f;
+            float normalization = 0.0f;
+
+            const int octaveCount = std::min<int>(octaves, static_cast<int>(octaveOffsets_.size()));
+            for (int i = 0; i < octaveCount; ++i)
+            {
+                const glm::vec2 sample{x * frequency + octaveOffsets_[i].x,
+                                       y * frequency + octaveOffsets_[i].y};
+                value += glm::perlin(sample) * amplitude;
+                normalization += amplitude;
+
+                amplitude *= persistence;
+                frequency *= lacunarity;
+            }
+
+            if (normalization > 0.0f)
+            {
+                value /= normalization;
+            }
+
+            return value;
+        }
+
+    private:
+        unsigned seed_{0};
+        std::array<glm::vec2, 16> octaveOffsets_{};
+    };
+
+    terrain::WorldgenProfile worldgenProfile_{};
+    terrain::BiomeDatabase biomeDatabase_;
+    std::unique_ptr<terrain::ClimateMap> climateMap_;
+    std::unique_ptr<terrain::SurfaceMap> surfaceMap_;
+    std::unique_ptr<terrain::TerrainGenerator> terrainGenerator_;
+    int globalSeaLevel_{20};
+    TreeDensityNoise noise_{};
+
     void startWorkerThreads();
     void stopWorkerThreads();
     void workerThreadFunction();
@@ -900,12 +966,15 @@ int ColumnManager::highestSolidBlock(int worldX, int worldZ) const noexcept
 ChunkManager::Impl::Impl(unsigned seed)
     : worldgenProfile_(terrain::WorldgenProfile::load("assets/worldgen.toml")),
       biomeDatabase_("assets/biomes"),
+      globalSeaLevel_(worldgenProfile_.seaLevel),
+      noise_(worldgenProfile_.effectiveSeed(seed)),
       shouldStop_(false),
       viewDistance_(kDefaultViewDistance),
-      targetViewDistance_(kDefaultViewDistance),
-      globalSeaLevel_(worldgenProfile_.seaLevel)
+      targetViewDistance_(kDefaultViewDistance)
 {
     const unsigned effectiveSeed = worldgenProfile_.effectiveSeed(seed);
+
+    noise_.reseed(effectiveSeed);
 
     if (biomeDatabase_.biomeCount() == 0)
     {

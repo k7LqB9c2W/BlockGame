@@ -20,6 +20,16 @@
 
 namespace terrain
 {
+namespace
+{
+float hashToUnitFloat(int x, int y, int z) noexcept
+{
+    std::uint32_t h = static_cast<std::uint32_t>(x * 374761393 + y * 668265263 + z * 2147483647);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= (h >> 16);
+    return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
+}
+} // namespace
 
 SurfaceFragment::SurfaceFragment(const glm::ivec2& fragmentCoord, int lodLevel) noexcept
     : fragmentCoord_(fragmentCoord),
@@ -328,12 +338,62 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                 adjustedWeights[i] = normalizedWeight;
             }
 
+            float dominantWeight = adjustedWeights[dominantIndex];
+            float dominantBaseHeight = (dominantIndex < climateSample.blendCount)
+                                            ? climateSample.blends[dominantIndex].height
+                                            : blendedHeight;
+
+            std::size_t secondaryIndex = dominantIndex;
+            float secondaryWeight = 0.0f;
+            for (std::size_t i = 0; i < climateSample.blendCount; ++i)
+            {
+                if (i == dominantIndex)
+                {
+                    continue;
+                }
+                if (adjustedWeights[i] > secondaryWeight)
+                {
+                    secondaryWeight = adjustedWeights[i];
+                    secondaryIndex = i;
+                }
+            }
+
+            if (secondaryWeight > 0.0f && secondaryIndex != dominantIndex)
+            {
+                const float prominence = secondaryWeight / (dominantWeight + secondaryWeight + 1e-4f);
+                const float chance = prominence * prominence;
+                const float noiseSample =
+                    hashToUnitFloat(worldX, climateSample.blends[secondaryIndex].seed & 0xFFFF,
+                                    worldZ + static_cast<int>(secondaryIndex) * 31);
+                if (noiseSample < chance * 0.35f)
+                {
+                    blendedHeight = glm::mix(blendedHeight, climateSample.blends[secondaryIndex].height, 0.5f);
+                    adjustedWeights[dominantIndex] = secondaryWeight;
+                    adjustedWeights[secondaryIndex] = dominantWeight;
+                    std::swap(blendBiomes[dominantIndex], blendBiomes[secondaryIndex]);
+                    std::swap(secondaryIndex, dominantIndex);
+                    dominantWeight = adjustedWeights[dominantIndex];
+                    dominantBaseHeight = climateSample.blends[dominantIndex].height;
+                }
+            }
+
             const BiomeDefinition* dominantSurfaceBiome = blendBiomes[dominantIndex] ? blendBiomes[dominantIndex]
                                                                                     : fallbackBiome;
             if (!dominantSurfaceBiome)
             {
                 continue;
             }
+
+            float transitionMix = std::clamp(1.0f - dominantWeight, 0.0f, 1.0f);
+            blendedHeight = glm::mix(dominantBaseHeight, blendedHeight, transitionMix);
+
+            const float keepOriginalMix = std::clamp(keepOriginal, 0.0f, 1.0f);
+            blendedHeight = glm::mix(blendedHeight, dominantBaseHeight, keepOriginalMix);
+            roughStrength = glm::mix(roughStrength, std::max(dominantSurfaceBiome->roughness, 0.0f), keepOriginalMix);
+            hillStrength = glm::mix(hillStrength, std::max(dominantSurfaceBiome->hills, 0.0f), keepOriginalMix);
+            mountainStrength = glm::mix(mountainStrength,
+                                        std::max(dominantSurfaceBiome->mountains, 0.0f),
+                                        keepOriginalMix);
 
             if (roughStrength <= 0.0f && hillStrength <= 0.0f && mountainStrength <= 0.0f)
             {
@@ -375,7 +435,7 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             surfaceHeight += mountainNoise * 12.0f * mountainStrength;
 
             outColumn.dominantBiome = dominantSurfaceBiome;
-            outColumn.dominantWeight = clamp01(adjustedWeights[dominantIndex]);
+            outColumn.dominantWeight = clamp01(dominantWeight);
             outColumn.surfaceHeight = surfaceHeight;
             outColumn.surfaceY = static_cast<int>(std::round(surfaceHeight));
             outColumn.roughAmplitude = std::max(roughStrength, 0.0f);

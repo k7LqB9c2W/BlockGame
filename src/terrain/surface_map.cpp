@@ -305,11 +305,11 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                 dominantIndex = 0;
             }
 
-            float blendedHeight = 0.0f;
-            float roughStrength = 0.0f;
-            float hillStrength = 0.0f;
-            float mountainStrength = 0.0f;
-            float keepOriginal = 0.0f;
+            float blendedHeight = climateSample.aggregatedHeight;
+            float roughStrength = climateSample.aggregatedRoughness;
+            float hillStrength = climateSample.aggregatedHills;
+            float mountainStrength = climateSample.aggregatedMountains;
+            float keepOriginal = climateSample.keepOriginalMix;
 
             for (std::size_t i = 0; i < climateSample.blendCount; ++i)
             {
@@ -320,21 +320,6 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                     continue;
                 }
 
-                const BiomeBlend& blend = climateSample.blends[i];
-                const BiomeDefinition* blendBiome = blendBiomes[i] ? blendBiomes[i] : fallbackBiome;
-
-                blendedHeight += blend.height * normalizedWeight;
-                roughStrength += blend.roughness * normalizedWeight;
-                hillStrength += blend.hills * normalizedWeight;
-                mountainStrength += blend.mountains * normalizedWeight;
-                if (blend.biome)
-                {
-                    keepOriginal += blend.biome->keepOriginalTerrain * normalizedWeight;
-                }
-                else if (fallbackBiome)
-                {
-                    keepOriginal += fallbackBiome->keepOriginalTerrain * normalizedWeight;
-                }
                 adjustedWeights[i] = normalizedWeight;
             }
 

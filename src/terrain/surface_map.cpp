@@ -9,7 +9,9 @@
 
 #include <glm/common.hpp>
 #include <glm/gtc/constants.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/compatibility.hpp>
+#undef GLM_ENABLE_EXPERIMENTAL
 
 #include "terrain/climate_map.h"
 #include "terrain/worldgen_profile.h"

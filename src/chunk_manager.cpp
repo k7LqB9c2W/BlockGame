@@ -29,7 +29,6 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
 
 namespace
 {
@@ -626,11 +625,7 @@ struct ChunkManager::Impl
     void setAtlasTexture(GLuint texture) noexcept;
     void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
     void update(const glm::vec3& cameraPos);
-    void render(GLuint shaderProgram,
-                const glm::mat4& viewProj,
-                const glm::vec3& cameraPos,
-                const Frustum& frustum,
-                const ChunkShaderUniformLocations& uniforms) const;
+    ChunkRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
     void clear();
@@ -1658,47 +1653,13 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     uploadReadyMeshes();
 }
 
-void ChunkManager::Impl::render(GLuint shaderProgram,
-                                const glm::mat4& viewProj,
-                                const glm::vec3& cameraPos,
-                                const Frustum& frustum,
-                                const ChunkShaderUniformLocations& uniforms) const
+ChunkRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) const
 {
-    glUseProgram(shaderProgram);
-    if (uniforms.uViewProj >= 0)
-    {
-        glUniformMatrix4fv(uniforms.uViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
-    }
-    if (uniforms.uLightDir >= 0)
-    {
-        glUniform3fv(uniforms.uLightDir, 1, glm::value_ptr(lightDirection_));
-    }
-    if (uniforms.uCameraPos >= 0)
-    {
-        glUniform3fv(uniforms.uCameraPos, 1, glm::value_ptr(cameraPos));
-    }
-
-    if (atlasTexture_ != 0)
-    {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, atlasTexture_);
-        if (uniforms.uAtlas >= 0)
-        {
-            glUniform1i(uniforms.uAtlas, 0);
-        }
-    }
-
-    if (uniforms.uHighlightedBlock >= 0)
-    {
-        glUniform3f(uniforms.uHighlightedBlock,
-                    static_cast<float>(highlightedBlock_.x),
-                    static_cast<float>(highlightedBlock_.y),
-                    static_cast<float>(highlightedBlock_.z));
-    }
-    if (uniforms.uHasHighlight >= 0)
-    {
-        glUniform1i(uniforms.uHasHighlight, hasHighlight_ ? 1 : 0);
-    }
+    ChunkRenderData renderData;
+    renderData.lightDirection = lightDirection_;
+    renderData.highlightedBlock = highlightedBlock_;
+    renderData.hasHighlight = hasHighlight_;
+    renderData.atlasTexture = atlasTexture_;
 
     std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
     {
@@ -1710,23 +1671,13 @@ void ChunkManager::Impl::render(GLuint shaderProgram,
         }
     }
 
-    struct DrawBatch
-    {
-        std::vector<GLsizei> counts;
-        std::vector<const void*> offsets;
-        std::vector<GLint> baseVertices;
-    };
-
-    std::vector<DrawBatch> drawBatches;
-    std::vector<GLuint> pageVaos;
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         const std::size_t pageCount = bufferPages_.size();
-        drawBatches.resize(pageCount);
-        pageVaos.resize(pageCount, 0);
+        renderData.batches.resize(pageCount);
         for (std::size_t i = 0; i < pageCount; ++i)
         {
-            pageVaos[i] = bufferPages_[i].vao;
+            renderData.batches[i].vao = bufferPages_[i].vao;
         }
     }
 
@@ -1756,7 +1707,7 @@ void ChunkManager::Impl::render(GLuint shaderProgram,
         }
 
         const std::uint32_t pageIndex = chunkPtr->bufferPageIndex;
-        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= drawBatches.size())
+        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= renderData.batches.size())
         {
             continue;
         }
@@ -1766,35 +1717,21 @@ void ChunkManager::Impl::render(GLuint shaderProgram,
             continue;
         }
 
-        DrawBatch& batch = drawBatches[pageIndex];
+        ChunkRenderBatch& batch = renderData.batches[pageIndex];
         batch.counts.push_back(chunkPtr->indexCount);
         batch.offsets.push_back(reinterpret_cast<const void*>(chunkPtr->indexOffset * sizeof(std::uint32_t)));
         batch.baseVertices.push_back(static_cast<GLint>(chunkPtr->vertexOffset));
     }
 
-    for (std::size_t pageIndex = 0; pageIndex < drawBatches.size(); ++pageIndex)
-    {
-        const DrawBatch& batch = drawBatches[pageIndex];
-        if (batch.counts.empty())
-        {
-            continue;
-        }
+    auto emptyIt = std::remove_if(renderData.batches.begin(),
+                                  renderData.batches.end(),
+                                  [](const ChunkRenderBatch& batch)
+                                  {
+                                      return batch.counts.empty();
+                                  });
+    renderData.batches.erase(emptyIt, renderData.batches.end());
 
-        glBindVertexArray(pageVaos[pageIndex]);
-        glMultiDrawElementsBaseVertex(GL_TRIANGLES,
-                                      batch.counts.data(),
-                                      GL_UNSIGNED_INT,
-                                      batch.offsets.data(),
-                                      static_cast<GLsizei>(batch.counts.size()),
-                                      batch.baseVertices.data());
-    }
-
-    glBindVertexArray(0);
-    if (atlasTexture_ != 0)
-    {
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-    glUseProgram(0);
+    return renderData;
 }
 
 float ChunkManager::Impl::surfaceHeight(float worldX, float worldZ) const noexcept
@@ -6079,13 +6016,9 @@ void ChunkManager::update(const glm::vec3& cameraPos)
     impl_->update(cameraPos);
 }
 
-void ChunkManager::render(GLuint shaderProgram,
-                          const glm::mat4& viewProj,
-                          const glm::vec3& cameraPos,
-                          const Frustum& frustum,
-                          const ChunkShaderUniformLocations& uniforms) const
+ChunkRenderData ChunkManager::buildRenderData(const Frustum& frustum) const
 {
-    impl_->render(shaderProgram, viewProj, cameraPos, frustum, uniforms);
+    return impl_->buildRenderData(frustum);
 }
 
 float ChunkManager::surfaceHeight(float worldX, float worldZ) const noexcept

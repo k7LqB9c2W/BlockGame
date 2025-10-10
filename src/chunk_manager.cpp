@@ -3,11 +3,15 @@
 
 #include "chunk_manager.h"
 
+#include "terrain/biome_database.h"
+#include "terrain/worldgen_profile.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <condition_variable>
 #include <deque>
 #include <iostream>
@@ -163,140 +167,13 @@ inline std::size_t columnIndex(int x, int z) noexcept
     return static_cast<std::size_t>(z) * kChunkSizeX + static_cast<std::size_t>(x);
 }
 
-enum class BiomeId : std::uint8_t
-{
-    Grasslands = 0,
-    Forest,
-    Desert,
-    LittleMountains,
-    Ocean,
-    Count
-};
-
-constexpr std::size_t toIndex(BiomeId biome) noexcept
-{
-    return static_cast<std::size_t>(biome);
-}
-
-struct BiomeDefinition
-{
-    BiomeId id;
-    const char* name;
-    BlockId surfaceBlock;
-    BlockId fillerBlock;
-    bool generatesTrees;
-    float treeDensityMultiplier;
-    float heightOffset;
-    float heightScale;
-    int minHeight;
-    int maxHeight;
-    float baseSlopeBias; // Bias toward flattening macro terrain (0 = legacy shaping, 1 = offset-driven)
-    float maxGradient;   // Maximum deviation from the local base height before clamping (blocks)
-    float footprintMultiplier{1.0f};
-};
-
-constexpr std::size_t kBiomeCount = toIndex(BiomeId::Count);
-
-// The biome height ranges are expressed in absolute world Y units so that terrain
-// generation remains stable regardless of the chunk edge length. These values
-// mirror the pre-cubic-chunk tuning that produced varied hills for each biome,
-// while oceans clamp to a fixed sea level so their surfaces stay flat.
-constexpr int kGrasslandsMaxSurfaceHeight = 61;
-constexpr int kForestMaxSurfaceHeight = 61;
-constexpr int kDesertMaxSurfaceHeight = 60;
-constexpr int kLittleMountainsMinSurfaceHeight = 30;
-constexpr int kLittleMountainsMaxSurfaceHeight = 820;
-constexpr int kGlobalSeaLevel = 20;
-constexpr int kOceanMaxSurfaceHeight = kGlobalSeaLevel;
-
-constexpr std::array<BiomeDefinition, kBiomeCount> kBiomeDefinitions{ {
-    {BiomeId::Grasslands,
-     "Grasslands",
-     BlockId::Grass,
-     BlockId::Grass,
-     false,
-     0.0f,
-     16.0f,
-     0.35f,
-     2,
-     kGrasslandsMaxSurfaceHeight,
-     0.65f,
-     6.0f,
-     1.0f},
-    {BiomeId::Forest,
-     "Forest",
-     BlockId::Grass,
-     BlockId::Grass,
-     true,
-     3.5f,
-     19.0f,
-     0.45f,
-     3,
-     kForestMaxSurfaceHeight,
-     0.45f,
-     9.0f,
-     1.0f},
-    {BiomeId::Desert,
-     "Desert",
-     BlockId::Sand,
-     BlockId::Sand,
-     false,
-     0.0f,
-     19.0f,
-     0.85f,
-     1,
-     kDesertMaxSurfaceHeight,
-     0.30f,
-     14.0f,
-     1.0f},
-    {BiomeId::LittleMountains,
-     "Little Mountains",
-     BlockId::Grass,
-     BlockId::Stone,
-     false,
-     0.0f,
-     270.0f,
-     44.0f,
-     kLittleMountainsMinSurfaceHeight,
-     kLittleMountainsMaxSurfaceHeight,
-     0.1f,
-     320.0f,
-     3.3f},
-    {BiomeId::Ocean,
-     "Ocean",
-     BlockId::Water,
-     BlockId::Water,
-     false,
-     0.0f,
-     static_cast<float>(kGlobalSeaLevel),
-     0.0f,
-     kGlobalSeaLevel,
-     kOceanMaxSurfaceHeight,
-     1.0f,
-     1.0f,
-     1.0f},
-} };
-
-constexpr float computeMaxFootprintMultiplier()
-{
-    float maxMultiplier = 0.0f;
-    for (const auto& definition : kBiomeDefinitions)
-    {
-        maxMultiplier = (definition.footprintMultiplier > maxMultiplier) ? definition.footprintMultiplier : maxMultiplier;
-    }
-    return maxMultiplier;
-}
-
-constexpr int ceilToIntPositive(float value)
+inline int ceilToIntPositive(float value)
 {
     const int truncated = static_cast<int>(value);
     return (static_cast<float>(truncated) < value) ? truncated + 1 : truncated;
 }
 
-constexpr float kMaxBiomeFootprintMultiplier = computeMaxFootprintMultiplier();
-constexpr int kBiomeRegionSearchRadius = std::max(1, ceilToIntPositive(kMaxBiomeFootprintMultiplier * 0.5f));
-constexpr std::size_t kBiomeRegionCandidateCapacity =
-    static_cast<std::size_t>((kBiomeRegionSearchRadius * 2 + 1) * (kBiomeRegionSearchRadius * 2 + 1));
+using terrain::BiomeDefinition;
 
 struct ColumnSample
 {
@@ -318,9 +195,8 @@ struct ColumnSample
 };
 
 // To introduce a new biome:
-// 1. Extend BiomeId before Count.
-// 2. Append a definition to kBiomeDefinitions with the desired blocks and tuning parameters.
-// 3. Provide textures for any new blocks in setBlockTextureAtlasConfig.
+// 1. Create a new TOML file under assets/biomes describing the biome parameters.
+// 2. Provide textures for any new blocks in setBlockTextureAtlasConfig.
 
 inline float hashToUnitFloat(int x, int y, int z) noexcept
 {
@@ -843,6 +719,11 @@ private:
     const BiomeRegionInfo& biomeRegionInfo(int regionX, int regionZ) const;
     const BiomeDefinition& biomeForRegion(int regionX, int regionZ) const;
 
+    terrain::WorldgenProfile worldgenProfile_{};
+    terrain::BiomeDatabase biomeDatabase_{};
+    int biomeRegionSearchRadius_{1};
+    std::size_t biomeRegionCandidateCapacity_{1};
+    int globalSeaLevel_{20};
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
     struct FaceUV
@@ -1436,14 +1317,34 @@ float PerlinNoise::grad(int hash, float x, float y) noexcept
 // ChunkManager::Impl methods (to be filled)
 
 ChunkManager::Impl::Impl(unsigned seed)
-    : littleMountainsNoise_(seed ^ 0x9E3779B9u),
-      littleMountainsWarpNoise_(seed ^ 0x7F4A7C15u),
-      littleMountainsOrientationNoise_(seed ^ 0xDD62BBA1u),
-      noise_(seed),
+    : worldgenProfile_(terrain::WorldgenProfile::load("assets/worldgen.toml")),
+      biomeDatabase_("assets/biomes"),
+      littleMountainsNoise_(),
+      littleMountainsWarpNoise_(),
+      littleMountainsOrientationNoise_(),
+      noise_(),
       shouldStop_(false),
       viewDistance_(kDefaultViewDistance),
-      targetViewDistance_(kDefaultViewDistance)
+      targetViewDistance_(kDefaultViewDistance),
+      globalSeaLevel_(worldgenProfile_.seaLevel)
 {
+    const unsigned effectiveSeed = worldgenProfile_.effectiveSeed(seed);
+    littleMountainsNoise_ = OpenSimplexNoise(effectiveSeed ^ 0x9E3779B9u);
+    littleMountainsWarpNoise_ = OpenSimplexNoise(effectiveSeed ^ 0x7F4A7C15u);
+    littleMountainsOrientationNoise_ = OpenSimplexNoise(effectiveSeed ^ 0xDD62BBA1u);
+    noise_ = PerlinNoise(effectiveSeed);
+
+    if (biomeDatabase_.biomeCount() == 0)
+    {
+        throw std::runtime_error("Biome database is empty");
+    }
+
+    const float maxFootprint = biomeDatabase_.maxFootprintMultiplier();
+    biomeRegionSearchRadius_ = std::max(1, ceilToIntPositive(maxFootprint * 0.5f));
+    biomeRegionCandidateCapacity_ =
+        static_cast<std::size_t>((biomeRegionSearchRadius_ * 2 + 1) * (biomeRegionSearchRadius_ * 2 + 1));
+    biomeRegionCandidateCapacity_ = std::max<std::size_t>(biomeRegionCandidateCapacity_, 1);
+
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
     startWorkerThreads();
@@ -4220,10 +4121,11 @@ const ChunkManager::Impl::BiomeRegionInfo& ChunkManager::Impl::biomeRegionInfo(i
 
     BiomeRegionInfo info{};
     const float selector = hashToUnitFloat(regionX, 31, regionZ);
-    const std::size_t maxIndex = kBiomeDefinitions.size() - 1;
+    const std::size_t biomeCount = biomeDatabase_.biomeCount();
+    const std::size_t maxIndex = biomeCount - 1;
     const std::size_t biomeIndex =
-        std::min(static_cast<std::size_t>(selector * static_cast<float>(kBiomeDefinitions.size())), maxIndex);
-    info.definition = &kBiomeDefinitions[biomeIndex];
+        std::min(static_cast<std::size_t>(selector * static_cast<float>(biomeCount)), maxIndex);
+    info.definition = &biomeDatabase_.definitionByIndex(biomeIndex);
     info.site = computeBiomeSite(*info.definition, regionX, regionZ);
 
     auto [insertedIt, inserted] = biomeRegionCache_.emplace(key, info);
@@ -4239,13 +4141,30 @@ ChunkManager::Impl::TerrainBasisSample ChunkManager::Impl::computeTerrainBasis(i
 {
     TerrainBasisSample basis{};
 
-    const float nx = static_cast<float>(worldX) * 0.01f;
-    const float nz = static_cast<float>(worldZ) * 0.01f;
+    const auto& noiseSettings = worldgenProfile_.noise;
+    const float worldXF = static_cast<float>(worldX);
+    const float worldZF = static_cast<float>(worldZ);
 
-    basis.mainTerrain = noise_.fbm(nx, nz, 6, 0.5f, 2.0f);
-    basis.mountainNoise = noise_.ridge(nx * 0.4f, nz * 0.4f, 5, 2.1f, 0.5f);
-    basis.detailNoise = noise_.fbm(nx * 4.0f, nz * 4.0f, 8, 0.45f, 2.2f);
-    basis.mediumNoise = noise_.fbm(nx * 0.8f, nz * 0.8f, 7, 0.5f, 2.0f);
+    basis.mainTerrain = noise_.fbm(worldXF * noiseSettings.main.frequency,
+                                   worldZF * noiseSettings.main.frequency,
+                                   noiseSettings.main.octaves,
+                                   noiseSettings.main.gain,
+                                   noiseSettings.main.lacunarity);
+    basis.mountainNoise = noise_.ridge(worldXF * noiseSettings.mountain.frequency,
+                                       worldZF * noiseSettings.mountain.frequency,
+                                       noiseSettings.mountain.octaves,
+                                       noiseSettings.mountain.lacunarity,
+                                       noiseSettings.mountain.gain);
+    basis.detailNoise = noise_.fbm(worldXF * noiseSettings.detail.frequency,
+                                   worldZF * noiseSettings.detail.frequency,
+                                   noiseSettings.detail.octaves,
+                                   noiseSettings.detail.gain,
+                                   noiseSettings.detail.lacunarity);
+    basis.mediumNoise = noise_.fbm(worldXF * noiseSettings.medium.frequency,
+                                   worldZF * noiseSettings.medium.frequency,
+                                   noiseSettings.medium.octaves,
+                                   noiseSettings.medium.gain,
+                                   noiseSettings.medium.lacunarity);
 
     basis.combinedNoise = basis.mainTerrain * 12.0f +
                           basis.mountainNoise * 8.0f +
@@ -4474,7 +4393,7 @@ float ChunkManager::Impl::computeBaselineSurfaceHeight(const BiomePerturbationSa
         maxHeight = std::max(maxHeight, landTarget);
     }
 
-    const float globalSeaLevelF = static_cast<float>(kGlobalSeaLevel);
+    const float globalSeaLevelF = static_cast<float>(globalSeaLevel_);
     float shorelineDistance = std::abs(macroStageHeight - globalSeaLevelF);
 
     if (hasLandContribution && landTarget > globalSeaLevelF)
@@ -4524,7 +4443,7 @@ float ChunkManager::Impl::computeBaselineSurfaceHeight(const BiomePerturbationSa
         }
     }
 
-    if (perturbations.dominantBiome && perturbations.dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
+    if (perturbations.dominantBiome && perturbations.dominantBiome->isOcean() && hasOceanContribution)
     {
         targetHeight = oceanTarget;
     }
@@ -4713,7 +4632,7 @@ ChunkManager::Impl::BiomePerturbationSample ChunkManager::Impl::applyBiomePertur
         result.blendedMaxGradient += weightedBiome.biome->maxGradient * weightedBiome.weight;
         totalBlendWeight += weightedBiome.weight;
 
-        if (weightedBiome.biome->id == BiomeId::Ocean)
+        if (weightedBiome.biome->isOcean())
         {
             result.oceanWeight += weightedBiome.weight;
             result.oceanOffset += weightedBiome.biome->heightOffset * weightedBiome.weight;
@@ -4807,9 +4726,9 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         float normalizedDistance{1.0f};
     };
 
-    constexpr int regionRadius = kBiomeRegionSearchRadius;
-    std::array<CandidateSite, kBiomeRegionCandidateCapacity> candidateSites{};
-    std::size_t candidateCount = 0;
+    const int regionRadius = biomeRegionSearchRadius_;
+    std::vector<CandidateSite> candidateSites;
+    candidateSites.reserve(biomeRegionCandidateCapacity_);
     auto littleMountainInfluence = [](float normalizedDistance) {
         const float clamped = std::clamp(normalizedDistance, 0.0f, 1.0f);
         const float tapered = 1.0f - glm::smoothstep(0.35f, 0.85f, clamped);
@@ -4830,11 +4749,12 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             const glm::vec2 normalizedDelta = delta / halfExtents;
             site.distanceSquared = glm::dot(delta, delta);
             site.normalizedDistance = glm::length(normalizedDelta);
-            candidateSites[candidateCount++] = site;
+            candidateSites.push_back(site);
         }
     }
 
     constexpr std::size_t kMaxConsideredSites = 4;
+    const std::size_t candidateCount = candidateSites.size();
     std::size_t sitesToConsider = std::min<std::size_t>(kMaxConsideredSites, candidateCount);
     if (sitesToConsider > 0)
     {
@@ -4865,7 +4785,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         bool allLittleMountains = true;
         for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
-            if (candidateSites[i].biome && candidateSites[i].biome->id != BiomeId::LittleMountains)
+            if (candidateSites[i].biome && !candidateSites[i].biome->isLittleMountains())
             {
                 allLittleMountains = false;
                 break;
@@ -4880,7 +4800,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             for (std::size_t i = sitesToConsider; i < candidateCount; ++i)
             {
                 const CandidateSite& site = candidateSites[i];
-                if (!site.biome || site.biome->id == BiomeId::LittleMountains)
+                if (!site.biome || site.biome->isLittleMountains())
                 {
                     continue;
                 }
@@ -4945,7 +4865,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
 
         for (std::size_t i = 0; i < sitesToConsider; ++i)
         {
-            if (candidateSites[i].biome && candidateSites[i].biome->id == BiomeId::LittleMountains)
+            if (candidateSites[i].biome && candidateSites[i].biome->isLittleMountains())
             {
                 const float influence = littleMountainInfluence(candidateSites[i].normalizedDistance);
                 rawWeights[i] *= influence;
@@ -5019,7 +4939,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             continue;
         }
 
-        if (weightedBiome.biome->id == BiomeId::LittleMountains)
+        if (weightedBiome.biome->isLittleMountains())
         {
             littleMountainsWeight += weightedBiome.weight;
             if (!littleMountainsDefinition)
@@ -5052,7 +4972,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                 continue;
             }
 
-            if (weightedBiome.biome->id == BiomeId::LittleMountains)
+            if (weightedBiome.biome->isLittleMountains())
             {
                 continue;
             }
@@ -5305,7 +5225,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         }
     }
 
-    const float globalSeaLevelF = static_cast<float>(kGlobalSeaLevel);
+    const float globalSeaLevelF = static_cast<float>(globalSeaLevel_);
     float shorelineDistance = std::abs(macroStageHeight - globalSeaLevelF);
 
     if (hasLandContribution && landTarget > globalSeaLevelF)
@@ -5397,7 +5317,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         }
     }
 
-    if (perturbations.dominantBiome && perturbations.dominantBiome->id == BiomeId::Ocean && hasOceanContribution)
+    if (perturbations.dominantBiome && perturbations.dominantBiome->isOcean() && hasOceanContribution)
     {
         targetHeight = oceanTarget;
     }
@@ -5493,11 +5413,11 @@ void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
                     }
 
                     BlockId surfaceBlock = sample.dominantBiome->surfaceBlock;
-                    if (sample.dominantBiome->id != BiomeId::Ocean)
+                    if (!sample.dominantBiome->isOcean())
                     {
                         constexpr float kBeachDistanceRange = 6.0f;
                         constexpr int kBeachHeightBand = 2;
-                        const bool nearSeaLevel = std::abs(sample.surfaceY - kGlobalSeaLevel) <= kBeachHeightBand;
+                        const bool nearSeaLevel = std::abs(sample.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
                         if (nearSeaLevel && sample.distanceToShore <= kBeachDistanceRange)
                         {
                             const float beachNoise = hashToUnitFloat(worldX, sample.surfaceY, worldZ);
@@ -5605,11 +5525,11 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                     BlockId surfaceBlock = biome.surfaceBlock;
                     BlockId fillerBlock = biome.fillerBlock;
 
-                    if (biome.id != BiomeId::Ocean)
+                    if (!biome.isOcean())
                     {
                         constexpr float kBeachDistanceRange = 6.0f;
                         constexpr int kBeachHeightBand = 2;
-                        const bool nearSeaLevel = std::abs(columnSample.surfaceY - kGlobalSeaLevel) <= kBeachHeightBand;
+                        const bool nearSeaLevel = std::abs(columnSample.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
                         if (nearSeaLevel && columnSample.distanceToShore <= kBeachDistanceRange)
                         {
                             const float beachNoise = hashToUnitFloat(worldX, columnSample.surfaceY, worldZ);
@@ -5618,7 +5538,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         }
                     }
 
-                    if (biome.id == BiomeId::LittleMountains)
+                    if (biome.isLittleMountains())
                     {
                         const int surfaceHeight = columnSample.surfaceY;
                         if (surfaceHeight < 140)
@@ -5662,7 +5582,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                             continue;
                         }
 
-                        if (biome.id == BiomeId::LittleMountains && block != BlockId::Air)
+                        if (biome.isLittleMountains() && block != BlockId::Air)
                         {
                             const int surfaceHeight = columnSample.surfaceY;
                             if (surfaceHeight >= 160)

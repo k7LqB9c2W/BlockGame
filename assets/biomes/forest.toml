@@ -1,0 +1,14 @@
+id = "forest"
+name = "Forest"
+surface_block = "grass"
+filler_block = "grass"
+generates_trees = true
+tree_density_multiplier = 3.5
+height_offset = 19.0
+height_scale = 0.45
+min_height = 3
+max_height = 61
+base_slope_bias = 0.45
+max_gradient = 9.0
+footprint_multiplier = 1.0
+flags = ["land"]

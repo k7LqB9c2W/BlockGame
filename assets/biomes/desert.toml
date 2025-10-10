@@ -1,0 +1,14 @@
+id = "desert"
+name = "Desert"
+surface_block = "sand"
+filler_block = "sand"
+generates_trees = false
+tree_density_multiplier = 0.0
+height_offset = 19.0
+height_scale = 0.85
+min_height = 1
+max_height = 60
+base_slope_bias = 0.30
+max_gradient = 14.0
+footprint_multiplier = 1.0
+flags = ["land"]

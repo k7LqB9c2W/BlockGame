@@ -199,22 +199,6 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                 }
             }
 
-            if (biome.isLittleMountains())
-            {
-                if (adjustedSurfaceY < 140)
-                {
-                    fillerBlock = BlockId::Grass;
-                    surfaceBlock = BlockId::Grass;
-                }
-                else
-                {
-                    fillerBlock = BlockId::Stone;
-                    if (adjustedSurfaceY >= 200)
-                    {
-                        surfaceBlock = BlockId::Stone;
-                    }
-                }
-            }
 
             const int highestSolidWorld = std::min(sample.slabHighestSolidY, maxWorldY);
             if (highestSolidWorld < minWorldY)
@@ -261,29 +245,6 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                     continue;
                 }
 
-                if (biome.isLittleMountains())
-                {
-                    if (adjustedSurfaceY >= 160)
-                    {
-                        const int depthFromSurface = adjustedSurfaceY - worldY;
-                        if (adjustedSurfaceY >= 220 || depthFromSurface <= 2)
-                        {
-                            if (adjustedSurfaceY >= 220)
-                            {
-                                block = BlockId::Stone;
-                            }
-                            else
-                            {
-                                const float stoneNoise = hashToUnitFloat(worldX, worldY, worldZ);
-                                const float blend = glm::smoothstep(0.0f, 3.0f, static_cast<float>(2 - depthFromSurface));
-                                if (stoneNoise < blend)
-                                {
-                                    block = BlockId::Stone;
-                                }
-                            }
-                        }
-                    }
-                }
 
                 setBlock(localX, localY, localZ, block);
                 outColumns[columnIdx].wroteSolid = true;

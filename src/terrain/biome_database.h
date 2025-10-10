@@ -29,6 +29,10 @@ struct BiomeDefinition
     float baseSlopeBias{0.0f};
     float maxGradient{0.0f};
     float footprintMultiplier{1.0f};
+    float roughness{0.0f};
+    float hills{0.0f};
+    float mountains{0.0f};
+    float keepOriginalTerrain{0.0f};
     struct SoilCreepSettings
     {
         float strength{0.0f};
@@ -61,7 +65,6 @@ struct BiomeDefinition
     } terrainSettings{};
 
     [[nodiscard]] bool isOcean() const noexcept { return oceanFlag_; }
-    [[nodiscard]] bool isLittleMountains() const noexcept { return littleMountainsFlag_; }
     [[nodiscard]] bool hasFlag(std::string_view flag) const noexcept;
     [[nodiscard]] const std::vector<std::string>& flags() const noexcept { return flags_; }
 
@@ -71,7 +74,6 @@ private:
     std::vector<std::string> flags_{};
     std::unordered_set<std::string> flagLookup_{};
     bool oceanFlag_{false};
-    bool littleMountainsFlag_{false};
 };
 
 class BiomeDatabase

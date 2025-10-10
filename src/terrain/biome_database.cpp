@@ -240,7 +240,6 @@ void BiomeDefinition::setFlags(std::vector<std::string> flags)
     flags_ = std::move(flags);
     flagLookup_.clear();
     oceanFlag_ = false;
-    littleMountainsFlag_ = false;
 
     for (std::string& flag : flags_)
     {
@@ -250,10 +249,6 @@ void BiomeDefinition::setFlags(std::vector<std::string> flags)
         if (normalized == "ocean")
         {
             oceanFlag_ = true;
-        }
-        else if (normalized == "little_mountains")
-        {
-            littleMountainsFlag_ = true;
         }
     }
 }
@@ -371,6 +366,44 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     definition.baseSlopeBias = requireFloat(table, "base_slope_bias", path);
     definition.maxGradient = requireFloat(table, "max_gradient", path);
     definition.footprintMultiplier = requireFloat(table, "footprint_multiplier", path);
+    if (const auto roughValue = table["roughness"].value<double>())
+    {
+        definition.roughness = static_cast<float>(*roughValue);
+    }
+    else if (const auto roughFloat = table["roughness"].value<float>())
+    {
+        definition.roughness = *roughFloat;
+    }
+
+    if (const auto hillsValue = table["hills"].value<double>())
+    {
+        definition.hills = static_cast<float>(*hillsValue);
+    }
+    else if (const auto hillsFloat = table["hills"].value<float>())
+    {
+        definition.hills = *hillsFloat;
+    }
+
+    if (const auto mountainsValue = table["mountains"].value<double>())
+    {
+        definition.mountains = static_cast<float>(*mountainsValue);
+    }
+    else if (const auto mountainsFloat = table["mountains"].value<float>())
+    {
+        definition.mountains = *mountainsFloat;
+    }
+
+    if (const auto keepValue = table["keep_original_terrain"].value<double>())
+    {
+        definition.keepOriginalTerrain = static_cast<float>(*keepValue);
+    }
+    else if (const auto keepFloat = table["keep_original_terrain"].value<float>())
+    {
+        definition.keepOriginalTerrain = *keepFloat;
+    }
+
+    definition.keepOriginalTerrain = std::clamp(definition.keepOriginalTerrain, 0.0f, 1.0f);
+
     if (const auto smooth = table["smooth_beaches"].value<bool>())
     {
         definition.terrainSettings.smoothBeaches = *smooth;

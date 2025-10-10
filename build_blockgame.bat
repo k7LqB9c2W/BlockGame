@@ -6,6 +6,11 @@ set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\To
 set "PROJECT_ROOT=%~dp0"
 set "INCLUDE_DIR=%PROJECT_ROOT%include"
 set "LIB_DIR=%PROJECT_ROOT%libs"
+
+set "SRC="
+for /r "%PROJECT_ROOT%src" %%F in (*.cpp) do (
+  set "SRC=!SRC! \"%%F\""
+
 set "OUT=blockgame.exe"
 set "GLFW_LIB=glfw3.lib"
 set "GLFW_DLL=glfw3.dll"

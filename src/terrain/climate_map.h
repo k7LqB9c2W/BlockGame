@@ -33,6 +33,13 @@ struct ClimateSample
 {
     std::array<BiomeBlend, 4> blends{};
     std::size_t blendCount{0};
+    float aggregatedHeight{0.0f};
+    float aggregatedRoughness{0.0f};
+    float aggregatedHills{0.0f};
+    float aggregatedMountains{0.0f};
+    float keepOriginalMix{0.0f};
+    glm::vec2 dominantSitePos{0.0f};
+    glm::vec2 dominantSiteHalfExtents{0.0f};
 
     [[nodiscard]] const BiomeDefinition* dominantBiome() const noexcept
     {
@@ -112,6 +119,7 @@ private:
                              int regionZ,
                              std::size_t siteIndex) const noexcept;
     float computeSiteBaseHeight(const BiomeDefinition& definition, unsigned siteSeed) const noexcept;
+    void applyPostProcessing(ClimateFragment& fragment, int stride) const;
 
     const BiomeDatabase& biomeDatabase_;
     const WorldgenProfile& profile_;

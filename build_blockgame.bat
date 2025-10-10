@@ -6,11 +6,6 @@ set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\To
 set "PROJECT_ROOT=%~dp0"
 set "INCLUDE_DIR=%PROJECT_ROOT%include"
 set "LIB_DIR=%PROJECT_ROOT%libs"
-
-set "SRC="
-for /r "%PROJECT_ROOT%src" %%F in (*.cpp) do (
-  set "SRC=!SRC! \"%%F\""
-
 set "OUT=blockgame.exe"
 set "GLFW_LIB=glfw3.lib"
 set "GLFW_DLL=glfw3.dll"
@@ -35,7 +30,7 @@ rem ====== Ensure dependencies ======
 if not exist "%INCLUDE_DIR%" (
   echo Could not find include folder at:
   echo   %INCLUDE_DIR%
-  echo Expected headers ^(glad, GLFW, glm, stb^).
+  echo Expected headers ^(glad, GLFW, glm, stb, toml++^).
   exit /b 1
 )
 if not exist "%LIB_DIR%\%GLFW_LIB%" (
@@ -77,17 +72,17 @@ exit /b 0
 
 :build_source_list
 set "SRC_RSP=%TMP_DIR%\blockgame_sources_%RANDOM%%RANDOM%.rsp"
-type nul > "%SRC_RSP%" || (
+>"%SRC_RSP%" type nul || (
   echo Failed to create response file at %SRC_RSP%.
   exit /b 1
 )
 set "FOUND_SRC="
 for /r "%PROJECT_ROOT%src" %%F in (*.cpp) do (
-  >> "%SRC_RSP%" echo "%%F"
+  >>"%SRC_RSP%" echo "%%F"
   set "FOUND_SRC=1"
 )
 for /r "%PROJECT_ROOT%src" %%F in (*.c) do (
-  >> "%SRC_RSP%" echo "%%F"
+  >>"%SRC_RSP%" echo "%%F"
   set "FOUND_SRC=1"
 )
 if not defined FOUND_SRC (
@@ -115,6 +110,7 @@ call :build_source_list || (
 )
 cl /nologo /EHsc /std:c++20 /O2 /DNDEBUG /MD ^
   /I "%INCLUDE_DIR%" ^
+  /I "%PROJECT_ROOT%src" ^
   @"%SRC_RSP%" ^
   /Fe:%OUT% ^
   /link /LIBPATH:"%LIB_DIR%" ^
@@ -136,6 +132,7 @@ call :build_source_list || (
 )
 cl /nologo /EHsc /std:c++20 /MDd /Zi /Od /DDEBUG ^
   /I "%INCLUDE_DIR%" ^
+  /I "%PROJECT_ROOT%src" ^
   @"%SRC_RSP%" ^
   /Fe:%OUT% ^
   /link /LIBPATH:"%LIB_DIR%" ^

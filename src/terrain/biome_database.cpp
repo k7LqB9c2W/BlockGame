@@ -182,6 +182,48 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
         oss << "Biome '" << definition.id << "' must have non-negative tree_density_multiplier in " << filePath;
         throw std::runtime_error(oss.str());
     }
+
+    const auto& soil = definition.terrainSettings.soilCreep;
+    if (!std::isfinite(soil.strength) || soil.strength < 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have non-negative finite soil_creep.strength in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (soil.maxStep < 0 || soil.maxDepth < 0)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have non-negative soil_creep max_step/max_depth in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+
+    const auto& stripes = definition.terrainSettings.stripes;
+    if (!std::isfinite(stripes.noiseThreshold))
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have finite stripes.noise_threshold in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (stripes.period < 0 || stripes.thickness < 0)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have non-negative stripes period/thickness in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (stripes.noiseThreshold < 0.0f || stripes.noiseThreshold > 1.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have stripes.noise_threshold between 0 and 1 in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+
+    const auto& water = definition.terrainSettings.waterFill;
+    if (water.maxDepth < 0)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have non-negative water_fill.max_depth in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
 }
 
 } // namespace
@@ -329,7 +371,100 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     definition.baseSlopeBias = requireFloat(table, "base_slope_bias", path);
     definition.maxGradient = requireFloat(table, "max_gradient", path);
     definition.footprintMultiplier = requireFloat(table, "footprint_multiplier", path);
+    if (const auto smooth = table["smooth_beaches"].value<bool>())
+    {
+        definition.terrainSettings.smoothBeaches = *smooth;
+    }
+
+    if (const toml::table* soilTable = table["soil_creep"].as_table())
+    {
+        auto& soil = definition.terrainSettings.soilCreep;
+        if (const auto strengthValue = (*soilTable)["strength"].value<double>())
+        {
+            soil.strength = static_cast<float>(*strengthValue);
+        }
+        else if (const auto strengthFloat = (*soilTable)["strength"].value<float>())
+        {
+            soil.strength = *strengthFloat;
+        }
+        if (const auto maxStepValue = (*soilTable)["max_step"].value<std::int64_t>())
+        {
+            soil.maxStep = static_cast<int>(*maxStepValue);
+        }
+        if (const auto maxDepthValue = (*soilTable)["max_depth"].value<std::int64_t>())
+        {
+            soil.maxDepth = static_cast<int>(*maxDepthValue);
+        }
+    }
+
+    if (const toml::table* stripeTable = table["stripes"].as_table())
+    {
+        auto& stripes = definition.terrainSettings.stripes;
+        stripes.enabled = true;
+        if (const auto enabledValue = (*stripeTable)["enabled"].value<bool>())
+        {
+            stripes.enabled = *enabledValue;
+        }
+        if (const auto blockValue = (*stripeTable)["block"].value<std::string>())
+        {
+            stripes.block = parseBlockId(*blockValue, path);
+        }
+        else
+        {
+            stripes.block = definition.fillerBlock;
+        }
+        if (const auto periodValue = (*stripeTable)["period"].value<std::int64_t>())
+        {
+            stripes.period = static_cast<int>(*periodValue);
+        }
+        if (const auto thicknessValue = (*stripeTable)["thickness"].value<std::int64_t>())
+        {
+            stripes.thickness = static_cast<int>(*thicknessValue);
+        }
+        if (const auto thresholdValue = (*stripeTable)["noise_threshold"].value<double>())
+        {
+            stripes.noiseThreshold = static_cast<float>(*thresholdValue);
+        }
+        else if (const auto thresholdFloat = (*stripeTable)["noise_threshold"].value<float>())
+        {
+            stripes.noiseThreshold = *thresholdFloat;
+        }
+    }
+
+    if (const toml::table* waterTable = table["water_fill"].as_table())
+    {
+        auto& water = definition.terrainSettings.waterFill;
+        water.enabled = true;
+        if (const auto enabledValue = (*waterTable)["enabled"].value<bool>())
+        {
+            water.enabled = *enabledValue;
+        }
+        if (const auto blockValue = (*waterTable)["block"].value<std::string>())
+        {
+            water.block = parseBlockId(*blockValue, path);
+        }
+        else
+        {
+            water.block = BlockId::Water;
+        }
+        if (const auto maxDepthValue = (*waterTable)["max_depth"].value<std::int64_t>())
+        {
+            water.maxDepth = static_cast<int>(*maxDepthValue);
+        }
+    }
+
     definition.setFlags(parseFlags(table, path));
+
+    if (definition.terrainSettings.waterFill.block == BlockId::Air)
+    {
+        definition.terrainSettings.waterFill.block = BlockId::Water;
+    }
+    if (!definition.terrainSettings.waterFill.enabled && definition.isOcean())
+    {
+        definition.terrainSettings.waterFill.enabled = true;
+        definition.terrainSettings.waterFill.block = BlockId::Water;
+        definition.terrainSettings.waterFill.maxDepth = 32;
+    }
 
     validateHeights(definition, path);
     validateNumericRanges(definition, path);

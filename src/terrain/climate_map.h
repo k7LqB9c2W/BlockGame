@@ -96,6 +96,7 @@ private:
         const BiomeDefinition* biome{nullptr};
         glm::vec2 positionXZ{0.0f};
         glm::vec2 halfExtents{0.0f};
+        glm::vec2 offsetXZ{0.0f};
         float distanceSquared{std::numeric_limits<float>::max()};
         float normalizedDistance{std::numeric_limits<float>::max()};
         unsigned siteSeed{0};

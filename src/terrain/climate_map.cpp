@@ -35,6 +35,24 @@ float randomUnit(unsigned seed, int saltX, int saltY, int saltZ) noexcept
     h ^= (h >> 16);
     return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
 }
+
+float applyInterpolationCurve(float closeness, BiomeDefinition::InterpolationCurve curve) noexcept
+{
+    closeness = std::clamp(closeness, 0.0f, 1.0f);
+    switch (curve)
+    {
+        case BiomeDefinition::InterpolationCurve::Step:
+            return glm::smoothstep(0.2f, 0.8f, closeness);
+        case BiomeDefinition::InterpolationCurve::Linear:
+            return closeness;
+        case BiomeDefinition::InterpolationCurve::Square:
+            return closeness * closeness;
+    }
+    return closeness;
+}
+
+constexpr float kFalloffExponent = 2.0f;
+constexpr float kInterpolationStrengthEpsilon = 1e-3f;
 } // namespace
 
 ClimateFragment::ClimateFragment(const glm::ivec2& fragmentCoord) noexcept
@@ -102,7 +120,7 @@ NoiseVoronoiClimateGenerator::BiomeSite NoiseVoronoiClimateGenerator::computeBio
 {
     const float baseRegionWidth = static_cast<float>(biomeSizeInChunks_) * static_cast<float>(chunkSize_);
     const float baseRegionDepth = static_cast<float>(biomeSizeInChunks_) * static_cast<float>(chunkSize_);
-    const float footprint = std::max(definition.footprintMultiplier, 0.1f);
+    const float footprint = BiomeDefinition::clampFootprintMultiplier(definition.footprintMultiplier);
     const float regionWidth = baseRegionWidth * footprint;
     const float regionDepth = baseRegionDepth * footprint;
     const float marginX = regionWidth * 0.25f;
@@ -380,6 +398,7 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
             const glm::vec2 delta = columnPosition - candidate.positionXZ;
             const glm::vec2 halfExtents = glm::max(candidate.halfExtents, glm::vec2(1.0f));
             const glm::vec2 normalizedDelta = delta / halfExtents;
+            candidate.offsetXZ = delta;
             candidate.distanceSquared = glm::dot(delta, delta);
             candidate.normalizedDistance = glm::length(normalizedDelta);
             candidate.siteSeed = computeSiteSeed(definition, regionX, regionZ, siteIndex);
@@ -421,21 +440,48 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
                       candidates.begin() + candidateCount, candidateLess);
 
     std::array<float, kMaxConsidered> weights{};
+    std::array<float, kMaxConsidered> falloffFactors{};
     float totalWeight = 0.0f;
     for (std::size_t i = 0; i < sitesToConsider; ++i)
     {
         const CandidateSite& candidate = candidates[i];
+        const glm::vec2 halfExtents = glm::max(candidate.halfExtents, glm::vec2(1.0f));
+        const glm::vec2 axisRatio = glm::abs(candidate.offsetXZ) / halfExtents;
+        const glm::vec2 axisClamped = glm::clamp(axisRatio, glm::vec2(0.0f), glm::vec2(1.0f));
+
+        const float closenessX = 1.0f - axisClamped.x;
+        const float closenessZ = 1.0f - axisClamped.y;
+
+        float axisWeight = applyInterpolationCurve(closenessX, candidate.biome->interpolationCurve);
+        axisWeight *= applyInterpolationCurve(closenessZ, candidate.biome->interpolationCurve);
+        axisWeight = std::clamp(axisWeight, 0.0f, 1.0f);
+
+        const float radial = std::pow(std::clamp(1.0f - candidate.normalizedDistance, 0.0f, 1.0f), kFalloffExponent);
+
+        float combinedFalloff = axisWeight * radial;
+        combinedFalloff *= std::max(candidate.biome->interpolationWeight, kInterpolationStrengthEpsilon);
+        combinedFalloff = std::clamp(combinedFalloff, 0.0f, 1.0f);
+
+        if (combinedFalloff <= std::numeric_limits<float>::epsilon())
+        {
+            weights[i] = 0.0f;
+            falloffFactors[i] = 0.0f;
+            continue;
+        }
+
         const float distance = std::sqrt(std::max(candidate.distanceSquared, 0.0f));
-        float weight = 1.0f / std::max(distance, kDistanceBias);
-        weight *= std::max(candidate.biome->footprintMultiplier, 0.1f);
+        float weight = combinedFalloff / std::max(distance, kDistanceBias);
         weights[i] = weight;
+        falloffFactors[i] = combinedFalloff;
         totalWeight += weight;
     }
 
     if (totalWeight <= std::numeric_limits<float>::epsilon())
     {
         weights.fill(0.0f);
+        falloffFactors.fill(0.0f);
         weights[0] = 1.0f;
+        falloffFactors[0] = 1.0f;
         sitesToConsider = std::min<std::size_t>(1, sitesToConsider);
         totalWeight = 1.0f;
     }
@@ -446,37 +492,48 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
     float aggregatedHills = 0.0f;
     float aggregatedMountains = 0.0f;
     float keepOriginalMix = 0.0f;
+    float amplitudeWeightSum = 0.0f;
 
     for (std::size_t i = 0; i < sitesToConsider; ++i)
     {
         const CandidateSite& candidate = candidates[i];
+        const float normalizedWeight = weights[i] / totalWeight;
+        const float amplitudeScale = std::clamp(falloffFactors[i], 0.0f, 1.0f);
+
         BiomeBlend blend{};
         blend.biome = candidate.biome;
-        blend.weight = weights[i] / totalWeight;
+        blend.weight = normalizedWeight;
         unsigned seed = hashCombine(candidate.siteSeed, static_cast<unsigned>(i));
         blend.seed = seed;
         blend.height = candidate.baseHeight;
-        blend.roughness = candidate.biome->roughness;
-        blend.hills = candidate.biome->hills;
-        blend.mountains = candidate.biome->mountains;
+        blend.roughness = candidate.biome->roughness * amplitudeScale;
+        blend.hills = candidate.biome->hills * amplitudeScale;
+        blend.mountains = candidate.biome->mountains * amplitudeScale;
         blend.normalizedDistance = candidate.normalizedDistance;
 
         outSample.blends[i] = blend;
 
-        aggregatedHeight += blend.height * blend.weight;
-        aggregatedRoughness += blend.roughness * blend.weight;
-        aggregatedHills += blend.hills * blend.weight;
-        aggregatedMountains += blend.mountains * blend.weight;
+        aggregatedHeight += candidate.baseHeight * amplitudeScale * normalizedWeight;
+        aggregatedRoughness += blend.roughness * normalizedWeight;
+        aggregatedHills += blend.hills * normalizedWeight;
+        aggregatedMountains += blend.mountains * normalizedWeight;
         if (blend.biome)
         {
-            keepOriginalMix += blend.biome->keepOriginalTerrain * blend.weight;
+            keepOriginalMix += blend.biome->keepOriginalTerrain * amplitudeScale * normalizedWeight;
         }
+        amplitudeWeightSum += amplitudeScale * normalizedWeight;
     }
 
     std::sort(outSample.blends.begin(), outSample.blends.begin() + outSample.blendCount,
               [](const BiomeBlend& lhs, const BiomeBlend& rhs) {
                   return lhs.weight > rhs.weight;
               });
+
+    if (amplitudeWeightSum > std::numeric_limits<float>::epsilon())
+    {
+        aggregatedHeight /= amplitudeWeightSum;
+        keepOriginalMix /= amplitudeWeightSum;
+    }
 
     outSample.aggregatedHeight = aggregatedHeight;
     outSample.aggregatedRoughness = aggregatedRoughness;

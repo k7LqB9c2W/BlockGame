@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -77,6 +78,12 @@ struct BiomeDefinition
     [[nodiscard]] const std::vector<std::string>& flags() const noexcept { return flags_; }
 
     void setFlags(std::vector<std::string> flags);
+    [[nodiscard]] static float clampFootprintMultiplier(float value) noexcept
+    {
+        constexpr float kMinFootprintMultiplier = 0.25f;
+        constexpr float kMaxFootprintMultiplier = 3.0f;
+        return std::clamp(value, kMinFootprintMultiplier, kMaxFootprintMultiplier);
+    }
 
 private:
     std::vector<std::string> flags_{};

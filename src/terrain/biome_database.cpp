@@ -417,7 +417,8 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     definition.maxHeight = requireInt(table, "max_height", path);
     definition.baseSlopeBias = requireFloat(table, "base_slope_bias", path);
     definition.maxGradient = requireFloat(table, "max_gradient", path);
-    definition.footprintMultiplier = requireFloat(table, "footprint_multiplier", path);
+    definition.footprintMultiplier =
+        BiomeDefinition::clampFootprintMultiplier(requireFloat(table, "footprint_multiplier", path));
     if (const auto roughValue = table["roughness"].value<double>())
     {
         definition.roughness = static_cast<float>(*roughValue);

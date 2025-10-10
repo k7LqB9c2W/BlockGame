@@ -29,6 +29,36 @@ struct BiomeDefinition
     float baseSlopeBias{0.0f};
     float maxGradient{0.0f};
     float footprintMultiplier{1.0f};
+    struct SoilCreepSettings
+    {
+        float strength{0.0f};
+        int maxStep{0};
+        int maxDepth{0};
+    };
+
+    struct StripeSettings
+    {
+        bool enabled{false};
+        BlockId block{};
+        int period{4};
+        int thickness{1};
+        float noiseThreshold{0.0f};
+    };
+
+    struct WaterFillSettings
+    {
+        bool enabled{false};
+        BlockId block{};
+        int maxDepth{0};
+    };
+
+    struct TerrainSettings
+    {
+        bool smoothBeaches{false};
+        SoilCreepSettings soilCreep{};
+        StripeSettings stripes{};
+        WaterFillSettings waterFill{};
+    } terrainSettings{};
 
     [[nodiscard]] bool isOcean() const noexcept { return oceanFlag_; }
     [[nodiscard]] bool isLittleMountains() const noexcept { return littleMountainsFlag_; }

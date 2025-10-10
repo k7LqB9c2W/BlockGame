@@ -164,18 +164,43 @@ void NoiseVoronoiClimateGenerator::applyPostProcessing(ClimateFragment& fragment
 {
     const int size = ClimateFragment::kSize;
     const glm::ivec2 baseWorld = fragment.baseWorld();
+    const std::size_t totalCells = static_cast<std::size_t>(size * size);
 
     auto withinBounds = [](int value, int limit) noexcept { return value >= 0 && value < limit; };
+    auto cellIndex = [size](int x, int z) noexcept -> std::size_t {
+        return static_cast<std::size_t>(z) * size + static_cast<std::size_t>(x);
+    };
 
-    std::vector<float> smoothedHeights(static_cast<std::size_t>(size * size), 0.0f);
+    std::vector<float> originalHeight(totalCells, 0.0f);
+    std::vector<float> originalRoughness(totalCells, 0.0f);
+    std::vector<float> originalHills(totalCells, 0.0f);
+    std::vector<float> originalMountains(totalCells, 0.0f);
+    std::vector<float> originalKeep(totalCells, 0.0f);
+    std::vector<glm::vec2> originalSitePos(totalCells, glm::vec2(0.0f));
+    std::vector<glm::vec2> originalSiteHalf(totalCells, glm::vec2(1.0f));
+    std::vector<BiomeBlend> originalPrimary(totalCells);
 
     for (int localZ = 0; localZ < size; ++localZ)
     {
         for (int localX = 0; localX < size; ++localX)
         {
             ClimateSample& sample = fragment.sample(localX, localZ);
-            smoothedHeights[static_cast<std::size_t>(localZ) * size + static_cast<std::size_t>(localX)] =
-                sample.aggregatedHeight;
+            const std::size_t idx = cellIndex(localX, localZ);
+            originalHeight[idx] = sample.aggregatedHeight;
+            originalRoughness[idx] = sample.aggregatedRoughness;
+            originalHills[idx] = sample.aggregatedHills;
+            originalMountains[idx] = sample.aggregatedMountains;
+            originalKeep[idx] = sample.keepOriginalMix;
+            originalSitePos[idx] = sample.dominantSitePos;
+            originalSiteHalf[idx] = sample.dominantSiteHalfExtents;
+            if (sample.blendCount > 0)
+            {
+                originalPrimary[idx] = sample.blends[0];
+            }
+            else
+            {
+                originalPrimary[idx] = BiomeBlend{};
+            }
         }
     }
 
@@ -187,12 +212,15 @@ void NoiseVoronoiClimateGenerator::applyPostProcessing(ClimateFragment& fragment
         for (int localX = 0; localX < size; ++localX)
         {
             ClimateSample& sample = fragment.sample(localX, localZ);
+            const std::size_t idx = cellIndex(localX, localZ);
+
             if (sample.blendCount == 0)
             {
                 continue;
             }
 
-            const BiomeDefinition* dominantBiome = sample.dominantBiome();
+            const BiomeBlend& primary = originalPrimary[idx];
+            const BiomeDefinition* dominantBiome = primary.biome ? primary.biome : sample.dominantBiome();
             if (!dominantBiome)
             {
                 continue;
@@ -200,7 +228,9 @@ void NoiseVoronoiClimateGenerator::applyPostProcessing(ClimateFragment& fragment
 
             float neighborHeightSum = 0.0f;
             int neighborCount = 0;
-            bool borderNeighbor = false;
+            bool hasForeignNeighbor = false;
+            float lowestNeighborHeight = std::numeric_limits<float>::infinity();
+            std::size_t lowestNeighborIdx = idx;
 
             for (const glm::ivec2& offset : kNeighborOffsets)
             {
@@ -211,50 +241,112 @@ void NoiseVoronoiClimateGenerator::applyPostProcessing(ClimateFragment& fragment
                     continue;
                 }
 
-                const ClimateSample& neighbor = fragment.sample(nx, nz);
-                neighborHeightSum += neighbor.aggregatedHeight;
+                const std::size_t nidx = cellIndex(nx, nz);
+                neighborHeightSum += originalHeight[nidx];
                 neighborCount++;
-                if (neighbor.dominantBiome() && neighbor.dominantBiome() != dominantBiome)
+
+                const BiomeBlend& neighborPrimary = originalPrimary[nidx];
+                if (neighborPrimary.biome && neighborPrimary.biome != dominantBiome)
                 {
-                    borderNeighbor = true;
+                    hasForeignNeighbor = true;
+                    if (originalHeight[nidx] < lowestNeighborHeight)
+                    {
+                        lowestNeighborHeight = originalHeight[nidx];
+                        lowestNeighborIdx = nidx;
+                    }
                 }
             }
 
-            if (borderNeighbor && neighborCount > 0)
+            const float baseHeight = originalHeight[idx];
+            if (neighborCount > 0)
             {
                 const float neighborAvg = neighborHeightSum / static_cast<float>(neighborCount);
-                const float heightDelta = std::abs(sample.aggregatedHeight - neighborAvg);
-                const float blendFactor = std::clamp(heightDelta / 96.0f, 0.0f, 0.55f);
-                sample.aggregatedHeight = glm::mix(sample.aggregatedHeight, neighborAvg, blendFactor);
+                const float heightDelta = std::abs(baseHeight - neighborAvg);
+                const float blendFactor = std::clamp(heightDelta / 112.0f, 0.0f, 0.55f);
+                sample.aggregatedHeight = glm::mix(baseHeight, neighborAvg, blendFactor);
                 if (sample.blendCount > 0)
                 {
-                    sample.blends[0].height = glm::mix(sample.blends[0].height, neighborAvg, blendFactor);
+                    sample.blends[0].height = glm::mix(primary.height, neighborAvg, blendFactor);
                 }
             }
 
-            const float radius = std::max(sample.dominantSiteHalfExtents.x, sample.dominantSiteHalfExtents.y);
+            if (hasForeignNeighbor && lowestNeighborIdx != idx && lowestNeighborHeight < std::numeric_limits<float>::infinity())
+            {
+                const float originalDelta = baseHeight - lowestNeighborHeight;
+                if (originalDelta > 18.0f)
+                {
+                    const BiomeBlend& neighborBlend = originalPrimary[lowestNeighborIdx];
+                    if (neighborBlend.biome)
+                    {
+                        sample.blends[0] = neighborBlend;
+                        sample.blends[0].weight = std::max(neighborBlend.weight, 0.9f);
+                        sample.blendCount = std::max<std::size_t>(sample.blendCount, 1);
+                        sample.aggregatedHeight = glm::mix(sample.aggregatedHeight, lowestNeighborHeight, 0.75f);
+                        sample.aggregatedRoughness =
+                            glm::mix(originalRoughness[idx], originalRoughness[lowestNeighborIdx], 0.6f);
+                        sample.aggregatedHills =
+                            glm::mix(originalHills[idx], originalHills[lowestNeighborIdx], 0.6f);
+                        sample.aggregatedMountains =
+                            glm::mix(originalMountains[idx], originalMountains[lowestNeighborIdx], 0.6f);
+                        sample.keepOriginalMix = originalKeep[lowestNeighborIdx];
+                        sample.dominantSitePos = originalSitePos[lowestNeighborIdx];
+                        sample.dominantSiteHalfExtents = originalSiteHalf[lowestNeighborIdx];
+                        dominantBiome = neighborBlend.biome;
+                        const float clampedWeight = std::clamp(sample.blends[0].weight, 0.0f, 1.0f);
+                        sample.blends[0].weight = clampedWeight;
+                    }
+                }
+            }
+
+            const glm::vec2 siteHalf = glm::max(sample.dominantSiteHalfExtents, glm::vec2(1.0f));
+            const float radius = std::max(siteHalf.x, siteHalf.y);
             if (radius > 0.01f)
             {
                 const float worldX = static_cast<float>(baseWorld.x) + static_cast<float>(localX * stride) + 0.5f;
                 const float worldZ = static_cast<float>(baseWorld.y) + static_cast<float>(localZ * stride) + 0.5f;
                 const glm::vec2 delta = glm::vec2(worldX, worldZ) - sample.dominantSitePos;
                 const float distance = glm::length(delta);
-                const float centerFactor = 1.0f - std::clamp(distance / (radius + static_cast<float>(stride)), 0.0f, 1.0f);
-                const float centerBias = centerFactor * centerFactor;
-                const float targetHeight = sample.blends[0].height;
-                const float centerHeight = glm::mix(sample.aggregatedHeight, targetHeight, centerBias);
-                sample.aggregatedHeight = glm::mix(sample.aggregatedHeight, centerHeight, 0.35f);
-                sample.blends[0].height = glm::mix(sample.blends[0].height, centerHeight, 0.35f);
+                const float centerFactor =
+                    std::clamp(1.0f - distance / (radius + static_cast<float>(stride)), 0.0f, 1.0f);
+                if (centerFactor > 0.0f && sample.blendCount > 0)
+                {
+                    const float centerBias = centerFactor * centerFactor;
+                    const float targetHeight =
+                        originalPrimary[idx].biome == sample.blends[0].biome ? originalPrimary[idx].height
+                                                                             : sample.blends[0].height;
+                    sample.aggregatedHeight =
+                        glm::mix(sample.aggregatedHeight, targetHeight, centerBias * 0.45f);
+                    sample.blends[0].height = glm::mix(sample.blends[0].height, targetHeight, centerBias * 0.45f);
+                }
             }
 
-            const float keepOriginalMix = std::clamp(sample.keepOriginalMix, 0.0f, 1.0f);
-            if (keepOriginalMix > 0.0f && sample.blendCount > 0)
+            const float keepMix = std::clamp(sample.keepOriginalMix, 0.0f, 1.0f);
+            if (keepMix > 0.0f)
             {
-                const float preserved = smoothedHeights[static_cast<std::size_t>(localZ) * size
-                                                        + static_cast<std::size_t>(localX)];
-                sample.aggregatedHeight = glm::mix(sample.aggregatedHeight, preserved, keepOriginalMix);
-                sample.blends[0].height = glm::mix(sample.blends[0].height, preserved, keepOriginalMix);
+                const float preserved = originalHeight[idx];
+                sample.aggregatedHeight = glm::mix(sample.aggregatedHeight, preserved, keepMix * 0.5f);
+                if (sample.blendCount > 0)
+                {
+                    sample.blends[0].height = glm::mix(sample.blends[0].height, preserved, keepMix * 0.5f);
+                }
             }
+
+            const float patchChance =
+                std::clamp(1.0f - sample.keepOriginalMix, 0.0f, 1.0f) * 0.08f;
+            const int patchSalt = static_cast<int>(baseWorld.x + localX * stride);
+            if (hashToUnitFloat(static_cast<int>(sample.aggregatedHeight * 31.0f), patchSalt,
+                                static_cast<int>(baseWorld.y + localZ * stride)) < patchChance)
+            {
+                sample.aggregatedHeight =
+                    glm::mix(sample.aggregatedHeight, originalHeight[idx], 0.35f);
+                if (sample.blendCount > 0)
+                {
+                    sample.blends[0].height =
+                        glm::mix(sample.blends[0].height, originalHeight[idx], 0.35f);
+                }
+            }
+
+            sample.keepOriginalMix = std::clamp(sample.keepOriginalMix, 0.0f, 1.0f);
         }
     }
 }

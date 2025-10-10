@@ -388,8 +388,31 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     definition.fillerBlock = parseBlockId(requireString(table, "filler_block", path), path);
     definition.generatesTrees = requireBool(table, "generates_trees", path);
     definition.treeDensityMultiplier = requireFloat(table, "tree_density_multiplier", path);
-    definition.heightOffset = requireFloat(table, "height_offset", path);
-    definition.heightScale = requireFloat(table, "height_scale", path);
+    if (const auto offsetValue = table["height_offset"].value<double>())
+    {
+        definition.heightOffset = static_cast<float>(*offsetValue);
+    }
+    else if (const auto offsetFloat = table["height_offset"].value<float>())
+    {
+        definition.heightOffset = *offsetFloat;
+    }
+    else
+    {
+        definition.heightOffset = 0.0f;
+    }
+
+    if (const auto scaleValue = table["height_scale"].value<double>())
+    {
+        definition.heightScale = static_cast<float>(*scaleValue);
+    }
+    else if (const auto scaleFloat = table["height_scale"].value<float>())
+    {
+        definition.heightScale = *scaleFloat;
+    }
+    else
+    {
+        definition.heightScale = 0.0f;
+    }
     definition.minHeight = requireInt(table, "min_height", path);
     definition.maxHeight = requireInt(table, "max_height", path);
     definition.baseSlopeBias = requireFloat(table, "base_slope_bias", path);

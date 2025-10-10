@@ -369,10 +369,14 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                 continue;
             }
 
+            dominantBaseHeight = climateSample.blends[dominantIndex].height;
+            dominantWeight = std::clamp(climateSample.blends[dominantIndex].weight, 0.0f, 1.0f);
+            keepOriginal = std::clamp(climateSample.keepOriginalMix, 0.0f, 1.0f);
+
             float transitionMix = std::clamp(1.0f - dominantWeight, 0.0f, 1.0f);
             blendedHeight = glm::mix(dominantBaseHeight, blendedHeight, transitionMix);
 
-            const float keepOriginalMix = std::clamp(keepOriginal, 0.0f, 1.0f);
+            const float keepOriginalMix = keepOriginal;
             blendedHeight = glm::mix(blendedHeight, dominantBaseHeight, keepOriginalMix);
             roughStrength = glm::mix(roughStrength, std::max(dominantSurfaceBiome->roughness, 0.0f), keepOriginalMix);
             hillStrength = glm::mix(hillStrength, std::max(dominantSurfaceBiome->hills, 0.0f), keepOriginalMix);

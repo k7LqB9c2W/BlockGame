@@ -1,20 +1,39 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 
 project(BlockGame VERSION 0.1.0 LANGUAGES C CXX)
+
+if(NOT CMAKE_GENERATOR MATCHES "Ninja")
+    message(STATUS "Generator is '${CMAKE_GENERATOR}'. For fastest incremental builds consider running: cmake -G Ninja -S . -B build")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_executable(blockgame
-    src/main.cpp
-    src/glad.c
+set(SRC_ROOT ${CMAKE_SOURCE_DIR}/src)
+
+set(BLOCKGAME_SOURCES
+    ${SRC_ROOT}/main.cpp
+    ${SRC_ROOT}/glad.c
+    ${SRC_ROOT}/camera.cpp
+    ${SRC_ROOT}/chunk_manager.cpp
+    ${SRC_ROOT}/input_context.cpp
+    ${SRC_ROOT}/renderer.cpp
+    ${SRC_ROOT}/TextureLoader.cpp
+    ${SRC_ROOT}/terrain/biome_database.cpp
+    ${SRC_ROOT}/terrain/climate_map.cpp
+    ${SRC_ROOT}/terrain/surface_map.cpp
+    ${SRC_ROOT}/terrain/terrain_generator.cpp
+    ${SRC_ROOT}/terrain/worldgen_profile.cpp
 )
+
+add_executable(blockgame ${BLOCKGAME_SOURCES})
 
 target_include_directories(blockgame
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
+        ${SRC_ROOT}
 )
 
 target_compile_options(blockgame
@@ -60,4 +79,4 @@ else()
     target_link_libraries(blockgame PRIVATE glfw)
 endif()
 
-source_group(TREE ${CMAKE_SOURCE_DIR} FILES src/main.cpp src/glad.c)
+source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${BLOCKGAME_SOURCES})

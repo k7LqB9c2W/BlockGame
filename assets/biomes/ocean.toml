@@ -1,0 +1,14 @@
+id = "ocean"
+name = "Ocean"
+surface_block = "water"
+filler_block = "water"
+generates_trees = false
+tree_density_multiplier = 0.0
+height_offset = 20.0
+height_scale = 0.0
+min_height = 20
+max_height = 20
+base_slope_bias = 1.0
+max_gradient = 1.0
+footprint_multiplier = 1.0
+flags = ["ocean"]

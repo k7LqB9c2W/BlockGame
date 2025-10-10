@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include <functional>
+
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 
@@ -135,6 +137,29 @@ const BiomeDefinition& NoiseVoronoiClimateGenerator::biomeForRegion(int regionX,
     return biomeDatabase_.definitionByIndex(biomeIndex);
 }
 
+unsigned NoiseVoronoiClimateGenerator::computeSiteSeed(const BiomeDefinition& definition,
+                                                       int regionX,
+                                                       int regionZ,
+                                                       std::size_t siteIndex) const noexcept
+{
+    unsigned seed = baseSeed_;
+    seed = hashCombine(seed, static_cast<unsigned>(regionX * 73856093));
+    seed = hashCombine(seed, static_cast<unsigned>(regionZ * 19349663));
+    seed = hashCombine(seed, static_cast<unsigned>(siteIndex));
+    seed = hashCombine(seed,
+                       static_cast<unsigned>(std::hash<std::string>{}(definition.id) & 0xFFFFFFFFu));
+    return seed;
+}
+
+float NoiseVoronoiClimateGenerator::computeSiteBaseHeight(const BiomeDefinition& definition,
+                                                          unsigned siteSeed) const noexcept
+{
+    const float minHeight = static_cast<float>(definition.minHeight);
+    const float maxHeight = static_cast<float>(definition.maxHeight);
+    const float t = randomUnit(siteSeed, 0, 0, 0);
+    return std::lerp(minHeight, maxHeight, t);
+}
+
 void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, ClimateSample& outSample)
 {
     const int chunkX = floorDiv(worldX, chunkSize_);
@@ -156,6 +181,7 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
             const BiomeDefinition& definition = biomeForRegion(regionX, regionZ);
             const BiomeSite site = computeBiomeSite(definition, regionX, regionZ);
 
+            const std::size_t siteIndex = candidates.size();
             CandidateSite candidate{};
             candidate.biome = &definition;
             candidate.positionXZ = site.worldPosXZ;
@@ -165,6 +191,8 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
             const glm::vec2 normalizedDelta = delta / halfExtents;
             candidate.distanceSquared = glm::dot(delta, delta);
             candidate.normalizedDistance = glm::length(normalizedDelta);
+            candidate.siteSeed = computeSiteSeed(definition, regionX, regionZ, siteIndex);
+            candidate.baseHeight = computeSiteBaseHeight(definition, candidate.siteSeed);
             candidates.push_back(candidate);
         }
     }
@@ -228,19 +256,13 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
         BiomeBlend blend{};
         blend.biome = candidate.biome;
         blend.weight = weights[i] / totalWeight;
-        unsigned seed = baseSeed_;
-        seed = hashCombine(seed, static_cast<unsigned>(worldX * 73856093));
-        seed = hashCombine(seed, static_cast<unsigned>(worldZ * 19349663));
-        seed = hashCombine(seed, static_cast<unsigned>(i * 83492791));
+        unsigned seed = hashCombine(candidate.siteSeed, static_cast<unsigned>(i));
         blend.seed = seed;
-
-        const float minHeight = static_cast<float>(candidate.biome->minHeight);
-        const float maxHeight = static_cast<float>(candidate.biome->maxHeight);
-        const float t = randomUnit(seed, worldX, worldZ, static_cast<int>(i));
-        blend.height = std::lerp(minHeight, maxHeight, t);
+        blend.height = candidate.baseHeight;
         blend.roughness = candidate.biome->roughness;
         blend.hills = candidate.biome->hills;
         blend.mountains = candidate.biome->mountains;
+        blend.normalizedDistance = std::clamp(candidate.normalizedDistance, 0.0f, 1.0f);
 
         outSample.blends[i] = blend;
     }

@@ -134,6 +134,28 @@ std::vector<std::string> parseFlags(const toml::table& table, const std::filesys
     return flags;
 }
 
+BiomeDefinition::InterpolationCurve parseInterpolationCurve(const std::string& value,
+                                                            const std::filesystem::path& filePath)
+{
+    const std::string normalized = toLowerCopy(value);
+    if (normalized == "none" || normalized == "step")
+    {
+        return BiomeDefinition::InterpolationCurve::Step;
+    }
+    if (normalized == "linear")
+    {
+        return BiomeDefinition::InterpolationCurve::Linear;
+    }
+    if (normalized == "square")
+    {
+        return BiomeDefinition::InterpolationCurve::Square;
+    }
+
+    std::ostringstream oss;
+    oss << "Unknown interpolation_curve value '" << value << "' in " << filePath;
+    throw std::runtime_error(oss.str());
+}
+
 void validateHeights(const BiomeDefinition& definition, const std::filesystem::path& filePath)
 {
     if (definition.minHeight > definition.maxHeight)
@@ -180,6 +202,13 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
     {
         std::ostringstream oss;
         oss << "Biome '" << definition.id << "' must have non-negative tree_density_multiplier in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+
+    if (!std::isfinite(definition.interpolationWeight) || definition.interpolationWeight <= 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have positive finite interpolation_weight in " << filePath;
         throw std::runtime_error(oss.str());
     }
 
@@ -407,6 +436,20 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     if (const auto smooth = table["smooth_beaches"].value<bool>())
     {
         definition.terrainSettings.smoothBeaches = *smooth;
+    }
+
+    if (const auto interpolationCurveValue = table["interpolation_curve"].value<std::string>())
+    {
+        definition.interpolationCurve = parseInterpolationCurve(*interpolationCurveValue, path);
+    }
+
+    if (const auto interpolationWeightValue = table["interpolation_weight"].value<double>())
+    {
+        definition.interpolationWeight = static_cast<float>(*interpolationWeightValue);
+    }
+    else if (const auto interpolationWeightFloat = table["interpolation_weight"].value<float>())
+    {
+        definition.interpolationWeight = *interpolationWeightFloat;
     }
 
     if (const toml::table* soilTable = table["soil_creep"].as_table())

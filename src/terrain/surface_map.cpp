@@ -1,6 +1,7 @@
 #include "terrain/surface_map.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <cmath>
 #include <random>
@@ -198,38 +199,140 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                 continue;
             }
 
+            const auto clamp01 = [](float value) noexcept {
+                return std::clamp(value, 0.0f, 1.0f);
+            };
+
+            const BiomeDefinition* fallbackBiome = dominantBiome;
+            if (!fallbackBiome)
+            {
+                for (std::size_t i = 0; i < climateSample.blendCount; ++i)
+                {
+                    if (climateSample.blends[i].biome)
+                    {
+                        fallbackBiome = climateSample.blends[i].biome;
+                        break;
+                    }
+                }
+                if (!fallbackBiome && biomeDatabase_.biomeCount() > 0)
+                {
+                    fallbackBiome = &biomeDatabase_.definitionByIndex(0);
+                }
+                if (!fallbackBiome)
+                {
+                    continue;
+                }
+            }
+
+            std::array<float, 4> adjustedWeights{};
+            std::array<const BiomeDefinition*, 4> blendBiomes{};
             float weightSum = 0.0f;
+            std::size_t dominantIndex = 0;
+            float bestWeight = -std::numeric_limits<float>::infinity();
+
+            for (std::size_t i = 0; i < climateSample.blendCount; ++i)
+            {
+                const BiomeBlend& blend = climateSample.blends[i];
+                const BiomeDefinition* blendBiome = blend.biome ? blend.biome : fallbackBiome;
+                blendBiomes[i] = blendBiome;
+
+                float adjustedWeight = blend.weight;
+                if (blendBiome)
+                {
+                    const float proximity = clamp01(1.0f - clamp01(blend.normalizedDistance));
+                    float shaped = proximity;
+                    switch (blendBiome->interpolationCurve)
+                    {
+                        case BiomeDefinition::InterpolationCurve::Step:
+                            shaped = glm::smoothstep(0.2f, 0.8f, proximity);
+                            break;
+                        case BiomeDefinition::InterpolationCurve::Linear:
+                            shaped = proximity;
+                            break;
+                        case BiomeDefinition::InterpolationCurve::Square:
+                            shaped = proximity * proximity;
+                            break;
+                    }
+                    const float bias = std::max(blendBiome->interpolationWeight, 1e-3f);
+                    adjustedWeight *= std::max(shaped, 0.0f);
+                    adjustedWeight *= std::max(bias, 0.0f);
+                }
+
+                adjustedWeight = std::max(adjustedWeight, 0.0f);
+                adjustedWeights[i] = adjustedWeight;
+
+                if (adjustedWeight > bestWeight)
+                {
+                    bestWeight = adjustedWeight;
+                    dominantIndex = i;
+                }
+                weightSum += adjustedWeight;
+            }
+
+            if (weightSum <= std::numeric_limits<float>::epsilon())
+            {
+                weightSum = 0.0f;
+                bestWeight = -std::numeric_limits<float>::infinity();
+                dominantIndex = 0;
+                for (std::size_t i = 0; i < climateSample.blendCount; ++i)
+                {
+                    const float fallbackWeight = climateSample.blends[i].weight;
+                    adjustedWeights[i] = fallbackWeight;
+                    if (fallbackWeight > bestWeight)
+                    {
+                        bestWeight = fallbackWeight;
+                        dominantIndex = i;
+                    }
+                    weightSum += fallbackWeight;
+                }
+            }
+
+            if (weightSum <= std::numeric_limits<float>::epsilon())
+            {
+                adjustedWeights.fill(0.0f);
+                adjustedWeights[0] = 1.0f;
+                weightSum = 1.0f;
+                dominantIndex = 0;
+            }
+
             float blendedHeight = 0.0f;
             float roughStrength = 0.0f;
             float hillStrength = 0.0f;
             float mountainStrength = 0.0f;
             float keepOriginal = 0.0f;
+
             for (std::size_t i = 0; i < climateSample.blendCount; ++i)
             {
+                const float normalizedWeight = adjustedWeights[i] / weightSum;
+                if (normalizedWeight <= std::numeric_limits<float>::epsilon())
+                {
+                    adjustedWeights[i] = 0.0f;
+                    continue;
+                }
+
                 const BiomeBlend& blend = climateSample.blends[i];
-                const float weight = blend.weight;
-                weightSum += weight;
-                blendedHeight += blend.height * weight;
-                roughStrength += blend.roughness * weight;
-                hillStrength += blend.hills * weight;
-                mountainStrength += blend.mountains * weight;
+                const BiomeDefinition* blendBiome = blendBiomes[i] ? blendBiomes[i] : fallbackBiome;
+
+                blendedHeight += blend.height * normalizedWeight;
+                roughStrength += blend.roughness * normalizedWeight;
+                hillStrength += blend.hills * normalizedWeight;
+                mountainStrength += blend.mountains * normalizedWeight;
                 if (blend.biome)
                 {
-                    keepOriginal += blend.biome->keepOriginalTerrain * weight;
+                    keepOriginal += blend.biome->keepOriginalTerrain * normalizedWeight;
                 }
+                else if (fallbackBiome)
+                {
+                    keepOriginal += fallbackBiome->keepOriginalTerrain * normalizedWeight;
+                }
+                adjustedWeights[i] = normalizedWeight;
             }
-            if (weightSum > std::numeric_limits<float>::epsilon())
+
+            const BiomeDefinition* dominantSurfaceBiome = blendBiomes[dominantIndex] ? blendBiomes[dominantIndex]
+                                                                                    : fallbackBiome;
+            if (!dominantSurfaceBiome)
             {
-                const float inv = 1.0f / weightSum;
-                blendedHeight *= inv;
-                roughStrength *= inv;
-                hillStrength *= inv;
-                mountainStrength *= inv;
-                keepOriginal *= inv;
-            }
-            else
-            {
-                keepOriginal = 0.0f;
+                continue;
             }
 
             if (roughStrength <= 0.0f && hillStrength <= 0.0f && mountainStrength <= 0.0f)
@@ -271,8 +374,8 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             surfaceHeight += (hillNoise - 0.5f) * 6.0f * hillStrength;
             surfaceHeight += mountainNoise * 12.0f * mountainStrength;
 
-            outColumn.dominantBiome = dominantBiome;
-            outColumn.dominantWeight = dominantBlend.weight;
+            outColumn.dominantBiome = dominantSurfaceBiome;
+            outColumn.dominantWeight = clamp01(adjustedWeights[dominantIndex]);
             outColumn.surfaceHeight = surfaceHeight;
             outColumn.surfaceY = static_cast<int>(std::round(surfaceHeight));
             outColumn.roughAmplitude = std::max(roughStrength, 0.0f);

@@ -316,6 +316,7 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
         blend.normalizedDistance = 0.0f;
         blend.seed = hashCombine(baseSeed_, static_cast<unsigned>(biome.minHeight));
         blend.falloff = biome.maxRadius();
+        blend.sitePosition = glm::vec2(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y));
         fallback.blends[0] = blend;
         fallback.aggregatedHeight = blend.height;
         fallback.aggregatedRoughness = blend.roughness;
@@ -371,6 +372,8 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
             hashCombine(baseSeed_, hashCombine(static_cast<unsigned>(entry.seed->position.x),
                                                static_cast<unsigned>(entry.seed->position.y)));
         blend.seed = seedHash;
+        blend.sitePosition = glm::vec2(static_cast<float>(entry.seed->position.x),
+                                       static_cast<float>(entry.seed->position.y));
 
         outSample.blends[i] = blend;
 

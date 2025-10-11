@@ -178,6 +178,7 @@ inline int ceilToIntPositive(float value)
 }
 
 using terrain::BiomeDefinition;
+using terrain::BiomeBlend;
 using terrain::ColumnBuildResult;
 using terrain::ColumnSample;
 
@@ -3773,9 +3774,14 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     {
         throw std::runtime_error("Surface map is not initialized");
     }
+    if (!climateMap_)
+    {
+        throw std::runtime_error("Climate map is not initialized");
+    }
 
     ColumnSample sample{};
     const terrain::SurfaceColumn& surfaceColumn = surfaceMap_->column(worldX, worldZ);
+    const terrain::ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
 
     sample.dominantBiome = surfaceColumn.dominantBiome;
     sample.dominantWeight = surfaceColumn.dominantWeight;
@@ -3786,12 +3792,61 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     sample.roughAmplitude = surfaceColumn.roughAmplitude;
     sample.hillAmplitude = surfaceColumn.hillAmplitude;
     sample.mountainAmplitude = surfaceColumn.mountainAmplitude;
-    sample.distanceToShore = std::abs(static_cast<float>(surfaceColumn.surfaceY - globalSeaLevel_));
+    sample.distanceToShore = std::numeric_limits<float>::infinity();
 
     sample.slabHasSolid = surfaceColumn.surfaceY >= slabMinWorldY;
     if (sample.slabHasSolid)
     {
         sample.slabHighestSolidY = std::min(surfaceColumn.surfaceY, slabMaxWorldY);
+    }
+
+    if (sample.dominantBiome)
+    {
+        const bool isLand = !sample.dominantBiome->isOcean();
+        const glm::vec2 worldPos(static_cast<float>(worldX) + 0.5f, static_cast<float>(worldZ) + 0.5f);
+        float bestDistance = std::numeric_limits<float>::infinity();
+
+        for (std::size_t i = 0; i < climateSample.blendCount; ++i)
+        {
+            const BiomeBlend& blend = climateSample.blends[i];
+            if (!blend.biome)
+            {
+                continue;
+            }
+
+            const bool blendIsOcean = blend.biome->isOcean();
+            if ((isLand && !blendIsOcean) || (!isLand && blendIsOcean))
+            {
+                continue;
+            }
+
+            const float radius = std::max(blend.falloff, 1.0f);
+            const glm::vec2 delta = worldPos - blend.sitePosition;
+            const float distanceToCenter = glm::length(delta);
+            float boundaryDistance = 0.0f;
+            if (isLand)
+            {
+                boundaryDistance = std::max(0.0f, distanceToCenter - radius);
+            }
+            else
+            {
+                boundaryDistance = std::max(0.0f, radius - distanceToCenter);
+            }
+            bestDistance = std::min(bestDistance, boundaryDistance);
+        }
+
+        if (std::isfinite(bestDistance))
+        {
+            sample.distanceToShore = bestDistance;
+        }
+        else if (isLand)
+        {
+            sample.distanceToShore = std::abs(static_cast<float>(surfaceColumn.surfaceY - globalSeaLevel_));
+        }
+        else
+        {
+            sample.distanceToShore = 0.0f;
+        }
     }
 
     return sample;

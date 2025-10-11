@@ -29,6 +29,7 @@ struct BiomeBlend
     float normalizedDistance{0.0f};
     unsigned seed{0};
     float falloff{1.0f};
+    glm::vec2 sitePosition{0.0f};
 };
 
 struct ClimateSample

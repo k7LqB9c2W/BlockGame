@@ -14,36 +14,118 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <queue>
 #include <random>
-#include <stdexcept>
 #include <sstream>
-#include <iomanip>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
-#include <utility>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <deque>
-#include <map>
+#include <ctime>
+
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 
 namespace
 {
+std::mutex gCrashLogMutex;
+std::filesystem::path gCrashLogPath;
+
+void appendCrashLog(std::string message)
+{
+    if (gCrashLogPath.empty())
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(gCrashLogMutex);
+
+    std::ofstream out(gCrashLogPath, std::ios::app);
+    if (!out)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t timestamp = std::chrono::system_clock::to_time_t(now);
+    std::tm timeInfo{};
+#ifdef _WIN32
+    localtime_s(&timeInfo, &timestamp);
+#else
+    if (std::tm* local = std::localtime(&timestamp))
+    {
+        timeInfo = *local;
+    }
+#endif
+    out << std::put_time(&timeInfo, "%Y-%m-%d %H:%M:%S") << " - " << message << '\n';
+    out.flush();
+}
+
+void initializeCrashLogging(const std::filesystem::path& logPath)
+{
+    gCrashLogPath = logPath;
+
+    std::set_terminate([]
+    {
+        if (auto current = std::current_exception())
+        {
+            try
+            {
+                std::rethrow_exception(current);
+            }
+            catch (const std::exception& e)
+            {
+                appendCrashLog(std::string("terminate: ") + e.what());
+            }
+            catch (...)
+            {
+                appendCrashLog("terminate: unknown exception");
+            }
+        }
+        else
+        {
+            appendCrashLog("terminate: no active exception");
+        }
+
+        std::abort();
+    });
+
+#ifdef _WIN32
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS*) -> LONG
+    {
+        appendCrashLog("SEH crash");
+        return EXCEPTION_EXECUTE_HANDLER;
+    });
+#endif
+}
+
 [[nodiscard]] GLuint compileShader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
@@ -539,9 +621,7 @@ void updatePhysics(Camera& camera,
     }
 }
 
-} // namespace
-
-int main()
+int runGame()
 {
     if (glfwInit() != GLFW_TRUE)
     {
@@ -1002,5 +1082,53 @@ void main()
     return EXIT_SUCCESS;
 }
 
+} // namespace
 
+int main(int argc, char** argv)
+{
+    std::filesystem::path exePath;
+    if (argc > 0 && argv[0] != nullptr)
+    {
+        std::error_code ec;
+        exePath = std::filesystem::canonical(argv[0], ec);
+        if (ec)
+        {
+            exePath = std::filesystem::absolute(argv[0], ec);
+            if (ec)
+            {
+                exePath.clear();
+            }
+        }
+    }
 
+    if (exePath.empty())
+    {
+        exePath = std::filesystem::current_path();
+    }
+
+    std::filesystem::path logPath = exePath.parent_path();
+    if (logPath.empty())
+    {
+        logPath = std::filesystem::current_path();
+    }
+    logPath /= "blockgame_crash.log";
+
+    initializeCrashLogging(logPath);
+
+    try
+    {
+        return runGame();
+    }
+    catch (const std::exception& e)
+    {
+        appendCrashLog(std::string("uncaught exception: ") + e.what());
+        std::cerr << "Unhandled exception: " << e.what() << '\n';
+    }
+    catch (...)
+    {
+        appendCrashLog("uncaught exception: unknown exception");
+        std::cerr << "Unhandled non-standard exception" << std::endl;
+    }
+
+    return EXIT_FAILURE;
+}

@@ -74,6 +74,12 @@ struct BiomeDefinition
         SoilCreepSettings soilCreep{};
         StripeSettings stripes{};
         WaterFillSettings waterFill{};
+        struct CoastSettings
+        {
+            float range{16.0f};
+            float minRoughnessScale{0.25f};
+            float heightBlend{0.6f};
+        } coast{};
     } terrainSettings{};
 
     [[nodiscard]] bool isOcean() const noexcept { return oceanFlag_; }

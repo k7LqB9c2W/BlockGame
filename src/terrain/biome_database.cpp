@@ -271,6 +271,25 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
         oss << "Biome '" << definition.id << "' must have non-negative water_fill.max_depth in " << filePath;
         throw std::runtime_error(oss.str());
     }
+    const auto& coast = definition.terrainSettings.coast;
+    if (!std::isfinite(coast.range) || coast.range <= 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have positive finite coast.range in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (!std::isfinite(coast.minRoughnessScale) || coast.minRoughnessScale < 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have non-negative coast.min_roughness_scale in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (!std::isfinite(coast.heightBlend) || coast.heightBlend < 0.0f || coast.heightBlend > 1.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have coast.height_blend within [0, 1] in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
 }
 
 } // namespace
@@ -543,6 +562,11 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     if (const auto smooth = table["smooth_beaches"].value<bool>())
     {
         definition.terrainSettings.smoothBeaches = *smooth;
+        if (definition.terrainSettings.smoothBeaches)
+        {
+            definition.terrainSettings.coast.minRoughnessScale = 0.1f;
+            definition.terrainSettings.coast.heightBlend = 0.0f;
+        }
     }
 
     if (const auto interpolationCurveValue = table["interpolation_curve"].value<std::string>())
@@ -634,6 +658,16 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
         {
             water.maxDepth = static_cast<int>(*maxDepthValue);
         }
+    }
+
+    if (const toml::table* coastTable = table["coast"].as_table())
+    {
+        auto& coast = definition.terrainSettings.coast;
+        coast.range = std::max(readFloatOr(*coastTable, "range", coast.range), 1.0f);
+        coast.minRoughnessScale =
+            std::max(readFloatOr(*coastTable, "min_roughness_scale", coast.minRoughnessScale), 0.0f);
+        coast.heightBlend =
+            std::clamp(readFloatOr(*coastTable, "height_blend", coast.heightBlend), 0.0f, 1.0f);
     }
 
     definition.setFlags(parseFlags(table, path));

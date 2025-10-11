@@ -16,6 +16,11 @@ flags = ["land", "little_mountains"]
 smooth_beaches = false
 keep_original_terrain = 0.55
 
+[coast]
+range = 18.0
+min_roughness_scale = 0.55
+height_blend = 0.1
+
 [soil_creep]
 strength = 0.15
 max_step = 1

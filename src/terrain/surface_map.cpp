@@ -227,15 +227,16 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
 
             if (std::isfinite(climateSample.distanceToCoast))
             {
-                constexpr float kBeachSmoothingRange = 16.0f;
-                const float t = std::clamp(climateSample.distanceToCoast / kBeachSmoothingRange, 0.0f, 1.0f);
-                const bool biomePrefersBeach = dominantBiome->terrainSettings.smoothBeaches || dominantBiome->isOcean();
-                const float minFactor = biomePrefersBeach ? 0.1f : 0.25f;
-                const float smoothFactor = glm::mix(minFactor, 1.0f, t);
+                const auto& coast = dominantBiome->terrainSettings.coast;
+                const float range = std::max(coast.range, 1.0f);
+                const float t = std::clamp(climateSample.distanceToCoast / range, 0.0f, 1.0f);
+                const float minFactor = std::clamp(coast.minRoughnessScale, 0.0f, 1.0f);
+                const float smoothFactor = std::clamp(glm::mix(minFactor, 1.0f, t), 0.0f, 1.0f);
                 roughStrength *= smoothFactor;
                 hillStrength *= smoothFactor;
                 mountainStrength *= smoothFactor;
-                const float heightBlend = glm::mix(0.0f, 1.0f, t);
+                const float baseBlendStrength = std::clamp(coast.heightBlend, 0.0f, 1.0f);
+                const float heightBlend = glm::mix(baseBlendStrength, 1.0f, t);
                 baseHeight = glm::mix(static_cast<float>(profile_.seaLevel), baseHeight, heightBlend);
             }
 

@@ -130,6 +130,7 @@ private:
     {
         std::unique_ptr<ClimateFragment> fragment;
         std::list<glm::ivec2>::iterator lruIt;
+        bool inLru{false};
     };
 
     static int floorDiv(int value, int divisor) noexcept;

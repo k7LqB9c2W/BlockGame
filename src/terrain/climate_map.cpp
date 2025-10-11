@@ -272,9 +272,31 @@ void NoiseVoronoiClimateGenerator::gatherCandidateSeeds(const glm::ivec2& worldP
 
 void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, ClimateSample& outSample) const
 {
-    std::vector<const BiomeSeed*> candidates;
-    candidates.reserve(128);
-    gatherCandidateSeeds(worldPos, candidates);
+    std::vector<const BiomeSeed*> rawCandidates;
+    rawCandidates.reserve(128);
+    gatherCandidateSeeds(worldPos, rawCandidates);
+
+    struct CandidateInfo
+    {
+        const BiomeSeed* seed{nullptr};
+        float distance{0.0f};
+        float radius{1.0f};
+        float normalized{0.0f};
+        float influence{0.0f};
+    };
+
+    std::vector<CandidateInfo> candidates;
+    candidates.reserve(rawCandidates.size());
+
+    for (const BiomeSeed* candidate : rawCandidates)
+    {
+        const float distSq = lengthSquared(worldPos, candidate->position);
+        const float distance = std::sqrt(distSq);
+        const float normalized = distance / std::max(candidate->radius, 1.0f);
+        const float blended = std::clamp(1.0f - normalized, 0.0f, 1.0f);
+        float influence = smoothStep(blended);
+        candidates.push_back(CandidateInfo{candidate, distance, std::max(candidate->radius, 1.0f), normalized, influence});
+    }
 
     struct WeightedSeed
     {
@@ -282,23 +304,23 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
         float weight{0.0f};
         float normalizedDistance{0.0f};
         float distance{0.0f};
+        float radius{1.0f};
     };
 
     std::vector<WeightedSeed> weighted;
     weighted.reserve(candidates.size());
 
-    for (const BiomeSeed* candidate : candidates)
+    for (const CandidateInfo& candidate : candidates)
     {
-        const float distSq = lengthSquared(worldPos, candidate->position);
-        const float distance = std::sqrt(distSq);
-        const float normalized = distance / std::max(candidate->radius, 1.0f);
-        const float blended = std::clamp(1.0f - normalized, 0.0f, 1.0f);
-        float influence = smoothStep(blended);
-        if (influence <= std::numeric_limits<float>::epsilon())
+        if (candidate.influence <= std::numeric_limits<float>::epsilon())
         {
             continue;
         }
-        weighted.push_back(WeightedSeed{candidate, influence, normalized, distance});
+        weighted.push_back(WeightedSeed{candidate.seed,
+                                        candidate.influence,
+                                        candidate.normalized,
+                                        candidate.distance,
+                                        candidate.radius});
     }
 
     if (weighted.empty())
@@ -393,7 +415,33 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
     const WeightedSeed& dominant = weighted.front();
     outSample.dominantSitePos = glm::vec2(static_cast<float>(dominant.seed->position.x),
                                           static_cast<float>(dominant.seed->position.y));
-    outSample.dominantSiteHalfExtents = glm::vec2(std::max(dominant.seed->radius, 1.0f));
+    outSample.dominantSiteHalfExtents = glm::vec2(dominant.radius);
+    outSample.dominantIsOcean = dominant.seed->biome && dominant.seed->biome->isOcean();
+
+    float bestBoundary = std::numeric_limits<float>::infinity();
+    for (const CandidateInfo& entry : candidates)
+    {
+        if (!entry.seed || !entry.seed->biome)
+        {
+            continue;
+        }
+        const bool isOceanSeed = entry.seed->biome->isOcean();
+        if (isOceanSeed == outSample.dominantIsOcean)
+        {
+            continue;
+        }
+        float boundaryDistance = outSample.dominantIsOcean ? std::max(0.0f, entry.radius - entry.distance)
+                                                           : std::max(0.0f, entry.distance - entry.radius);
+        bestBoundary = std::min(bestBoundary, boundaryDistance);
+    }
+    if (std::isfinite(bestBoundary))
+    {
+        outSample.distanceToCoast = bestBoundary;
+    }
+    else
+    {
+        outSample.distanceToCoast = outSample.dominantIsOcean ? 0.0f : std::numeric_limits<float>::infinity();
+    }
 }
 
 void NoiseVoronoiClimateGenerator::generate(ClimateFragment& fragment)

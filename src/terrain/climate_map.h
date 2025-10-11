@@ -43,6 +43,8 @@ struct ClimateSample
     float keepOriginalMix{0.0f};
     glm::vec2 dominantSitePos{0.0f};
     glm::vec2 dominantSiteHalfExtents{0.0f};
+    float distanceToCoast{std::numeric_limits<float>::infinity()};
+    bool dominantIsOcean{false};
 
     [[nodiscard]] const BiomeDefinition* dominantBiome() const noexcept
     {

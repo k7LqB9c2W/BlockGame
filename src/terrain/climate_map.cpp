@@ -344,10 +344,12 @@ const ClimateFragment& ClimateMap::fragmentForColumn(int worldX, int worldZ) con
     const ClimateFragment* result = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto [it, inserted] = fragments_.emplace(key, FragmentCacheEntry{std::move(fragment), lru_.end()});
+        FragmentCacheEntry entry;
+        entry.fragment = std::move(fragment);
+        entry.lruIt = lru_.emplace(lru_.begin(), key);
+        entry.inLru = true;
+        auto [it, inserted] = fragments_.emplace(key, std::move(entry));
         (void)inserted;
-        it->second.lruIt = lru_.emplace(lru_.begin(), key);
-        touch(it->second);
         evictIfNeeded();
         result = it->second.fragment.get();
     }
@@ -357,11 +359,12 @@ const ClimateFragment& ClimateMap::fragmentForColumn(int worldX, int worldZ) con
 
 void ClimateMap::touch(FragmentCacheEntry& entry) const
 {
-    if (entry.lruIt != lru_.end())
+    if (entry.inLru)
     {
         lru_.erase(entry.lruIt);
     }
     entry.lruIt = lru_.emplace(lru_.begin(), entry.fragment->fragmentCoord());
+    entry.inLru = true;
 }
 
 void ClimateMap::evictIfNeeded() const
@@ -372,6 +375,10 @@ void ClimateMap::evictIfNeeded() const
         auto it = fragments_.find(key);
         if (it != fragments_.end())
         {
+            if (it->second.inLru)
+            {
+                lru_.erase(it->second.lruIt);
+            }
             fragments_.erase(it);
         }
         lru_.pop_back();

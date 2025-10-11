@@ -129,6 +129,7 @@ private:
     {
         std::unique_ptr<SurfaceFragment> fragment;
         std::list<FragmentKey>::iterator lruIt;
+        bool inLru{false};
     };
 
     static int floorDiv(int value, int divisor) noexcept;

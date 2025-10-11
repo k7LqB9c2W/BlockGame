@@ -1,0 +1,74 @@
+2025-10-10 20:59:42 - CRT report[2]: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\include\list(146) : Assertion failed: cannot dereference value-initialized list iterator
+
+2025-10-10 21:00:00 - signal: SIGABRT
+2025-10-10 21:00:00 - stack:
+  [0] 0x7ff78c953548
+  [1] 0x7ff78c953f28
+  [2] 0x7ffa15e190ed
+  [3] 0x7ffa15e140bf
+  [4] 0x7ffa15e156d3
+  [5] 0x7ffa15e165a9
+  [6] 0x7ffa15e15590
+  [7] 0x7ff78ca6dfd6
+  [8] 0x7ff78ca6e124
+  [9] 0x7ff78ca6df24
+  [10] 0x7ff78ca69280
+  [11] 0x7ff78c98c462
+  [12] 0x7ff78c987273
+  [13] 0x7ff78c987091
+  [14] 0x7ff78c9c87ae
+  [15] 0x7ff78c9bde8b
+  [16] 0x7ffa15e23010
+  [17] 0x7ffa7aece8d7
+  [18] 0x7ffa7c988d9c
+2025-10-10 21:00:00 - minidump: written to blockgame_crash.dmp
+2025-10-10 21:08:13 - CRT report[2]: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\include\list(146) : Assertion failed: cannot dereference value-initialized list iterator
+
+2025-10-10 21:08:14 - signal: SIGABRT
+2025-10-10 21:08:14 - stack:
+  [0] 0x7ff6fc243648
+  [1] 0x7ff6fc244028
+  [2] 0x7ffa15db90ed
+  [3] 0x7ffa15db40bf
+  [4] 0x7ffa15db56d3
+  [5] 0x7ffa15db65a9
+  [6] 0x7ffa15db5590
+  [7] 0x7ff6fc360046
+  [8] 0x7ff6fc360194
+  [9] 0x7ff6fc35ff94
+  [10] 0x7ff6fc35b2f0
+  [11] 0x7ff6fc27e0c2
+  [12] 0x7ff6fc278ed3
+  [13] 0x7ff6fc278cf1
+  [14] 0x7ff6fc2ba40e
+  [15] 0x7ff6fc2afaeb
+  [16] 0x7ffa15dc3010
+  [17] 0x7ffa7aece8d7
+  [18] 0x7ffa7c988d9c
+2025-10-10 21:08:14 - minidump: written to blockgame_crash.dmp
+2025-10-10 21:18:03 - CRT report[2]: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\include\list(146) : Assertion failed: cannot dereference value-initialized list iterator
+
+2025-10-10 21:18:11 - signal: SIGABRT
+2025-10-10 21:18:11 - stack:
+  [0] 0x7ff7133d3648
+  [1] 0x7ff7133d4028
+  [2] 0x7ffa147290ed
+  [3] 0x7ffa147240bf
+  [4] 0x7ffa147256d3
+  [5] 0x7ffa147265a9
+  [6] 0x7ffa14725590
+  [7] 0x7ff7133dd4f6
+  [8] 0x7ff7134f05a4
+  [9] 0x7ff7134f0274
+  [10] 0x7ff7134eb2b8
+  [11] 0x7ff7134eb3ef
+  [12] 0x7ff7134f3be7
+  [13] 0x7ff71340e2c6
+  [14] 0x7ff713408ed3
+  [15] 0x7ff713408cf1
+  [16] 0x7ff71344a40e
+  [17] 0x7ff71343faeb
+  [18] 0x7ffa14733010
+  [19] 0x7ffa7aece8d7
+  [20] 0x7ffa7c988d9c
+2025-10-10 21:18:11 - minidump: written to blockgame_crash.dmp

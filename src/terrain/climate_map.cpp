@@ -344,14 +344,26 @@ const ClimateFragment& ClimateMap::fragmentForColumn(int worldX, int worldZ) con
     const ClimateFragment* result = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        FragmentCacheEntry entry;
-        entry.fragment = std::move(fragment);
-        entry.lruIt = lru_.emplace(lru_.begin(), key);
-        entry.inLru = true;
-        auto [it, inserted] = fragments_.emplace(key, std::move(entry));
-        (void)inserted;
-        evictIfNeeded();
-        result = it->second.fragment.get();
+
+        auto existing = fragments_.find(key);
+        if (existing != fragments_.end())
+        {
+            // Another thread populated this fragment while we were generating ours.
+            touch(existing->second);
+            result = existing->second.fragment.get();
+        }
+        else
+        {
+            FragmentCacheEntry entry{};
+            entry.fragment = std::move(fragment);
+            entry.lruIt = lru_.emplace(lru_.begin(), key);
+            entry.inLru = true;
+
+            auto [it, inserted] = fragments_.emplace(key, std::move(entry));
+            (void)inserted;
+            evictIfNeeded();
+            result = it->second.fragment.get();
+        }
     }
 
     return *result;
@@ -369,19 +381,19 @@ void ClimateMap::touch(FragmentCacheEntry& entry) const
 
 void ClimateMap::evictIfNeeded() const
 {
-    while (!lru_.empty() && fragments_.size() > maxFragments_)
+    while (fragments_.size() > maxFragments_ && !lru_.empty())
     {
-        const glm::ivec2 key = lru_.back();
-        auto it = fragments_.find(key);
-        if (it != fragments_.end())
+        auto lruIt = std::prev(lru_.end());
+        const glm::ivec2 key = *lruIt;
+
+        auto fragIt = fragments_.find(key);
+        if (fragIt != fragments_.end())
         {
-            if (it->second.inLru)
-            {
-                lru_.erase(it->second.lruIt);
-            }
-            fragments_.erase(it);
+            fragIt->second.inLru = false;
+            fragments_.erase(fragIt);
         }
-        lru_.pop_back();
+
+        lru_.erase(lruIt);
     }
 }
 

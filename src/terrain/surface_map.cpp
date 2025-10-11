@@ -300,11 +300,26 @@ const SurfaceFragment& SurfaceMap::getFragment(const glm::ivec2& fragmentCoord, 
     const SurfaceFragment* result = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto [it, inserted] = fragments_.emplace(key, FragmentCacheEntry{std::move(fragment), lru_.end()});
-        it->second.lruIt = lru_.emplace(lru_.begin(), key);
-        touch(it->second);
-        evictIfNeeded();
-        result = it->second.fragment.get();
+
+        auto existing = fragments_.find(key);
+        if (existing != fragments_.end())
+        {
+            touch(existing->second);
+            result = existing->second.fragment.get();
+        }
+        else
+        {
+            FragmentCacheEntry entry{};
+            entry.fragment = std::move(fragment);
+            entry.lruIt = lru_.emplace(lru_.begin(), key);
+            entry.inLru = true;
+
+            auto [it, inserted] = fragments_.emplace(key, std::move(entry));
+            (void)inserted;
+
+            evictIfNeeded();
+            result = it->second.fragment.get();
+        }
     }
 
     return *result;
@@ -352,7 +367,7 @@ int SurfaceMap::floorDiv(int value, int divisor) noexcept
 
 void SurfaceMap::touch(FragmentCacheEntry& entry) const
 {
-    if (entry.lruIt != lru_.end())
+    if (entry.inLru)
     {
         lru_.erase(entry.lruIt);
     }
@@ -361,19 +376,24 @@ void SurfaceMap::touch(FragmentCacheEntry& entry) const
     key.coord = entry.fragment->fragmentCoord();
     key.lod = entry.fragment->lodLevel();
     entry.lruIt = lru_.emplace(lru_.begin(), key);
+    entry.inLru = true;
 }
 
 void SurfaceMap::evictIfNeeded() const
 {
-    while (!lru_.empty() && fragments_.size() > maxFragments_)
+    while (fragments_.size() > maxFragments_ && !lru_.empty())
     {
-        const FragmentKey key = lru_.back();
-        auto it = fragments_.find(key);
-        if (it != fragments_.end())
+        auto lruIt = std::prev(lru_.end());
+        const FragmentKey key = *lruIt;
+
+        auto fragIt = fragments_.find(key);
+        if (fragIt != fragments_.end())
         {
-            fragments_.erase(it);
+            fragIt->second.inLru = false;
+            fragments_.erase(fragIt);
         }
-        lru_.pop_back();
+
+        lru_.erase(lruIt);
     }
 }
 

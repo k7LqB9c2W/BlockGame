@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -50,6 +51,8 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <crtdbg.h>
+#include <DbgHelp.h>
 #endif
 
 
@@ -57,6 +60,50 @@ namespace
 {
 std::mutex gCrashLogMutex;
 std::filesystem::path gCrashLogPath;
+
+void appendCrashLog(std::string message);
+#ifdef _WIN32
+void appendStackTrace(EXCEPTION_POINTERS* exceptionPointers = nullptr);
+void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers);
+int __cdecl crtReportHook(int reportType, char* message, int* returnValue);
+#endif
+
+void crashSignalHandler(int signalValue)
+{
+    const char* name = "unknown";
+    switch (signalValue)
+    {
+        case SIGABRT:
+            name = "SIGABRT";
+            break;
+#ifdef SIGSEGV
+        case SIGSEGV:
+            name = "SIGSEGV";
+            break;
+#endif
+#ifdef SIGILL
+        case SIGILL:
+            name = "SIGILL";
+            break;
+#endif
+#ifdef SIGFPE
+        case SIGFPE:
+            name = "SIGFPE";
+            break;
+#endif
+#ifdef SIGTERM
+        case SIGTERM:
+            name = "SIGTERM";
+            break;
+#endif
+    }
+    appendCrashLog(std::string("signal: ") + name);
+#ifdef _WIN32
+    appendStackTrace();
+    writeMiniDump(nullptr);
+#endif
+    std::_Exit(EXIT_FAILURE);
+}
 
 void appendCrashLog(std::string message)
 {
@@ -88,9 +135,132 @@ void appendCrashLog(std::string message)
     out.flush();
 }
 
+#ifdef _WIN32
+void appendStackTrace(EXCEPTION_POINTERS* exceptionPointers)
+{
+    constexpr USHORT kMaxFrames = 64;
+    void* stack[kMaxFrames]{};
+    const USHORT captured = CaptureStackBackTrace(0, kMaxFrames, stack, nullptr);
+
+    std::ostringstream oss;
+    oss << "stack:";
+    for (USHORT i = 0; i < captured; ++i)
+    {
+        const auto address = reinterpret_cast<std::uintptr_t>(stack[i]);
+        oss << "\n  [" << i << "] 0x" << std::hex << address << std::dec;
+    }
+
+    if (exceptionPointers && exceptionPointers->ExceptionRecord)
+    {
+        oss << "\n  exception code: 0x" << std::hex
+            << static_cast<std::uint32_t>(exceptionPointers->ExceptionRecord->ExceptionCode) << std::dec;
+    }
+
+    appendCrashLog(oss.str());
+}
+
+void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers)
+{
+    std::filesystem::path dumpPath;
+    if (!gCrashLogPath.empty())
+    {
+        dumpPath = gCrashLogPath.parent_path() / "blockgame_crash.dmp";
+    }
+    else
+    {
+        std::error_code ec;
+        dumpPath = std::filesystem::current_path(ec);
+        if (ec)
+        {
+            return;
+        }
+        dumpPath /= "blockgame_crash.dmp";
+    }
+
+    HMODULE dbgHelp = LoadLibraryW(L"DbgHelp.dll");
+    if (!dbgHelp)
+    {
+        appendCrashLog("minidump: failed to load DbgHelp.dll");
+        return;
+    }
+
+    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                              CONST PMINIDUMP_EXCEPTION_INFORMATION,
+                                              CONST PMINIDUMP_USER_STREAM_INFORMATION,
+                                              CONST PMINIDUMP_CALLBACK_INFORMATION);
+
+    auto miniDumpWriteDump = reinterpret_cast<MiniDumpWriteDumpFn>(GetProcAddress(dbgHelp, "MiniDumpWriteDump"));
+    if (!miniDumpWriteDump)
+    {
+        appendCrashLog("minidump: MiniDumpWriteDump not available");
+        FreeLibrary(dbgHelp);
+        return;
+    }
+
+    HANDLE file = CreateFileW(dumpPath.c_str(),
+                              GENERIC_WRITE,
+                              FILE_SHARE_READ,
+                              nullptr,
+                              CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        appendCrashLog("minidump: failed to create dump file");
+        FreeLibrary(dbgHelp);
+        return;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION info{};
+    info.ThreadId = GetCurrentThreadId();
+    info.ExceptionPointers = exceptionPointers;
+    info.ClientPointers = FALSE;
+
+    const MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory);
+    const BOOL dumpResult = miniDumpWriteDump(GetCurrentProcess(),
+                                              GetCurrentProcessId(),
+                                              file,
+                                              dumpType,
+                                              exceptionPointers ? &info : nullptr,
+                                              nullptr,
+                                              nullptr);
+    CloseHandle(file);
+    FreeLibrary(dbgHelp);
+
+    appendCrashLog(dumpResult ? "minidump: written to blockgame_crash.dmp"
+                              : "minidump: MiniDumpWriteDump failed");
+}
+
+int __cdecl crtReportHook(int reportType, char* message, int*)
+{
+    const char* text = message ? message : "<null>";
+    appendCrashLog(std::string("CRT report[") + std::to_string(reportType) + "]: " + text);
+    return FALSE; // allow default processing
+}
+#endif
+
 void initializeCrashLogging(const std::filesystem::path& logPath)
 {
     gCrashLogPath = logPath;
+
+    // Ensure the log file exists so later appends succeed even if the program dies immediately.
+    {
+        std::ofstream out(gCrashLogPath, std::ios::app);
+    }
+
+    std::signal(SIGABRT, crashSignalHandler);
+#ifdef SIGSEGV
+    std::signal(SIGSEGV, crashSignalHandler);
+#endif
+#ifdef SIGILL
+    std::signal(SIGILL, crashSignalHandler);
+#endif
+#ifdef SIGFPE
+    std::signal(SIGFPE, crashSignalHandler);
+#endif
+#ifdef SIGTERM
+    std::signal(SIGTERM, crashSignalHandler);
+#endif
 
     std::set_terminate([]
     {
@@ -114,15 +284,28 @@ void initializeCrashLogging(const std::filesystem::path& logPath)
             appendCrashLog("terminate: no active exception");
         }
 
+#ifdef _WIN32
+        appendStackTrace();
+        writeMiniDump(nullptr);
+#endif
         std::abort();
     });
 
 #ifdef _WIN32
-    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS*) -> LONG
+    _CrtSetReportHook2(_CRT_RPTHOOK_INSTALL, crtReportHook);
+
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* info) -> LONG
     {
         appendCrashLog("SEH crash");
+        appendStackTrace(info);
+        writeMiniDump(info);
         return EXCEPTION_EXECUTE_HANDLER;
     });
+
+    // Avoid CRT abort dialog swallowing the process without logging.
+#ifdef _DEBUG
+    _set_abort_behavior(0, _CALL_REPORTFAULT);
+#endif
 #endif
 }
 

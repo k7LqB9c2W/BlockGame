@@ -1101,17 +1101,28 @@ int main(int argc, char** argv)
         }
     }
 
-    if (exePath.empty())
+    std::filesystem::path exeDirectory;
+    std::error_code dirEc;
+    const bool pathIsDirectory = std::filesystem::is_directory(exePath, dirEc);
+    if (exePath.empty() || (!dirEc && pathIsDirectory))
     {
-        exePath = std::filesystem::current_path();
+        exeDirectory = exePath;
+    }
+    else
+    {
+        exeDirectory = exePath.parent_path();
     }
 
-    std::filesystem::path logPath = exePath.parent_path();
-    if (logPath.empty())
+    if (exeDirectory.empty())
     {
-        logPath = std::filesystem::current_path();
+        exeDirectory = std::filesystem::current_path();
     }
-    logPath /= "blockgame_crash.log";
+
+    std::filesystem::path logPath = exeDirectory / "blockgame_crash.log";
+
+#ifndef NDEBUG
+    std::cout << "Crash log path: " << logPath << '\n';
+#endif
 
     initializeCrashLogging(logPath);
 

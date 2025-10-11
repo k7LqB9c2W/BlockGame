@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\ricke\Documents\blockgame2\BlockGame\build_vs\CMakeFiles\1b6ad37cfaca4c19cf764eed7c54412d\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{BE254A4B-1844-35C7-BD6C-529E82F3E289}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

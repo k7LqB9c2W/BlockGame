@@ -11,6 +11,7 @@
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
+#include <glm/gtc/constants.hpp>
 
 namespace terrain
 {
@@ -30,30 +31,6 @@ float hashToUnitFloat(int x, int y, int z) noexcept
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= (h >> 16);
     return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
-}
-
-std::array<float, 2> axisInterpolationWeights(float t, BiomeDefinition::InterpolationCurve curve) noexcept
-{
-    t = std::clamp(t, 0.0f, 1.0f);
-    switch (curve)
-    {
-        case BiomeDefinition::InterpolationCurve::Step:
-            return t < 0.5f ? std::array<float, 2>{1.0f, 0.0f} : std::array<float, 2>{0.0f, 1.0f};
-        case BiomeDefinition::InterpolationCurve::Linear:
-            return {1.0f - t, t};
-        case BiomeDefinition::InterpolationCurve::Square:
-        {
-            if (t < 0.5f)
-            {
-                const float tsqr = 2.0f * t * t;
-                return {1.0f - tsqr, tsqr};
-            }
-            const float inv = 1.0f - t;
-            const float tsqr = 2.0f * inv * inv;
-            return {tsqr, 1.0f - tsqr};
-        }
-    }
-    return {1.0f - t, t};
 }
 
 } // namespace
@@ -87,11 +64,40 @@ NoiseVoronoiClimateGenerator::NoiseVoronoiClimateGenerator(const BiomeDatabase& 
                                                            int biomeSizeInChunks)
     : biomeDatabase_(database),
       profile_(profile),
-      chunkSize_(std::max(chunkSize, 1)),
-      biomeSizeInChunks_(std::max(biomeSizeInChunks, 1)),
-      cellSize_(static_cast<float>(chunkSize_ * biomeSizeInChunks_)),
       baseSeed_(seed)
 {
+    (void)chunkSize;
+    (void)biomeSizeInChunks;
+
+    chunkSpan_ = std::max(64, static_cast<int>(std::ceil(biomeDatabase_.maxBiomeRadius() * 1.75f)));
+    const int alignment = 32;
+    chunkSpan_ = std::max(alignment, ((chunkSpan_ + alignment - 1) / alignment) * alignment);
+    neighborRadius_ =
+        std::max(2, static_cast<int>(std::ceil(biomeDatabase_.maxBiomeRadius() / static_cast<float>(chunkSpan_))) + 1);
+
+    const auto& defs = biomeDatabase_.definitions();
+    biomeSelection_.reserve(defs.size());
+    biomeWeightPrefix_.reserve(defs.size());
+    for (const BiomeDefinition& def : defs)
+    {
+        if (def.spawnChance <= 0.0f)
+        {
+            continue;
+        }
+        const float weight = std::max(def.spawnChance * def.footprintMultiplier, 0.0f);
+        if (weight <= 0.0f)
+        {
+            continue;
+        }
+        biomeSelection_.push_back(&def);
+        totalSpawnWeight_ += weight;
+        biomeWeightPrefix_.push_back(totalSpawnWeight_);
+    }
+
+    if (biomeSelection_.empty())
+    {
+        throw std::runtime_error("No suitable biomes for radius-aware climate generation");
+    }
 }
 
 int NoiseVoronoiClimateGenerator::floorDiv(int value, int divisor) noexcept
@@ -105,141 +111,240 @@ int NoiseVoronoiClimateGenerator::floorDiv(int value, int divisor) noexcept
     return quotient;
 }
 
-std::array<float, 2> NoiseVoronoiClimateGenerator::axisInterpolationWeights(
-    float t,
-    BiomeDefinition::InterpolationCurve curve) noexcept
+float NoiseVoronoiClimateGenerator::smoothStep(float t) noexcept
 {
-    return ::terrain::axisInterpolationWeights(t, curve);
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
 }
 
-const BiomeDefinition& NoiseVoronoiClimateGenerator::biomeForCell(int cellX, int cellZ) const
+float NoiseVoronoiClimateGenerator::lengthSquared(const glm::ivec2& a, const glm::ivec2& b) noexcept
 {
-    const float selector = hashToUnitFloat(cellX, 31, cellZ);
-    const std::size_t biomeCount = biomeDatabase_.biomeCount();
-    if (biomeCount == 0)
+    const glm::ivec2 d = a - b;
+    return static_cast<float>(d.x * d.x + d.y * d.y);
+}
+
+const NoiseVoronoiClimateGenerator::ChunkSeeds&
+NoiseVoronoiClimateGenerator::chunkSeeds(int chunkX, int chunkZ) const
+{
+    const glm::ivec2 key{chunkX, chunkZ};
+    std::lock_guard<std::mutex> lock(chunkMutex_);
+    auto it = chunkCache_.find(key);
+    if (it != chunkCache_.end())
     {
-        throw std::runtime_error("Biome database is empty");
+        return it->second;
     }
-    const std::size_t maxIndex = biomeCount - 1;
-    const std::size_t biomeIndex =
-        std::min(static_cast<std::size_t>(selector * static_cast<float>(biomeCount)), maxIndex);
-    return biomeDatabase_.definitionByIndex(biomeIndex);
+    ChunkSeeds seeds = buildChunkSeeds(chunkX, chunkZ);
+    auto [insertedIt, inserted] = chunkCache_.emplace(key, std::move(seeds));
+    (void)inserted;
+    return insertedIt->second;
 }
 
-float NoiseVoronoiClimateGenerator::sampleBaseHeight(const BiomeDefinition& definition,
-                                                     int cellX,
-                                                     int cellZ) const noexcept
+NoiseVoronoiClimateGenerator::ChunkSeeds
+NoiseVoronoiClimateGenerator::buildChunkSeeds(int chunkX, int chunkZ) const
 {
-    const float minHeight = static_cast<float>(definition.minHeight);
-    const float maxHeight = static_cast<float>(definition.maxHeight);
-    const float center = 0.5f * (minHeight + maxHeight);
-    const float range = maxHeight - minHeight;
-    unsigned seed = baseSeed_;
-    seed = hashCombine(seed, static_cast<unsigned>(cellX * 73856093));
-    seed = hashCombine(seed, static_cast<unsigned>(cellZ * 19349663));
-    seed = hashCombine(seed, static_cast<unsigned>(std::hash<std::string>{}(definition.id) & 0xFFFFFFFFu));
-    const float noise = hashToUnitFloat(static_cast<int>(seed), 17, 91) * 2.0f - 1.0f;
-    const float variation = range * 0.35f;
-    return std::clamp(center + noise * variation, minHeight, maxHeight);
-}
+    ChunkSeeds result{};
+    const int baseX = chunkX * chunkSpan_;
+    const int baseZ = chunkZ * chunkSpan_;
 
-void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, ClimateSample& outSample) const
-{
-    outSample = ClimateSample{};
+    std::uint64_t seedValue = baseSeed_;
+    seedValue = hashCombine(seedValue, static_cast<unsigned>(chunkX * 73856093));
+    seedValue = hashCombine(seedValue, static_cast<unsigned>(chunkZ * 19349663));
+    Random rng(seedValue);
 
-    const float cellSize = cellSize_;
-    const float invCellSize = 1.0f / cellSize;
-    const float fx = (static_cast<float>(worldX) + 0.5f) * invCellSize;
-    const float fz = (static_cast<float>(worldZ) + 0.5f) * invCellSize;
+    constexpr int kMaxSeedsPerChunk = 48;
+    constexpr int kMaxRejections = 96;
+    int rejections = 0;
 
-    const int baseCellX = static_cast<int>(std::floor(fx));
-    const int baseCellZ = static_cast<int>(std::floor(fz));
-    const float relX = fx - static_cast<float>(baseCellX);
-    const float relZ = fz - static_cast<float>(baseCellZ);
-
-    std::array<BiomeBlend, 4> localBlends{};
-    std::array<float, 4> rawWeights{};
-    std::array<glm::vec2, 4> centers{};
-    std::size_t blendCount = 0;
-    float weightSum = 0.0f;
-
-    for (int dz = 0; dz < 2; ++dz)
+    while (static_cast<int>(result.seeds.size()) < kMaxSeedsPerChunk && rejections < kMaxRejections)
     {
-        for (int dx = 0; dx < 2; ++dx)
+        const int worldX = baseX + rng.nextInt(0, chunkSpan_ - 1);
+        const int worldZ = baseZ + rng.nextInt(0, chunkSpan_ - 1);
+
+        BiomeSeed seed = createSeed(rng, worldX, worldZ);
+        if (!seed.biome)
         {
-            const int cellX = baseCellX + dx;
-            const int cellZ = baseCellZ + dz;
-            const BiomeDefinition& biome = biomeForCell(cellX, cellZ);
+            ++rejections;
+            continue;
+        }
 
-            const auto wx = axisInterpolationWeights(relX, biome.interpolationCurve);
-            const auto wz = axisInterpolationWeights(relZ, biome.interpolationCurve);
-            float weight = wx[dx] * wz[dz];
-            weight *= std::max(biome.interpolationWeight, 1e-3f);
-            if (weight <= std::numeric_limits<float>::epsilon())
-            {
-                continue;
-            }
+        if (!isValidPlacement(seed.position, seed.radius, result.seeds))
+        {
+            ++rejections;
+            continue;
+        }
 
-            BiomeBlend blend{};
-            blend.biome = &biome;
-            blend.weight = weight;
-            blend.height = sampleBaseHeight(biome, cellX, cellZ);
-            blend.roughness = biome.roughness;
-            blend.hills = biome.hills;
-            blend.mountains = biome.mountains;
+        result.maxRadius = std::max(result.maxRadius, static_cast<int>(std::ceil(seed.radius)));
+        result.seeds.push_back(seed);
+        rejections = 0;
+    }
 
-            const glm::vec2 cellCenter = glm::vec2((static_cast<float>(cellX) + 0.5f) * cellSize,
-                                                   (static_cast<float>(cellZ) + 0.5f) * cellSize);
-            const glm::vec2 worldPos = glm::vec2(static_cast<float>(worldX) + 0.5f,
-                                                 static_cast<float>(worldZ) + 0.5f);
-            const glm::vec2 offset = worldPos - cellCenter;
-            const float normalizedDistance =
-                glm::length(offset) / std::max(cellSize * 0.5f, 1.0f);
-            blend.normalizedDistance = normalizedDistance;
-            blend.seed = hashCombine(baseSeed_, static_cast<unsigned>(cellX * 73856093));
+    if (result.seeds.empty())
+    {
+        BiomeSeed fallback = createSeed(rng, baseX + chunkSpan_ / 2, baseZ + chunkSpan_ / 2);
+        result.maxRadius = static_cast<int>(std::ceil(fallback.radius));
+        result.seeds.push_back(fallback);
+    }
 
-            localBlends[blendCount] = blend;
-            rawWeights[blendCount] = weight;
-            centers[blendCount] = cellCenter;
-            weightSum += weight;
-            ++blendCount;
+    return result;
+}
+
+NoiseVoronoiClimateGenerator::BiomeSeed
+NoiseVoronoiClimateGenerator::createSeed(Random& rng, int worldX, int worldZ) const
+{
+    BiomeSeed seed{};
+    const BiomeDefinition& biome = chooseBiome(rng);
+    seed.biome = &biome;
+    const float radius = std::clamp(biome.radius + biome.radiusVariation * rng.nextFloatSigned(),
+                                    biome.minRadius(),
+                                    biome.maxRadius());
+    seed.radius = std::max(radius, 1.0f);
+    seed.weight = 1.0f / std::max(seed.radius * std::sqrt(glm::pi<float>()), 1.0f);
+    seed.baseHeight = randomizedHeight(rng, biome);
+    seed.position = {worldX, worldZ};
+    return seed;
+}
+
+const BiomeDefinition& NoiseVoronoiClimateGenerator::chooseBiome(Random& rng) const
+{
+    if (biomeSelection_.empty())
+    {
+        throw std::runtime_error("Biome selection table is empty");
+    }
+
+    const float pick = rng.nextFloat() * totalSpawnWeight_;
+    auto it = std::lower_bound(biomeWeightPrefix_.begin(), biomeWeightPrefix_.end(), pick);
+    std::size_t index = 0;
+    if (it == biomeWeightPrefix_.end())
+    {
+        index = biomeWeightPrefix_.size() - 1;
+    }
+    else
+    {
+        index = static_cast<std::size_t>(std::distance(biomeWeightPrefix_.begin(), it));
+    }
+    return *biomeSelection_[index];
+}
+
+float NoiseVoronoiClimateGenerator::randomizedHeight(Random& rng, const BiomeDefinition& biome) const noexcept
+{
+    const float minHeight = static_cast<float>(biome.minHeight);
+    const float maxHeight = static_cast<float>(biome.maxHeight);
+    if (maxHeight <= minHeight)
+    {
+        return minHeight;
+    }
+    return glm::mix(minHeight, maxHeight, rng.nextFloat());
+}
+
+bool NoiseVoronoiClimateGenerator::isValidPlacement(const glm::ivec2& position,
+                                                    float radius,
+                                                    const std::vector<BiomeSeed>& seeds) const noexcept
+{
+    for (const BiomeSeed& other : seeds)
+    {
+        const float combined = (radius + other.radius) * 0.85f;
+        const float distSq = lengthSquared(position, other.position);
+        if (distSq < combined * combined)
+        {
+            return false;
         }
     }
+    return true;
+}
 
-    if (blendCount == 0)
+void NoiseVoronoiClimateGenerator::gatherCandidateSeeds(const glm::ivec2& worldPos,
+                                                        std::vector<const BiomeSeed*>& outCandidates) const
+{
+    const int chunkX = floorDiv(worldPos.x, chunkSpan_);
+    const int chunkZ = floorDiv(worldPos.y, chunkSpan_);
+    for (int dz = -neighborRadius_; dz <= neighborRadius_; ++dz)
     {
-        outSample.blendCount = 0;
-        outSample.aggregatedHeight = 0.0f;
+        for (int dx = -neighborRadius_; dx <= neighborRadius_; ++dx)
+        {
+            const ChunkSeeds& chunk = chunkSeeds(chunkX + dx, chunkZ + dz);
+            for (const BiomeSeed& seed : chunk.seeds)
+            {
+                outCandidates.push_back(&seed);
+            }
+        }
+    }
+}
+
+void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, ClimateSample& outSample) const
+{
+    std::vector<const BiomeSeed*> candidates;
+    candidates.reserve(128);
+    gatherCandidateSeeds(worldPos, candidates);
+
+    struct WeightedSeed
+    {
+        const BiomeSeed* seed{nullptr};
+        float weight{0.0f};
+        float normalizedDistance{0.0f};
+        float distance{0.0f};
+    };
+
+    std::vector<WeightedSeed> weighted;
+    weighted.reserve(candidates.size());
+
+    for (const BiomeSeed* candidate : candidates)
+    {
+        const float distSq = lengthSquared(worldPos, candidate->position);
+        const float distance = std::sqrt(distSq);
+        const float normalized = distance / std::max(candidate->radius, 1.0f);
+        const float blended = std::clamp(1.0f - normalized, 0.0f, 1.0f);
+        float influence = smoothStep(blended);
+        if (influence <= std::numeric_limits<float>::epsilon())
+        {
+            continue;
+        }
+        weighted.push_back(WeightedSeed{candidate, influence, normalized, distance});
+    }
+
+    if (weighted.empty())
+    {
+        ClimateSample fallback{};
+        fallback.blendCount = 1;
+        const BiomeDefinition& biome = biomeDatabase_.definitionByIndex(0);
+        BiomeBlend blend{};
+        blend.biome = &biome;
+        blend.weight = 1.0f;
+        blend.height = static_cast<float>(biome.minHeight);
+        blend.roughness = biome.roughness;
+        blend.hills = biome.hills;
+        blend.mountains = biome.mountains;
+        blend.normalizedDistance = 0.0f;
+        blend.seed = hashCombine(baseSeed_, static_cast<unsigned>(biome.minHeight));
+        blend.falloff = biome.maxRadius();
+        fallback.blends[0] = blend;
+        fallback.aggregatedHeight = blend.height;
+        fallback.aggregatedRoughness = blend.roughness;
+        fallback.aggregatedHills = blend.hills;
+        fallback.aggregatedMountains = blend.mountains;
+        fallback.keepOriginalMix = std::clamp(biome.keepOriginalTerrain, 0.0f, 1.0f);
+        fallback.dominantSitePos = glm::vec2(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y));
+        fallback.dominantSiteHalfExtents = glm::vec2(biome.radius);
+        outSample = fallback;
         return;
     }
 
+    std::sort(weighted.begin(), weighted.end(), [](const WeightedSeed& a, const WeightedSeed& b) {
+        return a.weight > b.weight;
+    });
+
+    const std::size_t blendCount = std::min<std::size_t>(weighted.size(), outSample.blends.size());
+    float totalWeight = 0.0f;
     for (std::size_t i = 0; i < blendCount; ++i)
     {
-        localBlends[i].weight = rawWeights[i] / weightSum;
+        totalWeight += weighted[i].weight;
     }
-
-    for (std::size_t i = 0; i < blendCount; ++i)
+    if (totalWeight <= std::numeric_limits<float>::epsilon())
     {
-        std::size_t best = i;
-        for (std::size_t j = i + 1; j < blendCount; ++j)
-        {
-            if (localBlends[j].weight > localBlends[best].weight)
-            {
-                best = j;
-            }
-        }
-        if (best != i)
-        {
-            std::swap(localBlends[i], localBlends[best]);
-            std::swap(centers[i], centers[best]);
-        }
+        totalWeight = 1.0f;
     }
 
+    outSample = ClimateSample{};
     outSample.blendCount = blendCount;
-    for (std::size_t i = 0; i < blendCount; ++i)
-    {
-        outSample.blends[i] = localBlends[i];
-    }
 
     float aggregatedHeight = 0.0f;
     float aggregatedRoughness = 0.0f;
@@ -249,15 +354,31 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
 
     for (std::size_t i = 0; i < blendCount; ++i)
     {
-        const BiomeBlend& blend = localBlends[i];
-        aggregatedHeight += blend.height * blend.weight;
-        aggregatedRoughness += std::max(blend.roughness, 0.0f) * blend.weight;
-        aggregatedHills += std::max(blend.hills, 0.0f) * blend.weight;
-        aggregatedMountains += std::max(blend.mountains, 0.0f) * blend.weight;
-        if (blend.biome)
-        {
-            keepOriginal += std::clamp(blend.biome->keepOriginalTerrain, 0.0f, 1.0f) * blend.weight;
-        }
+        const WeightedSeed& entry = weighted[i];
+        const BiomeDefinition& biome = *entry.seed->biome;
+        const float normalizedWeight = entry.weight / totalWeight;
+
+        BiomeBlend blend{};
+        blend.biome = &biome;
+        blend.weight = normalizedWeight;
+        blend.height = entry.seed->baseHeight;
+        blend.roughness = biome.roughness;
+        blend.hills = biome.hills;
+        blend.mountains = biome.mountains;
+        blend.normalizedDistance = entry.normalizedDistance;
+        blend.falloff = std::max(entry.seed->radius, 1.0f);
+        const unsigned seedHash =
+            hashCombine(baseSeed_, hashCombine(static_cast<unsigned>(entry.seed->position.x),
+                                               static_cast<unsigned>(entry.seed->position.y)));
+        blend.seed = seedHash;
+
+        outSample.blends[i] = blend;
+
+        aggregatedHeight += blend.height * normalizedWeight;
+        aggregatedRoughness += blend.roughness * normalizedWeight;
+        aggregatedHills += blend.hills * normalizedWeight;
+        aggregatedMountains += blend.mountains * normalizedWeight;
+        keepOriginal += std::clamp(biome.keepOriginalTerrain, 0.0f, 1.0f) * normalizedWeight;
     }
 
     outSample.aggregatedHeight = aggregatedHeight;
@@ -266,8 +387,10 @@ void NoiseVoronoiClimateGenerator::populateBlends(int worldX, int worldZ, Climat
     outSample.aggregatedMountains = aggregatedMountains;
     outSample.keepOriginalMix = std::clamp(keepOriginal, 0.0f, 1.0f);
 
-    outSample.dominantSitePos = outSample.blendCount > 0 ? centers[0] : glm::vec2(0.0f);
-    outSample.dominantSiteHalfExtents = glm::vec2(cellSize * 0.5f);
+    const WeightedSeed& dominant = weighted.front();
+    outSample.dominantSitePos = glm::vec2(static_cast<float>(dominant.seed->position.x),
+                                          static_cast<float>(dominant.seed->position.y));
+    outSample.dominantSiteHalfExtents = glm::vec2(std::max(dominant.seed->radius, 1.0f));
 }
 
 void NoiseVoronoiClimateGenerator::generate(ClimateFragment& fragment)
@@ -277,10 +400,9 @@ void NoiseVoronoiClimateGenerator::generate(ClimateFragment& fragment)
     {
         for (int localX = 0; localX < ClimateFragment::kSize; ++localX)
         {
-            const int worldX = baseWorld.x + localX;
-            const int worldZ = baseWorld.y + localZ;
             ClimateSample& sample = fragment.sample(localX, localZ);
-            populateBlends(worldX, worldZ, sample);
+            const glm::ivec2 worldPos{baseWorld.x + localX, baseWorld.y + localZ};
+            accumulateSample(worldPos, sample);
         }
     }
 }

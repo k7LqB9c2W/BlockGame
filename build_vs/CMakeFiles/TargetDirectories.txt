@@ -1,0 +1,3 @@
+C:/Users/ricke/Documents/blockgame2/BlockGame/build_vs/CMakeFiles/blockgame.dir
+C:/Users/ricke/Documents/blockgame2/BlockGame/build_vs/CMakeFiles/ALL_BUILD.dir
+C:/Users/ricke/Documents/blockgame2/BlockGame/build_vs/CMakeFiles/ZERO_CHECK.dir

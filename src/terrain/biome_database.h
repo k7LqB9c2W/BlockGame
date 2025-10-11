@@ -34,6 +34,9 @@ struct BiomeDefinition
     float hills{0.0f};
     float mountains{0.0f};
     float keepOriginalTerrain{0.0f};
+    float radius{256.0f};
+    float radiusVariation{0.0f};
+    float spawnChance{1.0f};
     enum class InterpolationCurve
     {
         Step,
@@ -84,6 +87,14 @@ struct BiomeDefinition
         constexpr float kMaxFootprintMultiplier = 3.0f;
         return std::clamp(value, kMinFootprintMultiplier, kMaxFootprintMultiplier);
     }
+    [[nodiscard]] float minRadius() const noexcept
+    {
+        return std::max(radius - radiusVariation, 1.0f);
+    }
+    [[nodiscard]] float maxRadius() const noexcept
+    {
+        return std::max(radius + radiusVariation, 1.0f);
+    }
 
 private:
     std::vector<std::string> flags_{};
@@ -102,6 +113,7 @@ public:
     [[nodiscard]] const std::vector<BiomeDefinition>& definitions() const noexcept { return definitions_; }
     [[nodiscard]] std::size_t biomeCount() const noexcept { return definitions_.size(); }
     [[nodiscard]] float maxFootprintMultiplier() const noexcept { return maxFootprintMultiplier_; }
+    [[nodiscard]] float maxBiomeRadius() const noexcept { return maxBiomeRadius_; }
 
 private:
     void loadFromDirectory(const std::filesystem::path& directory);
@@ -110,7 +122,7 @@ private:
     std::vector<BiomeDefinition> definitions_{};
     std::unordered_map<std::string, std::size_t> indexById_{};
     float maxFootprintMultiplier_{1.0f};
+    float maxBiomeRadius_{256.0f};
 };
 
 } // namespace terrain
-

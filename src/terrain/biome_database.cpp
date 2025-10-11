@@ -204,6 +204,24 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
         oss << "Biome '" << definition.id << "' must have non-negative tree_density_multiplier in " << filePath;
         throw std::runtime_error(oss.str());
     }
+    if (!std::isfinite(definition.radius) || definition.radius <= 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have positive finite radius in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (!std::isfinite(definition.radiusVariation) || definition.radiusVariation < 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have non-negative finite radius_variation in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
+    if (!std::isfinite(definition.spawnChance) || definition.spawnChance <= 0.0f)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' must have positive finite spawn_chance in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
 
     if (!std::isfinite(definition.interpolationWeight) || definition.interpolationWeight <= 0.0f)
     {
@@ -371,6 +389,7 @@ void BiomeDatabase::loadFromDirectory(const std::filesystem::path& directory)
 
         definition.id = normalizedId;
         maxFootprintMultiplier_ = std::max(maxFootprintMultiplier_, definition.footprintMultiplier);
+        maxBiomeRadius_ = std::max(maxBiomeRadius_, definition.maxRadius());
         const std::size_t index = definitions_.size();
         definitions_.push_back(std::move(definition));
         indexById_[normalizedId] = index;
@@ -456,6 +475,70 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     }
 
     definition.keepOriginalTerrain = std::clamp(definition.keepOriginalTerrain, 0.0f, 1.0f);
+
+    const auto readFloatOr = [&](const toml::table& tbl, std::string_view key, float fallback) -> float {
+        if (const auto val = tbl[key].value<double>())
+        {
+            return static_cast<float>(*val);
+        }
+        if (const auto valf = tbl[key].value<float>())
+        {
+            return *valf;
+        }
+        return fallback;
+    };
+
+    bool minRadiusProvided = false;
+    bool maxRadiusProvided = false;
+    float minRadius = readFloatOr(table, "min_radius", definition.radius);
+    if (table.contains("min_radius"))
+    {
+        minRadiusProvided = true;
+    }
+    else if (table.contains("radius_min"))
+    {
+        minRadius = readFloatOr(table, "radius_min", definition.radius);
+        minRadiusProvided = true;
+    }
+
+    float maxRadius = readFloatOr(table, "max_radius", definition.radius);
+    if (table.contains("max_radius"))
+    {
+        maxRadiusProvided = true;
+    }
+    else if (table.contains("radius_max"))
+    {
+        maxRadius = readFloatOr(table, "radius_max", definition.radius);
+        maxRadiusProvided = true;
+    }
+
+    if (const auto radiusValue = table["radius"].value<double>())
+    {
+        definition.radius = std::max(static_cast<float>(*radiusValue), 1.0f);
+    }
+    else if (const auto radiusFloat = table["radius"].value<float>())
+    {
+        definition.radius = std::max(*radiusFloat, 1.0f);
+    }
+
+    if (const auto radiusVarValue = table["radius_variation"].value<double>())
+    {
+        definition.radiusVariation = std::max(static_cast<float>(*radiusVarValue), 0.0f);
+    }
+    else if (const auto radiusVarFloat = table["radius_variation"].value<float>())
+    {
+        definition.radiusVariation = std::max(*radiusVarFloat, 0.0f);
+    }
+
+    if (minRadiusProvided || maxRadiusProvided)
+    {
+        minRadius = std::max(minRadius, 1.0f);
+        maxRadius = std::max(maxRadius, minRadius);
+        definition.radius = 0.5f * (minRadius + maxRadius);
+        definition.radiusVariation = std::max(0.5f * (maxRadius - minRadius), 0.0f);
+    }
+
+    definition.spawnChance = readFloatOr(table, "spawn_chance", definition.spawnChance);
 
     if (const auto smooth = table["smooth_beaches"].value<bool>())
     {

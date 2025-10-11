@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -92,19 +93,96 @@ public:
     void generate(ClimateFragment& fragment) override;
 
 private:
-    static int floorDiv(int value, int divisor) noexcept;
-    static std::array<float, 2> axisInterpolationWeights(float t, BiomeDefinition::InterpolationCurve curve) noexcept;
+    struct BiomeSeed
+    {
+        const BiomeDefinition* biome{nullptr};
+        glm::ivec2 position{0};
+        float radius{1.0f};
+        float weight{1.0f};
+        float baseHeight{0.0f};
+    };
 
-    const BiomeDefinition& biomeForCell(int cellX, int cellZ) const;
-    float sampleBaseHeight(const BiomeDefinition& definition, int cellX, int cellZ) const noexcept;
-    void populateBlends(int worldX, int worldZ, ClimateSample& outSample) const;
+    struct ChunkSeeds
+    {
+        std::vector<BiomeSeed> seeds{};
+        int maxRadius{0};
+    };
+
+    struct ChunkKeyHasher
+    {
+        std::size_t operator()(const glm::ivec2& value) const noexcept
+        {
+            std::size_t h1 = std::hash<int>{}(value.x);
+            std::size_t h2 = std::hash<int>{}(value.y);
+            return h1 ^ (h2 + 0x9E3779B97f4A7C15ull + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
+    class Random
+    {
+    public:
+        explicit Random(std::uint64_t seed) noexcept : state_(seed) {}
+
+        std::uint32_t next() noexcept
+        {
+            state_ ^= state_ >> 12;
+            state_ ^= state_ << 25;
+            state_ ^= state_ >> 27;
+            return static_cast<std::uint32_t>((state_ * 2685821657736338717ull) >> 32);
+        }
+
+        float nextFloat() noexcept
+        {
+            return static_cast<float>(next()) / static_cast<float>(std::numeric_limits<std::uint32_t>::max());
+        }
+
+        int nextInt(int minInclusive, int maxInclusive) noexcept
+        {
+            if (maxInclusive <= minInclusive)
+            {
+                return minInclusive;
+            }
+            const std::uint32_t range = static_cast<std::uint32_t>(maxInclusive - minInclusive + 1);
+            return minInclusive + static_cast<int>(next() % range);
+        }
+
+        float nextFloatSigned() noexcept
+        {
+            return nextFloat() * 2.0f - 1.0f;
+        }
+
+    private:
+        std::uint64_t state_;
+    };
+
+    static int floorDiv(int value, int divisor) noexcept;
+    static float smoothStep(float t) noexcept;
+    static float lengthSquared(const glm::ivec2& a, const glm::ivec2& b) noexcept;
 
     const BiomeDatabase& biomeDatabase_;
     const WorldgenProfile& profile_;
-    int chunkSize_{16};
-    int biomeSizeInChunks_{1};
-    float cellSize_{16.0f};
     unsigned baseSeed_{0};
+    int chunkSpan_{512};
+    int neighborRadius_{2};
+
+    std::vector<const BiomeDefinition*> biomeSelection_{};
+    std::vector<float> biomeWeightPrefix_{};
+    float totalSpawnWeight_{0.0f};
+
+    mutable std::unordered_map<glm::ivec2, ChunkSeeds, ChunkKeyHasher> chunkCache_{};
+    mutable std::mutex chunkMutex_;
+
+    const ChunkSeeds& chunkSeeds(int chunkX, int chunkZ) const;
+    ChunkSeeds buildChunkSeeds(int chunkX, int chunkZ) const;
+    BiomeSeed createSeed(Random& rng, int worldX, int worldZ) const;
+    const BiomeDefinition& chooseBiome(Random& rng) const;
+    float randomizedHeight(Random& rng, const BiomeDefinition& biome) const noexcept;
+    bool isValidPlacement(const glm::ivec2& position,
+                          float radius,
+                          const std::vector<BiomeSeed>& seeds) const noexcept;
+    void gatherCandidateSeeds(const glm::ivec2& worldPos,
+                              std::vector<const BiomeSeed*>& outCandidates) const;
+    void accumulateSample(const glm::ivec2& worldPos, ClimateSample& outSample) const;
 };
 
 class ClimateMap

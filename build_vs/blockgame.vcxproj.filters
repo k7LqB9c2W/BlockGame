@@ -1,0 +1,52 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\glad.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\camera.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\chunk_manager.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\input_context.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\renderer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\TextureLoader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\terrain\biome_database.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\terrain\climate_map.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\terrain\surface_map.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\terrain\terrain_generator.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\blockgame2\BlockGame\src\terrain\worldgen_profile.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\ricke\Documents\blockgame2\BlockGame\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{DFA709FC-0D61-3BE4-8718-B942140A0B61}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\terrain">
+      <UniqueIdentifier>{5730E6C8-F351-355F-8148-14A674A27522}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

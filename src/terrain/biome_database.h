@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -90,9 +91,12 @@ struct BiomeDefinition
     float hills{0.0f};
     float mountains{0.0f};
     float keepOriginalTerrain{0.0f};
+    std::optional<int> minHeightLimit{};
+    std::optional<int> maxHeightLimit{};
     float radius{256.0f};
     float radiusVariation{0.0f};
     float spawnChance{1.0f};
+    bool fixedRadius{false};
     GenerationProperties properties{};
     enum class InterpolationCurve
     {
@@ -141,6 +145,11 @@ struct BiomeDefinition
     [[nodiscard]] bool hasFlag(std::string_view flag) const noexcept;
     [[nodiscard]] const std::vector<std::string>& flags() const noexcept { return flags_; }
     [[nodiscard]] const GenerationProperties& generationProperties() const noexcept { return properties; }
+    [[nodiscard]] float applyHeightLimits(float height, float normalizedDistance) const noexcept;
+    [[nodiscard]] bool hasHeightLimits() const noexcept
+    {
+        return minHeightLimit.has_value() || maxHeightLimit.has_value();
+    }
 
     void setFlags(std::vector<std::string> flags);
     [[nodiscard]] static float clampFootprintMultiplier(float value) noexcept

@@ -1,0 +1,10 @@
+.{
+	.tags = .{.diggable},
+	.blockHealth = 4,
+	.drops = .{
+		.{.items = .{.auto}},
+	},
+	.absorbedLight = 0x6f6259,
+	.model = "cubyz:cube",
+	.texture = "cubyz:snow",
+}

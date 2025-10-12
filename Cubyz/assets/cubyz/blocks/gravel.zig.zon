@@ -1,0 +1,9 @@
+.{
+	.tags = .{.diggable},
+	.blockHealth = 5.5,
+	.drops = .{
+		.{.items = .{.auto}},
+	},
+	.model = "cubyz:cube",
+	.texture = "cubyz:gravel",
+}

@@ -225,6 +225,31 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             const float keepOriginal = std::clamp(climateSample.keepOriginalMix, 0.0f, 1.0f);
             float baseHeight = climateSample.aggregatedHeight;
 
+            const auto& dominantProps = dominantBiome->generationProperties();
+            const bool biomeIsOcean = dominantBiome->isOcean();
+            const bool biomeIsCoastal = dominantProps.isCoastal();
+            if (!biomeIsOcean && std::isfinite(climateSample.distanceToCoast))
+            {
+                const float distance = std::max(0.0f, climateSample.distanceToCoast);
+                const float baseRange = dominantProps.has(BiomeDefinition::GenerationProperties::kMountain) ? 64.0f
+                                                                                                           : 48.0f;
+                const float range = biomeIsCoastal ? baseRange * 0.5f : baseRange;
+                const float t = std::clamp(distance / range, 0.0f, 1.0f);
+                const float slopeFactor = t * t;
+                roughStrength *= slopeFactor;
+                hillStrength *= slopeFactor;
+                mountainStrength *= slopeFactor;
+
+                const float heightBlend = slopeFactor;
+                baseHeight = glm::mix(static_cast<float>(profile_.seaLevel), baseHeight, heightBlend);
+            }
+            else if (biomeIsCoastal)
+            {
+                roughStrength = std::min(roughStrength, 0.2f);
+                hillStrength = std::min(hillStrength, 0.2f);
+                mountainStrength = std::min(mountainStrength, 0.15f);
+            }
+
             const float worldXF = static_cast<float>(worldX);
             const float worldZF = static_cast<float>(worldZ);
 

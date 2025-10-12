@@ -29,3 +29,8 @@
 - Reference issue numbers in the body when relevant and describe gameplay or rendering impact plainly.
 - PRs should include a purpose summary, build mode exercised (debug/release), reproduction steps, and visuals for GPU-facing changes.
 - Keep binaries out of version control unless preparing a release; update `CMakeLists.txt` whenever dependencies shift.
+
+## WHAT IS CUBYZ?
+- REMINDER, OUR GAME THAT YOU WILL 99.999% OF THE TIME WILL BE EDITING IS BLOCK GAME.
+- WE ARE USING CUBYZ as a "REFERENCE" FOR SOME FEATURES, LIKE TERRAIN GEN!. THATS NOT THE MAIN GAME THOUGH, JUST REMEMBER WE ALWAYS WILL USE BLOCKGAME.
+- BUT I CAN REFERENCE CUBYZ SOMEITMES, like "ADD A FEATURE FROM CUBYZ"

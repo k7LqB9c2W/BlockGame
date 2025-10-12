@@ -1,0 +1,10 @@
+.{
+	.tags = .{.diggable},
+	.blockHealth = 7,
+	.drops = .{
+		.{.items = .{"cubyz:soil"}},
+	},
+	.model = "cubyz:cube",
+	.texture = "cubyz:grass_top",
+	.texture_bottom = "cubyz:soil",
+}

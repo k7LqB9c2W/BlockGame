@@ -729,6 +729,7 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                 const BiomeDefinition& target = *transition.biome;
                 const bool targetIsCoast = target.generationProperties().isCoastal();
                 const float seaLevelF = static_cast<float>(profile_.seaLevel);
+                const bool baseIsOcean = baseBiome->isOcean();
 
                 ClimateSample newSample{};
                 newSample.blendCount = 1;
@@ -739,7 +740,7 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                 const float prevMountains = sample.aggregatedMountains;
                 const float prevDistance = sample.distanceToCoast;
 
-                if (targetIsCoast)
+                if (targetIsCoast && !baseIsOcean)
                 {
                     constexpr float kMaxElevationAboveSea = 12.0f;
                     if (prevHeight > seaLevelF + kMaxElevationAboveSea)

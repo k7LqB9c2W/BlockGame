@@ -1,0 +1,8 @@
+.{
+	.tags = .{.mineable},
+	.blockHealth = 5,
+	.drops = .{
+		.{.items = .{.auto}},
+	},
+	.model = "cubyz:cube",
+}

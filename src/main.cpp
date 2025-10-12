@@ -6,6 +6,7 @@
 #include "chunk_manager.h"
 #include "input_context.h"
 #include "renderer.h"
+#include "text_overlay.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -533,6 +534,7 @@ void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3
     chunkManager.update(basePosition);
     chunkManager.sampleProfilingSnapshot();
 }
+
 
 #include "text_overlay.h"
 

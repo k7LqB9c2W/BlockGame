@@ -15,6 +15,8 @@
 
 namespace
 {
+constexpr float kLineSpacingFactor = 0.35f;
+
 [[nodiscard]] GLuint compileShader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
@@ -148,7 +150,7 @@ void TextOverlay::render(const std::string& text,
 
     const float scale = pixelHeight / kBaseFontPixelHeight;
     const float baseline = baseline_ * scale;
-    const float lineAdvance = baseLineHeight_ * scale;
+    const float lineAdvance = baseLineHeight_ * scale + pixelHeight * kLineSpacingFactor;
 
     vertexBuffer_.clear();
     vertexBuffer_.reserve(text.size() * 6);
@@ -254,7 +256,7 @@ float TextOverlay::lineHeight(float pixelHeight) const noexcept
         return 0.0f;
     }
 
-    return baseLineHeight_ * (pixelHeight / kBaseFontPixelHeight);
+    return baseLineHeight_ * (pixelHeight / kBaseFontPixelHeight) + pixelHeight * kLineSpacingFactor;
 }
 
 void TextOverlay::setupBuffers()

@@ -868,9 +868,7 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
             }
 
             entry.propertyMask = parseGenerationProperties(*transitionTable, path, false);
-            entry.propertyMask.fillMissingGroups();
-
-                definition.transitionBiomes.push_back(std::move(entry));
+            definition.transitionBiomes.push_back(std::move(entry));
         }
     }
 

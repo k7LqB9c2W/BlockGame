@@ -117,6 +117,8 @@ NoiseVoronoiClimateGenerator::NoiseVoronoiClimateGenerator(const BiomeDatabase& 
     const auto& defs = biomeDatabase_.definitions();
     biomeSelection_.reserve(defs.size());
     biomeWeightPrefix_.reserve(defs.size());
+    oceanBiomes_.reserve(defs.size());
+    oceanWeightPrefix_.reserve(defs.size());
     maxTransitionWidth_ = 0;
     for (const BiomeDefinition& def : defs)
     {
@@ -147,6 +149,13 @@ NoiseVoronoiClimateGenerator::NoiseVoronoiClimateGenerator(const BiomeDatabase& 
         biomeSelection_.push_back(&def);
         totalSpawnWeight_ += weight;
         biomeWeightPrefix_.push_back(totalSpawnWeight_);
+
+        if (def.isOcean())
+        {
+            oceanBiomes_.push_back(&def);
+            totalOceanWeight_ += weight;
+            oceanWeightPrefix_.push_back(totalOceanWeight_);
+        }
 
         for (const auto& transition : def.transitionBiomes)
         {
@@ -214,6 +223,67 @@ NoiseVoronoiClimateGenerator::buildChunkSeeds(int chunkX, int chunkZ) const
     constexpr int kMaxSeedsPerChunk = 48;
     constexpr int kMaxRejections = 96;
     int rejections = 0;
+    bool hasOceanSeed = false;
+
+    const auto pushSeed = [&](BiomeSeed&& seed) {
+        if (!seed.biome)
+        {
+            return;
+        }
+        result.maxRadius = std::max(result.maxRadius, static_cast<int>(std::ceil(seed.radius)));
+        if (seed.biome->isOcean())
+        {
+            hasOceanSeed = true;
+        }
+        result.seeds.push_back(std::move(seed));
+    };
+
+    const auto updateNewSeeds = [&](std::size_t startIndex) {
+        for (std::size_t i = startIndex; i < result.seeds.size(); ++i)
+        {
+            result.maxRadius =
+                std::max(result.maxRadius, static_cast<int>(std::ceil(result.seeds[i].radius)));
+            if (result.seeds[i].biome && result.seeds[i].biome->isOcean())
+            {
+                hasOceanSeed = true;
+            }
+        }
+    };
+
+    const auto tryAddOceanSeed = [&](int attempts, float spacingScale) -> bool {
+        if (oceanBiomes_.empty() || static_cast<int>(result.seeds.size()) >= kMaxSeedsPerChunk)
+        {
+            return false;
+        }
+        for (int attempt = 0; attempt < attempts; ++attempt)
+        {
+            const BiomeDefinition& oceanBiome = chooseOceanBiome(rng);
+            const int worldX = baseX + rng.nextInt(0, chunkSpan_ - 1);
+            const int worldZ = baseZ + rng.nextInt(0, chunkSpan_ - 1);
+
+            BiomeSeed seed = createSeed(rng, worldX, worldZ, oceanBiome);
+            if (!seed.biome)
+            {
+                continue;
+            }
+            if (!isValidPlacement(seed.position, seed.radius, result.seeds, spacingScale))
+            {
+                continue;
+            }
+            pushSeed(std::move(seed));
+            return true;
+        }
+        return false;
+    };
+
+    if (totalOceanWeight_ > 0.0f && totalSpawnWeight_ > 0.0f)
+    {
+        const float expectedShare = std::clamp(totalOceanWeight_ / totalSpawnWeight_, 0.05f, 0.35f);
+        if (rng.nextFloat() < expectedShare)
+        {
+            tryAddOceanSeed(24, 1.0f);
+        }
+    }
 
     while (static_cast<int>(result.seeds.size()) < kMaxSeedsPerChunk && rejections < kMaxRejections)
     {
@@ -233,29 +303,27 @@ NoiseVoronoiClimateGenerator::buildChunkSeeds(int chunkX, int chunkZ) const
             continue;
         }
 
-        result.maxRadius = std::max(result.maxRadius, static_cast<int>(std::ceil(seed.radius)));
-        result.seeds.push_back(seed);
+        pushSeed(std::move(seed));
         rejections = 0;
         const std::size_t beforeSub = result.seeds.size();
         spawnSubBiomeSeeds(result.seeds.back(), result.seeds, rng);
-        for (std::size_t i = beforeSub; i < result.seeds.size(); ++i)
-        {
-            result.maxRadius =
-                std::max(result.maxRadius, static_cast<int>(std::ceil(result.seeds[i].radius)));
-        }
+        updateNewSeeds(beforeSub);
     }
 
     if (result.seeds.empty())
     {
         BiomeSeed fallback = createSeed(rng, baseX + chunkSpan_ / 2, baseZ + chunkSpan_ / 2);
-        result.maxRadius = static_cast<int>(std::ceil(fallback.radius));
-        result.seeds.push_back(fallback);
+        pushSeed(std::move(fallback));
         const std::size_t beforeSub = result.seeds.size();
         spawnSubBiomeSeeds(result.seeds.back(), result.seeds, rng);
-        for (std::size_t i = beforeSub; i < result.seeds.size(); ++i)
+        updateNewSeeds(beforeSub);
+    }
+
+    if (!hasOceanSeed)
+    {
+        if (!tryAddOceanSeed(32, 1.0f))
         {
-            result.maxRadius =
-                std::max(result.maxRadius, static_cast<int>(std::ceil(result.seeds[i].radius)));
+            tryAddOceanSeed(48, 0.75f);
         }
     }
 
@@ -265,8 +333,17 @@ NoiseVoronoiClimateGenerator::buildChunkSeeds(int chunkX, int chunkZ) const
 NoiseVoronoiClimateGenerator::BiomeSeed
 NoiseVoronoiClimateGenerator::createSeed(Random& rng, int worldX, int worldZ) const
 {
-    BiomeSeed seed{};
     const BiomeDefinition& biome = chooseBiome(rng);
+    return createSeed(rng, worldX, worldZ, biome);
+}
+
+NoiseVoronoiClimateGenerator::BiomeSeed
+NoiseVoronoiClimateGenerator::createSeed(Random& rng,
+                                         int worldX,
+                                         int worldZ,
+                                         const BiomeDefinition& biome) const
+{
+    BiomeSeed seed{};
     seed.biome = &biome;
     float radius = biome.radius;
     if (!(biome.fixedRadius || biome.isOcean()))
@@ -303,6 +380,27 @@ const BiomeDefinition& NoiseVoronoiClimateGenerator::chooseBiome(Random& rng) co
     return *biomeSelection_[index];
 }
 
+const BiomeDefinition& NoiseVoronoiClimateGenerator::chooseOceanBiome(Random& rng) const
+{
+    if (oceanBiomes_.empty())
+    {
+        return chooseBiome(rng);
+    }
+
+    const float pick = rng.nextFloat() * totalOceanWeight_;
+    auto it = std::lower_bound(oceanWeightPrefix_.begin(), oceanWeightPrefix_.end(), pick);
+    std::size_t index = 0;
+    if (it == oceanWeightPrefix_.end())
+    {
+        index = oceanWeightPrefix_.size() - 1;
+    }
+    else
+    {
+        index = static_cast<std::size_t>(std::distance(oceanWeightPrefix_.begin(), it));
+    }
+    return *oceanBiomes_[index];
+}
+
 float NoiseVoronoiClimateGenerator::randomizedHeight(Random& rng, const BiomeDefinition& biome) const noexcept
 {
     const float minHeight = static_cast<float>(biome.minHeight);
@@ -318,11 +416,19 @@ bool NoiseVoronoiClimateGenerator::isValidPlacement(const glm::ivec2& position,
                                                     float radius,
                                                     const std::vector<BiomeSeed>& seeds) const noexcept
 {
+    return isValidPlacement(position, radius, seeds, 1.0f);
+}
+
+bool NoiseVoronoiClimateGenerator::isValidPlacement(const glm::ivec2& position,
+                                                    float radius,
+                                                    const std::vector<BiomeSeed>& seeds,
+                                                    float spacingScale) const noexcept
+{
     for (const BiomeSeed& other : seeds)
     {
         const float largestRadius = std::max(radius, other.radius);
-        const float spacingFactor =
-            std::clamp(0.85f - 0.0005f * largestRadius, 0.6f, 0.85f);
+        const float baseSpacing = std::clamp(0.85f - 0.0005f * largestRadius, 0.6f, 0.85f);
+        const float spacingFactor = std::clamp(baseSpacing * spacingScale, 0.4f, 0.85f);
         const float combined = (radius + other.radius) * spacingFactor;
         const float distSq = lengthSquared(position, other.position);
         if (distSq < combined * combined)

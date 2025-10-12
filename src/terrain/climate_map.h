@@ -172,6 +172,9 @@ private:
     std::vector<const BiomeDefinition*> biomeSelection_{};
     std::vector<float> biomeWeightPrefix_{};
     float totalSpawnWeight_{0.0f};
+    std::vector<const BiomeDefinition*> oceanBiomes_{};
+    std::vector<float> oceanWeightPrefix_{};
+    float totalOceanWeight_{0.0f};
 
     mutable std::unordered_map<glm::ivec2, ChunkSeeds, ChunkKeyHasher> chunkCache_{};
     mutable std::mutex chunkMutex_;
@@ -179,11 +182,17 @@ private:
     const ChunkSeeds& chunkSeeds(int chunkX, int chunkZ) const;
     ChunkSeeds buildChunkSeeds(int chunkX, int chunkZ) const;
     BiomeSeed createSeed(Random& rng, int worldX, int worldZ) const;
+    BiomeSeed createSeed(Random& rng, int worldX, int worldZ, const BiomeDefinition& biome) const;
     const BiomeDefinition& chooseBiome(Random& rng) const;
+    const BiomeDefinition& chooseOceanBiome(Random& rng) const;
     float randomizedHeight(Random& rng, const BiomeDefinition& biome) const noexcept;
     bool isValidPlacement(const glm::ivec2& position,
                           float radius,
                           const std::vector<BiomeSeed>& seeds) const noexcept;
+    bool isValidPlacement(const glm::ivec2& position,
+                          float radius,
+                          const std::vector<BiomeSeed>& seeds,
+                          float spacingScale) const noexcept;
     void gatherCandidateSeeds(const glm::ivec2& worldPos,
                               std::vector<const BiomeSeed*>& outCandidates) const;
     void accumulateSample(const glm::ivec2& worldPos, ClimateSample& outSample) const;

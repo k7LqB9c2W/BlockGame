@@ -33,6 +33,7 @@ inline constexpr int kChunkSizeZ = kChunkEdgeLength;
 inline constexpr int kChunkBlockCount = kChunkEdgeLength * kChunkEdgeLength * kChunkEdgeLength;
 inline constexpr int kAtlasTileSizePixels = 16;
 inline constexpr int kDefaultViewDistance = 12;
+inline constexpr int kMaxUserRenderDistance = 48;
 inline constexpr int kExtendedViewDistance = 320;
 struct VerticalStreamingConfig
 {

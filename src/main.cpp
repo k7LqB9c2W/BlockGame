@@ -1205,7 +1205,7 @@ void main()
             float boxTop = centerY - boxHeight * 0.5f;
 
             // Draw prompt text
-            std::string promptText = "Enter render distance:";
+            std::string promptText = "Enter render distance (1-48):";
             textOverlay.render(promptText, boxLeft + 20.0f, boxTop + 20.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
 
             // Draw input text with cursor

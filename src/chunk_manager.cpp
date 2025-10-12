@@ -1649,9 +1649,14 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
 {
     try
     {
-        const int clampedDistance = std::max(distance, 1);
+        const int clampedDistance = std::clamp(distance, 1, kMaxUserRenderDistance);
         targetViewDistance_ = clampedDistance;
         kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+        if (distance != clampedDistance)
+        {
+            std::cout << "Render distance request " << distance << " clamped to " << clampedDistance << " chunks"
+                      << std::endl;
+        }
 
         if (viewDistance_ > targetViewDistance_)
         {

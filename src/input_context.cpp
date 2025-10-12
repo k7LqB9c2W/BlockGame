@@ -118,8 +118,8 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     inputContext.nKeyPressed = nKeyCurrentlyPressed;
     if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
     {
-        inputContext.showRenderDistanceGUI = true;
-        inputContext.inputBuffer.clear();
+        inputContext.showTeleportGUI = true;
+        inputContext.teleportBuffer.clear();
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
@@ -130,6 +130,16 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     {
         inputContext.showTeleportGUI = true;
         inputContext.teleportBuffer.clear();
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+
+    bool f3CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
+    inputContext.f3JustPressed = f3CurrentlyPressed && !inputContext.f3Pressed;
+    inputContext.f3Pressed = f3CurrentlyPressed;
+    if (inputContext.f3JustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    {
+        inputContext.showRenderDistanceGUI = true;
+        inputContext.inputBuffer.clear();
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 

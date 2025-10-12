@@ -12,6 +12,8 @@
 
 #include "../chunk_manager.h"
 
+#include <glm/common.hpp>
+
 namespace terrain
 {
 namespace
@@ -337,6 +339,14 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
         oss << "Biome '" << definition.id << "' must have non-negative water_fill.max_depth in " << filePath;
         throw std::runtime_error(oss.str());
     }
+
+    if (definition.minHeightLimit && definition.maxHeightLimit
+        && *definition.minHeightLimit > *definition.maxHeightLimit)
+    {
+        std::ostringstream oss;
+        oss << "Biome '" << definition.id << "' has min_height_limit greater than max_height_limit in " << filePath;
+        throw std::runtime_error(oss.str());
+    }
 }
 
 } // namespace
@@ -372,6 +382,40 @@ void BiomeDefinition::setFlags(std::vector<std::string> flags)
             oceanFlag_ = true;
         }
     }
+}
+
+float BiomeDefinition::applyHeightLimits(float height, float normalizedDistance) const noexcept
+{
+    if (!hasHeightLimits())
+    {
+        return height;
+    }
+
+    const float t = std::clamp(normalizedDistance, 0.0f, 1.0f);
+    const float fade = glm::smoothstep(0.35f, 0.95f, t);
+    if (fade <= 0.0f)
+    {
+        return height;
+    }
+
+    const float original = height;
+    float result = height;
+
+    if (minHeightLimit)
+    {
+        const float limit = static_cast<float>(*minHeightLimit);
+        const float target = glm::mix(original, limit, fade);
+        result = std::max(result, target);
+    }
+
+    if (maxHeightLimit)
+    {
+        const float limit = static_cast<float>(*maxHeightLimit);
+        const float target = glm::mix(original, limit, fade);
+        result = std::min(result, target);
+    }
+
+    return result;
 }
 
 BiomeDatabase::BiomeDatabase(const std::filesystem::path& directory)
@@ -551,6 +595,23 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     }
     definition.minHeight = requireInt(table, "min_height", path);
     definition.maxHeight = requireInt(table, "max_height", path);
+    if (const auto minLimitValue = table["min_height_limit"].value<std::int64_t>())
+    {
+        definition.minHeightLimit = static_cast<int>(*minLimitValue);
+    }
+    else if (const auto minLimitFloat = table["min_height_limit"].value<double>())
+    {
+        definition.minHeightLimit = static_cast<int>(std::lround(*minLimitFloat));
+    }
+
+    if (const auto maxLimitValue = table["max_height_limit"].value<std::int64_t>())
+    {
+        definition.maxHeightLimit = static_cast<int>(*maxLimitValue);
+    }
+    else if (const auto maxLimitFloat = table["max_height_limit"].value<double>())
+    {
+        definition.maxHeightLimit = static_cast<int>(std::lround(*maxLimitFloat));
+    }
     definition.baseSlopeBias = requireFloat(table, "base_slope_bias", path);
     definition.maxGradient = requireFloat(table, "max_gradient", path);
     definition.footprintMultiplier =
@@ -645,6 +706,11 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     else if (const auto radiusVarFloat = table["radius_variation"].value<float>())
     {
         definition.radiusVariation = std::max(*radiusVarFloat, 0.0f);
+    }
+
+    if (const auto fixedRadiusValue = table["fixed_radius"].value<bool>())
+    {
+        definition.fixedRadius = *fixedRadiusValue;
     }
 
     if (minRadiusProvided || maxRadiusProvided)

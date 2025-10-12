@@ -148,7 +148,7 @@ void TextOverlay::render(const std::string& text,
 
     const float scale = pixelHeight / kBaseFontPixelHeight;
     const float baseline = baseline_ * scale;
-    const float lineAdvance = (baseLineHeight_ + extraLineSpacing_) * scale;
+    const float lineAdvance = baseLineHeight_ * scale;
 
     vertexBuffer_.clear();
     vertexBuffer_.reserve(text.size() * 6);
@@ -254,7 +254,7 @@ float TextOverlay::lineHeight(float pixelHeight) const noexcept
         return 0.0f;
     }
 
-    return (baseLineHeight_ + extraLineSpacing_) * (pixelHeight / kBaseFontPixelHeight);
+    return baseLineHeight_ * (pixelHeight / kBaseFontPixelHeight);
 }
 
 void TextOverlay::setupBuffers()
@@ -350,9 +350,6 @@ bool TextOverlay::loadFontAtlas(const std::string& path)
     stbtt_GetFontVMetrics(&fontInfo, &ascent, &descent, &lineGap);
     baseline_ = static_cast<float>(ascent) * scale;
     baseLineHeight_ = static_cast<float>(ascent - descent + lineGap) * scale;
-    const float computedGap = static_cast<float>(lineGap) * scale;
-    const float minGap = kBaseFontPixelHeight * 0.15f;
-    extraLineSpacing_ = std::max(minGap, computedGap);
 
     constexpr int atlasWidth = 512;
     constexpr int atlasHeight = 512;

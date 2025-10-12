@@ -71,7 +71,6 @@ private:
 
     float baseline_{0.0f};
     float baseLineHeight_{0.0f};
-    float extraLineSpacing_{6.0f};
     int fallbackGlyphIndex_{-1};
 
     Glyph glyphs_[kCodepointCount];

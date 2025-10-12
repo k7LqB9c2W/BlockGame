@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <glad/glad.h>
@@ -203,6 +204,7 @@ public:
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
 
     ChunkProfilingSnapshot sampleProfilingSnapshot();
+    std::string biomeNameAt(const glm::vec3& worldPos) const;
 
 private:
     struct Impl;

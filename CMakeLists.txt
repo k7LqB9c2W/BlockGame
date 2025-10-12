@@ -30,6 +30,7 @@ set(BLOCKGAME_SOURCES
     ${SRC_ROOT}/input_context.cpp
     ${SRC_ROOT}/renderer.cpp
     ${SRC_ROOT}/TextureLoader.cpp
+    ${SRC_ROOT}/text_overlay.cpp
     ${SRC_ROOT}/terrain/biome_database.cpp
     ${SRC_ROOT}/terrain/climate_map.cpp
     ${SRC_ROOT}/terrain/surface_map.cpp

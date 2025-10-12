@@ -485,6 +485,7 @@ struct ChunkManager::Impl
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
     ChunkProfilingSnapshot sampleProfilingSnapshot();
+    std::string biomeNameAt(const glm::vec3& worldPos) const;
 
 private:
     struct TreeDensityNoise
@@ -1931,6 +1932,19 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
 
     return snapshot;
+}
+
+std::string ChunkManager::Impl::biomeNameAt(const glm::vec3& worldPos) const
+{
+    const int worldX = static_cast<int>(std::floor(worldPos.x));
+    const int worldZ = static_cast<int>(std::floor(worldPos.z));
+    const ColumnSample sample = sampleColumn(worldX, worldZ);
+    if (sample.dominantBiome)
+    {
+        return sample.dominantBiome->name;
+    }
+
+    return "Unknown";
 }
 
 void ChunkManager::Impl::startWorkerThreads()
@@ -4409,5 +4423,10 @@ glm::vec3 ChunkManager::findSafeSpawnPosition(float worldX, float worldZ) const
 ChunkProfilingSnapshot ChunkManager::sampleProfilingSnapshot()
 {
     return impl_->sampleProfilingSnapshot();
+}
+
+std::string ChunkManager::biomeNameAt(const glm::vec3& worldPos) const
+{
+    return impl_->biomeNameAt(worldPos);
 }
 

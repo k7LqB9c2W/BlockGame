@@ -6,6 +6,7 @@
 #include "chunk_manager.h"
 #include "input_context.h"
 #include "renderer.h"
+#include "text_overlay.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -534,8 +535,6 @@ void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3
     chunkManager.sampleProfilingSnapshot();
 }
 
-#include "text_overlay.inl"
-
 // Collision detection helper functions
 struct AABB
 {
@@ -999,6 +998,9 @@ void main()
     constexpr double kFixedTimeStep = 1.0 / 60.0;
     double previousTime = glfwGetTime();
     double accumulator = 0.0;
+    double fpsTimer = 0.0;
+    int fpsFrameCount = 0;
+    double fpsValue = 0.0;
 #ifndef NDEBUG
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
@@ -1012,6 +1014,17 @@ void main()
         previousTime = currentTime;
         frameTime = std::min(frameTime, 0.25);
         accumulator += frameTime;
+        fpsTimer += frameTime;
+        ++fpsFrameCount;
+        if (fpsTimer >= 1.0)
+        {
+            if (fpsTimer > 0.0)
+            {
+                fpsValue = static_cast<double>(fpsFrameCount) / fpsTimer;
+            }
+            fpsTimer = 0.0;
+            fpsFrameCount = 0;
+        }
 #ifndef NDEBUG
         profilingOverlayTimer += frameTime;
 
@@ -1068,7 +1081,7 @@ void main()
         bool f1JustPressed = f1CurrentlyPressed && !inputContext.f1Pressed;
         if (f1JustPressed)
         {
-            inputContext.showCoordinates = !inputContext.showCoordinates;
+            inputContext.showDebugOverlay = !inputContext.showDebugOverlay;
         }
         inputContext.f1JustPressed = f1JustPressed;
         inputContext.f1Pressed = f1CurrentlyPressed;
@@ -1166,27 +1179,59 @@ void main()
         // Render crosshair on top of everything
         crosshair.render(framebufferWidth, framebufferHeight);
 
-        if (inputContext.showCoordinates)
+        const double currentFpsEstimate = (fpsFrameCount > 0 && fpsTimer > 0.0)
+                                              ? static_cast<double>(fpsFrameCount) / fpsTimer
+                                              : fpsValue;
+        const float overlayMargin = 12.0f;
+        const float debugFontSize = 20.0f;
+        std::string debugOverlayText;
+        int debugOverlayLineCount = 0;
+
+        if (inputContext.showDebugOverlay)
         {
-            std::ostringstream coordStream;
-            coordStream.setf(std::ios::fixed, std::ios::floatfield);
-            coordStream.precision(1);
-            coordStream << 'X' << ' ' << camera.position.x << ' '
-                         << 'Y' << ' ' << camera.position.y << ' '
-                         << 'Z' << ' ' << camera.position.z;
-            textOverlay.render(coordStream.str(), 8.0f, 8.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
+            std::ostringstream debugStream;
+            debugStream.setf(std::ios::fixed, std::ios::floatfield);
+            debugStream << "FPS: " << std::setprecision(0) << currentFpsEstimate << '\n';
+            debugStream << std::setprecision(1);
+            debugStream << "XYZ: " << camera.position.x << ", "
+                        << camera.position.y << ", "
+                        << camera.position.z << '\n';
+            debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position);
+
+            debugOverlayText = debugStream.str();
+            debugOverlayLineCount = 1 + static_cast<int>(std::count(debugOverlayText.begin(),
+                                                                    debugOverlayText.end(),
+                                                                    '\n'));
+
+            textOverlay.render(debugOverlayText,
+                               overlayMargin,
+                               overlayMargin,
+                               framebufferWidth,
+                               framebufferHeight,
+                               debugFontSize,
+                               glm::vec3(1.0f));
         }
 
 #ifndef NDEBUG
         if (!profilingOverlayText.empty())
         {
-            const float overlayY = inputContext.showCoordinates ? 24.0f : 8.0f;
+            float overlayY = overlayMargin;
+            if (debugOverlayLineCount > 0)
+            {
+                float lineHeight = textOverlay.lineHeight(debugFontSize);
+                if (lineHeight <= 0.0f)
+                {
+                    lineHeight = debugFontSize * 1.2f;
+                }
+                overlayY += lineHeight * static_cast<float>(debugOverlayLineCount) + 8.0f;
+            }
+
             textOverlay.render(profilingOverlayText,
-                               8.0f,
+                               overlayMargin,
                                overlayY,
                                framebufferWidth,
                                framebufferHeight,
-                               8.0f,
+                               16.0f,
                                glm::vec3(0.85f, 0.95f, 1.0f));
         }
 #endif

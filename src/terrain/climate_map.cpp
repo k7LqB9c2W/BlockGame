@@ -54,6 +54,24 @@ float hashToUnitFloat(int x, int y, int z) noexcept
     return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
 }
 
+std::uint16_t groupPresenceMask(std::uint16_t bits) noexcept
+{
+    constexpr int kGroupSize = 3;
+    constexpr int kGroupCount = 5;
+
+    std::uint16_t mask = 0;
+    for (int group = 0; group < kGroupCount; ++group)
+    {
+        const std::uint16_t groupBits =
+            static_cast<std::uint16_t>((bits >> (group * kGroupSize)) & 0x7u);
+        if (groupBits != 0)
+        {
+            mask |= static_cast<std::uint16_t>(1u << (group * kGroupSize));
+        }
+    }
+    return mask;
+}
+
 } // namespace
 
 ClimateFragment::ClimateFragment(const glm::ivec2& fragmentCoord) noexcept
@@ -302,7 +320,10 @@ bool NoiseVoronoiClimateGenerator::isValidPlacement(const glm::ivec2& position,
 {
     for (const BiomeSeed& other : seeds)
     {
-        const float combined = (radius + other.radius) * 0.85f;
+        const float largestRadius = std::max(radius, other.radius);
+        const float spacingFactor =
+            std::clamp(0.85f - 0.0005f * largestRadius, 0.6f, 0.85f);
+        const float combined = (radius + other.radius) * spacingFactor;
         const float distSq = lengthSquared(position, other.position);
         if (distSq < combined * combined)
         {
@@ -617,7 +638,6 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
         return;
     }
 
-    constexpr std::uint16_t kGroupMask = BiomeDefinition::GenerationProperties::kMask;
     const int size = ClimateFragment::kSize;
     const std::size_t area = static_cast<std::size_t>(size) * static_cast<std::size_t>(size);
     const int maxWidth = std::max(1, maxTransitionWidth_);
@@ -734,7 +754,9 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const std::uint16_t matched = static_cast<std::uint16_t>(neighborMask & requiredBits);
                     const std::uint16_t spread =
                         static_cast<std::uint16_t>(matched | (matched >> 1) | (matched >> 2));
-                    if ((spread & kGroupMask) != (requiredBits & kGroupMask))
+                    const std::uint16_t requiredGroups = groupPresenceMask(requiredBits);
+                    const std::uint16_t availableGroups = groupPresenceMask(spread);
+                    if ((availableGroups & requiredGroups) != requiredGroups)
                     {
                         continue;
                     }

@@ -15,11 +15,22 @@ footprint_multiplier = 1.0
 flags = ["land"]
 smooth_beaches = true
 keep_original_terrain = 0.55
+properties = ["temperate", "land", "wet", "overgrown"]
 
-[coast]
-range = 16.0
-min_roughness_scale = 0.35
-height_blend = 0.1
+[[transition_biomes]]
+id = "beach"
+chance = 1.0
+width = 4
+properties = ["ocean"]
+
+max_sub_biome_count = 2.0
+sub_biome_total_chance = 0.18
+
+[[sub_biomes]]
+id = "grasslands"
+chance = 0.18
+min_radius = 40.0
+max_radius = 120.0
 
 [soil_creep]
 strength = 0.4

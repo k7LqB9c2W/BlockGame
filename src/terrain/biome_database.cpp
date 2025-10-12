@@ -134,6 +134,72 @@ std::vector<std::string> parseFlags(const toml::table& table, const std::filesys
     return flags;
 }
 
+std::uint16_t propertyBitFromString(std::string_view name, const std::filesystem::path& filePath)
+{
+    std::string lowered{name};
+    lowered = toLowerCopy(std::move(lowered));
+    using GP = BiomeDefinition::GenerationProperties;
+    if (lowered == "hot") return GP::kHot;
+    if (lowered == "temperate") return GP::kTemperate;
+    if (lowered == "cold") return GP::kCold;
+    if (lowered == "inland") return GP::kInland;
+    if (lowered == "land") return GP::kLand;
+    if (lowered == "ocean") return GP::kOcean;
+    if (lowered == "wet") return GP::kWet;
+    if (lowered == "neither_wet_nor_dry" || lowered == "neutral" || lowered == "neutral_hydration")
+        return GP::kNeutralHydration;
+    if (lowered == "dry") return GP::kDry;
+    if (lowered == "barren") return GP::kBarren;
+    if (lowered == "balanced") return GP::kBalanced;
+    if (lowered == "overgrown") return GP::kOvergrown;
+    if (lowered == "mountain") return GP::kMountain;
+    if (lowered == "low_terrain" || lowered == "lowterrain") return GP::kLowTerrain;
+    if (lowered == "anti_mountain" || lowered == "antimountain") return GP::kAntiMountain;
+
+    std::ostringstream oss;
+    oss << "Unknown biome property '" << name << "' in " << filePath;
+    throw std::runtime_error(oss.str());
+}
+
+BiomeDefinition::GenerationProperties parseGenerationProperties(const toml::table& table,
+                                                                const std::filesystem::path& filePath,
+                                                                bool fillMissingGroups)
+{
+    const toml::node_view propertiesNode = table["properties"];
+    const toml::array* propertiesArray = propertiesNode.as_array();
+    if (!propertiesArray)
+    {
+        BiomeDefinition::GenerationProperties props{};
+        if (fillMissingGroups)
+        {
+            props.fillMissingGroups();
+        }
+        return props;
+    }
+
+    BiomeDefinition::GenerationProperties result{};
+    for (const toml::node& node : *propertiesArray)
+    {
+        if (const auto* str = node.as_string())
+        {
+            result.add(propertyBitFromString(str->get(), filePath));
+        }
+        else
+        {
+            std::ostringstream oss;
+            oss << "Non-string property entry in " << filePath;
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    if (fillMissingGroups)
+    {
+        result.fillMissingGroups();
+    }
+
+    return result;
+}
+
 BiomeDefinition::InterpolationCurve parseInterpolationCurve(const std::string& value,
                                                             const std::filesystem::path& filePath)
 {
@@ -216,10 +282,10 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
         oss << "Biome '" << definition.id << "' must have non-negative finite radius_variation in " << filePath;
         throw std::runtime_error(oss.str());
     }
-    if (!std::isfinite(definition.spawnChance) || definition.spawnChance <= 0.0f)
+    if (!std::isfinite(definition.spawnChance) || definition.spawnChance < 0.0f)
     {
         std::ostringstream oss;
-        oss << "Biome '" << definition.id << "' must have positive finite spawn_chance in " << filePath;
+        oss << "Biome '" << definition.id << "' must have non-negative finite spawn_chance in " << filePath;
         throw std::runtime_error(oss.str());
     }
 
@@ -271,28 +337,17 @@ void validateNumericRanges(const BiomeDefinition& definition, const std::filesys
         oss << "Biome '" << definition.id << "' must have non-negative water_fill.max_depth in " << filePath;
         throw std::runtime_error(oss.str());
     }
-    const auto& coast = definition.terrainSettings.coast;
-    if (!std::isfinite(coast.range) || coast.range <= 0.0f)
-    {
-        std::ostringstream oss;
-        oss << "Biome '" << definition.id << "' must have positive finite coast.range in " << filePath;
-        throw std::runtime_error(oss.str());
-    }
-    if (!std::isfinite(coast.minRoughnessScale) || coast.minRoughnessScale < 0.0f)
-    {
-        std::ostringstream oss;
-        oss << "Biome '" << definition.id << "' must have non-negative coast.min_roughness_scale in " << filePath;
-        throw std::runtime_error(oss.str());
-    }
-    if (!std::isfinite(coast.heightBlend) || coast.heightBlend < 0.0f || coast.heightBlend > 1.0f)
-    {
-        std::ostringstream oss;
-        oss << "Biome '" << definition.id << "' must have coast.height_blend within [0, 1] in " << filePath;
-        throw std::runtime_error(oss.str());
-    }
 }
 
 } // namespace
+
+void BiomeDefinition::GenerationProperties::fillMissingGroups() noexcept
+{
+    const std::uint16_t val = bits;
+    const std::uint16_t empty =
+        static_cast<std::uint16_t>(~val & (~val >> 1) & (~val >> 2) & kMask);
+    bits = static_cast<std::uint16_t>(val | empty | (empty << 1) | (empty << 2));
+}
 
 bool BiomeDefinition::hasFlag(std::string_view flag) const noexcept
 {
@@ -412,6 +467,49 @@ void BiomeDatabase::loadFromDirectory(const std::filesystem::path& directory)
         const std::size_t index = definitions_.size();
         definitions_.push_back(std::move(definition));
         indexById_[normalizedId] = index;
+    }
+
+    for (BiomeDefinition& definition : definitions_)
+    {
+        for (auto& transition : definition.transitionBiomes)
+        {
+            if (transition.biomeId.empty())
+            {
+                continue;
+            }
+            const BiomeDefinition* target = tryGetBiome(transition.biomeId);
+            if (!target)
+            {
+                std::ostringstream oss;
+                oss << "Transition biome '" << transition.biomeId << "' referenced by biome '"
+                    << definition.id << "' was not found";
+                throw std::runtime_error(oss.str());
+            }
+            transition.biome = target;
+        }
+
+        float accumulatedChance = 0.0f;
+        for (auto& sub : definition.subBiomes)
+        {
+            if (sub.biomeId.empty())
+            {
+                continue;
+            }
+            const BiomeDefinition* target = tryGetBiome(sub.biomeId);
+            if (!target)
+            {
+                std::ostringstream oss;
+                oss << "Sub-biome '" << sub.biomeId << "' referenced by biome '" << definition.id
+                    << "' was not found";
+                throw std::runtime_error(oss.str());
+            }
+            sub.biome = target;
+            accumulatedChance += std::max(sub.chance, 0.0f);
+        }
+        if (definition.subBiomeTotalChance <= 0.0f && accumulatedChance > 0.0f)
+        {
+            definition.subBiomeTotalChance = accumulatedChance;
+        }
     }
 }
 
@@ -562,11 +660,6 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     if (const auto smooth = table["smooth_beaches"].value<bool>())
     {
         definition.terrainSettings.smoothBeaches = *smooth;
-        if (definition.terrainSettings.smoothBeaches)
-        {
-            definition.terrainSettings.coast.minRoughnessScale = 0.1f;
-            definition.terrainSettings.coast.heightBlend = 0.0f;
-        }
     }
 
     if (const auto interpolationCurveValue = table["interpolation_curve"].value<std::string>())
@@ -660,17 +753,84 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
         }
     }
 
-    if (const toml::table* coastTable = table["coast"].as_table())
+    std::vector<std::string> flags = parseFlags(table, path);
+    definition.setFlags(flags);
+
+    const bool hasExplicitProperties = table.contains("properties");
+    if (hasExplicitProperties)
     {
-        auto& coast = definition.terrainSettings.coast;
-        coast.range = std::max(readFloatOr(*coastTable, "range", coast.range), 1.0f);
-        coast.minRoughnessScale =
-            std::max(readFloatOr(*coastTable, "min_roughness_scale", coast.minRoughnessScale), 0.0f);
-        coast.heightBlend =
-            std::clamp(readFloatOr(*coastTable, "height_blend", coast.heightBlend), 0.0f, 1.0f);
+        definition.properties = parseGenerationProperties(table, path, false);
+        definition.properties.fillMissingGroups();
+    }
+    else
+    {
+        BiomeDefinition::GenerationProperties derived{};
+        for (const std::string& flag : flags)
+        {
+            try
+            {
+                derived.add(propertyBitFromString(flag, path));
+            }
+            catch (const std::exception&)
+            {
+                // Ignore flags that are not mapped to generation properties.
+            }
+        }
+        derived.fillMissingGroups();
+        definition.properties = derived;
     }
 
-    definition.setFlags(parseFlags(table, path));
+    if (const toml::array* transitionArray = table["transition_biomes"].as_array())
+    {
+        definition.transitionBiomes.reserve(transitionArray->size());
+        for (const toml::node& node : *transitionArray)
+        {
+            const toml::table* transitionTable = node.as_table();
+            if (!transitionTable)
+            {
+                std::ostringstream oss;
+                oss << "Transition biome entry is not a table in " << path;
+                throw std::runtime_error(oss.str());
+            }
+
+            BiomeDefinition::TransitionBiomeDefinition entry{};
+            entry.biomeId = toLowerCopy(requireString(*transitionTable, "id", path));
+            entry.chance = readFloatOr(*transitionTable, "chance", entry.chance);
+            if (const auto widthValue = (*transitionTable)["width"].value<std::int64_t>())
+            {
+                entry.width = std::max(1, static_cast<int>(*widthValue));
+            }
+
+            entry.propertyMask = parseGenerationProperties(*transitionTable, path, false);
+            entry.propertyMask.fillMissingGroups();
+
+                definition.transitionBiomes.push_back(std::move(entry));
+        }
+    }
+
+    definition.maxSubBiomeCount = readFloatOr(table, "max_sub_biome_count", definition.maxSubBiomeCount);
+    definition.subBiomeTotalChance = readFloatOr(table, "sub_biome_total_chance", definition.subBiomeTotalChance);
+    if (const toml::array* subBiomes = table["sub_biomes"].as_array())
+    {
+        definition.subBiomes.reserve(subBiomes->size());
+        for (const toml::node& node : *subBiomes)
+        {
+            const toml::table* subTable = node.as_table();
+            if (!subTable)
+            {
+                std::ostringstream oss;
+                oss << "Sub-biome entry is not a table in " << path;
+                throw std::runtime_error(oss.str());
+            }
+
+            BiomeDefinition::SubBiomeDefinition sub{};
+            sub.biomeId = toLowerCopy(requireString(*subTable, "id", path));
+            sub.chance = readFloatOr(*subTable, "chance", sub.chance);
+            sub.minRadius = readFloatOr(*subTable, "min_radius", sub.minRadius);
+            sub.maxRadius = readFloatOr(*subTable, "max_radius", sub.maxRadius);
+            definition.subBiomes.push_back(std::move(sub));
+        }
+    }
 
     if (definition.terrainSettings.waterFill.block == BlockId::Air)
     {

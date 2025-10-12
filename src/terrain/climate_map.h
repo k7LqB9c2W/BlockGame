@@ -167,6 +167,7 @@ private:
     unsigned baseSeed_{0};
     int chunkSpan_{512};
     int neighborRadius_{2};
+    int maxTransitionWidth_{0};
 
     std::vector<const BiomeDefinition*> biomeSelection_{};
     std::vector<float> biomeWeightPrefix_{};
@@ -186,6 +187,11 @@ private:
     void gatherCandidateSeeds(const glm::ivec2& worldPos,
                               std::vector<const BiomeSeed*>& outCandidates) const;
     void accumulateSample(const glm::ivec2& worldPos, ClimateSample& outSample) const;
+    void applyTransitionBiomes(const glm::ivec2& baseWorld, ClimateFragment& fragment) const;
+    void spawnSubBiomeSeeds(const BiomeSeed& parent,
+                            std::vector<BiomeSeed>& seeds,
+                            Random& rng) const;
+    static glm::vec2 randomInUnitCircle(Random& rng) noexcept;
 };
 
 class ClimateMap

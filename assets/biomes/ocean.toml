@@ -15,11 +15,13 @@ footprint_multiplier = 1.0
 flags = ["ocean"]
 smooth_beaches = true
 keep_original_terrain = 0.7
+properties = ["temperate", "ocean", "wet", "balanced"]
 
-[coast]
-range = 20.0
-min_roughness_scale = 0.05
-height_blend = 0.0
+[[transition_biomes]]
+id = "beach"
+chance = 1.0
+width = 5
+properties = ["land"]
 
 [soil_creep]
 strength = 0.08

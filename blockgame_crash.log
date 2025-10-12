@@ -72,3 +72,7 @@
   [19] 0x7ffa7aece8d7
   [20] 0x7ffa7c988d9c
 2025-10-10 21:18:11 - minidump: written to blockgame_crash.dmp
+2025-10-11 17:40:08 - uncaught exception: Biome 'beach' must have positive finite spawn_chance in "assets/biomes\\beach.toml"
+2025-10-11 17:40:11 - uncaught exception: Biome 'beach' must have positive finite spawn_chance in "assets/biomes\\beach.toml"
+2025-10-11 17:40:17 - uncaught exception: Biome 'beach' must have positive finite spawn_chance in "assets/biomes\\beach.toml"
+2025-10-11 17:41:11 - uncaught exception: Biome 'beach' must have positive finite spawn_chance in "assets/biomes\\beach.toml"

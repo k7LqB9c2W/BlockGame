@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -21,6 +22,26 @@ unsigned hashCombine(unsigned a, unsigned b) noexcept
 {
     a ^= b + 0x9E3779B9u + (a << 6) + (a >> 2);
     return a;
+}
+
+float evaluateInterpolationCurve(float t, BiomeDefinition::InterpolationCurve curve) noexcept
+{
+    t = std::clamp(t, 0.0f, 1.0f);
+    switch (curve)
+    {
+    case BiomeDefinition::InterpolationCurve::Step:
+        return t >= 0.5f ? 1.0f : 0.0f;
+    case BiomeDefinition::InterpolationCurve::Linear:
+        return t;
+    case BiomeDefinition::InterpolationCurve::Square:
+    default:
+        if (t < 0.5f)
+        {
+            return std::clamp(2.0f * t * t, 0.0f, 1.0f);
+        }
+        const float inv = 1.0f - t;
+        return std::clamp(1.0f - 2.0f * inv * inv, 0.0f, 1.0f);
+    }
 }
 
 float hashToUnitFloat(int x, int y, int z) noexcept
@@ -78,13 +99,29 @@ NoiseVoronoiClimateGenerator::NoiseVoronoiClimateGenerator(const BiomeDatabase& 
     const auto& defs = biomeDatabase_.definitions();
     biomeSelection_.reserve(defs.size());
     biomeWeightPrefix_.reserve(defs.size());
+    maxTransitionWidth_ = 0;
     for (const BiomeDefinition& def : defs)
     {
         if (def.spawnChance <= 0.0f)
         {
             continue;
         }
-        const float weight = std::max(def.spawnChance * def.footprintMultiplier, 0.0f);
+        const float radiusScale = std::max(def.radius, 1.0f);
+        float weight = std::max(def.spawnChance * def.footprintMultiplier, 0.0f);
+        weight /= std::max(radiusScale, 1.0f);
+        const auto& props = def.generationProperties();
+        if (props.has(BiomeDefinition::GenerationProperties::kOcean))
+        {
+            weight *= 1.25f;
+        }
+        if (props.has(BiomeDefinition::GenerationProperties::kMountain))
+        {
+            weight *= 0.85f;
+        }
+        if (props.has(BiomeDefinition::GenerationProperties::kLowTerrain))
+        {
+            weight *= 1.1f;
+        }
         if (weight <= 0.0f)
         {
             continue;
@@ -92,6 +129,11 @@ NoiseVoronoiClimateGenerator::NoiseVoronoiClimateGenerator(const BiomeDatabase& 
         biomeSelection_.push_back(&def);
         totalSpawnWeight_ += weight;
         biomeWeightPrefix_.push_back(totalSpawnWeight_);
+
+        for (const auto& transition : def.transitionBiomes)
+        {
+            maxTransitionWidth_ = std::max(maxTransitionWidth_, transition.width);
+        }
     }
 
     if (biomeSelection_.empty())
@@ -176,6 +218,13 @@ NoiseVoronoiClimateGenerator::buildChunkSeeds(int chunkX, int chunkZ) const
         result.maxRadius = std::max(result.maxRadius, static_cast<int>(std::ceil(seed.radius)));
         result.seeds.push_back(seed);
         rejections = 0;
+        const std::size_t beforeSub = result.seeds.size();
+        spawnSubBiomeSeeds(result.seeds.back(), result.seeds, rng);
+        for (std::size_t i = beforeSub; i < result.seeds.size(); ++i)
+        {
+            result.maxRadius =
+                std::max(result.maxRadius, static_cast<int>(std::ceil(result.seeds[i].radius)));
+        }
     }
 
     if (result.seeds.empty())
@@ -183,6 +232,13 @@ NoiseVoronoiClimateGenerator::buildChunkSeeds(int chunkX, int chunkZ) const
         BiomeSeed fallback = createSeed(rng, baseX + chunkSpan_ / 2, baseZ + chunkSpan_ / 2);
         result.maxRadius = static_cast<int>(std::ceil(fallback.radius));
         result.seeds.push_back(fallback);
+        const std::size_t beforeSub = result.seeds.size();
+        spawnSubBiomeSeeds(result.seeds.back(), result.seeds, rng);
+        for (std::size_t i = beforeSub; i < result.seeds.size(); ++i)
+        {
+            result.maxRadius =
+                std::max(result.maxRadius, static_cast<int>(std::ceil(result.seeds[i].radius)));
+        }
     }
 
     return result;
@@ -316,8 +372,22 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
         {
             continue;
         }
+        if (!candidate.seed || !candidate.seed->biome)
+        {
+            continue;
+        }
+
+        const BiomeDefinition& biome = *candidate.seed->biome;
+        const float blendFactor =
+            evaluateInterpolationCurve(1.0f - candidate.normalized, biome.interpolationCurve);
+        const float adjustedWeight = candidate.influence * blendFactor * biome.interpolationWeight;
+        if (adjustedWeight <= std::numeric_limits<float>::epsilon())
+        {
+            continue;
+        }
+
         weighted.push_back(WeightedSeed{candidate.seed,
-                                        candidate.influence,
+                                        adjustedWeight,
                                         candidate.normalized,
                                         candidate.distance,
                                         candidate.radius});
@@ -454,6 +524,296 @@ void NoiseVoronoiClimateGenerator::generate(ClimateFragment& fragment)
             ClimateSample& sample = fragment.sample(localX, localZ);
             const glm::ivec2 worldPos{baseWorld.x + localX, baseWorld.y + localZ};
             accumulateSample(worldPos, sample);
+        }
+    }
+
+    applyTransitionBiomes(baseWorld, fragment);
+}
+
+glm::vec2 NoiseVoronoiClimateGenerator::randomInUnitCircle(Random& rng) noexcept
+{
+    glm::vec2 v{0.0f};
+    do
+    {
+        v.x = rng.nextFloatSigned();
+        v.y = rng.nextFloatSigned();
+    } while (glm::dot(v, v) > 1.0f);
+    return v;
+}
+
+void NoiseVoronoiClimateGenerator::spawnSubBiomeSeeds(const BiomeSeed& parent,
+                                                      std::vector<BiomeSeed>& seeds,
+                                                      Random& rng) const
+{
+    if (!parent.biome || parent.biome->subBiomes.empty())
+    {
+        return;
+    }
+
+    const int maxCount = parent.biome->maxSubBiomeCount > 0.0f
+                             ? static_cast<int>(std::ceil(parent.biome->maxSubBiomeCount))
+                             : std::numeric_limits<int>::max();
+    int spawned = 0;
+
+    for (const auto& sub : parent.biome->subBiomes)
+    {
+        if (!sub.biome)
+        {
+            continue;
+        }
+        if (spawned >= maxCount)
+        {
+            break;
+        }
+
+        const float probability = std::clamp(sub.chance, 0.0f, 1.0f);
+        if (probability <= std::numeric_limits<float>::epsilon())
+        {
+            continue;
+        }
+        if (rng.nextFloat() > probability)
+        {
+            continue;
+        }
+
+        const glm::vec2 offset = randomInUnitCircle(rng);
+        const float parentRadius = std::max(parent.radius, 1.0f);
+        const float distance = parentRadius * 0.6f * std::sqrt(rng.nextFloat());
+        const glm::ivec2 candidatePos = parent.position + glm::ivec2(static_cast<int>(offset.x * distance),
+                                                                     static_cast<int>(offset.y * distance));
+
+        const float radiusNoise = rng.nextFloat();
+        float radius = sub.sampleRadius(parentRadius * 0.75f, radiusNoise);
+        radius = std::clamp(radius, 4.0f, parentRadius);
+
+        if (!isValidPlacement(candidatePos, radius, seeds))
+        {
+            continue;
+        }
+
+        BiomeSeed child{};
+        child.biome = sub.biome;
+        child.position = candidatePos;
+        child.radius = radius;
+        child.weight = 1.0f / std::max(child.radius * std::sqrt(glm::pi<float>()), 1.0f);
+        child.baseHeight = randomizedHeight(rng, *child.biome);
+
+        seeds.push_back(child);
+        ++spawned;
+    }
+}
+
+void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseWorld,
+                                                         ClimateFragment& fragment) const
+{
+    if (maxTransitionWidth_ <= 0)
+    {
+        return;
+    }
+
+    constexpr std::uint16_t kGroupMask = BiomeDefinition::GenerationProperties::kMask;
+    const int size = ClimateFragment::kSize;
+    const std::size_t area = static_cast<std::size_t>(size) * static_cast<std::size_t>(size);
+    const int maxWidth = std::max(1, maxTransitionWidth_);
+
+    std::vector<std::uint16_t> neighborLayers(static_cast<std::size_t>(maxWidth + 1) * area, 0);
+
+    const auto layerPtr = [&](int distance) -> std::uint16_t* {
+        return neighborLayers.data() + static_cast<std::size_t>(distance) * area;
+    };
+
+    std::uint16_t* baseLayer = layerPtr(0);
+    for (int z = 0; z < size; ++z)
+    {
+        for (int x = 0; x < size; ++x)
+        {
+            const std::size_t idx = static_cast<std::size_t>(z) * size + static_cast<std::size_t>(x);
+            const ClimateSample& sample = fragment.sample(x, z);
+            const BiomeDefinition* biome = sample.dominantBiome();
+            baseLayer[idx] = biome ? biome->generationProperties().value() : 0;
+        }
+    }
+
+    for (int distance = 1; distance <= maxWidth; ++distance)
+    {
+        const std::uint16_t* prev = layerPtr(distance - 1);
+        std::uint16_t* curr = layerPtr(distance);
+        for (int z = 0; z < size; ++z)
+        {
+            for (int x = 0; x < size; ++x)
+            {
+                const std::size_t idx = static_cast<std::size_t>(z) * size + static_cast<std::size_t>(x);
+                std::uint16_t value = prev[idx];
+                if (x > 0)
+                {
+                    value |= prev[idx - 1];
+                }
+                if (x + 1 < size)
+                {
+                    value |= prev[idx + 1];
+                }
+                if (z > 0)
+                {
+                    value |= prev[idx - size];
+                }
+                if (x > 0 && z > 0)
+                {
+                    value |= prev[idx - size - 1];
+                }
+                if (x + 1 < size && z > 0)
+                {
+                    value |= prev[idx - size + 1];
+                }
+                if (z + 1 < size)
+                {
+                    value |= prev[idx + size];
+                }
+                if (x > 0 && z + 1 < size)
+                {
+                    value |= prev[idx + size - 1];
+                }
+                if (x + 1 < size && z + 1 < size)
+                {
+                    value |= prev[idx + size + 1];
+                }
+                curr[idx] = value;
+            }
+        }
+    }
+
+    for (int z = 0; z < size; ++z)
+    {
+        for (int x = 0; x < size; ++x)
+        {
+            ClimateSample& sample = fragment.sample(x, z);
+            const BiomeDefinition* baseBiome = sample.dominantBiome();
+            if (!baseBiome || baseBiome->transitionBiomes.empty())
+            {
+                continue;
+            }
+
+            const std::size_t idx = static_cast<std::size_t>(z) * size + static_cast<std::size_t>(x);
+            const int worldX = baseWorld.x + x;
+            const int worldZ = baseWorld.y + z;
+
+            for (const BiomeDefinition::TransitionBiomeDefinition& transition : baseBiome->transitionBiomes)
+            {
+                if (!transition.biome)
+                {
+                    continue;
+                }
+
+                const int radius = std::clamp(transition.width, 0, maxWidth);
+                const std::uint16_t neighborMask = layerPtr(radius)[idx];
+                const std::uint16_t requiredBits = transition.propertyMask.value();
+                const std::uint16_t matched = static_cast<std::uint16_t>(neighborMask & requiredBits);
+                const std::uint16_t spread =
+                    static_cast<std::uint16_t>(matched | (matched >> 1) | (matched >> 2));
+                if ((spread & kGroupMask) != (requiredBits & kGroupMask))
+                {
+                    continue;
+                }
+
+                const unsigned hashSeed = hashCombine(
+                    baseSeed_,
+                    hashCombine(static_cast<unsigned>(worldX),
+                                hashCombine(static_cast<unsigned>(worldZ),
+                                            static_cast<unsigned>(transition.width))));
+                const float threshold = std::clamp(transition.chance, 0.0f, 1.0f);
+                const float roll = hashToUnitFloat(worldX, worldZ, static_cast<int>(hashSeed));
+                if (roll > threshold)
+                {
+                    continue;
+                }
+
+                const BiomeDefinition& target = *transition.biome;
+                const bool targetIsCoast = target.generationProperties().isCoastal();
+                const float seaLevelF = static_cast<float>(profile_.seaLevel);
+
+                ClimateSample newSample{};
+                newSample.blendCount = 1;
+
+                const float prevHeight = sample.aggregatedHeight;
+                const float prevRoughness = sample.aggregatedRoughness;
+                const float prevHills = sample.aggregatedHills;
+                const float prevMountains = sample.aggregatedMountains;
+                const float prevDistance = sample.distanceToCoast;
+
+                if (targetIsCoast)
+                {
+                    constexpr float kMaxElevationAboveSea = 12.0f;
+                    if (prevHeight > seaLevelF + kMaxElevationAboveSea)
+                    {
+                        continue;
+                    }
+                }
+
+                BiomeBlend blend{};
+                blend.biome = &target;
+                blend.weight = 1.0f;
+                blend.height = glm::mix(static_cast<float>(target.minHeight),
+                                        static_cast<float>(target.maxHeight),
+                                        hashToUnitFloat(worldX, worldZ, static_cast<int>(hashSeed ^ 0x45AFC123u)));
+                blend.roughness = target.roughness;
+                blend.hills = target.hills;
+                blend.mountains = target.mountains;
+                blend.normalizedDistance = 0.0f;
+                blend.falloff = target.maxRadius();
+                blend.seed = hashCombine(hashSeed, static_cast<unsigned>(std::hash<std::string>{}(target.id)));
+                blend.sitePosition = glm::vec2(static_cast<float>(worldX), static_cast<float>(worldZ));
+                newSample.blends[0] = blend;
+
+                float keepOriginal = std::clamp(target.keepOriginalTerrain, 0.0f, 1.0f);
+                float heightBlend = keepOriginal;
+                float roughBlend = keepOriginal;
+
+                float newHeight = glm::mix(blend.height, prevHeight, heightBlend);
+                float newRoughness = glm::mix(target.roughness, prevRoughness, roughBlend);
+                float newHills = glm::mix(target.hills, prevHills, roughBlend);
+                float newMountains = glm::mix(target.mountains, prevMountains, roughBlend);
+
+                if (targetIsCoast)
+                {
+                    const float coastNoise =
+                        hashToUnitFloat(worldX, worldZ, static_cast<int>(hashSeed ^ 0x17D4A5B3u));
+                    const float targetCoastHeight = glm::mix(seaLevelF - 1.5f, seaLevelF + 1.5f, coastNoise);
+
+                    heightBlend = std::min(heightBlend, 0.15f);
+                    newHeight = glm::mix(targetCoastHeight, prevHeight, heightBlend);
+                    newHeight = std::clamp(newHeight, seaLevelF - 2.5f, seaLevelF + 2.5f);
+
+                    roughBlend = std::min(roughBlend, 0.12f);
+                    newRoughness = glm::mix(target.roughness, prevRoughness, roughBlend);
+                    newHills = glm::mix(target.hills, prevHills, roughBlend);
+                    newMountains = glm::mix(target.mountains, prevMountains, roughBlend);
+
+                    newRoughness = std::min(newRoughness, 0.18f);
+                    newHills = std::min(newHills, 0.18f);
+                    newMountains = std::min(newMountains, 0.12f);
+
+                    keepOriginal = std::min(keepOriginal, roughBlend);
+                }
+
+                newSample.aggregatedHeight = newHeight;
+                newSample.aggregatedRoughness = newRoughness;
+                newSample.aggregatedHills = newHills;
+                newSample.aggregatedMountains = newMountains;
+                newSample.keepOriginalMix = keepOriginal;
+                newSample.dominantSitePos = glm::vec2(static_cast<float>(worldX), static_cast<float>(worldZ));
+                newSample.dominantSiteHalfExtents = glm::vec2(target.radius);
+                newSample.dominantIsOcean = target.isOcean();
+                if (targetIsCoast)
+                {
+                    newSample.distanceToCoast = std::abs(newSample.aggregatedHeight - seaLevelF);
+                }
+                else
+                {
+                    newSample.distanceToCoast = target.isOcean() ? 0.0f : prevDistance;
+                }
+
+                sample = newSample;
+                break;
+            }
         }
     }
 }

@@ -1,0 +1,50 @@
+id = "coast_cliffs"
+name = "Coastal Cliffs"
+surface_block = "stone"
+filler_block = "stone"
+generates_trees = false
+tree_density_multiplier = 0.0
+radius = 160.0
+radius_variation = 40.0
+spawn_chance = 0.0
+min_height = 22
+max_height = 40
+base_slope_bias = 0.20
+max_gradient = 40.0
+footprint_multiplier = 1.0
+flags = ["land", "coastal"]
+smooth_beaches = false
+keep_original_terrain = 0.15
+properties = ["temperate", "land", "ocean", "dry", "mountain"]
+
+[[transition_biomes]]
+id = "beach"
+chance = 0.75
+width = 3
+properties = ["ocean"]
+
+max_sub_biome_count = 1.0
+sub_biome_total_chance = 0.5
+
+[[sub_biomes]]
+id = "beach"
+chance = 0.5
+min_radius = 20.0
+max_radius = 40.0
+
+[soil_creep]
+strength = 0.12
+max_step = 1
+max_depth = 3
+
+[stripes]
+enabled = false
+block = "stone"
+period = 6
+thickness = 1
+noise_threshold = 0.5
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

@@ -228,6 +228,21 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             const auto& dominantProps = dominantBiome->generationProperties();
             const bool biomeIsOcean = dominantBiome->isOcean();
             const bool biomeIsCoastal = dominantProps.isCoastal();
+            if (biomeIsOcean)
+            {
+                const float seaLevel = static_cast<float>(profile_.seaLevel);
+                if (std::isfinite(climateSample.distanceToCoast))
+                {
+                    const float distance = std::max(0.0f, climateSample.distanceToCoast);
+                    constexpr float kBlendRange = 48.0f;
+                    const float t = std::clamp(distance / kBlendRange, 0.0f, 1.0f);
+                    baseHeight = glm::mix(seaLevel, baseHeight, t);
+                }
+                else
+                {
+                    baseHeight = std::min(baseHeight, seaLevel);
+                }
+            }
             if (!biomeIsOcean && std::isfinite(climateSample.distanceToCoast))
             {
                 const float distance = std::max(0.0f, climateSample.distanceToCoast);

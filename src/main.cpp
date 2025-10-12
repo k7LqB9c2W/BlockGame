@@ -535,6 +535,9 @@ void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3
     chunkManager.sampleProfilingSnapshot();
 }
 
+
+#include "text_overlay.h"
+
 // Collision detection helper functions
 struct AABB
 {

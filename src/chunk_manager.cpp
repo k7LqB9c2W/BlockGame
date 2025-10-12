@@ -3803,7 +3803,9 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
 
     sample.dominantBiome = surfaceColumn.dominantBiome;
     sample.dominantWeight = surfaceColumn.dominantWeight;
+    sample.surfaceHeight = surfaceColumn.surfaceHeight;
     sample.surfaceY = surfaceColumn.surfaceY;
+    sample.originalSurfaceY = surfaceColumn.surfaceY;
     sample.minSurfaceY = std::min(sample.surfaceY, slabMinWorldY);
     sample.maxSurfaceY = std::max(sample.surfaceY, slabMaxWorldY);
     sample.soilCreepCoefficient = surfaceColumn.soilCreepCoefficient;
@@ -3813,6 +3815,18 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     sample.distanceToShore = std::isfinite(climateSample.distanceToCoast)
                                  ? climateSample.distanceToCoast
                                  : std::numeric_limits<float>::infinity();
+    sample.soilCreepOffset = 0.0f;
+
+    sample.topBlendCount = std::min(climateSample.blendCount, sample.topBlendDebug.size());
+    for (std::size_t i = 0; i < sample.topBlendCount; ++i)
+    {
+        const auto& srcBlend = climateSample.blends[i];
+        auto& dstBlend = sample.topBlendDebug[i];
+        dstBlend.biome = srcBlend.biome;
+        dstBlend.weight = srcBlend.weight;
+        dstBlend.aggregatedHeight = srcBlend.height;
+        dstBlend.normalizedDistance = srcBlend.normalizedDistance;
+    }
 
     sample.slabHasSolid = surfaceColumn.surfaceY >= slabMinWorldY;
     if (sample.slabHasSolid)

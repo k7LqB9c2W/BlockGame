@@ -6,6 +6,7 @@
 #include "chunk_manager.h"
 #include "input_context.h"
 #include "renderer.h"
+#include "terrain/terrain_generator.h"
 #include "text_overlay.h"
 
 #include <glm/glm.hpp>
@@ -1199,7 +1200,66 @@ void main()
             debugStream << "XYZ: " << camera.position.x << ", "
                         << camera.position.y << ", "
                         << camera.position.z << '\n';
-            debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position);
+            debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position) << '\n';
+
+            const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
+            glm::vec3 samplePosition = camera.position;
+            if (debugHit.hit)
+            {
+                samplePosition = glm::vec3(debugHit.blockPos);
+            }
+
+            const int columnX = static_cast<int>(std::floor(samplePosition.x));
+            const int columnZ = static_cast<int>(std::floor(samplePosition.z));
+            const terrain::ColumnSample columnSample = chunkManager.sampleColumnAt(samplePosition);
+
+            debugStream << std::setprecision(2);
+            const terrain::BiomeDefinition* dominantBiome = columnSample.dominantBiome;
+            const char* dominantName = dominantBiome ? dominantBiome->name.c_str() : "(none)";
+            debugStream << "Column [" << columnX << ", " << columnZ << "]\n";
+            debugStream << "Dominant: "
+                        << dominantName
+                        << " (w=" << columnSample.dominantWeight << ")\n";
+
+            debugStream << "SurfaceY: " << columnSample.surfaceY
+                        << " h=" << columnSample.surfaceHeight
+                        << " min=" << columnSample.minSurfaceY
+                        << " max=" << columnSample.maxSurfaceY;
+            if (columnSample.slabHasSolid && columnSample.slabHighestSolidY != std::numeric_limits<int>::min())
+            {
+                debugStream << " solidTop=" << columnSample.slabHighestSolidY;
+            }
+            debugStream << '\n';
+
+            debugStream << "Soil: coeff=" << columnSample.soilCreepCoefficient
+                        << " offset=" << columnSample.soilCreepOffset
+                        << " originalY=" << columnSample.originalSurfaceY << '\n';
+
+            debugStream << "Amplitude: rough=" << columnSample.roughAmplitude
+                        << " hill=" << columnSample.hillAmplitude
+                        << " mountain=" << columnSample.mountainAmplitude
+                        << " shoreDist=" << columnSample.distanceToShore << '\n';
+
+            debugStream << "Climate blend:";
+            if (columnSample.topBlendCount == 0)
+            {
+                debugStream << " none\n";
+            }
+            else
+            {
+                debugStream << '\n';
+                for (std::size_t i = 0; i < columnSample.topBlendCount; ++i)
+                {
+                    const auto& blend = columnSample.topBlendDebug[i];
+                    const terrain::BiomeDefinition* blendBiome = blend.biome;
+                    const char* blendName = blendBiome ? blendBiome->name.c_str() : "(none)";
+                    debugStream << "  - "
+                                << blendName
+                                << " w=" << blend.weight
+                                << " aggY=" << blend.aggregatedHeight
+                                << " dist=" << blend.normalizedDistance << '\n';
+                }
+            }
 
             debugOverlayText = debugStream.str();
             debugOverlayLineCount = 1 + static_cast<int>(std::count(debugOverlayText.begin(),

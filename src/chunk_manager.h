@@ -5,12 +5,18 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+
+namespace terrain
+{
+struct ColumnSample;
+}
 
 inline constexpr float kNearPlane = 0.1f;
 inline constexpr float kDefaultFarPlane = 256.0f;
@@ -186,6 +192,9 @@ public:
     ChunkRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
+    terrain::ColumnSample sampleColumnAt(const glm::vec3& worldPos,
+                                         int slabMinWorldY = std::numeric_limits<int>::min(),
+                                         int slabMaxWorldY = std::numeric_limits<int>::max()) const;
     void clear();
 
     bool destroyBlock(const glm::ivec3& worldPos);

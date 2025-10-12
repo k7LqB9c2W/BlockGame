@@ -21,12 +21,6 @@ smooth_beaches = true
 keep_original_terrain = 0.25
 properties = ["hot", "dry", "land", "barren"]
 
-[[transition_biomes]]
-id = "beach"
-chance = 1.0
-width = 4
-properties = ["ocean"]
-
 max_sub_biome_count = 1.5
 sub_biome_total_chance = 0.2
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -26,8 +27,17 @@ struct WorldgenProfile;
 
 struct ColumnSample
 {
+    struct BlendDebugInfo
+    {
+        const BiomeDefinition* biome{nullptr};
+        float weight{0.0f};
+        float aggregatedHeight{0.0f};
+        float normalizedDistance{0.0f};
+    };
+
     const BiomeDefinition* dominantBiome{nullptr};
     float dominantWeight{0.0f};
+    float surfaceHeight{0.0f};
     int surfaceY{0};
     int minSurfaceY{0};
     int maxSurfaceY{0};
@@ -38,6 +48,10 @@ struct ColumnSample
     float hillAmplitude{0.0f};
     float mountainAmplitude{0.0f};
     float distanceToShore{0.0f};
+    int originalSurfaceY{0};
+    float soilCreepOffset{0.0f};
+    std::array<BlendDebugInfo, 2> topBlendDebug{};
+    std::size_t topBlendCount{0};
 };
 
 struct ColumnBuildResult

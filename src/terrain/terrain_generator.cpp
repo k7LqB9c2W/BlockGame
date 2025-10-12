@@ -19,6 +19,16 @@ namespace terrain
 {
 namespace
 {
+struct TerrainLogInitializer
+{
+    TerrainLogInitializer()
+    {
+        std::ofstream clear("debug_terrain.log", std::ios::trunc);
+    }
+};
+
+const TerrainLogInitializer g_logInitializer{};
+
 inline std::size_t columnIndex(int x, int z, int strideX) noexcept
 {
     return static_cast<std::size_t>(z) * static_cast<std::size_t>(strideX) + static_cast<std::size_t>(x);
@@ -49,7 +59,8 @@ void logTerrainAnomaly(const char* tag,
                        int worldZ,
                        int surfaceY,
                        float neighborAverage,
-                       const ColumnSample& sample)
+                       const ColumnSample& sample,
+                       int seaLevel)
 {
     if (!kEnableTerrainDebugLogs)
     {
@@ -66,11 +77,36 @@ void logTerrainAnomaly(const char* tag,
 
     std::lock_guard<std::mutex> lock(s_logMutex);
     ++s_logCount;
-    s_logFile << tag << " world=(" << worldX << ',' << worldZ << ") surfaceY=" << surfaceY
+    const float seaLevelDelta = static_cast<float>(surfaceY - seaLevel);
+    const float netDelta = static_cast<float>(surfaceY - sample.originalSurfaceY);
+    s_logFile << tag << " world=(" << worldX << ',' << worldZ << ")"
+              << " finalSurfaceY=" << surfaceY
+              << " originalSurfaceY=" << sample.originalSurfaceY
+              << " rawHeight=" << sample.surfaceHeight
+              << " creepOffset=" << sample.soilCreepOffset
+              << " netDelta=" << netDelta
               << " neighborAvg=" << neighborAverage
+              << " seaLevelDelta=" << seaLevelDelta
+              << " distanceToShore=" << sample.distanceToShore
               << " dominantBiome=" << (sample.dominantBiome ? sample.dominantBiome->id : "<none>")
-              << " weight=" << sample.dominantWeight << " roughAmp=" << sample.roughAmplitude
-              << " hillAmp=" << sample.hillAmplitude << " mountainAmp=" << sample.mountainAmplitude << '\n';
+              << " weight=" << sample.dominantWeight
+              << " roughAmp=" << sample.roughAmplitude
+              << " hillAmp=" << sample.hillAmplitude
+              << " mountainAmp=" << sample.mountainAmplitude;
+
+    if (sample.topBlendCount > 0)
+    {
+        s_logFile << " blends=";
+        for (std::size_t i = 0; i < sample.topBlendCount; ++i)
+        {
+            const auto& blend = sample.topBlendDebug[i];
+            s_logFile << " [" << i << "] biome=" << (blend.biome ? blend.biome->id : "<none>")
+                      << " weight=" << blend.weight << " aggHeight=" << blend.aggregatedHeight
+                      << " normDist=" << blend.normalizedDistance;
+        }
+    }
+
+    s_logFile << '\n';
 }
 
 } // namespace
@@ -186,6 +222,7 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
 
             const float neighborAverage = computeNeighborAverage(localX, localZ);
             int adjustedSurfaceY = sample.surfaceY;
+            float creepOffset = 0.0f;
             if (biome.terrainSettings.soilCreep.strength > 0.0f && sample.soilCreepCoefficient > 0.0f)
             {
                 const float strength = std::clamp(sample.soilCreepCoefficient * biome.terrainSettings.soilCreep.strength,
@@ -203,10 +240,12 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                     const float maxDepth = static_cast<float>(biome.terrainSettings.soilCreep.maxDepth);
                     offset = std::clamp(offset, -maxDepth, maxDepth);
                 }
+                creepOffset = offset;
                 adjustedSurfaceY = static_cast<int>(std::round(static_cast<float>(adjustedSurfaceY) + offset));
                 adjustedSurfaceY = std::clamp(adjustedSurfaceY, sample.minSurfaceY, sample.maxSurfaceY);
             }
 
+            sample.soilCreepOffset = creepOffset;
             sample.surfaceY = adjustedSurfaceY;
             sample.slabHasSolid = minWorldY <= adjustedSurfaceY;
             sample.slabHighestSolidY = sample.slabHasSolid ? std::min(adjustedSurfaceY, maxWorldY)
@@ -217,7 +256,7 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                 const float diff = std::abs(static_cast<float>(adjustedSurfaceY) - neighborAverage);
                 if (adjustedSurfaceY <= minWorldY + 4 || diff > 48.0f)
                 {
-                    logTerrainAnomaly("[HeightDebug]", worldX, worldZ, adjustedSurfaceY, neighborAverage, sample);
+                    logTerrainAnomaly("[HeightDebug]", worldX, worldZ, adjustedSurfaceY, neighborAverage, sample, seaLevel_);
                 }
             }
 

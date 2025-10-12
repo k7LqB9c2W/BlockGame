@@ -468,6 +468,9 @@ struct ChunkManager::Impl
     ChunkRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
+    ColumnSample sampleColumnAt(const glm::vec3& worldPos,
+                                int slabMinWorldY = std::numeric_limits<int>::min(),
+                                int slabMaxWorldY = std::numeric_limits<int>::max()) const;
     void clear();
 
     bool destroyBlock(const glm::ivec3& worldPos);
@@ -1314,6 +1317,15 @@ float ChunkManager::Impl::surfaceHeight(float worldX, float worldZ) const noexce
     const ColumnSample sample = sampleColumn(wx, wz);
     return static_cast<float>(sample.surfaceY + 1);
 
+}
+
+ColumnSample ChunkManager::Impl::sampleColumnAt(const glm::vec3& worldPos,
+                                                int slabMinWorldY,
+                                                int slabMaxWorldY) const
+{
+    const int worldX = static_cast<int>(std::floor(worldPos.x));
+    const int worldZ = static_cast<int>(std::floor(worldPos.z));
+    return sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
 }
 
 void ChunkManager::Impl::clear()
@@ -4372,6 +4384,13 @@ ChunkRenderData ChunkManager::buildRenderData(const Frustum& frustum) const
 float ChunkManager::surfaceHeight(float worldX, float worldZ) const noexcept
 {
     return impl_->surfaceHeight(worldX, worldZ);
+}
+
+terrain::ColumnSample ChunkManager::sampleColumnAt(const glm::vec3& worldPos,
+                                                   int slabMinWorldY,
+                                                   int slabMaxWorldY) const
+{
+    return impl_->sampleColumnAt(worldPos, slabMinWorldY, slabMaxWorldY);
 }
 
 void ChunkManager::clear()

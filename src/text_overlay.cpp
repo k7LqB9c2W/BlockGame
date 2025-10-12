@@ -16,6 +16,7 @@
 namespace
 {
 constexpr float kLineSpacingFactor = 0.35f;
+constexpr float kMinGlyphSpacing = 0.5f;
 
 [[nodiscard]] GLuint compileShader(GLenum type, const char* source)
 {
@@ -195,7 +196,10 @@ void TextOverlay::render(const std::string& text,
             vertexBuffer_.push_back({glyphX0, glyphY1, glyph.uvMin.x, glyph.uvMax.y});
         }
 
-        penX += glyph.advance * scale;
+        const float glyphRight = penX + glyph.offsetX2 * scale;
+        const float nextPen = penX + glyph.advance * scale;
+        const float minPen = glyphRight + kMinGlyphSpacing * scale;
+        penX = std::max(nextPen, minPen);
     }
 
     if (vertexBuffer_.empty())

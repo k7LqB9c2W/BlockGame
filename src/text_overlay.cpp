@@ -183,8 +183,8 @@ void TextOverlay::render(const std::string& text,
         {
             const float glyphX0 = penX + glyph.offsetX * scale;
             const float glyphY0 = penY + glyph.offsetY * scale;
-            const float glyphX1 = glyphX0 + glyph.width * scale;
-            const float glyphY1 = glyphY0 + glyph.height * scale;
+            const float glyphX1 = penX + glyph.offsetX2 * scale;
+            const float glyphY1 = penY + glyph.offsetY2 * scale;
 
             vertexBuffer_.push_back({glyphX0, glyphY0, glyph.uvMin.x, glyph.uvMin.y});
             vertexBuffer_.push_back({glyphX1, glyphY0, glyph.uvMax.x, glyph.uvMin.y});
@@ -387,8 +387,8 @@ bool TextOverlay::loadFontAtlas(const std::string& path)
         glyph.advance = pc.xadvance;
         glyph.offsetX = pc.xoff;
         glyph.offsetY = pc.yoff;
-        glyph.width = static_cast<float>(pc.x1 - pc.x0);
-        glyph.height = static_cast<float>(pc.y1 - pc.y0);
+        glyph.offsetX2 = pc.xoff2;
+        glyph.offsetY2 = pc.yoff2;
         glyph.uvMin = glm::vec2(static_cast<float>(pc.x0) / static_cast<float>(atlasWidth),
                                 static_cast<float>(pc.y0) / static_cast<float>(atlasHeight));
         glyph.uvMax = glm::vec2(static_cast<float>(pc.x1) / static_cast<float>(atlasWidth),

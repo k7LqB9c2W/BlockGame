@@ -28,12 +28,6 @@ chance = 0.9
 width = 5
 properties = ["ocean"]
 
-[[transition_biomes]]
-id = "beach"
-chance = 0.35
-width = 3
-properties = ["ocean"]
-
 [soil_creep]
 strength = 0.15
 max_step = 1

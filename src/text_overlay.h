@@ -37,8 +37,8 @@ private:
         float advance{0.0f};
         float offsetX{0.0f};
         float offsetY{0.0f};
-        float width{0.0f};
-        float height{0.0f};
+        float offsetX2{0.0f};
+        float offsetY2{0.0f};
         glm::vec2 uvMin{0.0f};
         glm::vec2 uvMax{0.0f};
     };

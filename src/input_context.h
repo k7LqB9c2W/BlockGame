@@ -28,7 +28,7 @@ struct InputContext
     bool f3Pressed{false};
     bool f3JustPressed{false};
     bool lodEnabled{false};
-    bool showCoordinates{false};
+    bool showDebugOverlay{false};
     bool showRenderDistanceGUI{false};
     bool showTeleportGUI{false};
     std::string inputBuffer{};

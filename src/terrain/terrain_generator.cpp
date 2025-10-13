@@ -88,6 +88,17 @@ void logTerrainAnomaly(const char* tag,
               << " neighborAvg=" << neighborAverage
               << " seaLevelDelta=" << seaLevelDelta
               << " distanceToShore=" << sample.distanceToShore
+              << " dominantIsOcean=" << (sample.dominantIsOcean ? "true" : "false")
+              << " coastDistance=";
+    if (std::isfinite(sample.distanceToCoast))
+    {
+        s_logFile << sample.distanceToCoast;
+    }
+    else
+    {
+        s_logFile << "inf";
+    }
+    s_logFile
               << " dominantBiome=" << (sample.dominantBiome ? sample.dominantBiome->id : "<none>")
               << " weight=" << sample.dominantWeight
               << " roughAmp=" << sample.roughAmplitude
@@ -102,7 +113,10 @@ void logTerrainAnomaly(const char* tag,
             const auto& blend = sample.topBlendDebug[i];
             s_logFile << " [" << i << "] biome=" << (blend.biome ? blend.biome->id : "<none>")
                       << " weight=" << blend.weight << " aggHeight=" << blend.aggregatedHeight
-                      << " normDist=" << blend.normalizedDistance;
+                      << " normDist=" << blend.normalizedDistance
+                      << " radius=" << blend.seedRadius
+                      << " worldDist=" << blend.worldDistance
+                      << " isOcean=" << (blend.isOcean ? "true" : "false");
         }
     }
 

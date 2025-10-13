@@ -753,6 +753,7 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
     };
 
     std::vector<std::uint16_t> propertyGrid(area, 0);
+    std::vector<std::uint8_t> oceanSnapshot(area, 0);
     const auto refreshProperties = [&]() {
         for (int z = 0; z < size; ++z)
         {
@@ -830,6 +831,15 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
     for (int iteration = 0; iteration < kMaxIterations; ++iteration)
     {
         rebuildNeighborLayers();
+        for (int z = 0; z < size; ++z)
+        {
+            for (int x = 0; x < size; ++x)
+            {
+                const std::size_t idx = indexFor(x, z);
+                const ClimateSample& sample = fragment.sample(x, z);
+                oceanSnapshot[idx] = sample.dominantIsOcean ? 1 : 0;
+            }
+        }
         bool anyChange = false;
 
         for (int z = 0; z < size; ++z)
@@ -904,6 +914,33 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     {
                         const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
                         if (!std::isfinite(prevDistance) || prevDistance > transitionWidth)
+                        {
+                            continue;
+                        }
+
+                        bool hasOceanNeighbor = false;
+                        for (int dz = -radius; dz <= radius && !hasOceanNeighbor; ++dz)
+                        {
+                            const int nz = z + dz;
+                            if (nz < 0 || nz >= size)
+                            {
+                                continue;
+                            }
+                            for (int dx = -radius; dx <= radius; ++dx)
+                            {
+                                const int nx = x + dx;
+                                if (nx < 0 || nx >= size)
+                                {
+                                    continue;
+                                }
+                                if (oceanSnapshot[indexFor(nx, nz)] != 0)
+                                {
+                                    hasOceanNeighbor = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!hasOceanNeighbor)
                         {
                             continue;
                         }

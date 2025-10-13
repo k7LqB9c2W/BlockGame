@@ -899,6 +899,16 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const float prevMountains = sample.aggregatedMountains;
                     const float prevDistance = sample.distanceToCoast;
 
+                    const bool requiresCoastline = targetIsCoast || targetIsBeach;
+                    if (requiresCoastline)
+                    {
+                        const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
+                        if (!std::isfinite(prevDistance) || prevDistance > transitionWidth)
+                        {
+                            continue;
+                        }
+                    }
+
                     if (targetIsCoast && !baseIsOcean)
                     {
                         constexpr float kMaxElevationAboveSea = 12.0f;

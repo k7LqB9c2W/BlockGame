@@ -1238,7 +1238,18 @@ void main()
             debugStream << "Amplitude: rough=" << columnSample.roughAmplitude
                         << " hill=" << columnSample.hillAmplitude
                         << " mountain=" << columnSample.mountainAmplitude
-                        << " shoreDist=" << columnSample.distanceToShore << '\n';
+                        << " shoreDist=" << columnSample.distanceToShore
+                        << " domOcean=" << (columnSample.dominantIsOcean ? "true" : "false")
+                        << " coastDist=";
+            if (std::isfinite(columnSample.distanceToCoast))
+            {
+                debugStream << columnSample.distanceToCoast;
+            }
+            else
+            {
+                debugStream << "inf";
+            }
+            debugStream << '\n';
 
             debugStream << "Climate blend:";
             if (columnSample.topBlendCount == 0)
@@ -1257,7 +1268,11 @@ void main()
                                 << blendName
                                 << " w=" << blend.weight
                                 << " aggY=" << blend.aggregatedHeight
-                                << " dist=" << blend.normalizedDistance << '\n';
+                                << " normDist=" << blend.normalizedDistance
+                                << " radius=" << blend.seedRadius
+                                << " worldDist=" << blend.worldDistance
+                                << " ocean=" << (blend.isOcean ? "true" : "false")
+                                << '\n';
                 }
             }
 

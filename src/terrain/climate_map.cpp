@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cmath>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -18,6 +19,8 @@ namespace terrain
 {
 namespace
 {
+constexpr bool kLogCoastTransitions = false;
+
 unsigned hashCombine(unsigned a, unsigned b) noexcept
 {
     a ^= b + 0x9E3779B9u + (a << 6) + (a >> 2);
@@ -633,8 +636,7 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
         {
             continue;
         }
-        float boundaryDistance = outSample.dominantIsOcean ? std::max(0.0f, entry.radius - entry.distance)
-                                                           : std::max(0.0f, entry.distance - entry.radius);
+        const float boundaryDistance = std::max(0.0f, entry.distance - entry.radius);
         bestBoundary = std::min(bestBoundary, boundaryDistance);
     }
     if (std::isfinite(bestBoundary))
@@ -894,6 +896,8 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const bool targetIsBeach = target.hasFlag("beach");
                     const float seaLevelF = static_cast<float>(profile_.seaLevel);
                     const bool baseIsOcean = baseBiome->isOcean();
+                    const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
+                    bool hasOceanNeighbor = false;
 
                     if (targetIsBeach && !baseIsOcean)
                     {
@@ -912,13 +916,11 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const bool requiresCoastline = targetIsCoast || targetIsBeach;
                     if (requiresCoastline)
                     {
-                        const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
                         if (!std::isfinite(prevDistance) || prevDistance > transitionWidth)
                         {
                             continue;
                         }
 
-                        bool hasOceanNeighbor = false;
                         for (int dz = -radius; dz <= radius && !hasOceanNeighbor; ++dz)
                         {
                             const int nz = z + dz;
@@ -1019,6 +1021,17 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     else
                     {
                         newSample.distanceToCoast = target.isOcean() ? 0.0f : prevDistance;
+                    }
+
+                    if (kLogCoastTransitions)
+                    {
+                        std::cout << "[CoastTransition] world=(" << worldX << ',' << worldZ << ")"
+                                  << " base=" << (baseBiome ? baseBiome->id : "<none>")
+                                  << " target=" << target.id
+                                  << " prevDistance=" << prevDistance
+                                  << " width=" << transitionWidth
+                                  << " hasOceanNeighbor=" << (hasOceanNeighbor ? "true" : "false")
+                                  << '\n';
                     }
 
                     sample = newSample;

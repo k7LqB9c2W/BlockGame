@@ -33,6 +33,9 @@ struct ColumnSample
         float weight{0.0f};
         float aggregatedHeight{0.0f};
         float normalizedDistance{0.0f};
+        float seedRadius{0.0f};
+        float worldDistance{0.0f};
+        bool isOcean{false};
     };
 
     const BiomeDefinition* dominantBiome{nullptr};
@@ -50,7 +53,9 @@ struct ColumnSample
     float distanceToShore{0.0f};
     int originalSurfaceY{0};
     float soilCreepOffset{0.0f};
-    std::array<BlendDebugInfo, 2> topBlendDebug{};
+    bool dominantIsOcean{false};
+    float distanceToCoast{0.0f};
+    std::array<BlendDebugInfo, 4> topBlendDebug{};
     std::size_t topBlendCount{0};
 };
 

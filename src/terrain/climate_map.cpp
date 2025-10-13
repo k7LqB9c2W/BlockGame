@@ -6,6 +6,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <queue>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -754,6 +755,9 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
 
     std::vector<std::uint16_t> propertyGrid(area, 0);
     std::vector<std::uint8_t> oceanSnapshot(area, 0);
+    std::vector<std::uint16_t> coastDistance(
+        area,
+        std::numeric_limits<std::uint16_t>::max());
     const auto refreshProperties = [&]() {
         for (int z = 0; z < size; ++z)
         {
@@ -827,10 +831,12 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
         }
     };
 
-    constexpr int kMaxIterations = 4;
-    for (int iteration = 0; iteration < kMaxIterations; ++iteration)
-    {
-        rebuildNeighborLayers();
+    const std::uint16_t unreachableDistance = std::numeric_limits<std::uint16_t>::max();
+    const int clampedMaxDistance = std::min(maxWidth + 1,
+                                            static_cast<int>(unreachableDistance - 1));
+    const std::uint16_t maxDistanceValue = static_cast<std::uint16_t>(clampedMaxDistance);
+
+    const auto rebuildOceanSnapshot = [&]() {
         for (int z = 0; z < size; ++z)
         {
             for (int x = 0; x < size; ++x)
@@ -840,6 +846,95 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                 oceanSnapshot[idx] = sample.dominantIsOcean ? 1 : 0;
             }
         }
+    };
+
+    const auto recomputeCoastDistances = [&]() {
+        std::fill(coastDistance.begin(), coastDistance.end(), unreachableDistance);
+
+        std::queue<std::size_t> frontier;
+        for (std::size_t idx = 0; idx < area; ++idx)
+        {
+            if (oceanSnapshot[idx] != 0)
+            {
+                coastDistance[idx] = 0;
+                frontier.push(idx);
+            }
+        }
+
+        const std::array<std::pair<int, int>, 8> neighborOffsets{{
+            {-1, 0},
+            {1, 0},
+            {0, -1},
+            {0, 1},
+            {-1, -1},
+            {1, -1},
+            {-1, 1},
+            {1, 1},
+        }};
+
+        while (!frontier.empty())
+        {
+            const std::size_t idx = frontier.front();
+            frontier.pop();
+            const std::uint16_t currentDistance = coastDistance[idx];
+            if (currentDistance >= maxDistanceValue)
+            {
+                continue;
+            }
+
+            const int x = static_cast<int>(idx % static_cast<std::size_t>(size));
+            const int z = static_cast<int>(idx / static_cast<std::size_t>(size));
+
+            for (const auto& [dx, dz] : neighborOffsets)
+            {
+                const int nx = x + dx;
+                const int nz = z + dz;
+                if (nx < 0 || nx >= size || nz < 0 || nz >= size)
+                {
+                    continue;
+                }
+
+                const std::size_t nIdx = indexFor(nx, nz);
+                const std::uint16_t nextDistance = static_cast<std::uint16_t>(currentDistance + 1);
+                const std::uint16_t clampedDistance =
+                    nextDistance > maxDistanceValue ? maxDistanceValue : nextDistance;
+                if (coastDistance[nIdx] <= clampedDistance)
+                {
+                    continue;
+                }
+
+                coastDistance[nIdx] = clampedDistance;
+                if (clampedDistance < maxDistanceValue)
+                {
+                    frontier.push(nIdx);
+                }
+            }
+        }
+
+        for (int z = 0; z < size; ++z)
+        {
+            for (int x = 0; x < size; ++x)
+            {
+                const std::size_t idx = indexFor(x, z);
+                ClimateSample& sample = fragment.sample(x, z);
+                if (coastDistance[idx] == unreachableDistance)
+                {
+                    sample.distanceToCoast = std::numeric_limits<float>::infinity();
+                }
+                else
+                {
+                    sample.distanceToCoast = static_cast<float>(coastDistance[idx]);
+                }
+            }
+        }
+    };
+
+    constexpr int kMaxIterations = 4;
+    for (int iteration = 0; iteration < kMaxIterations; ++iteration)
+    {
+        rebuildNeighborLayers();
+        rebuildOceanSnapshot();
+        recomputeCoastDistances();
         bool anyChange = false;
 
         for (int z = 0; z < size; ++z)
@@ -908,12 +1003,13 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const float prevHills = sample.aggregatedHills;
                     const float prevMountains = sample.aggregatedMountains;
                     const float prevDistance = sample.distanceToCoast;
+                    const std::uint16_t dist = coastDistance[idx];
 
                     const bool requiresCoastline = targetIsCoast || targetIsBeach;
                     if (requiresCoastline)
                     {
-                        const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
-                        if (!std::isfinite(prevDistance) || prevDistance > transitionWidth)
+                        if (dist == unreachableDistance ||
+                            dist > static_cast<std::uint16_t>(radius))
                         {
                             continue;
                         }
@@ -1014,7 +1110,7 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     newSample.dominantIsOcean = target.isOcean();
                     if (targetIsCoast)
                     {
-                        newSample.distanceToCoast = std::abs(newSample.aggregatedHeight - seaLevelF);
+                        newSample.distanceToCoast = static_cast<float>(dist);
                     }
                     else
                     {
@@ -1035,6 +1131,8 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
         }
 
         refreshProperties();
+        rebuildOceanSnapshot();
+        recomputeCoastDistances();
     }
 }
 

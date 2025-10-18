@@ -721,6 +721,34 @@ void NoiseVoronoiClimateGenerator::spawnSubBiomeSeeds(const BiomeSeed& parent,
         float radius = sub.sampleRadius(parentRadius * 0.75f, radiusNoise);
         radius = std::clamp(radius, 4.0f, parentRadius);
 
+        const bool requiresOceanNeighbor =
+            sub.biome->generationProperties().isCoastal() || sub.biome->hasFlag("beach");
+        if (requiresOceanNeighbor)
+        {
+            constexpr float kOceanProximityFactor = 2.0f;
+            bool hasNearbyOcean = false;
+            for (const BiomeSeed& oceanSeed : seeds)
+            {
+                if (!oceanSeed.biome || !oceanSeed.biome->isOcean())
+                {
+                    continue;
+                }
+
+                const float distanceToOcean =
+                    glm::length(glm::vec2(candidatePos - oceanSeed.position));
+                if (distanceToOcean <= radius * kOceanProximityFactor)
+                {
+                    hasNearbyOcean = true;
+                    break;
+                }
+            }
+
+            if (!hasNearbyOcean)
+            {
+                continue;
+            }
+        }
+
         if (!isValidPlacement(candidatePos, radius, seeds))
         {
             continue;

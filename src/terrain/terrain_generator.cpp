@@ -279,7 +279,8 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
 
             const bool nearSeaLevel = std::abs(adjustedSurfaceY - seaLevel_) <= 2;
             constexpr float kBeachDistanceRange = 6.0f;
-            if (!biome.isOcean() && nearSeaLevel && sample.distanceToShore <= kBeachDistanceRange)
+            if (!biome.isOcean() && nearSeaLevel && std::isfinite(sample.distanceToShore)
+                && sample.distanceToShore <= kBeachDistanceRange)
             {
                 const float noise = hashToUnitFloat(worldX, adjustedSurfaceY, worldZ);
                 if (biome.terrainSettings.smoothBeaches)

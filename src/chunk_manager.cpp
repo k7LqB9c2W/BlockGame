@@ -3852,16 +3852,13 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         sample.slabHighestSolidY = std::min(surfaceColumn.surfaceY, slabMaxWorldY);
     }
 
-    if (!std::isfinite(sample.distanceToShore) && sample.dominantBiome && !sample.dominantBiome->isOcean())
+    if (!std::isfinite(sample.distanceToShore))
     {
-        const float fallback = std::abs(static_cast<float>(surfaceColumn.surfaceY - globalSeaLevel_));
-        sample.distanceToShore = fallback;
-        sample.distanceToCoast = fallback;
-    }
-    else if (!std::isfinite(sample.distanceToShore))
-    {
-        sample.distanceToShore = 0.0f;
-        sample.distanceToCoast = 0.0f;
+        if (sample.dominantBiome && sample.dominantBiome->isOcean())
+        {
+            sample.distanceToShore = 0.0f;
+            sample.distanceToCoast = 0.0f;
+        }
     }
 
     return sample;
@@ -3926,7 +3923,8 @@ void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
                         constexpr float kBeachDistanceRange = 6.0f;
                         constexpr int kBeachHeightBand = 2;
                         const bool nearSeaLevel = std::abs(sample.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
-                        if (nearSeaLevel && sample.distanceToShore <= kBeachDistanceRange)
+                        if (nearSeaLevel && std::isfinite(sample.distanceToShore)
+                            && sample.distanceToShore <= kBeachDistanceRange)
                         {
                             const float beachNoise = hashToUnitFloat(worldX, sample.surfaceY, worldZ);
                             surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;

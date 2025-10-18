@@ -645,7 +645,7 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
     }
     else
     {
-        outSample.distanceToCoast = outSample.dominantIsOcean ? 0.0f : std::numeric_limits<float>::infinity();
+        outSample.distanceToCoast = std::numeric_limits<float>::infinity();
     }
 }
 

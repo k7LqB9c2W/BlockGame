@@ -3860,8 +3860,9 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     }
     else if (!std::isfinite(sample.distanceToShore))
     {
-        sample.distanceToShore = 0.0f;
-        sample.distanceToCoast = 0.0f;
+        // Ocean-dominant samples without a nearby land seed keep their infinite distance.
+        sample.distanceToShore = std::numeric_limits<float>::infinity();
+        sample.distanceToCoast = std::numeric_limits<float>::infinity();
     }
 
     return sample;

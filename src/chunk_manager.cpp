@@ -3824,12 +3824,15 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     sample.roughAmplitude = surfaceColumn.roughAmplitude;
     sample.hillAmplitude = surfaceColumn.hillAmplitude;
     sample.mountainAmplitude = surfaceColumn.mountainAmplitude;
+    sample.dominantIsOcean = climateSample.dominantIsOcean;
+    sample.distanceToCoast = climateSample.distanceToCoast;
     sample.distanceToShore = std::isfinite(climateSample.distanceToCoast)
                                  ? climateSample.distanceToCoast
                                  : std::numeric_limits<float>::infinity();
     sample.soilCreepOffset = 0.0f;
 
     sample.topBlendCount = std::min(climateSample.blendCount, sample.topBlendDebug.size());
+    const glm::vec2 columnPos(static_cast<float>(worldX), static_cast<float>(worldZ));
     for (std::size_t i = 0; i < sample.topBlendCount; ++i)
     {
         const auto& srcBlend = climateSample.blends[i];
@@ -3838,6 +3841,9 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
         dstBlend.weight = srcBlend.weight;
         dstBlend.aggregatedHeight = srcBlend.height;
         dstBlend.normalizedDistance = srcBlend.normalizedDistance;
+        dstBlend.seedRadius = srcBlend.falloff;
+        dstBlend.worldDistance = glm::length(columnPos - srcBlend.sitePosition);
+        dstBlend.isOcean = srcBlend.biome && srcBlend.biome->isOcean();
     }
 
     sample.slabHasSolid = surfaceColumn.surfaceY >= slabMinWorldY;
@@ -3848,11 +3854,15 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
 
     if (!std::isfinite(sample.distanceToShore) && sample.dominantBiome && !sample.dominantBiome->isOcean())
     {
-        sample.distanceToShore = std::abs(static_cast<float>(surfaceColumn.surfaceY - globalSeaLevel_));
+        const float fallback = std::abs(static_cast<float>(surfaceColumn.surfaceY - globalSeaLevel_));
+        sample.distanceToShore = fallback;
+        sample.distanceToCoast = fallback;
     }
     else if (!std::isfinite(sample.distanceToShore))
     {
-        sample.distanceToShore = 0.0f;
+        // Ocean-dominant samples without a nearby land seed keep their infinite distance.
+        sample.distanceToShore = std::numeric_limits<float>::infinity();
+        sample.distanceToCoast = std::numeric_limits<float>::infinity();
     }
 
     return sample;

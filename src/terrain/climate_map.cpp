@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cmath>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -18,6 +19,8 @@ namespace terrain
 {
 namespace
 {
+constexpr bool kLogCoastTransitions = false;
+
 unsigned hashCombine(unsigned a, unsigned b) noexcept
 {
     a ^= b + 0x9E3779B9u + (a << 6) + (a >> 2);
@@ -52,6 +55,49 @@ float hashToUnitFloat(int x, int y, int z) noexcept
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= (h >> 16);
     return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
+}
+
+float distanceToApolloniusBoundary(const glm::vec2& sample,
+                                   const glm::vec2& dominantPos,
+                                   float dominantRadius,
+                                   const glm::vec2& otherPos,
+                                   float otherRadius) noexcept
+{
+    constexpr float kEpsilon = 1e-4f;
+
+    dominantRadius = std::max(dominantRadius, kEpsilon);
+    otherRadius = std::max(otherRadius, kEpsilon);
+
+    const glm::vec2 delta = otherPos - dominantPos;
+    const float deltaLength = glm::length(delta);
+
+    if (deltaLength <= kEpsilon)
+    {
+        return 0.0f;
+    }
+
+    const float ratio = dominantRadius / otherRadius;
+    const float ratioSq = ratio * ratio;
+    const float s = 1.0f - ratioSq;
+
+    if (std::abs(s) <= kEpsilon)
+    {
+        const glm::vec2 unitNormal = delta / deltaLength;
+        const glm::vec2 midpoint = 0.5f * (dominantPos + otherPos);
+        const float signedDistance = glm::dot(sample - midpoint, unitNormal);
+        return std::abs(signedDistance);
+    }
+
+    const glm::vec2 center = (dominantPos - ratioSq * otherPos) / s;
+    const float centerLenSq = glm::dot(center, center);
+    const float term = (glm::dot(dominantPos, dominantPos) - ratioSq * glm::dot(otherPos, otherPos)) / s;
+    float radiusSq = centerLenSq - term;
+    radiusSq = std::max(radiusSq, 0.0f);
+    const float radius = std::sqrt(radiusSq);
+
+    const float distanceToCenter = glm::length(sample - center);
+    const float separation = std::abs(distanceToCenter - radius);
+    return separation;
 }
 
 std::uint16_t groupPresenceMask(std::uint16_t bits) noexcept
@@ -616,8 +662,10 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
     outSample.keepOriginalMix = std::clamp(keepOriginal, 0.0f, 1.0f);
 
     const WeightedSeed& dominant = weighted.front();
-    outSample.dominantSitePos = glm::vec2(static_cast<float>(dominant.seed->position.x),
-                                          static_cast<float>(dominant.seed->position.y));
+    const glm::vec2 dominantPos(static_cast<float>(dominant.seed->position.x),
+                                static_cast<float>(dominant.seed->position.y));
+    const glm::vec2 samplePos(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y));
+    outSample.dominantSitePos = dominantPos;
     outSample.dominantSiteHalfExtents = glm::vec2(dominant.radius);
     outSample.dominantIsOcean = dominant.seed->biome && dominant.seed->biome->isOcean();
 
@@ -633,8 +681,10 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
         {
             continue;
         }
-        float boundaryDistance = outSample.dominantIsOcean ? std::max(0.0f, entry.radius - entry.distance)
-                                                           : std::max(0.0f, entry.distance - entry.radius);
+        const glm::vec2 otherPos(static_cast<float>(entry.seed->position.x),
+                                 static_cast<float>(entry.seed->position.y));
+        const float boundaryDistance =
+            distanceToApolloniusBoundary(samplePos, dominantPos, dominant.radius, otherPos, entry.radius);
         bestBoundary = std::min(bestBoundary, boundaryDistance);
     }
     if (std::isfinite(bestBoundary))
@@ -643,7 +693,7 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos, 
     }
     else
     {
-        outSample.distanceToCoast = outSample.dominantIsOcean ? 0.0f : std::numeric_limits<float>::infinity();
+        outSample.distanceToCoast = std::numeric_limits<float>::infinity();
     }
 }
 
@@ -894,6 +944,8 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const bool targetIsBeach = target.hasFlag("beach");
                     const float seaLevelF = static_cast<float>(profile_.seaLevel);
                     const bool baseIsOcean = baseBiome->isOcean();
+                    const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
+                    bool hasOceanNeighbor = false;
 
                     if (targetIsBeach && !baseIsOcean)
                     {
@@ -912,13 +964,11 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     const bool requiresCoastline = targetIsCoast || targetIsBeach;
                     if (requiresCoastline)
                     {
-                        const float transitionWidth = static_cast<float>(std::max(transition.width, 0));
                         if (!std::isfinite(prevDistance) || prevDistance > transitionWidth)
                         {
                             continue;
                         }
 
-                        bool hasOceanNeighbor = false;
                         for (int dz = -radius; dz <= radius && !hasOceanNeighbor; ++dz)
                         {
                             const int nz = z + dz;
@@ -1019,6 +1069,17 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     else
                     {
                         newSample.distanceToCoast = target.isOcean() ? 0.0f : prevDistance;
+                    }
+
+                    if (kLogCoastTransitions)
+                    {
+                        std::cout << "[CoastTransition] world=(" << worldX << ',' << worldZ << ")"
+                                  << " base=" << (baseBiome ? baseBiome->id : "<none>")
+                                  << " target=" << target.id
+                                  << " prevDistance=" << prevDistance
+                                  << " width=" << transitionWidth
+                                  << " hasOceanNeighbor=" << (hasOceanNeighbor ? "true" : "false")
+                                  << '\n';
                     }
 
                     sample = newSample;

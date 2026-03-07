@@ -20,3 +20,5 @@
 4834	158978	7945659002315388	CMakeFiles/blockgame.dir/src/terrain/climate_map.cpp.obj	8ebfb22497e1e19b
 154914	174997	7945660503119677	CMakeFiles/blockgame.dir/src/terrain/terrain_generator.cpp.obj	4ab40d7073cea26
 175001	175634	7945660703988008	blockgame.exe	1d6f56214a2f63db
+21	25991	7945666381084851	CMakeFiles/blockgame.dir/src/chunk_manager.cpp.obj	af196492a49e018c
+25993	26301	7945666640801173	blockgame.exe	1d6f56214a2f63db

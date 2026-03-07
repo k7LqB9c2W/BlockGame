@@ -227,13 +227,6 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
 
             const BiomeDefinition& biome = *sample.dominantBiome;
 
-            if (!sample.slabHasSolid)
-            {
-                continue;
-            }
-
-            summary.slabContainsTerrain = true;
-
             const float neighborAverage = computeNeighborAverage(localX, localZ);
             int adjustedSurfaceY = sample.surfaceY;
             float creepOffset = 0.0f;
@@ -264,11 +257,37 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
             sample.slabHasSolid = minWorldY <= adjustedSurfaceY;
             sample.slabHighestSolidY = sample.slabHasSolid ? std::min(adjustedSurfaceY, maxWorldY)
                                                            : std::numeric_limits<int>::min();
+
+            const auto& waterFill = biome.terrainSettings.waterFill;
+            int waterTopWorld = std::numeric_limits<int>::min();
+            int waterBottomWorld = std::numeric_limits<int>::max();
+            bool slabHasWater = false;
+            if (waterFill.enabled && adjustedSurfaceY < seaLevel_)
+            {
+                waterTopWorld = std::min(seaLevel_, maxWorldY);
+                waterBottomWorld = std::max(adjustedSurfaceY + 1, minWorldY);
+                if (waterFill.maxDepth > 0)
+                {
+                    waterBottomWorld = std::max(waterBottomWorld, waterTopWorld - waterFill.maxDepth + 1);
+                }
+                slabHasWater = waterBottomWorld <= waterTopWorld;
+            }
+
             outColumns[columnIdx].sample = sample;
+            if (!sample.slabHasSolid && !slabHasWater)
+            {
+                continue;
+            }
+
+            if (sample.slabHasSolid)
+            {
+                summary.slabContainsTerrain = true;
+            }
+
             if (kEnableTerrainDebugLogs)
             {
                 const float diff = std::abs(static_cast<float>(adjustedSurfaceY) - neighborAverage);
-                if (adjustedSurfaceY <= minWorldY + 4 || diff > 48.0f)
+                if (sample.slabHasSolid && (adjustedSurfaceY <= minWorldY + 4 || diff > 48.0f))
                 {
                     logTerrainAnomaly("[HeightDebug]", worldX, worldZ, adjustedSurfaceY, neighborAverage, sample, seaLevel_);
                 }
@@ -306,83 +325,69 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
 
 
             const int highestSolidWorld = std::min(sample.slabHighestSolidY, maxWorldY);
-            if (highestSolidWorld < minWorldY)
+            if (sample.slabHasSolid && highestSolidWorld >= minWorldY)
             {
-                continue;
-            }
+                const int highestLocalY = std::min(highestSolidWorld - minWorldY, chunkSizeY - 1);
 
-            const int highestLocalY = std::min(highestSolidWorld - minWorldY, chunkSizeY - 1);
+                const auto& stripes = biome.terrainSettings.stripes;
+                const bool stripesEnabled = stripes.enabled && stripes.period > 0 && stripes.thickness > 0;
+                const bool columnHasStripes = stripesEnabled
+                                              && hashToUnitFloat(worldX, adjustedSurfaceY * 17 + 3, worldZ)
+                                                     > stripes.noiseThreshold;
+                const int stripePeriod = std::max(stripes.period, stripes.thickness);
+                const int stripeOffset = stripesEnabled
+                                             ? static_cast<int>(hashToUnitFloat(worldX, adjustedSurfaceY * 31 + 7, worldZ)
+                                                               * static_cast<float>(stripePeriod))
+                                             : 0;
 
-            const auto& stripes = biome.terrainSettings.stripes;
-            const bool stripesEnabled = stripes.enabled && stripes.period > 0 && stripes.thickness > 0;
-            const bool columnHasStripes = stripesEnabled
-                                          && hashToUnitFloat(worldX, adjustedSurfaceY * 17 + 3, worldZ)
-                                                 > stripes.noiseThreshold;
-            const int stripePeriod = std::max(stripes.period, stripes.thickness);
-            const int stripeOffset = stripesEnabled
-                                         ? static_cast<int>(hashToUnitFloat(worldX, adjustedSurfaceY * 31 + 7, worldZ)
-                                                           * static_cast<float>(stripePeriod))
-                                         : 0;
-
-            for (int localY = 0; localY <= highestLocalY; ++localY)
-            {
-                const int worldY = minWorldY + localY;
-                BlockId block = BlockId::Air;
-                if (worldY < adjustedSurfaceY)
+                for (int localY = 0; localY <= highestLocalY; ++localY)
                 {
-                    block = fillerBlock;
-                    if (columnHasStripes)
+                    const int worldY = minWorldY + localY;
+                    BlockId block = BlockId::Air;
+                    if (worldY < adjustedSurfaceY)
                     {
-                        const int pattern = (worldY + stripeOffset) % stripePeriod;
-                        if (pattern < stripes.thickness)
+                        block = fillerBlock;
+                        if (columnHasStripes)
                         {
-                            block = stripes.block;
+                            const int pattern = (worldY + stripeOffset) % stripePeriod;
+                            if (pattern < stripes.thickness)
+                            {
+                                block = stripes.block;
+                            }
                         }
                     }
-                }
-                else if (worldY == adjustedSurfaceY)
-                {
-                    block = surfaceBlock;
+                    else if (worldY == adjustedSurfaceY)
+                    {
+                        block = surfaceBlock;
+                    }
+
+                    if (block == BlockId::Air)
+                    {
+                        continue;
+                    }
+
+                    setBlock(localX, localY, localZ, block);
+                    outColumns[columnIdx].wroteSolid = true;
+                    summary.anySolid = true;
                 }
 
-                if (block == BlockId::Air)
-                {
-                    continue;
-                }
-
-
-                setBlock(localX, localY, localZ, block);
-                outColumns[columnIdx].wroteSolid = true;
-                summary.anySolid = true;
+                outColumns[columnIdx].highestSolidWorld = highestSolidWorld;
             }
 
-            outColumns[columnIdx].highestSolidWorld = highestSolidWorld;
-
-            const auto& waterFill = biome.terrainSettings.waterFill;
-            if (waterFill.enabled && adjustedSurfaceY < seaLevel_)
+            if (slabHasWater)
             {
-                const int waterTop = std::min(seaLevel_, maxWorldY);
-                int waterBottom = std::max(highestSolidWorld + 1, minWorldY);
-                if (waterFill.maxDepth > 0)
+                for (int worldY = waterBottomWorld; worldY <= waterTopWorld; ++worldY)
                 {
-                    waterBottom = std::max(waterBottom, waterTop - waterFill.maxDepth + 1);
-                }
-
-                if (waterBottom <= waterTop)
-                {
-                    for (int worldY = waterBottom; worldY <= waterTop; ++worldY)
+                    const int localY = worldY - minWorldY;
+                    if (localY < 0 || localY >= chunkSizeY)
                     {
-                        const int localY = worldY - minWorldY;
-                        if (localY < 0 || localY >= chunkSizeY)
-                        {
-                            continue;
-                        }
-                        setBlock(localX, localY, localZ, waterFill.block);
-                        outColumns[columnIdx].wroteSolid = true;
-                        summary.anySolid = true;
+                        continue;
                     }
-                    outColumns[columnIdx].waterTopWorld = waterTop;
+                    setBlock(localX, localY, localZ, waterFill.block);
+                    outColumns[columnIdx].wroteSolid = true;
+                    summary.anySolid = true;
                 }
+                outColumns[columnIdx].waterTopWorld = waterTopWorld;
             }
         }
     }

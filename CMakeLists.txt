@@ -89,4 +89,22 @@ else()
     target_link_libraries(blockgame PRIVATE glfw)
 endif()
 
+if (EXISTS "${CMAKE_SOURCE_DIR}/block_atlas.png")
+    add_custom_command(TARGET blockgame POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/block_atlas.png"
+            $<TARGET_FILE_DIR:blockgame>
+        COMMENT "Copying block atlas"
+    )
+endif()
+
+if (EXISTS "${CMAKE_SOURCE_DIR}/assets")
+    add_custom_command(TARGET blockgame POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:blockgame>/assets"
+        COMMENT "Copying runtime assets"
+    )
+endif()
+
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${BLOCKGAME_SOURCES})

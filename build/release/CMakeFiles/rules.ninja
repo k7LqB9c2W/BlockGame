@@ -69,7 +69,7 @@ rule CXX_COMPILER__blockgame_unscanned_Release
 
 rule CXX_EXECUTABLE_LINKER__blockgame_Release
   command = C:\WINDOWS\system32\cmd.exe /C "$PRE_LINK && "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E vs_link_exe --msvc-ver=1950 --intdir=$OBJECT_DIR --rc=D:\bin\10.0.26100.0\x64\rc.exe --mt=D:\bin\10.0.26100.0\x64\mt.exe --manifests $MANIFESTS -- C:\PROGRA~2\MIB055~1\18\BUILDT~1\VC\Tools\MSVC\1450~1.357\bin\Hostx64\x64\link.exe /nologo $in  /out:$TARGET_FILE /implib:$TARGET_IMPLIB /pdb:$TARGET_PDB /version:0.0 $LINK_FLAGS $LINK_PATH $LINK_LIBRARIES && $POST_BUILD"
-  description = Linking CXX executable $TARGET_FILE; Copying GLFW runtime
+  description = Linking CXX executable $TARGET_FILE; Copying GLFW runtime; Copying block atlas; Copying runtime assets
   restat = $RESTAT
 
 

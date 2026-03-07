@@ -131,7 +131,18 @@ struct BiomeDefinition
 
     struct TerrainSettings
     {
+        enum class CoastProfile
+        {
+            Auto,
+            GentleBeach,
+            Dunes,
+            RockyShore,
+            CliffCoast,
+            Marsh
+        };
+
         bool smoothBeaches{false};
+        CoastProfile coastProfile{CoastProfile::Auto};
         SoilCreepSettings soilCreep{};
         StripeSettings stripes{};
         WaterFillSettings waterFill{};
@@ -146,6 +157,7 @@ struct BiomeDefinition
     [[nodiscard]] const std::vector<std::string>& flags() const noexcept { return flags_; }
     [[nodiscard]] const GenerationProperties& generationProperties() const noexcept { return properties; }
     [[nodiscard]] float applyHeightLimits(float height, float normalizedDistance) const noexcept;
+    [[nodiscard]] TerrainSettings::CoastProfile effectiveCoastProfile() const noexcept;
     [[nodiscard]] bool hasHeightLimits() const noexcept
     {
         return minHeightLimit.has_value() || maxHeightLimit.has_value();

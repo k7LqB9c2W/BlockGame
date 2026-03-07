@@ -1424,6 +1424,14 @@ int main(int argc, char** argv)
         exeDirectory = std::filesystem::current_path();
     }
 
+    std::error_code cwdEc;
+    std::filesystem::current_path(exeDirectory, cwdEc);
+    if (cwdEc)
+    {
+        std::cerr << "Failed to set working directory to executable directory: "
+                  << cwdEc.message() << '\n';
+    }
+
     std::filesystem::path logPath = exeDirectory / "blockgame_crash.log";
 
 #ifndef NDEBUG

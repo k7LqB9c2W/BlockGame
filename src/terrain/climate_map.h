@@ -36,6 +36,8 @@ struct ClimateSample
 {
     std::array<BiomeBlend, 4> blends{};
     std::size_t blendCount{0};
+    const BiomeDefinition* representativeBiome{nullptr};
+    float representativeWeight{0.0f};
     float aggregatedHeight{0.0f};
     float aggregatedRoughness{0.0f};
     float aggregatedHills{0.0f};
@@ -44,15 +46,26 @@ struct ClimateSample
     glm::vec2 dominantSitePos{0.0f};
     glm::vec2 dominantSiteHalfExtents{0.0f};
     float distanceToCoast{std::numeric_limits<float>::infinity()};
+    float signedDistanceToCoast{std::numeric_limits<float>::infinity()};
+    float landBaseHeight{0.0f};
+    float oceanBaseHeight{0.0f};
     bool dominantIsOcean{false};
 
     [[nodiscard]] const BiomeDefinition* dominantBiome() const noexcept
     {
+        if (representativeBiome)
+        {
+            return representativeBiome;
+        }
         return blendCount > 0 ? blends[0].biome : nullptr;
     }
 
     [[nodiscard]] float dominantWeight() const noexcept
     {
+        if (representativeWeight > 0.0f)
+        {
+            return representativeWeight;
+        }
         return blendCount > 0 ? blends[0].weight : 0.0f;
     }
 };
@@ -109,6 +122,31 @@ private:
     {
         std::vector<BiomeSeed> seeds{};
         int maxRadius{0};
+    };
+
+    struct SampleComposition
+    {
+        float landWeight{0.0f};
+        float oceanWeight{0.0f};
+        float landHeight{0.0f};
+        float oceanHeight{0.0f};
+        float landRoughness{0.0f};
+        float oceanRoughness{0.0f};
+        float landHills{0.0f};
+        float oceanHills{0.0f};
+        float landMountains{0.0f};
+        float oceanMountains{0.0f};
+        float landKeepOriginal{0.0f};
+        float oceanKeepOriginal{0.0f};
+        const BiomeDefinition* landRepresentativeBiome{nullptr};
+        const BiomeDefinition* oceanRepresentativeBiome{nullptr};
+        float landRepresentativeWeight{0.0f};
+        float oceanRepresentativeWeight{0.0f};
+        glm::vec2 landSitePos{0.0f};
+        glm::vec2 oceanSitePos{0.0f};
+        float landSiteRadius{0.0f};
+        float oceanSiteRadius{0.0f};
+        bool prefersOcean{false};
     };
 
     struct ChunkKeyHasher
@@ -195,7 +233,9 @@ private:
                           float spacingScale) const noexcept;
     void gatherCandidateSeeds(const glm::ivec2& worldPos,
                               std::vector<const BiomeSeed*>& outCandidates) const;
-    void accumulateSample(const glm::ivec2& worldPos, ClimateSample& outSample) const;
+    void accumulateSample(const glm::ivec2& worldPos,
+                          ClimateSample& outSample,
+                          SampleComposition* outComposition = nullptr) const;
     void applyTransitionBiomes(const glm::ivec2& baseWorld, ClimateFragment& fragment) const;
     void spawnSubBiomeSeeds(const BiomeSeed& parent,
                             std::vector<BiomeSeed>& seeds,

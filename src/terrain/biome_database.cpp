@@ -224,6 +224,42 @@ BiomeDefinition::InterpolationCurve parseInterpolationCurve(const std::string& v
     throw std::runtime_error(oss.str());
 }
 
+BiomeDefinition::TerrainSettings::CoastProfile parseCoastProfile(const std::string& value,
+                                                                 const std::filesystem::path& filePath)
+{
+    using CoastProfile = BiomeDefinition::TerrainSettings::CoastProfile;
+
+    const std::string normalized = toLowerCopy(value);
+    if (normalized == "auto")
+    {
+        return CoastProfile::Auto;
+    }
+    if (normalized == "gentle_beach" || normalized == "gentle" || normalized == "beach")
+    {
+        return CoastProfile::GentleBeach;
+    }
+    if (normalized == "dunes" || normalized == "dune")
+    {
+        return CoastProfile::Dunes;
+    }
+    if (normalized == "rocky_shore" || normalized == "rocky")
+    {
+        return CoastProfile::RockyShore;
+    }
+    if (normalized == "cliff_coast" || normalized == "cliffs" || normalized == "cliff")
+    {
+        return CoastProfile::CliffCoast;
+    }
+    if (normalized == "marsh" || normalized == "marshland")
+    {
+        return CoastProfile::Marsh;
+    }
+
+    std::ostringstream oss;
+    oss << "Unknown coast_profile value '" << value << "' in " << filePath;
+    throw std::runtime_error(oss.str());
+}
+
 void validateHeights(const BiomeDefinition& definition, const std::filesystem::path& filePath)
 {
     if (definition.minHeight > definition.maxHeight)
@@ -416,6 +452,41 @@ float BiomeDefinition::applyHeightLimits(float height, float normalizedDistance)
     }
 
     return result;
+}
+
+BiomeDefinition::TerrainSettings::CoastProfile BiomeDefinition::effectiveCoastProfile() const noexcept
+{
+    using CoastProfile = TerrainSettings::CoastProfile;
+
+    if (terrainSettings.coastProfile != CoastProfile::Auto)
+    {
+        return terrainSettings.coastProfile;
+    }
+
+    if (hasFlag("beach"))
+    {
+        return CoastProfile::GentleBeach;
+    }
+    if (generationProperties().has(GenerationProperties::kMountain) || hasFlag("coastal"))
+    {
+        return generationProperties().has(GenerationProperties::kMountain) ? CoastProfile::CliffCoast
+                                                                           : CoastProfile::RockyShore;
+    }
+    if (generationProperties().has(GenerationProperties::kWet)
+        && generationProperties().has(GenerationProperties::kLowTerrain))
+    {
+        return CoastProfile::Marsh;
+    }
+    if (surfaceBlock == BlockId::Sand || generationProperties().has(GenerationProperties::kDry)
+        || generationProperties().has(GenerationProperties::kBarren))
+    {
+        return CoastProfile::Dunes;
+    }
+    if (isOcean())
+    {
+        return CoastProfile::GentleBeach;
+    }
+    return CoastProfile::GentleBeach;
 }
 
 BiomeDatabase::BiomeDatabase(const std::filesystem::path& directory)
@@ -726,6 +797,10 @@ BiomeDefinition BiomeDatabase::parseBiomeFile(const std::filesystem::path& path)
     if (const auto smooth = table["smooth_beaches"].value<bool>())
     {
         definition.terrainSettings.smoothBeaches = *smooth;
+    }
+    if (const auto coastProfileValue = table["coast_profile"].value<std::string>())
+    {
+        definition.terrainSettings.coastProfile = parseCoastProfile(*coastProfileValue, path);
     }
 
     if (const auto interpolationCurveValue = table["interpolation_curve"].value<std::string>())

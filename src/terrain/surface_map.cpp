@@ -39,6 +39,93 @@ float hashToUnitFloat(int x, int y, int z) noexcept
     h ^= (h >> 16);
     return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
 }
+
+float smooth01(float t) noexcept
+{
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+struct CoastProfileSettings
+{
+    float inlandBlendDistance{48.0f};
+    float offshoreBlendDistance{48.0f};
+    float shorelineRise{2.0f};
+    float nearshoreDepth{3.0f};
+    float roughFadeDistance{32.0f};
+    float hillFadeDistance{40.0f};
+    float mountainFadeDistance{48.0f};
+    float roughFloor{0.08f};
+    float hillFloor{0.05f};
+    float mountainFloor{0.02f};
+};
+
+const CoastProfileSettings& coastProfileSettings(BiomeDefinition::TerrainSettings::CoastProfile profile) noexcept
+{
+    using CoastProfile = BiomeDefinition::TerrainSettings::CoastProfile;
+
+    static const CoastProfileSettings kGentleBeach{
+        56.0f, 64.0f, 1.5f, 2.5f, 36.0f, 44.0f, 56.0f, 0.08f, 0.05f, 0.02f};
+    static const CoastProfileSettings kDunes{
+        72.0f, 56.0f, 2.5f, 2.0f, 42.0f, 54.0f, 68.0f, 0.16f, 0.08f, 0.02f};
+    static const CoastProfileSettings kRockyShore{
+        40.0f, 36.0f, 4.5f, 4.0f, 28.0f, 34.0f, 40.0f, 0.35f, 0.24f, 0.12f};
+    static const CoastProfileSettings kCliffCoast{
+        18.0f, 28.0f, 12.0f, 6.0f, 18.0f, 22.0f, 28.0f, 0.60f, 0.52f, 0.46f};
+    static const CoastProfileSettings kMarsh{
+        84.0f, 52.0f, 0.75f, 1.5f, 54.0f, 66.0f, 80.0f, 0.04f, 0.02f, 0.00f};
+
+    switch (profile)
+    {
+    case CoastProfile::Dunes:
+        return kDunes;
+    case CoastProfile::RockyShore:
+        return kRockyShore;
+    case CoastProfile::CliffCoast:
+        return kCliffCoast;
+    case CoastProfile::Marsh:
+        return kMarsh;
+    case CoastProfile::Auto:
+    case CoastProfile::GentleBeach:
+    default:
+        return kGentleBeach;
+    }
+}
+
+float shorelineNoiseFactor(float distance, float fadeDistance, float floor) noexcept
+{
+    if (!std::isfinite(distance))
+    {
+        return 1.0f;
+    }
+    return glm::mix(floor, 1.0f, smooth01(distance / std::max(fadeDistance, 1.0f)));
+}
+
+float solveShorelineBaseHeight(float signedDistance,
+                               float landBaseHeight,
+                               float oceanBaseHeight,
+                               float seaLevel,
+                               const CoastProfileSettings& settings) noexcept
+{
+    if (!std::isfinite(signedDistance))
+    {
+        return signedDistance < 0.0f ? oceanBaseHeight : landBaseHeight;
+    }
+
+    const float shorelineLandHeight = seaLevel + settings.shorelineRise;
+    const float nearshoreFloor = seaLevel - settings.nearshoreDepth;
+    const float safeLandBase = std::max(landBaseHeight, shorelineLandHeight);
+    const float safeOceanBase = std::min(oceanBaseHeight, nearshoreFloor);
+
+    if (signedDistance >= 0.0f)
+    {
+        const float inlandFactor = smooth01(signedDistance / std::max(settings.inlandBlendDistance, 1.0f));
+        return glm::mix(shorelineLandHeight, safeLandBase, inlandFactor);
+    }
+
+    const float offshoreFactor = smooth01((-signedDistance) / std::max(settings.offshoreBlendDistance, 1.0f));
+    return glm::mix(nearshoreFloor, safeOceanBase, offshoreFactor);
+}
 } // namespace
 
 SurfaceFragment::SurfaceFragment(const glm::ivec2& fragmentCoord, int lodLevel) noexcept
@@ -179,6 +266,8 @@ MapGenV1::MapGenV1(const BiomeDatabase& database,
 
 void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
 {
+    (void)lodLevel;
+
     if (!climateMap_)
     {
         throw std::runtime_error("Surface generator requires a climate map");
@@ -208,8 +297,7 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             SurfaceColumn& outColumn = fragment.column(localX, localZ);
             outColumn = SurfaceColumn{};
 
-            const BiomeBlend& dominantBlend = climateSample.blends[0];
-            const BiomeDefinition* dominantBiome = dominantBlend.biome;
+            const BiomeDefinition* dominantBiome = climateSample.dominantBiome();
             if (!dominantBiome && biomeDatabase_.biomeCount() > 0)
             {
                 dominantBiome = &biomeDatabase_.definitionByIndex(0);
@@ -225,62 +313,26 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             const float keepOriginal = std::clamp(climateSample.keepOriginalMix, 0.0f, 1.0f);
             float baseHeight = climateSample.aggregatedHeight;
 
-            const auto& dominantProps = dominantBiome->generationProperties();
-            const bool biomeIsOcean = dominantBiome->isOcean();
-            const bool biomeIsCoastal = dominantProps.isCoastal();
-            if (biomeIsOcean)
-            {
-                const float seaLevel = static_cast<float>(profile_.seaLevel);
-                if (std::isfinite(climateSample.distanceToCoast))
-                {
-                    const float distance = std::max(0.0f, climateSample.distanceToCoast);
-                    constexpr float kBlendRange = 48.0f;
-                    const float t = std::clamp(distance / kBlendRange, 0.0f, 1.0f);
-                    baseHeight = glm::mix(seaLevel, baseHeight, t);
-                }
-                else
-                {
-                    baseHeight = std::min(baseHeight, seaLevel);
-                }
-            }
-            const bool biomeIsMountainCoast =
-                biomeIsCoastal
-                && dominantProps.has(BiomeDefinition::GenerationProperties::kMountain)
-                && !dominantBiome->hasFlag("beach")
-                && !biomeIsOcean;
+            const float seaLevel = static_cast<float>(profile_.seaLevel);
+            const float signedCoastDistance = climateSample.signedDistanceToCoast;
+            const float absCoastDistance = std::isfinite(signedCoastDistance) ? std::abs(signedCoastDistance)
+                                                                              : std::numeric_limits<float>::infinity();
+            const CoastProfileSettings& coastSettings = coastProfileSettings(dominantBiome->effectiveCoastProfile());
 
-            if (biomeIsCoastal && std::isfinite(climateSample.distanceToCoast))
-            {
-                const float distance = std::max(0.0f, climateSample.distanceToCoast);
-                const float baseRange = dominantProps.has(BiomeDefinition::GenerationProperties::kMountain) ? 64.0f
-                                                                                                           : 48.0f;
-                const float range = biomeIsCoastal ? baseRange * 0.5f : baseRange;
-                const float t = std::clamp(distance / range, 0.0f, 1.0f);
-                const float slopeFactor = t * t;
-                if (biomeIsMountainCoast)
-                {
-                    const float featureFloor = glm::mix(0.55f, 1.0f, slopeFactor);
-                    roughStrength *= featureFloor;
-                    hillStrength *= featureFloor;
-                    mountainStrength *= featureFloor;
-                    baseHeight = std::max(baseHeight, static_cast<float>(profile_.seaLevel + 6));
-                }
-                else
-                {
-                    roughStrength *= slopeFactor;
-                    hillStrength *= slopeFactor;
-                    mountainStrength *= slopeFactor;
-
-                    const float heightBlend = slopeFactor;
-                    baseHeight = glm::mix(static_cast<float>(profile_.seaLevel), baseHeight, heightBlend);
-                }
-            }
-            else if (biomeIsCoastal)
-            {
-                roughStrength = std::min(roughStrength, 0.2f);
-                hillStrength = std::min(hillStrength, 0.2f);
-                mountainStrength = std::min(mountainStrength, 0.15f);
-            }
+            baseHeight = solveShorelineBaseHeight(signedCoastDistance,
+                                                  climateSample.landBaseHeight,
+                                                  climateSample.oceanBaseHeight,
+                                                  seaLevel,
+                                                  coastSettings);
+            roughStrength *= shorelineNoiseFactor(absCoastDistance,
+                                                  coastSettings.roughFadeDistance,
+                                                  coastSettings.roughFloor);
+            hillStrength *= shorelineNoiseFactor(absCoastDistance,
+                                                 coastSettings.hillFadeDistance,
+                                                 coastSettings.hillFloor);
+            mountainStrength *= shorelineNoiseFactor(absCoastDistance,
+                                                     coastSettings.mountainFadeDistance,
+                                                     coastSettings.mountainFloor);
 
             const float worldXF = static_cast<float>(worldX);
             const float worldZF = static_cast<float>(worldZ);
@@ -315,7 +367,7 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             surfaceHeight += mountainNoise * 12.0f * mountainStrength;
 
             outColumn.dominantBiome = dominantBiome;
-            outColumn.dominantWeight = dominantBlend.weight;
+            outColumn.dominantWeight = climateSample.dominantWeight();
             outColumn.surfaceHeight = surfaceHeight;
             outColumn.surfaceY = static_cast<int>(std::round(surfaceHeight));
             outColumn.roughAmplitude = roughStrength;

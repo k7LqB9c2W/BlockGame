@@ -1,6 +1,0 @@
-.{
-	.blueprints = .{
-		.{.id = "cubyz:mushroom/side/bolete", .chance = 0.1},
-		.{.id = null},
-	},
-}

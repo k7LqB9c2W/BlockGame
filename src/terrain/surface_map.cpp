@@ -243,7 +243,13 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                     baseHeight = std::min(baseHeight, seaLevel);
                 }
             }
-            if (!biomeIsOcean && std::isfinite(climateSample.distanceToCoast))
+            const bool biomeIsMountainCoast =
+                biomeIsCoastal
+                && dominantProps.has(BiomeDefinition::GenerationProperties::kMountain)
+                && !dominantBiome->hasFlag("beach")
+                && !biomeIsOcean;
+
+            if (biomeIsCoastal && std::isfinite(climateSample.distanceToCoast))
             {
                 const float distance = std::max(0.0f, climateSample.distanceToCoast);
                 const float baseRange = dominantProps.has(BiomeDefinition::GenerationProperties::kMountain) ? 64.0f
@@ -251,12 +257,23 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
                 const float range = biomeIsCoastal ? baseRange * 0.5f : baseRange;
                 const float t = std::clamp(distance / range, 0.0f, 1.0f);
                 const float slopeFactor = t * t;
-                roughStrength *= slopeFactor;
-                hillStrength *= slopeFactor;
-                mountainStrength *= slopeFactor;
+                if (biomeIsMountainCoast)
+                {
+                    const float featureFloor = glm::mix(0.55f, 1.0f, slopeFactor);
+                    roughStrength *= featureFloor;
+                    hillStrength *= featureFloor;
+                    mountainStrength *= featureFloor;
+                    baseHeight = std::max(baseHeight, static_cast<float>(profile_.seaLevel + 6));
+                }
+                else
+                {
+                    roughStrength *= slopeFactor;
+                    hillStrength *= slopeFactor;
+                    mountainStrength *= slopeFactor;
 
-                const float heightBlend = slopeFactor;
-                baseHeight = glm::mix(static_cast<float>(profile_.seaLevel), baseHeight, heightBlend);
+                    const float heightBlend = slopeFactor;
+                    baseHeight = glm::mix(static_cast<float>(profile_.seaLevel), baseHeight, heightBlend);
+                }
             }
             else if (biomeIsCoastal)
             {

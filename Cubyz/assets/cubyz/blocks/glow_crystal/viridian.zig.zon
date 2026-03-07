@@ -1,4 +1,0 @@
-.{
-	.emittedLight = 0x0f6529,
-	.texture = "cubyz:glow_crystal/viridian",
-}

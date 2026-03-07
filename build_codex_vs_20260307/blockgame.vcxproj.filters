@@ -1,0 +1,55 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\glad.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\camera.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\chunk_manager.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\input_context.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\renderer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\TextureLoader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\text_overlay.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\terrain\biome_database.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\terrain\climate_map.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\terrain\surface_map.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\terrain\terrain_generator.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\ricke\Documents\code\BlockGame\src\terrain\worldgen_profile.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\ricke\Documents\code\BlockGame\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{5BF94C13-1DA9-3693-ADD1-05ABD909F19B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\terrain">
+      <UniqueIdentifier>{188F9936-FB1F-36CA-9A6E-0F8E9FDB7800}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

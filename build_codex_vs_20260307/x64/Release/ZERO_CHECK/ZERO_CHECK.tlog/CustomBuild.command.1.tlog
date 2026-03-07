@@ -1,0 +1,10 @@
+^C:\USERS\RICKE\DOCUMENTS\CODE\BLOCKGAME\BUILD_CODEX_VS_20260307\CMAKEFILES\AFDB175B4B555FDB0121F374F70452D0\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/ricke/Documents/code/BlockGame -BC:/Users/ricke/Documents/code/BlockGame/build_codex_vs_20260307 --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/ricke/Documents/code/BlockGame/build_codex_vs_20260307/BlockGame.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

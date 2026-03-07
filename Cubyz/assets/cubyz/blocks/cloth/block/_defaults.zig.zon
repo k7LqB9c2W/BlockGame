@@ -1,8 +1,0 @@
-.{
-	.tags = .{.cloth, .cuttable},
-	.blockHealth = 4,
-	.drops = .{
-		.{.items = .{.auto}},
-	},
-	.rotation = "cubyz:stairs",
-}

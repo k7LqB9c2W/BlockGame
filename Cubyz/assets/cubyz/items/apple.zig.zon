@@ -1,4 +1,0 @@
-.{
-	.texture = "apple.png",
-	.food = 4,
-}

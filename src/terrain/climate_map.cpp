@@ -1011,27 +1011,50 @@ void NoiseVoronoiClimateGenerator::applyTransitionBiomes(const glm::ivec2& baseW
                     float newHills = glm::mix(target.hills, prevHills, roughBlend);
                     float newMountains = glm::mix(target.mountains, prevMountains, roughBlend);
 
+                    const bool targetIsMountainCoast =
+                        targetIsCoast
+                        && target.generationProperties().has(BiomeDefinition::GenerationProperties::kMountain)
+                        && !targetIsBeach
+                        && !target.isOcean();
+
                     if (targetIsCoast)
                     {
-                        const float coastNoise =
-                            hashToUnitFloat(worldX, worldZ, static_cast<int>(hashSeed ^ 0x17D4A5B3u));
-                        const float targetCoastHeight = glm::mix(seaLevelF - 1.5f, seaLevelF + 1.5f, coastNoise);
+                        if (targetIsMountainCoast)
+                        {
+                            heightBlend = std::max(heightBlend, 0.65f);
+                            newHeight = glm::mix(blend.height, prevHeight, heightBlend);
+                            newHeight = std::max(newHeight, seaLevelF + 6.0f);
+                            newHeight = target.applyHeightLimits(newHeight, 1.0f);
 
-                        heightBlend = std::min(heightBlend, 0.15f);
-                        newHeight = glm::mix(targetCoastHeight, prevHeight, heightBlend);
-                        newHeight = target.applyHeightLimits(newHeight, 1.0f);
-                        newHeight = std::clamp(newHeight, seaLevelF - 2.5f, seaLevelF + 2.5f);
+                            roughBlend = std::max(roughBlend, 0.55f);
+                            newRoughness = glm::mix(target.roughness, prevRoughness, roughBlend);
+                            newHills = glm::mix(target.hills, prevHills, roughBlend);
+                            newMountains = glm::mix(target.mountains, prevMountains, roughBlend);
 
-                        roughBlend = std::min(roughBlend, 0.12f);
-                        newRoughness = glm::mix(target.roughness, prevRoughness, roughBlend);
-                        newHills = glm::mix(target.hills, prevHills, roughBlend);
-                        newMountains = glm::mix(target.mountains, prevMountains, roughBlend);
+                            keepOriginal = std::max(keepOriginal, heightBlend);
+                        }
+                        else
+                        {
+                            const float coastNoise =
+                                hashToUnitFloat(worldX, worldZ, static_cast<int>(hashSeed ^ 0x17D4A5B3u));
+                            const float targetCoastHeight = glm::mix(seaLevelF - 1.5f, seaLevelF + 1.5f, coastNoise);
 
-                        newRoughness = std::min(newRoughness, 0.18f);
-                        newHills = std::min(newHills, 0.18f);
-                        newMountains = std::min(newMountains, 0.12f);
+                            heightBlend = std::min(heightBlend, 0.15f);
+                            newHeight = glm::mix(targetCoastHeight, prevHeight, heightBlend);
+                            newHeight = target.applyHeightLimits(newHeight, 1.0f);
+                            newHeight = std::clamp(newHeight, seaLevelF - 2.5f, seaLevelF + 2.5f);
 
-                        keepOriginal = std::min(keepOriginal, roughBlend);
+                            roughBlend = std::min(roughBlend, 0.12f);
+                            newRoughness = glm::mix(target.roughness, prevRoughness, roughBlend);
+                            newHills = glm::mix(target.hills, prevHills, roughBlend);
+                            newMountains = glm::mix(target.mountains, prevMountains, roughBlend);
+
+                            newRoughness = std::min(newRoughness, 0.18f);
+                            newHills = std::min(newHills, 0.18f);
+                            newMountains = std::min(newMountains, 0.12f);
+
+                            keepOriginal = std::min(keepOriginal, roughBlend);
+                        }
                     }
 
                     newSample.aggregatedHeight = newHeight;
@@ -1192,3 +1215,4 @@ void ClimateMap::evictIfNeeded() const
 }
 
 } // namespace terrain
+

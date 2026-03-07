@@ -1,6 +1,0 @@
-.{
-	.texture = "cubyz:sign/mahogany",
-	.item = .{
-		.texture = "sign/mahogany.png",
-	},
-}

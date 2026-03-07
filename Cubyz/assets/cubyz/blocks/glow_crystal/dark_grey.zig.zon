@@ -1,4 +1,0 @@
-.{
-	.emittedLight = 0x414141,
-	.texture = "cubyz:glow_crystal/dark_grey",
-}

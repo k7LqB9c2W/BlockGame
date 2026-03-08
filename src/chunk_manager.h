@@ -39,9 +39,22 @@ inline constexpr int kChunkSizeY = kChunkEdgeLength;
 inline constexpr int kChunkSizeZ = kChunkEdgeLength;
 inline constexpr int kChunkBlockCount = kChunkEdgeLength * kChunkEdgeLength * kChunkEdgeLength;
 inline constexpr int kAtlasTileSizePixels = 16;
-inline constexpr int kDefaultViewDistance = 12;
+inline constexpr int kDefaultNearRenderDistance = 12;
+inline constexpr int kDefaultViewDistance = kDefaultNearRenderDistance;
 inline constexpr int kMaxUserRenderDistance = 48;
 inline constexpr int kExtendedViewDistance = 320;
+inline constexpr int kDefaultFarRenderDistanceBlocks = 4800;
+inline constexpr int kDefaultFarFogStartBlocks = 1400;
+
+enum class StreamingPhase : std::uint8_t
+{
+    SpawnResolve = 0,
+    ExactPreload,
+    InteractiveNearOnly,
+    FarRamp,
+    SteadyState
+};
+
 struct VerticalStreamingConfig
 {
     int minRadiusChunks{2};
@@ -83,6 +96,7 @@ inline constexpr std::size_t kUploadQueueScanLimit = 128ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept;
+float computeFarPlaneForDistanceBlocks(int farDistanceBlocks) noexcept;
 extern float kFarPlane;
 
 enum class BlockId : std::uint8_t
@@ -125,6 +139,17 @@ struct ChunkShaderUniformLocations
     GLint uHasHighlight{-1};
 };
 
+struct FarTerrainShaderUniformLocations
+{
+    GLint uViewProj{-1};
+    GLint uLightDir{-1};
+    GLint uAtlas{-1};
+    GLint uCameraPos{-1};
+    GLint uFogColor{-1};
+    GLint uFogStart{-1};
+    GLint uFogEnd{-1};
+};
+
 struct ChunkRenderBatch
 {
     GLuint vao{0};
@@ -142,10 +167,34 @@ struct ChunkRenderData
     std::vector<ChunkRenderBatch> batches;
 };
 
+struct WorldRenderData
+{
+    glm::vec3 lightDirection{0.0f};
+    glm::ivec3 highlightedBlock{0};
+    bool hasHighlight{false};
+    GLuint atlasTexture{0};
+    glm::vec3 fogColor{0.55f, 0.78f, 0.95f};
+    float fogStart{static_cast<float>(kDefaultFarFogStartBlocks)};
+    float fogEnd{static_cast<float>(kDefaultFarRenderDistanceBlocks)};
+    std::vector<ChunkRenderBatch> nearBatches;
+    std::vector<ChunkRenderBatch> farBatches;
+};
+
+struct RenderDistanceSettings
+{
+    int nearChunks{kDefaultNearRenderDistance};
+    int farBlocks{kDefaultFarRenderDistanceBlocks};
+    int fogStartBlocks{kDefaultFarFogStartBlocks};
+    bool farTerrainEnabled{true};
+};
+
 struct ChunkProfilingSnapshot
 {
+    StreamingPhase phase{StreamingPhase::SteadyState};
     double averageGenerationMs{0.0};
     double averageMeshingMs{0.0};
+    double uploadMsLastFrame{0.0};
+    double farBuildMsAverage{0.0};
     std::size_t uploadedBytes{0};
     int generatedChunks{0};
     int meshedChunks{0};
@@ -165,6 +214,26 @@ struct ChunkProfilingSnapshot
     std::size_t uploadBudgetBytes{0};
     int uploadColumnLimit{0};
     int pendingUploadChunks{0};
+    int exactChunksReady{0};
+    int exactChunksPending{0};
+    int farActiveTiles{0};
+    int farDirtyTiles{0};
+    int farShellTilesReady{0};
+    int farTilesBuilt{0};
+    int farTilesQueued{0};
+    int farTilesPendingUpload{0};
+};
+
+struct StreamingStatusSnapshot
+{
+    StreamingPhase phase{StreamingPhase::SteadyState};
+    int exactReadyChunks{0};
+    int exactRequiredChunks{0};
+    int exactPendingUploads{0};
+    int farReadyTiles{0};
+    int farQueuedTiles{0};
+    bool playerReleaseReady{true};
+    const char* blockingReason{"ready"};
 };
 
 struct Frustum
@@ -189,7 +258,8 @@ public:
     void setAtlasTexture(GLuint texture) noexcept;
     void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
     void update(const glm::vec3& cameraPos);
-    ChunkRenderData buildRenderData(const Frustum& frustum) const;
+    void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
+    WorldRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
     terrain::ColumnSample sampleColumnAt(const glm::vec3& worldPos,
@@ -205,12 +275,26 @@ public:
 
     void toggleViewDistance();
     int viewDistance() const noexcept;
+    int nearRenderDistance() const noexcept;
+    int farRenderDistanceBlocks() const noexcept;
+    RenderDistanceSettings renderDistanceSettings() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setNearRenderDistance(int chunks) noexcept;
+    void setFarRenderDistanceBlocks(int blocks) noexcept;
     void setLodEnabled(bool enabled);
     bool lodEnabled() const noexcept;
+    void setFarTerrainEnabled(bool enabled);
+    bool farTerrainEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
+    void beginSpawnPreload(const glm::vec3& spawnPos);
+    bool isSpawnPreloadReady() const noexcept;
+    bool playerReleaseReady() const noexcept;
+    StreamingPhase streamingPhase() const noexcept;
+    void setStartupEnabled(bool enabled) noexcept;
+    bool startupEnabled() const noexcept;
+    StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
 
     ChunkProfilingSnapshot sampleProfilingSnapshot();
     std::string biomeNameAt(const glm::vec3& worldPos) const;

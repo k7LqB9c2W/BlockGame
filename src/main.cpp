@@ -940,14 +940,60 @@ void main()
 }
 )";
 
+    const char* farFragmentShaderSrc = R"(#version 330 core
+out vec4 FragColor;
+
+in vec3 vNormal;
+in vec3 vWorldPos;
+in vec2 vTileCoord;
+in vec2 vAtlasBase;
+in vec2 vAtlasSize;
+
+uniform sampler2D uAtlas;
+uniform vec3 uLightDir;
+uniform vec3 uCameraPos;
+uniform vec3 uFogColor;
+uniform float uFogStart;
+uniform float uFogEnd;
+
+void main()
+{
+    vec3 normal = normalize(vNormal);
+    vec3 lightDir = normalize(-uLightDir);
+    float diff = max(dot(normal, lightDir), 0.0);
+    float ambient = 0.45;
+
+    vec2 tileUV = fract(vTileCoord);
+    vec2 atlasUV = vAtlasBase + vAtlasSize * tileUV;
+    vec3 textureColor = texture(uAtlas, atlasUV).rgb;
+    vec3 litColor = textureColor * (ambient + diff * 0.55);
+
+    float horizontalDistance = distance(vWorldPos, uCameraPos);
+    float fogFactor = 0.0;
+    if (uFogEnd > uFogStart)
+    {
+        fogFactor = clamp((horizontalDistance - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    }
+
+    vec3 color = mix(litColor, uFogColor, fogFactor);
+    FragColor = vec4(color, 1.0);
+}
+)";
+
     GLuint shaderProgram = 0;
+    GLuint farShaderProgram = 0;
     try
     {
         shaderProgram = createProgram(vertexShaderSrc, fragmentShaderSrc);
+        farShaderProgram = createProgram(vertexShaderSrc, farFragmentShaderSrc);
     }
     catch (const std::exception& ex)
     {
         std::cerr << "Shader compilation failed: " << ex.what() << std::endl;
+        if (shaderProgram != 0)
+        {
+            glDeleteProgram(shaderProgram);
+        }
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
@@ -961,10 +1007,20 @@ void main()
     chunkUniforms.uHighlightedBlock = glGetUniformLocation(shaderProgram, "uHighlightedBlock");
     chunkUniforms.uHasHighlight = glGetUniformLocation(shaderProgram, "uHasHighlight");
 
+    FarTerrainShaderUniformLocations farUniforms{};
+    farUniforms.uViewProj = glGetUniformLocation(farShaderProgram, "uViewProj");
+    farUniforms.uLightDir = glGetUniformLocation(farShaderProgram, "uLightDir");
+    farUniforms.uAtlas = glGetUniformLocation(farShaderProgram, "uAtlas");
+    farUniforms.uCameraPos = glGetUniformLocation(farShaderProgram, "uCameraPos");
+    farUniforms.uFogColor = glGetUniformLocation(farShaderProgram, "uFogColor");
+    farUniforms.uFogStart = glGetUniformLocation(farShaderProgram, "uFogStart");
+    farUniforms.uFogEnd = glGetUniformLocation(farShaderProgram, "uFogEnd");
+
     LoadedTexture blockAtlas = loadTexture("block_atlas.png");
     if (blockAtlas.id == 0)
     {
         glDeleteProgram(shaderProgram);
+        glDeleteProgram(farShaderProgram);
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
@@ -977,10 +1033,17 @@ void main()
     }
     glUseProgram(0);
 
+    glUseProgram(farShaderProgram);
+    if (farUniforms.uAtlas >= 0)
+    {
+        glUniform1i(farUniforms.uAtlas, 0);
+    }
+    glUseProgram(0);
+
     ChunkManager chunkManager(1337u);
     chunkManager.setAtlasTexture(blockAtlas.id);
     chunkManager.setBlockTextureAtlasConfig(blockAtlas.size, kAtlasTileSizePixels); // Map block faces to atlas tiles.
-    chunkManager.update(camera.position);
+    inputContext.lodEnabled = chunkManager.farTerrainEnabled();
     
     // Find a guaranteed safe spawn position above ground
     std::cout << "Finding safe spawn position..." << std::endl;
@@ -989,11 +1052,12 @@ void main()
     camera.onGround = false;
 
     std::cout << "Player spawned at: (" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")" << std::endl;
+    chunkManager.beginSpawnPreload(camera.position);
 
     if (std::getenv("BLOCKGAME_STREAMING_TEST"))
     {
         runStreamingValidationScenarios(chunkManager, camera.position);
-        chunkManager.update(camera.position);
+        chunkManager.update(camera.position, camera.front());
     }
 
     Crosshair crosshair;
@@ -1005,11 +1069,13 @@ void main()
     double fpsTimer = 0.0;
     int fpsFrameCount = 0;
     double fpsValue = 0.0;
+    double loadingOverlayTimer = 0.0;
+    std::string loadingOverlayText;
 #ifndef NDEBUG
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
 #endif
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -1035,6 +1101,27 @@ void main()
         if (profilingOverlayTimer >= 1.0)
         {
             ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
+            const char* phaseName = "steady";
+            switch (snapshot.phase)
+            {
+            case StreamingPhase::SpawnResolve:
+                phaseName = "spawn";
+                break;
+            case StreamingPhase::ExactPreload:
+                phaseName = "preload";
+                break;
+            case StreamingPhase::InteractiveNearOnly:
+                phaseName = "near";
+                break;
+            case StreamingPhase::FarRamp:
+                phaseName = "ramp";
+                break;
+            case StreamingPhase::SteadyState:
+            default:
+                phaseName = "steady";
+                break;
+            }
+
             std::ostringstream profilingStream;
             profilingStream.setf(std::ios::fixed, std::ios::floatfield);
             profilingStream << std::setprecision(2);
@@ -1070,9 +1157,37 @@ void main()
             }
 
             const int verticalSpan = (snapshot.verticalRadius * 2 + 1) * kChunkSizeY;
-            profilingStream << " | View " << chunkManager.viewDistance()
+            profilingStream << " | " << phaseName
+                            << " Near " << chunkManager.nearRenderDistance()
                             << "x" << snapshot.verticalRadius
+                            << " Far " << chunkManager.farRenderDistanceBlocks()
                             << " (" << verticalSpan << "h)";
+            if (snapshot.exactChunksPending > 0 || snapshot.exactChunksReady > 0)
+            {
+                profilingStream << " | Exact " << snapshot.exactChunksReady
+                                << " ready " << snapshot.exactChunksPending << " pending";
+            }
+            if (snapshot.farActiveTiles > 0 || snapshot.farDirtyTiles > 0)
+            {
+                profilingStream << " | FarTiles " << snapshot.farActiveTiles;
+                if (snapshot.farDirtyTiles > 0)
+                {
+                    profilingStream << " dirty " << snapshot.farDirtyTiles;
+                }
+                if (snapshot.farShellTilesReady > 0)
+                {
+                    profilingStream << " ready " << snapshot.farShellTilesReady;
+                }
+                if (snapshot.farTilesBuilt > 0)
+                {
+                    profilingStream << " built " << snapshot.farTilesBuilt;
+                }
+                if (snapshot.farTilesQueued > 0)
+                {
+                    profilingStream << " q " << snapshot.farTilesQueued;
+                }
+            }
+            profilingStream << " | UploadMs " << snapshot.uploadMsLastFrame;
 
             profilingOverlayText = profilingStream.str();
             profilingOverlayTimer = 0.0;
@@ -1094,11 +1209,58 @@ void main()
         bool f3JustPressed = f3CurrentlyPressed && !inputContext.f3Pressed;
         if (f3JustPressed)
         {
-            inputContext.lodEnabled = !inputContext.lodEnabled;
-            chunkManager.setLodEnabled(inputContext.lodEnabled);
+            inputContext.lodEnabled = !chunkManager.farTerrainEnabled();
+            chunkManager.setFarTerrainEnabled(inputContext.lodEnabled);
         }
         inputContext.f3JustPressed = f3JustPressed;
         inputContext.f3Pressed = f3CurrentlyPressed;
+
+        const StreamingStatusSnapshot streamingStatus = chunkManager.streamingStatusSnapshot();
+        const bool playerReleased = streamingStatus.playerReleaseReady;
+        if (!playerReleased)
+        {
+            loadingOverlayTimer += frameTime;
+            if (loadingOverlayTimer >= 0.2 || loadingOverlayText.empty())
+            {
+                const char* phaseName = "Loading";
+                switch (streamingStatus.phase)
+                {
+                case StreamingPhase::SpawnResolve:
+                    phaseName = "Resolving spawn";
+                    break;
+                case StreamingPhase::ExactPreload:
+                    phaseName = "Preloading exact world";
+                    break;
+                case StreamingPhase::InteractiveNearOnly:
+                    phaseName = "Stabilizing near world";
+                    break;
+                case StreamingPhase::FarRamp:
+                    phaseName = "Streaming far terrain";
+                    break;
+                case StreamingPhase::SteadyState:
+                default:
+                    phaseName = "Streaming";
+                    break;
+                }
+
+                std::ostringstream loadingStream;
+                loadingStream << "Loading world...\n";
+                loadingStream << phaseName << '\n';
+                loadingStream << "Exact bubble: " << streamingStatus.exactReadyChunks
+                              << " / " << streamingStatus.exactRequiredChunks << '\n';
+                loadingStream << "Pending uploads: " << streamingStatus.exactPendingUploads << '\n';
+                loadingStream << "Far tiles: " << streamingStatus.farReadyTiles
+                              << " ready, " << streamingStatus.farQueuedTiles << " queued\n";
+                loadingStream << streamingStatus.blockingReason;
+                loadingOverlayText = loadingStream.str();
+                loadingOverlayTimer = 0.0;
+            }
+        }
+        else
+        {
+            loadingOverlayTimer = 0.0;
+            loadingOverlayText.clear();
+        }
 
         // Only close window with ESC if GUI is not active
         // (ESC to close GUI is handled in computePlayerInputState)
@@ -1109,56 +1271,58 @@ void main()
         }
 
         auto* inputContextPtr = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
-        while (accumulator >= kFixedTimeStep)
+        if (playerReleased)
         {
-            if (inputContextPtr)
+            while (accumulator >= kFixedTimeStep)
             {
-                PlayerInputState inputState = computePlayerInputState(window, *inputContextPtr, camera, chunkManager);
-                updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                if (inputContextPtr)
+                {
+                    PlayerInputState inputState = computePlayerInputState(window, *inputContextPtr, camera, chunkManager);
+                    updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                }
+                else
+                {
+                    InputContext dummy;
+                    PlayerInputState inputState = computePlayerInputState(window, dummy, camera, chunkManager);
+                    updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                }
+                accumulator -= kFixedTimeStep;
             }
-            else
-            {
-                InputContext dummy;
-                PlayerInputState inputState = computePlayerInputState(window, dummy, camera, chunkManager);
-                updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
-            }
-            accumulator -= kFixedTimeStep;
-        }
-
-        // Update block highlighting based on crosshair
-        chunkManager.updateHighlight(camera.position, camera.front());
-
-        // Handle block destruction
-        if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.leftMouseJustPressed)
-        {
-            RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
-            if (hit.hit)
-            {
-                chunkManager.destroyBlock(hit.blockPos);
-            }
-            inputContext.leftMouseJustPressed = false; // Reset the flag
         }
         else
         {
-            inputContext.leftMouseJustPressed = false;
+            accumulator = 0.0;
         }
 
-        // Handle block placement
-        if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.rightMouseJustPressed)
+        if (playerReleased)
         {
-            RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
-            if (hit.hit)
+            // Update block highlighting based on crosshair
+            chunkManager.updateHighlight(camera.position, camera.front());
+
+            if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.leftMouseJustPressed)
             {
-                chunkManager.placeBlock(hit.blockPos, hit.faceNormal);
+                RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
+                if (hit.hit)
+                {
+                    chunkManager.destroyBlock(hit.blockPos);
+                }
+                inputContext.leftMouseJustPressed = false;
             }
-            inputContext.rightMouseJustPressed = false; // Reset the flag
-        }
-        else
-        {
-            inputContext.rightMouseJustPressed = false;
-        }
 
-        chunkManager.update(camera.position);
+            if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.rightMouseJustPressed)
+            {
+                RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
+                if (hit.hit)
+                {
+                    chunkManager.placeBlock(hit.blockPos, hit.faceNormal);
+                }
+                inputContext.rightMouseJustPressed = false;
+            }
+        }
+        inputContext.leftMouseJustPressed = false;
+        inputContext.rightMouseJustPressed = false;
+
+        chunkManager.update(camera.position, camera.front());
 
         glClearColor(0.55f, 0.78f, 0.95f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1170,18 +1334,29 @@ void main()
         framebufferHeight = std::max(framebufferHeight, 1);
         const float aspect = static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight);
 
-        const float currentFarPlane = computeFarPlaneForViewDistance(chunkManager.viewDistance());
+        const float currentFarPlane = computeFarPlaneForDistanceBlocks(chunkManager.farRenderDistanceBlocks());
         kFarPlane = currentFarPlane;
         const glm::mat4 projection = glm::perspective(glm::radians(60.0f), aspect, kNearPlane, currentFarPlane);
         const glm::mat4 view = glm::lookAt(camera.position, camera.position + camera.front(), camera.up());
         const glm::mat4 viewProj = projection * view;
         const Frustum frustum = Frustum::fromMatrix(viewProj);
 
-        const ChunkRenderData renderData = chunkManager.buildRenderData(frustum);
-        renderWorldGeometry(shaderProgram, viewProj, camera.position, chunkUniforms, renderData);
+        if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
+        {
+            const WorldRenderData renderData = chunkManager.buildRenderData(frustum);
+            renderWorldGeometry(shaderProgram,
+                                farShaderProgram,
+                                viewProj,
+                                camera.position,
+                                chunkUniforms,
+                                farUniforms,
+                                renderData);
+        }
 
-        // Render crosshair on top of everything
-        crosshair.render(framebufferWidth, framebufferHeight);
+        if (playerReleased)
+        {
+            crosshair.render(framebufferWidth, framebufferHeight);
+        }
 
         const double currentFpsEstimate = (fpsFrameCount > 0 && fpsTimer > 0.0)
                                               ? static_cast<double>(fpsFrameCount) / fpsTimer
@@ -1314,6 +1489,19 @@ void main()
         }
 #endif
 
+        if (!playerReleased && !loadingOverlayText.empty())
+        {
+            const float boxLeft = framebufferWidth * 0.5f - 180.0f;
+            const float boxTop = framebufferHeight * 0.5f - 48.0f;
+            textOverlay.render(loadingOverlayText,
+                               boxLeft,
+                               boxTop,
+                               framebufferWidth,
+                               framebufferHeight,
+                               16.0f,
+                               glm::vec3(1.0f, 0.98f, 0.92f));
+        }
+
         // Render render distance GUI
         if (inputContext.showRenderDistanceGUI)
         {
@@ -1322,13 +1510,13 @@ void main()
             float centerY = framebufferHeight * 0.5f;
 
             // Draw semi-transparent background (using multiple overlapping lines to create a filled rectangle effect)
-            float boxWidth = 400.0f;
-            float boxHeight = 100.0f;
+            float boxWidth = 620.0f;
+            float boxHeight = 110.0f;
             float boxLeft = centerX - boxWidth * 0.5f;
             float boxTop = centerY - boxHeight * 0.5f;
 
             // Draw prompt text
-            std::string promptText = "Enter render distance (1-48):";
+            std::string promptText = "Enter near chunks and optional far blocks (e.g. 12 4800):";
             textOverlay.render(promptText, boxLeft + 20.0f, boxTop + 20.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
 
             // Draw input text with cursor
@@ -1382,6 +1570,7 @@ void main()
         glDeleteTextures(1, &blockAtlas.id);
     }
     glDeleteProgram(shaderProgram);
+    glDeleteProgram(farShaderProgram);
 
     glfwDestroyWindow(window);
     glfwTerminate();

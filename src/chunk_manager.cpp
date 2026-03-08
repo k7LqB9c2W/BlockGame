@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -56,7 +57,20 @@ float computeFarPlaneForViewDistance(int viewDistance) noexcept
     return static_cast<float>(farPlane);
 }
 
-float kFarPlane = computeFarPlaneForViewDistance(kDefaultViewDistance);
+float computeFarPlaneForDistanceBlocks(int farDistanceBlocks) noexcept
+{
+    const int clampedBlocks = std::max(farDistanceBlocks, 1);
+    const int verticalRadius = std::max(gActiveVerticalRadius.load(std::memory_order_relaxed),
+                                        kVerticalStreamingConfig.minRadiusChunks);
+    const double horizontalSpan = static_cast<double>(clampedBlocks);
+    const double verticalSpan = static_cast<double>(verticalRadius + 1) * static_cast<double>(kChunkSizeY);
+    const double diagonal = std::hypot(horizontalSpan, verticalSpan);
+    const double farPlane = std::max(diagonal + static_cast<double>(kFarPlanePadding),
+                                     static_cast<double>(kDefaultFarPlane));
+    return static_cast<float>(farPlane);
+}
+
+float kFarPlane = computeFarPlaneForDistanceBlocks(kDefaultFarRenderDistanceBlocks);
 
 Frustum Frustum::fromMatrix(const glm::mat4& matrix)
 {
@@ -454,6 +468,1330 @@ private:
     std::unordered_map<glm::ivec2, ColumnData, ColumnHasher> columns_;
 };
 
+struct FarTerrainSurfaceSample
+{
+    int solidTopY{std::numeric_limits<int>::min()};
+    BlockId solidBlock{BlockId::Air};
+    int waterTopY{std::numeric_limits<int>::min()};
+    bool hasVisibleWater{false};
+};
+
+class FarTerrainManager
+{
+public:
+    struct LevelConfig
+    {
+        int id{0};
+        int innerRadiusChunks{0};
+        int outerRadiusChunks{0};
+        int tileSizeChunks{8};
+        int sampleStepBlocks{8};
+        int lodLevel{3};
+        int skirtDepthBlocks{32};
+    };
+
+    using SampleFn = std::function<FarTerrainSurfaceSample(int worldX, int worldZ, int lodLevel)>;
+    using UvLookupFn = std::function<std::pair<glm::vec2, glm::vec2>(BlockId block, BlockFace face)>;
+
+    FarTerrainManager()
+        : levels_{
+              LevelConfig{1, kDefaultNearRenderDistance, 64, 8, 8, 3, 32},
+              LevelConfig{2, 64, 300, 32, 32, 5, 96}}
+    {
+    }
+
+    ~FarTerrainManager()
+    {
+        stopWorkers();
+        clear();
+    }
+
+    void setEnabled(bool enabled)
+    {
+        if (enabled_ == enabled)
+        {
+            return;
+        }
+
+        enabled_ = enabled;
+        if (!enabled_)
+        {
+            clear();
+        }
+    }
+
+    [[nodiscard]] bool enabled() const noexcept
+    {
+        return enabled_;
+    }
+
+    void setWorkerCount(std::size_t count)
+    {
+        const std::size_t clamped = std::max<std::size_t>(count, 1);
+        if (workerCount_ == clamped && !workerThreads_.empty())
+        {
+            return;
+        }
+
+        stopWorkers();
+        workerCount_ = clamped;
+        startWorkers();
+    }
+
+    void setDistanceBlocks(int blocks)
+    {
+        farDistanceBlocks_ = std::max(blocks, 256);
+    }
+
+    [[nodiscard]] int distanceBlocks() const noexcept
+    {
+        return farDistanceBlocks_;
+    }
+
+    void setFogStartBlocks(int blocks) noexcept
+    {
+        fogStartBlocks_ = std::max(blocks, 0);
+    }
+
+    [[nodiscard]] int fogStartBlocks() const noexcept
+    {
+        return fogStartBlocks_;
+    }
+
+    void update(const glm::ivec3& cameraChunk,
+                const glm::vec3& cameraForward,
+                int nearRadiusChunks,
+                int realDistanceBlocks,
+                double uploadBudgetMs,
+                const SampleFn& sampleFn,
+                const UvLookupFn& uvLookup)
+    {
+        builtTilesLastUpdate_ = 0;
+        if (!enabled_ || realDistanceBlocks <= 0)
+        {
+            clear();
+            return;
+        }
+
+        if (workerThreads_.empty())
+        {
+            startWorkers();
+        }
+
+        farDistanceBlocks_ = std::max(realDistanceBlocks, 256);
+        ++updateStamp_;
+        cameraChunk_ = cameraChunk;
+        if (glm::dot(cameraForward, cameraForward) > kEpsilon)
+        {
+            cameraForward_ = glm::normalize(cameraForward);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(configMutex_);
+            sampleFn_ = sampleFn;
+            uvLookupFn_ = uvLookup;
+        }
+
+        const int realRadiusChunks = std::max(nearRadiusChunks + 1,
+                                              ceilToIntPositive(
+                                                  static_cast<float>(farDistanceBlocks_) / static_cast<float>(kChunkSizeX)));
+
+        levels_[0].innerRadiusChunks = nearRadiusChunks;
+        levels_[0].outerRadiusChunks = std::min(realRadiusChunks, 64);
+        levels_[1].innerRadiusChunks = 64;
+        levels_[1].outerRadiusChunks = realRadiusChunks;
+
+        auto touchLevel = [&](const LevelConfig& level)
+        {
+            const int tileMinX = floorDiv(cameraChunk.x - level.outerRadiusChunks, level.tileSizeChunks);
+            const int tileMaxX = floorDiv(cameraChunk.x + level.outerRadiusChunks, level.tileSizeChunks);
+            const int tileMinZ = floorDiv(cameraChunk.z - level.outerRadiusChunks, level.tileSizeChunks);
+            const int tileMaxZ = floorDiv(cameraChunk.z + level.outerRadiusChunks, level.tileSizeChunks);
+
+            for (int tileX = tileMinX; tileX <= tileMaxX; ++tileX)
+            {
+                for (int tileZ = tileMinZ; tileZ <= tileMaxZ; ++tileZ)
+                {
+                    if (!tileIntersectsRing(level, cameraChunk_, tileX, tileZ))
+                    {
+                        continue;
+                    }
+
+                    FarTileKey key{level.id, tileX, tileZ};
+                    FarTile& tile = tiles_[key];
+                    tile.key = key;
+                    tile.level = level;
+                    tile.lastTouchedStamp = updateStamp_;
+                    tile.active = true;
+                    if (!tile.initialized)
+                    {
+                        initializeTile(tile, level);
+                        markDirty(tile);
+                    }
+                }
+            }
+        };
+
+        if (levels_[0].outerRadiusChunks > levels_[0].innerRadiusChunks)
+        {
+            touchLevel(levels_[0]);
+        }
+        if (levels_[1].outerRadiusChunks > levels_[1].innerRadiusChunks)
+        {
+            touchLevel(levels_[1]);
+        }
+
+        std::vector<FarTileKey> staleKeys;
+        staleKeys.reserve(tiles_.size());
+        for (const auto& [key, tile] : tiles_)
+        {
+            if (tile.lastTouchedStamp != updateStamp_)
+            {
+                staleKeys.push_back(key);
+            }
+        }
+
+        for (const FarTileKey& key : staleKeys)
+        {
+            auto it = tiles_.find(key);
+            if (it == tiles_.end())
+            {
+                continue;
+            }
+
+            releaseTileGpu(it->second);
+            tiles_.erase(it);
+        }
+
+        collectCompletedBuilds(uploadBudgetMs);
+        scheduleDirtyBuilds();
+    }
+
+    [[nodiscard]] std::vector<ChunkRenderBatch> buildRenderBatches(const Frustum& frustum) const
+    {
+        std::vector<ChunkRenderBatch> batches;
+        batches.resize(bufferPages_.size());
+        for (std::size_t i = 0; i < bufferPages_.size(); ++i)
+        {
+            batches[i].vao = bufferPages_[i].vao;
+        }
+
+        for (const auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            if (!tile.active || tile.indexCount == 0)
+            {
+                continue;
+            }
+            if (!frustum.intersectsAABB(tile.boundsMin, tile.boundsMax))
+            {
+                continue;
+            }
+            if (tile.pageIndex == kInvalidChunkBufferPage || tile.pageIndex >= batches.size())
+            {
+                continue;
+            }
+
+            ChunkRenderBatch& batch = batches[tile.pageIndex];
+            batch.counts.push_back(tile.indexCount);
+            batch.offsets.push_back(reinterpret_cast<const void*>(tile.indexOffset * sizeof(std::uint32_t)));
+            batch.baseVertices.push_back(static_cast<GLint>(tile.vertexOffset));
+        }
+
+        auto emptyIt = std::remove_if(batches.begin(),
+                                      batches.end(),
+                                      [](const ChunkRenderBatch& batch)
+                                      {
+                                          return batch.counts.empty();
+                                      });
+        batches.erase(emptyIt, batches.end());
+        return batches;
+    }
+
+    void invalidateWorldBlock(const glm::ivec3& worldPos)
+    {
+        for (auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            const int tileSpanBlocks = tile.level.tileSizeChunks * kChunkSizeX;
+            const int minX = tile.key.tileX * tileSpanBlocks;
+            const int minZ = tile.key.tileZ * tileSpanBlocks;
+            const int maxX = minX + tileSpanBlocks;
+            const int maxZ = minZ + tileSpanBlocks;
+            if (worldPos.x < minX - tileSpanBlocks || worldPos.x > maxX + tileSpanBlocks ||
+                worldPos.z < minZ - tileSpanBlocks || worldPos.z > maxZ + tileSpanBlocks)
+            {
+                continue;
+            }
+
+            markDirty(tile);
+        }
+    }
+
+    void clear()
+    {
+        buildEpoch_.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard<std::mutex> lock(buildQueueMutex_);
+            buildQueue_.clear();
+            queuedKeys_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(completedMutex_);
+            completedBuilds_.clear();
+        }
+        for (auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            releaseTileGpu(tile);
+            tile.inFlight = false;
+        }
+        tiles_.clear();
+        destroyBufferPages();
+        builtTilesLastUpdate_ = 0;
+        lastAverageBuildMs_ = 0.0;
+    }
+
+    [[nodiscard]] int activeTileCount() const noexcept
+    {
+        return static_cast<int>(tiles_.size());
+    }
+
+    [[nodiscard]] int dirtyTileCount() const noexcept
+    {
+        int dirty = 0;
+        for (const auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            if (tile.active && tile.dirty)
+            {
+                ++dirty;
+            }
+        }
+        return dirty;
+    }
+
+    [[nodiscard]] int builtTilesLastUpdate() const noexcept
+    {
+        return builtTilesLastUpdate_;
+    }
+
+private:
+    struct FarTileKey
+    {
+        int level{0};
+        int tileX{0};
+        int tileZ{0};
+
+        bool operator==(const FarTileKey& other) const noexcept
+        {
+            return level == other.level && tileX == other.tileX && tileZ == other.tileZ;
+        }
+    };
+
+    struct FarTileKeyHasher
+    {
+        std::size_t operator()(const FarTileKey& key) const noexcept
+        {
+            std::size_t hash = static_cast<std::size_t>(key.level) * 73856093u;
+            hash ^= static_cast<std::size_t>(key.tileX) * 19349663u;
+            hash ^= static_cast<std::size_t>(key.tileZ) * 83492791u;
+            return hash;
+        }
+    };
+
+    struct BufferPage
+    {
+        struct Range
+        {
+            std::size_t offset{0};
+            std::size_t size{0};
+        };
+
+        GLuint vao{0};
+        GLuint vbo{0};
+        GLuint ibo{0};
+        std::size_t vertexCapacity{0};
+        std::size_t indexCapacity{0};
+        std::size_t vertexCursor{0};
+        std::size_t indexCursor{0};
+        std::vector<Range> freeVertices;
+        std::vector<Range> freeIndices;
+    };
+
+    struct Allocation
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::size_t vertexOffset{0};
+        std::size_t indexOffset{0};
+    };
+
+    struct FarTile
+    {
+        FarTileKey key{};
+        LevelConfig level{};
+        glm::vec3 boundsMin{0.0f};
+        glm::vec3 boundsMax{0.0f};
+        std::uint64_t lastTouchedStamp{0};
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::size_t vertexOffset{0};
+        std::size_t indexOffset{0};
+        std::size_t vertexCount{0};
+        GLsizei indexCount{0};
+        std::uint32_t buildVersion{1};
+        bool active{false};
+        bool dirty{true};
+        bool initialized{false};
+        bool inFlight{false};
+    };
+
+    struct TileMesh
+    {
+        std::vector<Vertex> vertices;
+        std::vector<std::uint32_t> indices;
+        glm::vec3 boundsMin{0.0f};
+        glm::vec3 boundsMax{1.0f};
+    };
+
+    struct BuildResult
+    {
+        FarTileKey key{};
+        std::uint32_t buildVersion{0};
+        std::uint64_t epoch{0};
+        TileMesh mesh{};
+        double buildMs{0.0};
+    };
+
+    struct BuildJob
+    {
+        FarTileKey key{};
+        LevelConfig level{};
+        std::uint32_t buildVersion{0};
+        std::uint64_t epoch{0};
+    };
+
+    struct CandidateBuild
+    {
+        FarTileKey key{};
+        float distanceSq{0.0f};
+        int forwardBucket{0};
+    };
+
+    static glm::vec2 projectTileCoord(const glm::vec3& position, const glm::vec3& normal) noexcept
+    {
+        const glm::vec3 absNormal = glm::abs(normal);
+        if (absNormal.y >= absNormal.x && absNormal.y >= absNormal.z)
+        {
+            return glm::vec2(position.x, position.z);
+        }
+        if (absNormal.x >= absNormal.z)
+        {
+            return glm::vec2(position.z, position.y);
+        }
+        return glm::vec2(position.x, position.y);
+    }
+
+    static void appendQuad(std::vector<Vertex>& vertices,
+                           std::vector<std::uint32_t>& indices,
+                           const glm::vec3& p0,
+                           const glm::vec3& p1,
+                           const glm::vec3& p2,
+                           const glm::vec3& p3,
+                           const glm::vec3& normal,
+                           const std::pair<glm::vec2, glm::vec2>& uv)
+    {
+        const std::uint32_t baseIndex = static_cast<std::uint32_t>(vertices.size());
+        vertices.push_back(Vertex{p0, normal, projectTileCoord(p0, normal), uv.first, uv.second});
+        vertices.push_back(Vertex{p1, normal, projectTileCoord(p1, normal), uv.first, uv.second});
+        vertices.push_back(Vertex{p2, normal, projectTileCoord(p2, normal), uv.first, uv.second});
+        vertices.push_back(Vertex{p3, normal, projectTileCoord(p3, normal), uv.first, uv.second});
+
+        indices.push_back(baseIndex + 0);
+        indices.push_back(baseIndex + 1);
+        indices.push_back(baseIndex + 2);
+        indices.push_back(baseIndex + 0);
+        indices.push_back(baseIndex + 2);
+        indices.push_back(baseIndex + 3);
+    }
+
+    static std::size_t nextPowerOfTwo(std::size_t value) noexcept
+    {
+        if (value <= 1)
+        {
+            return 1;
+        }
+
+        --value;
+        value |= value >> 1;
+        value |= value >> 2;
+        value |= value >> 4;
+        value |= value >> 8;
+        value |= value >> 16;
+#if SIZE_MAX > 0xffffffffu
+        value |= value >> 32;
+#endif
+        return value + 1;
+    }
+
+    [[nodiscard]] static bool tileIntersectsRing(const LevelConfig& level,
+                                                 const glm::ivec3& cameraChunk,
+                                                 int tileX,
+                                                 int tileZ) noexcept
+    {
+        const int minX = tileX * level.tileSizeChunks;
+        const int maxX = minX + level.tileSizeChunks - 1;
+        const int minZ = tileZ * level.tileSizeChunks;
+        const int maxZ = minZ + level.tileSizeChunks - 1;
+
+        const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            if (center < minValue) return minValue - center;
+            if (center > maxValue) return center - maxValue;
+            return 0;
+        };
+
+        const auto maxAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            return std::max(std::abs(center - minValue), std::abs(center - maxValue));
+        };
+
+        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minX, maxX),
+                                         minAxisDistance(cameraChunk.z, minZ, maxZ));
+        const int maxDistance = std::max(maxAxisDistance(cameraChunk.x, minX, maxX),
+                                         maxAxisDistance(cameraChunk.z, minZ, maxZ));
+        return maxDistance > level.innerRadiusChunks && minDistance <= level.outerRadiusChunks;
+    }
+
+    void initializeTile(FarTile& tile, const LevelConfig& level)
+    {
+        const int tileSpanBlocks = level.tileSizeChunks * kChunkSizeX;
+        const float minX = static_cast<float>(tile.key.tileX * tileSpanBlocks);
+        const float minZ = static_cast<float>(tile.key.tileZ * tileSpanBlocks);
+        const float maxX = static_cast<float>((tile.key.tileX + 1) * tileSpanBlocks);
+        const float maxZ = static_cast<float>((tile.key.tileZ + 1) * tileSpanBlocks);
+        tile.level = level;
+        tile.boundsMin = glm::vec3(minX, 0.0f, minZ);
+        tile.boundsMax = glm::vec3(maxX, 1.0f, maxZ);
+        tile.initialized = true;
+    }
+
+    void markDirty(FarTile& tile)
+    {
+        tile.dirty = true;
+        ++tile.buildVersion;
+        if (tile.buildVersion == 0)
+        {
+            tile.buildVersion = 1;
+        }
+    }
+
+    BufferPage createBufferPage(std::size_t vertexCount, std::size_t indexCount)
+    {
+        static constexpr std::size_t kDefaultVertexCapacity = 131072;
+        static constexpr std::size_t kDefaultIndexCapacity = 196608;
+
+        BufferPage page;
+        page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
+        page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
+
+        glGenVertexArrays(1, &page.vao);
+        glGenBuffers(1, &page.vbo);
+        glGenBuffers(1, &page.ibo);
+
+        glBindVertexArray(page.vao);
+
+        glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(page.vertexCapacity * sizeof(Vertex)),
+                     nullptr,
+                     GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, tileCoord)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasBase)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
+        glEnableVertexAttribArray(4);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, page.ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(page.indexCapacity * sizeof(std::uint32_t)),
+                     nullptr,
+                     GL_DYNAMIC_DRAW);
+
+        glBindVertexArray(0);
+        return page;
+    }
+
+    static bool tryAllocateRange(std::vector<BufferPage::Range>& ranges,
+                                 std::size_t& cursor,
+                                 std::size_t capacity,
+                                 std::size_t count,
+                                 std::size_t& outOffset)
+    {
+        if (count == 0)
+        {
+            outOffset = cursor;
+            return true;
+        }
+
+        for (auto it = ranges.begin(); it != ranges.end(); ++it)
+        {
+            if (it->size >= count)
+            {
+                outOffset = it->offset;
+                it->offset += count;
+                it->size -= count;
+                if (it->size == 0)
+                {
+                    ranges.erase(it);
+                }
+                return true;
+            }
+        }
+
+        if (cursor + count <= capacity)
+        {
+            outOffset = cursor;
+            cursor += count;
+            return true;
+        }
+
+        return false;
+    }
+
+    static void mergeRange(std::vector<BufferPage::Range>& ranges, std::size_t offset, std::size_t size)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        BufferPage::Range range{offset, size};
+        auto it = std::lower_bound(ranges.begin(), ranges.end(), range.offset,
+                                   [](const BufferPage::Range& lhs, std::size_t value)
+                                   {
+                                       return lhs.offset < value;
+                                   });
+        it = ranges.insert(it, range);
+
+        if (it != ranges.begin())
+        {
+            auto prev = std::prev(it);
+            if (prev->offset + prev->size == it->offset)
+            {
+                prev->size += it->size;
+                it = ranges.erase(it);
+                it = prev;
+            }
+        }
+
+        auto next = std::next(it);
+        if (next != ranges.end() && it->offset + it->size == next->offset)
+        {
+            it->size += next->size;
+            ranges.erase(next);
+        }
+    }
+
+    Allocation acquireAllocation(std::size_t vertexCount, std::size_t indexCount)
+    {
+        Allocation allocation{};
+        if (vertexCount == 0 || indexCount == 0)
+        {
+            return allocation;
+        }
+
+        for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
+        {
+            BufferPage& page = bufferPages_[pageIndex];
+            std::size_t vertexOffset = 0;
+            if (!tryAllocateRange(page.freeVertices, page.vertexCursor, page.vertexCapacity, vertexCount, vertexOffset))
+            {
+                continue;
+            }
+
+            std::size_t indexOffset = 0;
+            if (!tryAllocateRange(page.freeIndices, page.indexCursor, page.indexCapacity, indexCount, indexOffset))
+            {
+                mergeRange(page.freeVertices, vertexOffset, vertexCount);
+                continue;
+            }
+
+            allocation.pageIndex = pageIndex;
+            allocation.vertexOffset = vertexOffset;
+            allocation.indexOffset = indexOffset;
+            return allocation;
+        }
+
+        BufferPage newPage = createBufferPage(vertexCount, indexCount);
+        bufferPages_.push_back(std::move(newPage));
+        BufferPage& page = bufferPages_.back();
+        allocation.pageIndex = static_cast<std::uint32_t>(bufferPages_.size() - 1);
+        tryAllocateRange(page.freeVertices, page.vertexCursor, page.vertexCapacity, vertexCount, allocation.vertexOffset);
+        tryAllocateRange(page.freeIndices, page.indexCursor, page.indexCapacity, indexCount, allocation.indexOffset);
+        return allocation;
+    }
+
+    void releaseTileGpu(FarTile& tile)
+    {
+        if (tile.pageIndex == kInvalidChunkBufferPage)
+        {
+            tile.vertexOffset = 0;
+            tile.indexOffset = 0;
+            tile.vertexCount = 0;
+            tile.indexCount = 0;
+            return;
+        }
+
+        if (tile.pageIndex < bufferPages_.size())
+        {
+            BufferPage& page = bufferPages_[tile.pageIndex];
+            mergeRange(page.freeVertices, tile.vertexOffset, tile.vertexCount);
+            mergeRange(page.freeIndices, tile.indexOffset, static_cast<std::size_t>(tile.indexCount));
+        }
+
+        tile.pageIndex = kInvalidChunkBufferPage;
+        tile.vertexOffset = 0;
+        tile.indexOffset = 0;
+        tile.vertexCount = 0;
+        tile.indexCount = 0;
+    }
+
+    void destroyBufferPages()
+    {
+        for (BufferPage& page : bufferPages_)
+        {
+            if (page.vao != 0)
+            {
+                glDeleteVertexArrays(1, &page.vao);
+            }
+            if (page.vbo != 0)
+            {
+                glDeleteBuffers(1, &page.vbo);
+            }
+            if (page.ibo != 0)
+            {
+                glDeleteBuffers(1, &page.ibo);
+            }
+        }
+        bufferPages_.clear();
+    }
+
+    [[nodiscard]] static bool hasSolidSurface(const FarTerrainSurfaceSample& sample) noexcept
+    {
+        return sample.solidTopY != std::numeric_limits<int>::min() && sample.solidBlock != BlockId::Air;
+    }
+
+    [[nodiscard]] static bool isSubmergedSurface(const FarTerrainSurfaceSample& sample) noexcept
+    {
+        return sample.hasVisibleWater &&
+               sample.waterTopY != std::numeric_limits<int>::min() &&
+               hasSolidSurface(sample) &&
+               sample.solidTopY < sample.waterTopY;
+    }
+
+    [[nodiscard]] static float sampleTopY(const FarTerrainSurfaceSample& sample, float fallbackY) noexcept
+    {
+        if (hasSolidSurface(sample))
+        {
+            return static_cast<float>(sample.solidTopY + 1);
+        }
+        return fallbackY;
+    }
+
+    [[nodiscard]] static glm::vec3 computeTerrainNormal(float h00,
+                                                        float h10,
+                                                        float h11,
+                                                        float h01,
+                                                        float step) noexcept
+    {
+        const float safeStep = std::max(step, 1.0f);
+        const float dHdX = ((h10 - h00) + (h11 - h01)) * 0.5f / safeStep;
+        const float dHdZ = ((h01 - h00) + (h11 - h10)) * 0.5f / safeStep;
+        glm::vec3 normal(-dHdX, 1.0f, -dHdZ);
+        if (glm::dot(normal, normal) <= kEpsilon)
+        {
+            return glm::vec3(0.0f, 1.0f, 0.0f);
+        }
+        return glm::normalize(normal);
+    }
+
+    [[nodiscard]] static BlockId dominantBlockForCell(const std::array<FarTerrainSurfaceSample, 4>& corners) noexcept
+    {
+        std::array<int, toIndex(BlockId::Count)> counts{};
+        BlockId fallback = BlockId::Grass;
+        for (const FarTerrainSurfaceSample& sample : corners)
+        {
+            if (!hasSolidSurface(sample))
+            {
+                continue;
+            }
+
+            fallback = sample.solidBlock;
+            if (isSubmergedSurface(sample))
+            {
+                continue;
+            }
+
+            ++counts[toIndex(sample.solidBlock)];
+        }
+
+        int bestCount = 0;
+        BlockId bestBlock = fallback;
+        for (std::size_t i = 0; i < counts.size(); ++i)
+        {
+            if (counts[i] > bestCount)
+            {
+                bestCount = counts[i];
+                bestBlock = static_cast<BlockId>(i);
+            }
+        }
+        return bestBlock;
+    }
+
+public:
+    [[nodiscard]] int readyTileCount() const noexcept
+    {
+        int ready = 0;
+        for (const auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            if (tile.active && tile.indexCount > 0)
+            {
+                ++ready;
+            }
+        }
+        return ready;
+    }
+
+    [[nodiscard]] int queuedTileCount() const noexcept
+    {
+        int queued = 0;
+        for (const auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            if (tile.active && tile.inFlight)
+            {
+                ++queued;
+            }
+        }
+        return queued;
+    }
+
+    [[nodiscard]] int pendingUploadTileCount() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(completedMutex_);
+        return static_cast<int>(completedBuilds_.size());
+    }
+
+    [[nodiscard]] double averageBuildMs() const noexcept
+    {
+        return lastAverageBuildMs_;
+    }
+
+private:
+    void startWorkers()
+    {
+        stopWorkers_.store(false, std::memory_order_release);
+        const std::size_t desired = std::max<std::size_t>(workerCount_, 1);
+        workerThreads_.reserve(desired);
+        for (std::size_t i = 0; i < desired; ++i)
+        {
+            workerThreads_.emplace_back(&FarTerrainManager::workerThreadLoop, this);
+        }
+    }
+
+    void stopWorkers()
+    {
+        stopWorkers_.store(true, std::memory_order_release);
+        buildQueueCv_.notify_all();
+        for (std::thread& worker : workerThreads_)
+        {
+            if (worker.joinable())
+            {
+                worker.join();
+            }
+        }
+        workerThreads_.clear();
+        {
+            std::lock_guard<std::mutex> lock(buildQueueMutex_);
+            buildQueue_.clear();
+            queuedKeys_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(completedMutex_);
+            completedBuilds_.clear();
+        }
+    }
+
+    void workerThreadLoop()
+    {
+        while (true)
+        {
+            BuildJob job{};
+            {
+                std::unique_lock<std::mutex> lock(buildQueueMutex_);
+                buildQueueCv_.wait(lock,
+                                   [this]()
+                                   {
+                                       return stopWorkers_.load(std::memory_order_acquire) || !buildQueue_.empty();
+                                   });
+                if (stopWorkers_.load(std::memory_order_acquire) && buildQueue_.empty())
+                {
+                    return;
+                }
+
+                job = buildQueue_.front();
+                buildQueue_.pop_front();
+                queuedKeys_.erase(job.key);
+            }
+
+            SampleFn sampleFn;
+            UvLookupFn uvLookup;
+            {
+                std::lock_guard<std::mutex> lock(configMutex_);
+                sampleFn = sampleFn_;
+                uvLookup = uvLookupFn_;
+            }
+
+            if (!sampleFn || !uvLookup)
+            {
+                continue;
+            }
+
+            BuildResult result = buildTileMesh(job.key, job.level, sampleFn, uvLookup);
+            result.buildVersion = job.buildVersion;
+            result.epoch = job.epoch;
+
+            if (job.epoch != buildEpoch_.load(std::memory_order_acquire))
+            {
+                continue;
+            }
+
+            std::lock_guard<std::mutex> completedLock(completedMutex_);
+            completedBuilds_.push_back(std::move(result));
+        }
+    }
+
+    void scheduleDirtyBuilds()
+    {
+        const std::size_t maxQueued = std::max<std::size_t>(4, std::max<std::size_t>(workerCount_, 1) * 3);
+        std::size_t inFlightCount = 0;
+        std::vector<CandidateBuild> candidates;
+        candidates.reserve(tiles_.size());
+
+        const glm::vec2 cameraCenter(static_cast<float>(cameraChunk_.x * kChunkSizeX),
+                                     static_cast<float>(cameraChunk_.z * kChunkSizeZ));
+        glm::vec2 forwardXZ(cameraForward_.x, cameraForward_.z);
+        if (glm::dot(forwardXZ, forwardXZ) <= kEpsilon)
+        {
+            forwardXZ = glm::vec2(0.0f, -1.0f);
+        }
+        else
+        {
+            forwardXZ = glm::normalize(forwardXZ);
+        }
+
+        for (const auto& [key, tile] : tiles_)
+        {
+            if (!tile.active)
+            {
+                continue;
+            }
+            if (tile.inFlight)
+            {
+                ++inFlightCount;
+                continue;
+            }
+            if (!tile.dirty)
+            {
+                continue;
+            }
+
+            const int tileSpanBlocks = tile.level.tileSizeChunks * kChunkSizeX;
+            const glm::vec2 tileCenter(static_cast<float>(key.tileX * tileSpanBlocks + tileSpanBlocks / 2),
+                                       static_cast<float>(key.tileZ * tileSpanBlocks + tileSpanBlocks / 2));
+            const glm::vec2 delta = tileCenter - cameraCenter;
+            const float distanceSq = glm::dot(delta, delta);
+            float facingDot = 1.0f;
+            if (distanceSq > kEpsilon)
+            {
+                facingDot = glm::dot(glm::normalize(delta), forwardXZ);
+            }
+
+            int forwardBucket = 2;
+            if (facingDot >= 0.5f)
+            {
+                forwardBucket = 0;
+            }
+            else if (facingDot >= -0.2f)
+            {
+                forwardBucket = 1;
+            }
+
+            candidates.push_back(CandidateBuild{key, distanceSq, forwardBucket});
+        }
+
+        if (inFlightCount >= maxQueued || candidates.empty())
+        {
+            return;
+        }
+
+        std::sort(candidates.begin(),
+                  candidates.end(),
+                  [](const CandidateBuild& lhs, const CandidateBuild& rhs)
+                  {
+                      if (lhs.forwardBucket != rhs.forwardBucket)
+                      {
+                          return lhs.forwardBucket < rhs.forwardBucket;
+                      }
+                      return lhs.distanceSq < rhs.distanceSq;
+                  });
+
+        std::size_t available = maxQueued - inFlightCount;
+        for (const CandidateBuild& candidate : candidates)
+        {
+            if (available == 0)
+            {
+                break;
+            }
+
+            auto tileIt = tiles_.find(candidate.key);
+            if (tileIt == tiles_.end() || !tileIt->second.active || !tileIt->second.dirty || tileIt->second.inFlight)
+            {
+                continue;
+            }
+
+            bool queued = false;
+            {
+                std::lock_guard<std::mutex> lock(buildQueueMutex_);
+                if (queuedKeys_.insert(candidate.key).second)
+                {
+                    buildQueue_.push_back(BuildJob{
+                        candidate.key,
+                        tileIt->second.level,
+                        tileIt->second.buildVersion,
+                        buildEpoch_.load(std::memory_order_acquire)});
+                    queued = true;
+                }
+            }
+
+            if (!queued)
+            {
+                continue;
+            }
+
+            tileIt->second.inFlight = true;
+            --available;
+            buildQueueCv_.notify_one();
+        }
+    }
+
+    void collectCompletedBuilds(double uploadBudgetMs)
+    {
+        const auto uploadStart = std::chrono::steady_clock::now();
+        while (true)
+        {
+            BuildResult result{};
+            {
+                std::lock_guard<std::mutex> lock(completedMutex_);
+                if (completedBuilds_.empty())
+                {
+                    break;
+                }
+
+                result = std::move(completedBuilds_.front());
+                completedBuilds_.pop_front();
+            }
+
+            if (result.epoch != buildEpoch_.load(std::memory_order_acquire))
+            {
+                continue;
+            }
+
+            auto tileIt = tiles_.find(result.key);
+            if (tileIt == tiles_.end())
+            {
+                continue;
+            }
+
+            FarTile& tile = tileIt->second;
+            tile.inFlight = false;
+            if (!tile.active || tile.buildVersion != result.buildVersion)
+            {
+                continue;
+            }
+
+            uploadBuiltTile(tile, result.mesh);
+            tile.dirty = false;
+            ++builtTilesLastUpdate_;
+            if (builtTilesLastUpdate_ == 1)
+            {
+                lastAverageBuildMs_ = result.buildMs;
+            }
+            else
+            {
+                lastAverageBuildMs_ = (lastAverageBuildMs_ * 0.65) + (result.buildMs * 0.35);
+            }
+
+            const double elapsedMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadStart).count();
+            if (elapsedMs >= uploadBudgetMs && builtTilesLastUpdate_ > 0)
+            {
+                break;
+            }
+        }
+    }
+
+    void uploadBuiltTile(FarTile& tile, const TileMesh& mesh)
+    {
+        releaseTileGpu(tile);
+        tile.boundsMin = mesh.boundsMin;
+        tile.boundsMax = mesh.boundsMax;
+
+        if (mesh.vertices.empty() || mesh.indices.empty())
+        {
+            return;
+        }
+
+        Allocation allocation = acquireAllocation(mesh.vertices.size(), mesh.indices.size());
+        if (allocation.pageIndex == kInvalidChunkBufferPage || allocation.pageIndex >= bufferPages_.size())
+        {
+            return;
+        }
+
+        tile.pageIndex = allocation.pageIndex;
+        tile.vertexOffset = allocation.vertexOffset;
+        tile.indexOffset = allocation.indexOffset;
+        tile.vertexCount = mesh.vertices.size();
+        tile.indexCount = static_cast<GLsizei>(mesh.indices.size());
+
+        BufferPage& page = bufferPages_[allocation.pageIndex];
+        glBindVertexArray(page.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
+        glBufferSubData(GL_ARRAY_BUFFER,
+                        static_cast<GLintptr>(tile.vertexOffset * sizeof(Vertex)),
+                        static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(Vertex)),
+                        mesh.vertices.data());
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, page.ibo);
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,
+                        static_cast<GLintptr>(tile.indexOffset * sizeof(std::uint32_t)),
+                        static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t)),
+                        mesh.indices.data());
+        glBindVertexArray(0);
+    }
+
+    static BuildResult buildTileMesh(const FarTileKey& key,
+                                     const LevelConfig& level,
+                                     const SampleFn& sampleFn,
+                                     const UvLookupFn& uvLookup)
+    {
+        BuildResult result{};
+        result.key = key;
+
+        const auto start = std::chrono::steady_clock::now();
+        const int tileSpanBlocks = level.tileSizeChunks * kChunkSizeX;
+        const int gridCount = std::max(1, tileSpanBlocks / std::max(level.sampleStepBlocks, 1));
+        const int worldMinX = key.tileX * tileSpanBlocks;
+        const int worldMinZ = key.tileZ * tileSpanBlocks;
+        const float step = static_cast<float>(level.sampleStepBlocks);
+
+        std::vector<FarTerrainSurfaceSample> vertexSamples(
+            static_cast<std::size_t>((gridCount + 1) * (gridCount + 1)));
+        auto sampleAt = [&](int x, int z) -> FarTerrainSurfaceSample& {
+            return vertexSamples[static_cast<std::size_t>(z * (gridCount + 1) + x)];
+        };
+
+        int minY = std::numeric_limits<int>::max();
+        int maxY = std::numeric_limits<int>::min();
+        for (int z = 0; z <= gridCount; ++z)
+        {
+            for (int x = 0; x <= gridCount; ++x)
+            {
+                const int worldX = worldMinX + x * level.sampleStepBlocks;
+                const int worldZ = worldMinZ + z * level.sampleStepBlocks;
+                FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
+                sampleAt(x, z) = sample;
+                if (hasSolidSurface(sample))
+                {
+                    minY = std::min(minY, sample.solidTopY);
+                    maxY = std::max(maxY, sample.solidTopY + 1);
+                }
+                if (sample.hasVisibleWater)
+                {
+                    minY = std::min(minY, sample.waterTopY);
+                    maxY = std::max(maxY, sample.waterTopY + 1);
+                }
+            }
+        }
+
+        auto& vertices = result.mesh.vertices;
+        auto& indices = result.mesh.indices;
+        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * 24));
+        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * 36));
+
+        for (int z = 0; z < gridCount; ++z)
+        {
+            for (int x = 0; x < gridCount; ++x)
+            {
+                const float minX = static_cast<float>(worldMinX) + static_cast<float>(x) * step;
+                const float maxX = minX + step;
+                const float minZ = static_cast<float>(worldMinZ) + static_cast<float>(z) * step;
+                const float maxZ = minZ + step;
+                const FarTerrainSurfaceSample& s00 = sampleAt(x, z);
+                const FarTerrainSurfaceSample& s10 = sampleAt(x + 1, z);
+                const FarTerrainSurfaceSample& s11 = sampleAt(x + 1, z + 1);
+                const FarTerrainSurfaceSample& s01 = sampleAt(x, z + 1);
+                const std::array<FarTerrainSurfaceSample, 4> corners{s00, s10, s11, s01};
+
+                bool hasVisibleTerrain = false;
+                bool allSubmerged = true;
+                float fallbackHeight = 0.0f;
+                for (const FarTerrainSurfaceSample& sample : corners)
+                {
+                    if (hasSolidSurface(sample))
+                    {
+                        hasVisibleTerrain = true;
+                        fallbackHeight = static_cast<float>(sample.solidTopY + 1);
+                    }
+                    if (!isSubmergedSurface(sample))
+                    {
+                        allSubmerged = false;
+                    }
+                }
+
+                if (hasVisibleTerrain && !allSubmerged)
+                {
+                    const float h00 = sampleTopY(s00, fallbackHeight);
+                    const float h10 = sampleTopY(s10, fallbackHeight);
+                    const float h11 = sampleTopY(s11, fallbackHeight);
+                    const float h01 = sampleTopY(s01, fallbackHeight);
+                    const glm::vec3 normal = computeTerrainNormal(h00, h10, h11, h01, step);
+                    const BlockId surfaceBlock = dominantBlockForCell(corners);
+
+                    appendQuad(vertices,
+                               indices,
+                               glm::vec3(minX, h00, minZ),
+                               glm::vec3(maxX, h10, minZ),
+                               glm::vec3(maxX, h11, maxZ),
+                               glm::vec3(minX, h01, maxZ),
+                               normal,
+                               uvLookup(surfaceBlock, BlockFace::Top));
+
+                    const float skirtDepth = static_cast<float>(level.skirtDepthBlocks);
+                    if (x == 0)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, h01 - skirtDepth, maxZ),
+                                   glm::vec3(minX, h00 - skirtDepth, minZ),
+                                   glm::vec3(minX, h00, minZ),
+                                   glm::vec3(minX, h01, maxZ),
+                                   glm::vec3(-1.0f, 0.0f, 0.0f),
+                                   uvLookup(surfaceBlock, BlockFace::West));
+                    }
+                    if (x == gridCount - 1)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(maxX, h10 - skirtDepth, minZ),
+                                   glm::vec3(maxX, h11 - skirtDepth, maxZ),
+                                   glm::vec3(maxX, h11, maxZ),
+                                   glm::vec3(maxX, h10, minZ),
+                                   glm::vec3(1.0f, 0.0f, 0.0f),
+                                   uvLookup(surfaceBlock, BlockFace::East));
+                    }
+                    if (z == 0)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(maxX, h10 - skirtDepth, minZ),
+                                   glm::vec3(minX, h00 - skirtDepth, minZ),
+                                   glm::vec3(minX, h00, minZ),
+                                   glm::vec3(maxX, h10, minZ),
+                                   glm::vec3(0.0f, 0.0f, -1.0f),
+                                   uvLookup(surfaceBlock, BlockFace::North));
+                    }
+                    if (z == gridCount - 1)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, h01 - skirtDepth, maxZ),
+                                   glm::vec3(maxX, h11 - skirtDepth, maxZ),
+                                   glm::vec3(maxX, h11, maxZ),
+                                   glm::vec3(minX, h01, maxZ),
+                                   glm::vec3(0.0f, 0.0f, 1.0f),
+                                   uvLookup(surfaceBlock, BlockFace::South));
+                    }
+                }
+
+                bool hasWater = false;
+                int waterTopY = std::numeric_limits<int>::min();
+                for (const FarTerrainSurfaceSample& sample : corners)
+                {
+                    if (!sample.hasVisibleWater)
+                    {
+                        continue;
+                    }
+                    hasWater = true;
+                    waterTopY = std::max(waterTopY, sample.waterTopY);
+                }
+
+                if (hasWater && waterTopY != std::numeric_limits<int>::min())
+                {
+                    const float waterY = static_cast<float>(waterTopY + 1);
+                    appendQuad(vertices,
+                               indices,
+                               glm::vec3(minX, waterY, minZ),
+                               glm::vec3(maxX, waterY, minZ),
+                               glm::vec3(maxX, waterY, maxZ),
+                               glm::vec3(minX, waterY, maxZ),
+                               glm::vec3(0.0f, 1.0f, 0.0f),
+                               uvLookup(BlockId::Water, BlockFace::Top));
+                }
+            }
+        }
+
+        result.mesh.boundsMin = glm::vec3(static_cast<float>(worldMinX),
+                                          static_cast<float>((minY == std::numeric_limits<int>::max()) ? 0 : minY - level.skirtDepthBlocks),
+                                          static_cast<float>(worldMinZ));
+        result.mesh.boundsMax = glm::vec3(static_cast<float>(worldMinX + tileSpanBlocks),
+                                          static_cast<float>((maxY == std::numeric_limits<int>::min()) ? 1 : maxY),
+                                          static_cast<float>(worldMinZ + tileSpanBlocks));
+        result.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        return result;
+    }
+
+    bool enabled_{true};
+    int farDistanceBlocks_{kDefaultFarRenderDistanceBlocks};
+    int fogStartBlocks_{kDefaultFarFogStartBlocks};
+    glm::ivec3 cameraChunk_{0};
+    glm::vec3 cameraForward_{0.0f, 0.0f, -1.0f};
+    std::uint64_t updateStamp_{0};
+    int builtTilesLastUpdate_{0};
+    double lastAverageBuildMs_{0.0};
+    std::vector<LevelConfig> levels_;
+    std::vector<BufferPage> bufferPages_;
+    std::unordered_map<FarTileKey, FarTile, FarTileKeyHasher> tiles_;
+    std::mutex configMutex_;
+    SampleFn sampleFn_{};
+    UvLookupFn uvLookupFn_{};
+    std::mutex buildQueueMutex_;
+    std::condition_variable buildQueueCv_;
+    std::deque<BuildJob> buildQueue_;
+    std::unordered_set<FarTileKey, FarTileKeyHasher> queuedKeys_;
+    std::mutex completedMutex_;
+    std::deque<BuildResult> completedBuilds_;
+    std::vector<std::thread> workerThreads_;
+    std::atomic<bool> stopWorkers_{false};
+    std::atomic<std::uint64_t> buildEpoch_{1};
+    std::size_t workerCount_{1};
+};
+
 
 } // namespace
 
@@ -465,7 +1803,8 @@ struct ChunkManager::Impl
     void setAtlasTexture(GLuint texture) noexcept;
     void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
     void update(const glm::vec3& cameraPos);
-    ChunkRenderData buildRenderData(const Frustum& frustum) const;
+    void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
+    WorldRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
     ColumnSample sampleColumnAt(const glm::vec3& worldPos,
@@ -481,12 +1820,26 @@ struct ChunkManager::Impl
 
     void toggleViewDistance();
     int viewDistance() const noexcept;
+    int nearRenderDistance() const noexcept;
+    int farRenderDistanceBlocks() const noexcept;
+    RenderDistanceSettings renderDistanceSettings() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setNearRenderDistance(int chunks) noexcept;
+    void setFarRenderDistanceBlocks(int blocks) noexcept;
     void setLodEnabled(bool enabled);
     bool lodEnabled() const noexcept;
+    void setFarTerrainEnabled(bool enabled);
+    bool farTerrainEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
+    void beginSpawnPreload(const glm::vec3& spawnPos);
+    bool isSpawnPreloadReady() const noexcept;
+    bool playerReleaseReady() const noexcept;
+    StreamingPhase streamingPhase() const noexcept;
+    void setStartupEnabled(bool enabled) noexcept;
+    bool startupEnabled() const noexcept;
+    StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
     ChunkProfilingSnapshot sampleProfilingSnapshot();
     std::string biomeNameAt(const glm::vec3& worldPos) const;
 
@@ -625,6 +1978,7 @@ private:
         std::size_t byteBudget{kUploadBudgetBytesPerFrame};
         int columnLimit{kVerticalStreamingConfig.uploadBasePerColumn};
         std::size_t queueSize{0};
+        double timeBudgetMs{4.0};
     };
     UploadBudgets computeUploadBudgets(int verticalRadius);
     static int computeBacklogSteps(int backlog, int threshold, int stepSize) noexcept;
@@ -632,6 +1986,7 @@ private:
     int computeRingExpansionBudget(int backlogChunks) const;
     int computeColumnJobCap(int backlogSteps, int backlogChunks) const;
     int estimateMissingChunks(const glm::ivec3& center, int horizontalRadius, int verticalRadius) const;
+    StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
 
     struct RingProgress
     {
@@ -654,11 +2009,11 @@ private:
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
     void generateChunkBlocks(Chunk& chunk);
-    void generateSurfaceOnlyChunk(Chunk& chunk);
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
                               int slabMaxWorldY = std::numeric_limits<int>::max()) const;
+    FarTerrainSurfaceSample sampleFarTerrainSurfaceLod(int worldX, int worldZ, int lodLevel) const;
     int ensureColumnHeightCached(const glm::ivec2& column, int worldX, int worldZ) const;
     bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
     int cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const;
@@ -668,7 +2023,9 @@ private:
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
     void buildSurfaceOnlyMesh(Chunk& chunk);
+    void generateSurfaceOnlyChunk(Chunk& chunk);
     bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
+    std::pair<glm::vec2, glm::vec2> atlasUvFor(BlockId block, BlockFace face) const;
 
     glm::vec2 atlasTileScale_{1.0f, 1.0f};
     struct FaceUV
@@ -684,9 +2041,21 @@ private:
 
     std::array<BlockUVSet, toIndex(BlockId::Count)> blockUVTable_{};
     bool blockAtlasConfigured_{false};
-    bool lodEnabled_{false};
-    int lodNearRadius_{8};
-    bool lodModeDirty_{false};
+    RenderDistanceSettings renderSettings_{};
+    FarTerrainManager farTerrainManager_{};
+
+    struct StartupStreamingState
+    {
+        StreamingPhase phase{StreamingPhase::SpawnResolve};
+        double phaseTimeSeconds{0.0};
+        double totalTimeSeconds{0.0};
+        double healthyTimeSeconds{0.0};
+        int exactNearCurrentChunks{0};
+        int farCurrentBlocks{0};
+        bool preloadStarted{false};
+        bool playerReleaseReady{false};
+        glm::ivec3 spawnChunk{0};
+    };
 
     std::deque<std::weak_ptr<Chunk>> uploadQueue_;
     std::mutex uploadQueueMutex_;
@@ -720,6 +2089,7 @@ private:
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
+    double uploadBudgetMsThisFrame_{4.0};
     std::size_t lastUploadBytesUsed_{0};
     std::size_t pendingUploadsLastFrame_{0};
     int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
@@ -730,6 +2100,14 @@ private:
     int lastMissingChunks_{0};
     int lastColumnCap_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
     int lastBacklogSteps_{0};
+    bool startupEnabled_{true};
+    StartupStreamingState startupState_{};
+    glm::vec3 lastCameraForward_{0.0f, 0.0f, -1.0f};
+    glm::ivec3 lastCenterChunk_{0};
+    std::chrono::steady_clock::time_point lastUpdateTime_{};
+    double smoothedFrameMs_{16.0};
+    double lastUploadMsUsed_{0.0};
+    int farWorkerCount_{1};
     int lastLoggedGenerationBudget_{-1};
     int lastLoggedRingBudget_{-1};
     int lastLoggedColumnCap_{-1};
@@ -983,8 +2361,8 @@ ChunkManager::Impl::Impl(unsigned seed)
       globalSeaLevel_(worldgenProfile_.seaLevel),
       noise_(worldgenProfile_.effectiveSeed(seed)),
       shouldStop_(false),
-      viewDistance_(kDefaultViewDistance),
-      targetViewDistance_(kDefaultViewDistance)
+      viewDistance_(renderSettings_.nearChunks),
+      targetViewDistance_(renderSettings_.nearChunks)
 {
     const unsigned effectiveSeed = worldgenProfile_.effectiveSeed(seed);
 
@@ -1009,11 +2387,11 @@ ChunkManager::Impl::Impl(unsigned seed)
                                  + "' in assets/worldgen.toml");
     }
 
-    climateMap_ = std::make_unique<terrain::ClimateMap>(std::move(climateGenerator), 64);
+    climateMap_ = std::make_unique<terrain::ClimateMap>(std::move(climateGenerator), 256);
 
     surfaceMap_ = std::make_unique<terrain::SurfaceMap>(
         std::make_unique<terrain::MapGenV1>(biomeDatabase_, *climateMap_, worldgenProfile_, effectiveSeed),
-        64);
+        256);
 
     terrainGenerator_ = std::make_unique<terrain::TerrainGenerator>(
         *climateMap_,
@@ -1025,7 +2403,20 @@ ChunkManager::Impl::Impl(unsigned seed)
         });
 
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
-    kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+    farTerrainManager_.setEnabled(renderSettings_.farTerrainEnabled);
+    farTerrainManager_.setDistanceBlocks(renderSettings_.farBlocks);
+    farTerrainManager_.setFogStartBlocks(renderSettings_.fogStartBlocks);
+    unsigned concurrency = std::thread::hardware_concurrency();
+    if (concurrency >= 12)
+    {
+        farWorkerCount_ = 2;
+    }
+    else
+    {
+        farWorkerCount_ = 1;
+    }
+    farTerrainManager_.setWorkerCount(static_cast<std::size_t>(farWorkerCount_));
+    kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
     startWorkerThreads();
 }
 
@@ -1033,6 +2424,7 @@ ChunkManager::Impl::~Impl()
 {
     stopWorkerThreads();
     clear();
+    farTerrainManager_.clear();
     destroyBufferPages();
 }
 
@@ -1108,34 +2500,120 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSiz
     blockAtlasConfigured_ = true;
 }
 
+std::pair<glm::vec2, glm::vec2> ChunkManager::Impl::atlasUvFor(BlockId block, BlockFace face) const
+{
+    const FaceUV& uv = blockUVTable_[toIndex(block)].faces[toIndex(face)];
+    return {uv.base, uv.size};
+}
+
+FarTerrainSurfaceSample ChunkManager::Impl::sampleFarTerrainSurfaceLod(int worldX, int worldZ, int lodLevel) const
+{
+    FarTerrainSurfaceSample visual{};
+    if (!surfaceMap_ || !climateMap_)
+    {
+        return visual;
+    }
+
+    const terrain::SurfaceColumn& surfaceColumn = surfaceMap_->column(worldX, worldZ, lodLevel);
+    const terrain::ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
+    if (!surfaceColumn.dominantBiome)
+    {
+        return visual;
+    }
+
+    const BiomeDefinition& biome = *surfaceColumn.dominantBiome;
+    BlockId surfaceBlock = biome.surfaceBlock;
+    if (!biome.isOcean())
+    {
+        constexpr float kBeachDistanceRange = 6.0f;
+        constexpr int kBeachHeightBand = 2;
+        const bool nearSeaLevel = std::abs(surfaceColumn.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
+        if (nearSeaLevel && std::isfinite(climateSample.distanceToCoast) &&
+            climateSample.distanceToCoast <= kBeachDistanceRange)
+        {
+            const float beachNoise = hashToUnitFloat(worldX, surfaceColumn.surfaceY, worldZ);
+            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
+        }
+    }
+
+    visual.solidTopY = surfaceColumn.surfaceY;
+    visual.solidBlock = surfaceBlock;
+    const int cachedTop = columnManager_.highestSolidBlock(worldX, worldZ);
+    const int cacheTolerance = std::max(1 << std::clamp(lodLevel, 0, 6), 12);
+    if (cachedTop != ColumnManager::kNoHeight &&
+        std::abs(cachedTop - surfaceColumn.surfaceY) <= cacheTolerance)
+    {
+        visual.solidTopY = cachedTop;
+    }
+
+    const auto& waterFill = biome.terrainSettings.waterFill;
+    if (waterFill.enabled && surfaceColumn.surfaceY < globalSeaLevel_)
+    {
+        visual.waterTopY = globalSeaLevel_;
+        visual.hasVisibleWater = true;
+    }
+
+    return visual;
+}
+
 void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 {
+    update(cameraPos, lastCameraForward_);
+}
+
+void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cameraForward)
+{
+    if (glm::dot(cameraForward, cameraForward) > kEpsilon)
+    {
+        lastCameraForward_ = glm::normalize(cameraForward);
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    double frameSeconds = 1.0 / 60.0;
+    if (lastUpdateTime_.time_since_epoch().count() != 0)
+    {
+        frameSeconds = std::chrono::duration<double>(now - lastUpdateTime_).count();
+    }
+    lastUpdateTime_ = now;
+    frameSeconds = std::clamp(frameSeconds, 1.0 / 240.0, 0.25);
+    smoothedFrameMs_ = smoothedFrameMs_ * 0.90 + frameSeconds * 1000.0 * 0.10;
+
     const int worldX = static_cast<int>(std::floor(cameraPos.x));
     const int worldY = static_cast<int>(std::floor(cameraPos.y));
     const int worldZ = static_cast<int>(std::floor(cameraPos.z));
     const int clampedWorldY = std::max(worldY, 0);
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
+    lastCenterChunk_ = centerChunk;
 
-    if (lodModeDirty_)
+    if (!startupEnabled_ || !startupState_.preloadStarted)
     {
-        clear();
-        lodModeDirty_ = false;
+        startupState_.phase = StreamingPhase::SteadyState;
+        startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
+        startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+        startupState_.playerReleaseReady = true;
+    }
+    else
+    {
+        if (startupState_.phase == StreamingPhase::SpawnResolve)
+        {
+            startupState_.phase = StreamingPhase::ExactPreload;
+        }
+        startupState_.phaseTimeSeconds += frameSeconds;
+        startupState_.totalTimeSeconds += frameSeconds;
     }
 
-    if (lodEnabled_)
-    {
-        lodNearRadius_ = std::max(4, targetViewDistance_ / 2);
-    }
+    targetViewDistance_ = std::clamp(startupState_.exactNearCurrentChunks, 1, renderSettings_.nearChunks);
 
     resetColumnBudgets();
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
     lastVerticalRadius_ = verticalRadius;
     gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
-    kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+    kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
 
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
     uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
     uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
+    uploadBudgetMsThisFrame_ = uploadBudgets.timeBudgetMs;
     pendingUploadsLastFrame_ = uploadBudgets.queueSize;
 
     jobQueue_.updatePriorityOrigin(centerChunk);
@@ -1166,30 +2644,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
     lastMissingChunks_ = missingChunks;
     lastColumnCap_ = generationColumnCapThisFrame_;
     lastBacklogSteps_ = backlogSteps;
-
-    if (generationBudgetTarget != lastLoggedGenerationBudget_ ||
-        ringBudget != lastLoggedRingBudget_ ||
-        lastColumnCap_ != lastLoggedColumnCap_)
-    {
-        std::cout << "[ChunkManager] Adaptive streaming budgets -- backlog: " << missingChunks
-                  << " chunks, steps: " << backlogSteps
-                  << ", jobBudget: " << generationBudgetTarget
-                  << ", ringBudget: " << ringBudget
-                  << ", columnCap: ";
-        if (generationColumnCapThisFrame_ >= std::numeric_limits<int>::max())
-        {
-            std::cout << "unlimited";
-        }
-        else
-        {
-            std::cout << generationColumnCapThisFrame_;
-        }
-        std::cout << ", verticalRadius: " << verticalRadius << std::endl;
-
-        lastLoggedGenerationBudget_ = generationBudgetTarget;
-        lastLoggedRingBudget_ = ringBudget;
-        lastLoggedColumnCap_ = lastColumnCap_;
-    }
 
     int jobBudget = generationBudgetTarget;
 
@@ -1231,15 +2685,176 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
                         verticalRadius);
 
     uploadReadyMeshes();
+
+    const bool farStreamingActive =
+        renderSettings_.farTerrainEnabled &&
+        (!startupEnabled_ || !startupState_.preloadStarted ||
+         startupState_.phase == StreamingPhase::FarRamp ||
+         startupState_.phase == StreamingPhase::SteadyState);
+    if (farStreamingActive && startupState_.farCurrentBlocks > 0)
+    {
+        farTerrainManager_.update(centerChunk,
+                                  lastCameraForward_,
+                                  targetViewDistance_,
+                                  startupState_.farCurrentBlocks,
+                                  std::max(0.5, uploadBudgets.timeBudgetMs * 0.75),
+                                  [this](int sampleWorldX, int sampleWorldZ, int lodLevel)
+                                  {
+                                      return this->sampleFarTerrainSurfaceLod(sampleWorldX, sampleWorldZ, lodLevel);
+                                  },
+                                  [this](BlockId block, BlockFace face)
+                                  {
+                                      return this->atlasUvFor(block, face);
+                                  });
+    }
+    else
+    {
+        farTerrainManager_.clear();
+    }
+
+    if (startupEnabled_ && startupState_.preloadStarted)
+    {
+        const bool nearReady = missingChunks == 0;
+        const bool uploadReady = pendingUploadsLastFrame_ <= 8;
+        const bool exactReady = nearReady && uploadReady;
+        const bool farHealthy = smoothedFrameMs_ <= 20.0 &&
+                                pendingUploadsLastFrame_ <= 16 &&
+                                farTerrainManager_.queuedTileCount() <= std::max(4, farWorkerCount_ * 3) &&
+                                farTerrainManager_.pendingUploadTileCount() <= 6;
+        const bool farRegressed = smoothedFrameMs_ > 28.0;
+
+        switch (startupState_.phase)
+        {
+        case StreamingPhase::ExactPreload:
+            startupState_.farCurrentBlocks = 0;
+            startupState_.playerReleaseReady = exactReady;
+            if (exactReady)
+            {
+                startupState_.phase = StreamingPhase::InteractiveNearOnly;
+                startupState_.phaseTimeSeconds = 0.0;
+                startupState_.healthyTimeSeconds = 0.0;
+                startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 6);
+                startupState_.playerReleaseReady = true;
+            }
+            else if (startupState_.phaseTimeSeconds >= 2.0 && startupState_.exactNearCurrentChunks > 4)
+            {
+                --startupState_.exactNearCurrentChunks;
+                startupState_.phaseTimeSeconds = 0.0;
+            }
+            break;
+        case StreamingPhase::InteractiveNearOnly:
+            startupState_.playerReleaseReady = true;
+            startupState_.farCurrentBlocks = 0;
+            if (exactReady)
+            {
+                startupState_.healthyTimeSeconds += frameSeconds;
+            }
+            else
+            {
+                startupState_.healthyTimeSeconds = 0.0;
+            }
+
+            if (startupState_.healthyTimeSeconds >= 0.75)
+            {
+                startupState_.healthyTimeSeconds = 0.0;
+                if (startupState_.exactNearCurrentChunks < std::min(renderSettings_.nearChunks, 8))
+                {
+                    startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 8);
+                }
+                else
+                {
+                    startupState_.phase = StreamingPhase::FarRamp;
+                    startupState_.phaseTimeSeconds = 0.0;
+                    startupState_.farCurrentBlocks = std::min(renderSettings_.farBlocks, 768);
+                }
+            }
+            break;
+        case StreamingPhase::FarRamp:
+            startupState_.playerReleaseReady = true;
+            if (startupState_.exactNearCurrentChunks < renderSettings_.nearChunks && exactReady)
+            {
+                startupState_.healthyTimeSeconds += frameSeconds;
+                if (startupState_.healthyTimeSeconds >= 0.75)
+                {
+                    startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
+                    startupState_.healthyTimeSeconds = 0.0;
+                }
+            }
+            else
+            {
+                if (farHealthy)
+                {
+                    startupState_.healthyTimeSeconds += frameSeconds;
+                }
+                else if (farRegressed)
+                {
+                    startupState_.healthyTimeSeconds = 0.0;
+                    if (startupState_.farCurrentBlocks > 3072)
+                    {
+                        startupState_.farCurrentBlocks = 3072;
+                    }
+                    else if (startupState_.farCurrentBlocks > 1536)
+                    {
+                        startupState_.farCurrentBlocks = 1536;
+                    }
+                    else if (startupState_.farCurrentBlocks > 768)
+                    {
+                        startupState_.farCurrentBlocks = 768;
+                    }
+                }
+                else
+                {
+                    startupState_.healthyTimeSeconds =
+                        std::max(0.0, startupState_.healthyTimeSeconds - frameSeconds * 0.5);
+                }
+
+                if (startupState_.healthyTimeSeconds >= 1.5)
+                {
+                    startupState_.healthyTimeSeconds = 0.0;
+                    if (startupState_.farCurrentBlocks < std::min(renderSettings_.farBlocks, 1536))
+                    {
+                        startupState_.farCurrentBlocks = std::min(renderSettings_.farBlocks, 1536);
+                    }
+                    else if (startupState_.farCurrentBlocks < std::min(renderSettings_.farBlocks, 3072))
+                    {
+                        startupState_.farCurrentBlocks = std::min(renderSettings_.farBlocks, 3072);
+                    }
+                    else if (startupState_.farCurrentBlocks < renderSettings_.farBlocks)
+                    {
+                        startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+                    }
+                    else
+                    {
+                        startupState_.phase = StreamingPhase::SteadyState;
+                        startupState_.phaseTimeSeconds = 0.0;
+                    }
+                }
+            }
+            break;
+        case StreamingPhase::SteadyState:
+            startupState_.playerReleaseReady = true;
+            startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
+            startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+            break;
+        case StreamingPhase::SpawnResolve:
+            startupState_.phase = StreamingPhase::ExactPreload;
+            startupState_.phaseTimeSeconds = 0.0;
+            startupState_.playerReleaseReady = false;
+            startupState_.farCurrentBlocks = 0;
+            break;
+        }
+    }
 }
 
-ChunkRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) const
+WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) const
 {
-    ChunkRenderData renderData;
+    WorldRenderData renderData;
     renderData.lightDirection = lightDirection_;
     renderData.highlightedBlock = highlightedBlock_;
     renderData.hasHighlight = hasHighlight_;
     renderData.atlasTexture = atlasTexture_;
+    renderData.fogStart = static_cast<float>(renderSettings_.fogStartBlocks);
+    renderData.fogEnd = static_cast<float>(renderSettings_.farBlocks);
 
     std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
     {
@@ -1254,10 +2869,10 @@ ChunkRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         const std::size_t pageCount = bufferPages_.size();
-        renderData.batches.resize(pageCount);
+        renderData.nearBatches.resize(pageCount);
         for (std::size_t i = 0; i < pageCount; ++i)
         {
-            renderData.batches[i].vao = bufferPages_[i].vao;
+            renderData.nearBatches[i].vao = bufferPages_[i].vao;
         }
     }
 
@@ -1287,7 +2902,7 @@ ChunkRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         }
 
         const std::uint32_t pageIndex = chunkPtr->bufferPageIndex;
-        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= renderData.batches.size())
+        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= renderData.nearBatches.size())
         {
             continue;
         }
@@ -1297,19 +2912,20 @@ ChunkRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             continue;
         }
 
-        ChunkRenderBatch& batch = renderData.batches[pageIndex];
+        ChunkRenderBatch& batch = renderData.nearBatches[pageIndex];
         batch.counts.push_back(chunkPtr->indexCount);
         batch.offsets.push_back(reinterpret_cast<const void*>(chunkPtr->indexOffset * sizeof(std::uint32_t)));
         batch.baseVertices.push_back(static_cast<GLint>(chunkPtr->vertexOffset));
     }
 
-    auto emptyIt = std::remove_if(renderData.batches.begin(),
-                                  renderData.batches.end(),
+    auto emptyIt = std::remove_if(renderData.nearBatches.begin(),
+                                  renderData.nearBatches.end(),
                                   [](const ChunkRenderBatch& batch)
                                   {
                                       return batch.counts.empty();
                                   });
-    renderData.batches.erase(emptyIt, renderData.batches.end());
+    renderData.nearBatches.erase(emptyIt, renderData.nearBatches.end());
+    renderData.farBatches = farTerrainManager_.buildRenderBatches(frustum);
 
     return renderData;
 }
@@ -1399,6 +3015,7 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(uploadQueueMutex_);
         uploadQueue_.clear();
     }
+    farTerrainManager_.clear();
     columnManager_.clear();
     {
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
@@ -1471,6 +3088,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
+    farTerrainManager_.invalidateWorldBlock(worldPos);
 
     return true;
 }
@@ -1519,6 +3137,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
 
     enqueueJob(chunk, JobType::Mesh, chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
+    farTerrainManager_.invalidateWorldBlock(placePos);
 
     return true;
 }
@@ -1627,40 +3246,32 @@ void ChunkManager::Impl::toggleViewDistance()
 {
     try
     {
-        if (targetViewDistance_ == kDefaultViewDistance)
+        if (targetViewDistance_ == kDefaultNearRenderDistance)
         {
-            std::cout << "Switching to extended render distance..." << std::endl;
-
-            targetViewDistance_ = kExtendedViewDistance;
-            kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+            std::cout << "Switching to extended near render distance..." << std::endl;
+            setNearRenderDistance(kMaxUserRenderDistance);
             const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
             const long long totalColumns = width * width;
-            std::cout << "Extended render distance target: " << targetViewDistance_ << " chunks (total: "
+            std::cout << "Extended near render distance target: " << targetViewDistance_ << " chunks (total: "
                       << totalColumns << " chunks)" << std::endl;
         }
         else
         {
-            std::cout << "Switching to default render distance..." << std::endl;
-
-            targetViewDistance_ = kDefaultViewDistance;
-            kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+            std::cout << "Switching to default near render distance..." << std::endl;
+            setNearRenderDistance(kDefaultNearRenderDistance);
             const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
             const long long totalColumns = width * width;
-            std::cout << "Default render distance target: " << targetViewDistance_
+            std::cout << "Default near render distance target: " << targetViewDistance_
                       << " chunks (total: " << totalColumns << " chunks)" << std::endl;
-        }
-
-        if (viewDistance_ > targetViewDistance_)
-        {
-            viewDistance_ = targetViewDistance_;
         }
     }
     catch (const std::exception& ex)
     {
         std::cerr << "Error toggling view distance: " << ex.what() << std::endl;
-        targetViewDistance_ = kDefaultViewDistance;
+        targetViewDistance_ = kDefaultNearRenderDistance;
         viewDistance_ = std::min(viewDistance_, targetViewDistance_);
-        kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
+        renderSettings_.nearChunks = targetViewDistance_;
+        kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
     }
 }
 
@@ -1669,16 +3280,46 @@ int ChunkManager::Impl::viewDistance() const noexcept
     return targetViewDistance_;
 }
 
+int ChunkManager::Impl::nearRenderDistance() const noexcept
+{
+    return renderSettings_.nearChunks;
+}
+
+int ChunkManager::Impl::farRenderDistanceBlocks() const noexcept
+{
+    return renderSettings_.farBlocks;
+}
+
+RenderDistanceSettings ChunkManager::Impl::renderDistanceSettings() const noexcept
+{
+    return renderSettings_;
+}
+
 void ChunkManager::Impl::setRenderDistance(int distance) noexcept
+{
+    setNearRenderDistance(distance);
+}
+
+void ChunkManager::Impl::setNearRenderDistance(int chunks) noexcept
 {
     try
     {
-        const int clampedDistance = std::clamp(distance, 1, kMaxUserRenderDistance);
-        targetViewDistance_ = clampedDistance;
-        kFarPlane = computeFarPlaneForViewDistance(targetViewDistance_);
-        if (distance != clampedDistance)
+        const int clampedDistance = std::clamp(chunks, 1, kMaxUserRenderDistance);
+        renderSettings_.nearChunks = clampedDistance;
+        if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
         {
-            std::cout << "Render distance request " << distance << " clamped to " << clampedDistance << " chunks"
+            targetViewDistance_ = clampedDistance;
+            startupState_.exactNearCurrentChunks = clampedDistance;
+        }
+        else
+        {
+            startupState_.exactNearCurrentChunks = std::min(startupState_.exactNearCurrentChunks, clampedDistance);
+            targetViewDistance_ = std::min(startupState_.exactNearCurrentChunks, clampedDistance);
+        }
+        kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+        if (chunks != clampedDistance)
+        {
+            std::cout << "Near render distance request " << chunks << " clamped to " << clampedDistance << " chunks"
                       << std::endl;
         }
 
@@ -1689,33 +3330,63 @@ void ChunkManager::Impl::setRenderDistance(int distance) noexcept
 
         const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
         const long long totalColumns = width * width;
-        std::cout << "Render distance set to: " << targetViewDistance_ << " chunks (total: "
+        std::cout << "Near render distance set to: " << targetViewDistance_ << " chunks (total: "
                   << totalColumns << " chunks)" << std::endl;
     }
     catch (const std::exception& ex)
     {
-        std::cerr << "Error setting render distance: " << ex.what() << std::endl;
+        std::cerr << "Error setting near render distance: " << ex.what() << std::endl;
     }
+}
+
+void ChunkManager::Impl::setFarRenderDistanceBlocks(int blocks) noexcept
+{
+    try
+    {
+        renderSettings_.farBlocks = std::max(blocks, 256);
+        if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
+        {
+            startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+        }
+        else if (startupState_.phase == StreamingPhase::FarRamp)
+        {
+            startupState_.farCurrentBlocks = std::min(startupState_.farCurrentBlocks, renderSettings_.farBlocks);
+        }
+        else
+        {
+            startupState_.farCurrentBlocks = 0;
+        }
+        farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+        kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Error setting far render distance: " << ex.what() << std::endl;
+    }
+}
+
+void ChunkManager::Impl::setFarTerrainEnabled(bool enabled)
+{
+    renderSettings_.farTerrainEnabled = enabled;
+    farTerrainManager_.setEnabled(enabled);
+    farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+    std::cout << "[ChunkManager] Far terrain " << (enabled ? "enabled" : "disabled")
+              << " via F3 toggle" << std::endl;
+}
+
+bool ChunkManager::Impl::farTerrainEnabled() const noexcept
+{
+    return renderSettings_.farTerrainEnabled;
 }
 
 void ChunkManager::Impl::setLodEnabled(bool enabled)
 {
-    if (lodEnabled_ == enabled)
-    {
-        return;
-    }
-
-    lodEnabled_ = enabled;
-    lodNearRadius_ = enabled ? std::max(4, targetViewDistance_ / 2) : 0;
-    lodModeDirty_ = true;
-
-    std::cout << "[ChunkManager] Surface LOD " << (enabled ? "enabled" : "disabled")
-              << " via F3 toggle" << std::endl;
+    setFarTerrainEnabled(enabled);
 }
 
 bool ChunkManager::Impl::lodEnabled() const noexcept
 {
-    return lodEnabled_;
+    return farTerrainEnabled();
 }
 
 BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
@@ -1739,7 +3410,6 @@ BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
 
 glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) const
 {
-    const float halfWidth = kPlayerWidth * 0.5f;
     const int baseX = static_cast<int>(std::floor(worldX));
     const int baseZ = static_cast<int>(std::floor(worldZ));
     int highestSolid = columnManager_.highestSolidBlock(baseX, baseZ);
@@ -1843,74 +3513,168 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
         highestSolid = 0;
     }
 
-    const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 1;
-    const int searchTop = highestSolid + clearanceHeight + 2;
-    int searchBottom = highestSolid - kChunkSizeY;
-    if (searchBottom > searchTop)
-    {
-        searchBottom = searchTop - 1;
-    }
-    searchBottom = std::max(searchBottom, highestSolid - 2 * kChunkSizeY);
-    searchBottom = std::max(searchBottom, 0);
-
-    for (int y = searchTop; y >= searchBottom; --y)
-    {
-        bool hasGround = false;
-        for (int dx = -1; dx <= 1 && !hasGround; ++dx)
-        {
-            for (int dz = -1; dz <= 1; ++dz)
-            {
-                const int checkX = static_cast<int>(std::floor(worldX + dx * halfWidth));
-                const int checkZ = static_cast<int>(std::floor(worldZ + dz * halfWidth));
-                if (isSolid(blockAt(glm::ivec3(checkX, y - 1, checkZ))))
-                {
-                    hasGround = true;
-                    break;
-                }
-            }
-        }
-
-        if (!hasGround)
-        {
-            continue;
-        }
-
-        bool canFit = true;
-        for (int dy = 0; dy < clearanceHeight && canFit; ++dy)
-        {
-            const int checkY = y + dy;
-            for (int dx = -1; dx <= 1 && canFit; ++dx)
-            {
-                for (int dz = -1; dz <= 1; ++dz)
-                {
-                    const int checkX = static_cast<int>(std::floor(worldX + dx * halfWidth));
-                    const int checkZ = static_cast<int>(std::floor(worldZ + dz * halfWidth));
-                    if (isSolid(blockAt(glm::ivec3(checkX, checkY, checkZ))))
-                    {
-                        canFit = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (canFit)
-        {
-            const float safeY = static_cast<float>(y) + kCameraEyeHeight;
-            std::cout << "Safe spawn found at height: " << safeY << " (feet at: " << y << ")" << std::endl;
-            return glm::vec3(worldX, safeY, worldZ);
-        }
-    }
-
-    std::cout << "Warning: No safe spawn found, spawning above highest predicted block" << std::endl;
-    const int spawnFeetY = highestSolid + 1;
+    const int clearanceHeight = static_cast<int>(std::ceil(kPlayerHeight)) + 2;
+    const int spawnFeetY = std::max(highestSolid + 1, baseSample.surfaceY + 2) + clearanceHeight;
+    std::cout << "Predicted spawn at height: " << (spawnFeetY + kCameraEyeHeight)
+              << " (feet at: " << spawnFeetY << ")" << std::endl;
     const float fallbackY = static_cast<float>(spawnFeetY) + kCameraEyeHeight;
     return glm::vec3(worldX, fallbackY, worldZ);
+}
+
+void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
+{
+    startupState_ = StartupStreamingState{};
+    startupState_.phase = StreamingPhase::ExactPreload;
+    startupState_.preloadStarted = true;
+    startupState_.spawnChunk = worldToChunkCoords(static_cast<int>(std::floor(spawnPos.x)),
+                                                  std::max(static_cast<int>(std::floor(spawnPos.y)), 0),
+                                                  static_cast<int>(std::floor(spawnPos.z)));
+    startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 6);
+    startupState_.farCurrentBlocks = 0;
+    targetViewDistance_ = startupState_.exactNearCurrentChunks;
+    if (viewDistance_ > targetViewDistance_)
+    {
+        viewDistance_ = targetViewDistance_;
+    }
+    farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+    farTerrainManager_.clear();
+}
+
+bool ChunkManager::Impl::isSpawnPreloadReady() const noexcept
+{
+    return !startupEnabled_ || !startupState_.preloadStarted || startupState_.phase != StreamingPhase::ExactPreload;
+}
+
+bool ChunkManager::Impl::playerReleaseReady() const noexcept
+{
+    return !startupEnabled_ || !startupState_.preloadStarted || startupState_.playerReleaseReady;
+}
+
+StreamingPhase ChunkManager::Impl::streamingPhase() const noexcept
+{
+    if (!startupEnabled_ || !startupState_.preloadStarted)
+    {
+        return StreamingPhase::SteadyState;
+    }
+
+    return startupState_.phase;
+}
+
+void ChunkManager::Impl::setStartupEnabled(bool enabled) noexcept
+{
+    startupEnabled_ = enabled;
+    if (!startupEnabled_)
+    {
+        startupState_.phase = StreamingPhase::SteadyState;
+        startupState_.playerReleaseReady = true;
+        startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
+        startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+        targetViewDistance_ = renderSettings_.nearChunks;
+        farTerrainManager_.setDistanceBlocks(renderSettings_.farBlocks);
+    }
+}
+
+bool ChunkManager::Impl::startupEnabled() const noexcept
+{
+    return startupEnabled_;
+}
+
+StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() const noexcept
+{
+    StreamingStatusSnapshot snapshot{};
+    snapshot.phase = streamingPhase();
+    snapshot.playerReleaseReady = playerReleaseReady();
+    snapshot.exactPendingUploads = static_cast<int>(
+        std::min<std::size_t>(pendingUploadsLastFrame_, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    snapshot.farReadyTiles = farTerrainManager_.readyTileCount();
+    snapshot.farQueuedTiles = farTerrainManager_.queuedTileCount();
+
+    const int horizontalRadius = std::clamp(
+        (startupEnabled_ && startupState_.preloadStarted && startupState_.exactNearCurrentChunks > 0)
+            ? startupState_.exactNearCurrentChunks
+            : renderSettings_.nearChunks,
+        1,
+        renderSettings_.nearChunks);
+    const glm::ivec2 cameraColumn{lastCenterChunk_.x, lastCenterChunk_.z};
+    const int cameraChunkY = lastCenterChunk_.y;
+    const int verticalRadius = std::max(lastVerticalRadius_, kVerticalStreamingConfig.minRadiusChunks);
+
+    int readyChunks = 0;
+    int requiredChunks = 0;
+    std::lock_guard<std::mutex> lock(chunksMutex);
+    for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
+    {
+        for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
+        {
+            if (std::max(std::abs(dx), std::abs(dz)) > horizontalRadius)
+            {
+                continue;
+            }
+
+            const int chunkX = lastCenterChunk_.x + dx;
+            const int chunkZ = lastCenterChunk_.z + dz;
+            const glm::ivec2 column{chunkX, chunkZ};
+            const int worldX = chunkX * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
+            const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+            const int columnRadius = columnRadiusForHeight(column,
+                                                           cameraColumn,
+                                                           cameraChunkY,
+                                                           verticalRadius,
+                                                           columnHeight);
+            const int minChunkY = std::max(0, cameraChunkY - columnRadius);
+            const int maxChunkY = std::max(minChunkY, cameraChunkY + columnRadius);
+            for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
+            {
+                ++requiredChunks;
+                const auto it = chunks_.find(glm::ivec3{chunkX, chunkY, chunkZ});
+                if (it == chunks_.end() || !it->second)
+                {
+                    continue;
+                }
+
+                const ChunkState state = it->second->state.load(std::memory_order_acquire);
+                if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
+                {
+                    ++readyChunks;
+                }
+            }
+        }
+    }
+
+    snapshot.exactReadyChunks = readyChunks;
+    snapshot.exactRequiredChunks = requiredChunks;
+
+    if (snapshot.playerReleaseReady)
+    {
+        snapshot.blockingReason = "ready";
+    }
+    else if (snapshot.exactReadyChunks < snapshot.exactRequiredChunks)
+    {
+        snapshot.blockingReason = "waiting for exact chunks";
+    }
+    else if (snapshot.exactPendingUploads > 8)
+    {
+        snapshot.blockingReason = "waiting for mesh uploads";
+    }
+    else
+    {
+        snapshot.blockingReason = "stabilizing preload";
+    }
+
+    return snapshot;
+}
+
+StreamingStatusSnapshot ChunkManager::Impl::streamingStatusSnapshot() const noexcept
+{
+    return computeStreamingStatusSnapshot();
 }
 
 ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
 {
     ChunkProfilingSnapshot snapshot{};
+    const StreamingStatusSnapshot status = computeStreamingStatusSnapshot();
+    snapshot.phase = status.phase;
 
     const int generated = profilingCounters_.generatedChunks.exchange(0, std::memory_order_relaxed);
     const int meshed = profilingCounters_.meshedChunks.exchange(0, std::memory_order_relaxed);
@@ -1950,9 +3714,19 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
 
     snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
     snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
+    snapshot.uploadMsLastFrame = lastUploadMsUsed_;
     const std::size_t pendingUploads = pendingUploadsLastFrame_;
     snapshot.pendingUploadChunks = static_cast<int>(
         std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    snapshot.farBuildMsAverage = farTerrainManager_.averageBuildMs();
+    snapshot.farActiveTiles = farTerrainManager_.activeTileCount();
+    snapshot.farDirtyTiles = farTerrainManager_.dirtyTileCount();
+    snapshot.farShellTilesReady = farTerrainManager_.readyTileCount();
+    snapshot.farTilesBuilt = farTerrainManager_.builtTilesLastUpdate();
+    snapshot.farTilesQueued = farTerrainManager_.queuedTileCount();
+    snapshot.farTilesPendingUpload = farTerrainManager_.pendingUploadTileCount();
+    snapshot.exactChunksReady = status.exactReadyChunks;
+    snapshot.exactChunksPending = std::max(status.exactRequiredChunks - status.exactReadyChunks, 0);
 
     return snapshot;
 }
@@ -1980,15 +3754,24 @@ void ChunkManager::Impl::startWorkerThreads()
         concurrency = 2;
     }
 
-    const unsigned minimum = 2u;
-    unsigned desired = std::max(minimum, concurrency);
+    unsigned desired = 1u;
+    if (concurrency >= 12)
+    {
+        desired = 6u;
+    }
+    else if (concurrency >= 8)
+    {
+        desired = 4u;
+    }
+    else
+    {
+        desired = std::max(1u, concurrency > 2 ? concurrency - 2 : 1u);
+    }
 
     if (kVerticalStreamingConfig.maxWorkerThreads > 0)
     {
         desired = std::min(desired, static_cast<unsigned>(kVerticalStreamingConfig.maxWorkerThreads));
     }
-
-    desired = std::max(minimum, desired);
 
     workerThreadCount_ = static_cast<std::size_t>(desired);
     workerThreads_.reserve(workerThreadCount_);
@@ -2520,41 +4303,32 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
 {
     UploadBudgets budgets{};
     budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
-    budgets.byteBudget = kUploadBudgetBytesPerFrame;
     budgets.queueSize = estimateUploadQueueSize();
-
-    const std::size_t queueSize = budgets.queueSize;
-    const std::size_t baseBudget = kUploadBudgetBytesPerFrame;
-
-    constexpr std::size_t kQueueThreshold = 12;
-    constexpr std::size_t kQueueStep = 8;
-    constexpr int kMaxBurstSteps = 3;
-    constexpr int kBurstMaxPerColumn = 12;
-
-    int backlogSteps = 0;
-    if (queueSize > kQueueThreshold)
+    if (startupEnabled_ && startupState_.preloadStarted)
     {
-        backlogSteps = static_cast<int>((queueSize - kQueueThreshold + kQueueStep - 1) / kQueueStep);
-    }
-
-    if (queueSize > 0)
-    {
-        const bool hasFrameHeadroom = lastUploadBytesUsed_ + (baseBudget / 4) <= baseBudget;
-        if (hasFrameHeadroom)
+        if (startupState_.phase == StreamingPhase::ExactPreload)
         {
-            backlogSteps = std::max(backlogSteps, 1);
+            budgets.byteBudget = 4ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit, 4);
+            budgets.timeBudgetMs = 2.0;
+        }
+        else if (startupState_.phase == StreamingPhase::InteractiveNearOnly ||
+                 startupState_.phase == StreamingPhase::FarRamp)
+        {
+            budgets.byteBudget = 8ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, 6);
+            budgets.timeBudgetMs = 3.0;
+        }
+        else
+        {
+            budgets.byteBudget = 32ull * 1024ull * 1024ull;
+            budgets.timeBudgetMs = 4.0;
         }
     }
-
-    backlogSteps = std::clamp(backlogSteps, 0, kMaxBurstSteps);
-
-    const int multiplier = std::clamp(1 + backlogSteps, 1, kMaxBurstSteps + 1);
-    budgets.byteBudget = baseBudget * static_cast<std::size_t>(multiplier);
-
-    if (backlogSteps > 0)
+    else
     {
-        const int boostedLimit = budgets.columnLimit + backlogSteps;
-        budgets.columnLimit = std::min(boostedLimit, kBurstMaxPerColumn);
+        budgets.byteBudget = 32ull * 1024ull * 1024ull;
+        budgets.timeBudgetMs = 4.0;
     }
 
     return budgets;
@@ -2944,42 +4718,9 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
 
         const glm::ivec2 columnKey{candidate.coord.x, candidate.coord.z};
         int& columnJobs = jobsScheduledThisFrame_[columnKey];
-        const bool surfaceOnly = shouldUseSurfaceOnly(center, candidate.coord);
 
         if (auto existing = getChunkShared(candidate.coord))
         {
-            if (existing->surfaceOnly != surfaceOnly && existing->inFlight.load(std::memory_order_acquire) == 0)
-            {
-                if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
-                {
-                    continue;
-                }
-
-                {
-                    std::lock_guard<std::mutex> meshLock(existing->meshMutex);
-                    std::fill(existing->blocks.begin(), existing->blocks.end(), BlockId::Air);
-                    existing->meshData.clear();
-                    existing->hasBlocks = false;
-                    if (surfaceOnly)
-                    {
-                        if (!existing->lodData)
-                        {
-                            existing->lodData = std::make_unique<FarChunk>();
-                        }
-                    }
-                    else
-                    {
-                        existing->lodData.reset();
-                    }
-                }
-
-                existing->surfaceOnly = surfaceOnly;
-                existing->state.store(ChunkState::Generating, std::memory_order_release);
-                enqueueJob(existing, JobType::Generate, candidate.coord);
-                --jobBudget;
-                ++columnJobs;
-                missingFound = true;
-            }
             continue;
         }
 
@@ -2990,7 +4731,7 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
             continue;
         }
 
-        if (ensureChunkAsync(candidate.coord, surfaceOnly))
+        if (ensureChunkAsync(candidate.coord, false))
         {
             --jobBudget;
             ++columnJobs;
@@ -3078,13 +4819,9 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
 
 bool ChunkManager::Impl::shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept
 {
-    if (!lodEnabled_)
-    {
-        return false;
-    }
-
-    const int horizontalDistance = std::max(std::abs(coord.x - center.x), std::abs(coord.z - center.z));
-    return horizontalDistance > lodNearRadius_;
+    (void)center;
+    (void)coord;
+    return false;
 }
 
 bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool surfaceOnly)
@@ -3107,18 +4844,8 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool surfaceO
 
             chunk = acquireChunk(coord);
             chunk->state.store(ChunkState::Generating, std::memory_order_release);
-            chunk->surfaceOnly = surfaceOnly;
-            if (surfaceOnly)
-            {
-                if (!chunk->lodData)
-                {
-                    chunk->lodData = std::make_unique<FarChunk>();
-                }
-            }
-            else
-            {
-                chunk->lodData.reset();
-            }
+            chunk->surfaceOnly = false;
+            chunk->lodData.reset();
             chunks_.emplace(coord, chunk);
         }
 
@@ -3141,6 +4868,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
     std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
     std::size_t attempts = 0;
     const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
+    const auto uploadStart = std::chrono::steady_clock::now();
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
@@ -3198,6 +4926,13 @@ void ChunkManager::Impl::uploadReadyMeshes()
         {
             remainingBudget -= totalBytes;
         }
+
+        const double elapsedMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - uploadStart).count();
+        if (elapsedMs >= uploadBudgetMsThisFrame_ && uploadedAnything)
+        {
+            break;
+        }
     }
     if (initialBudget > remainingBudget)
     {
@@ -3207,6 +4942,8 @@ void ChunkManager::Impl::uploadReadyMeshes()
     {
         lastUploadBytesUsed_ = 0;
     }
+    lastUploadMsUsed_ = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - uploadStart).count();
 
     pendingUploadsLastFrame_ = estimateUploadQueueSize();
 }
@@ -3338,13 +5075,6 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 
     if (!chunk.hasBlocks)
     {
-        chunk.meshReady = true;
-        return;
-    }
-
-    if (chunk.surfaceOnly)
-    {
-        buildSurfaceOnlyMesh(chunk);
         chunk.meshReady = true;
         return;
     }
@@ -4027,12 +5757,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     std::vector<PendingStructureEdit> externalEdits;
     bool anySolid = false;
 
-    if (chunk.surfaceOnly)
-    {
-        generateSurfaceOnlyChunk(chunk);
-        return;
-    }
-
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         std::fill(chunk.blocks.begin(), chunk.blocks.end(), BlockId::Air);
@@ -4426,7 +6150,12 @@ void ChunkManager::update(const glm::vec3& cameraPos)
     impl_->update(cameraPos);
 }
 
-ChunkRenderData ChunkManager::buildRenderData(const Frustum& frustum) const
+void ChunkManager::update(const glm::vec3& cameraPos, const glm::vec3& cameraForward)
+{
+    impl_->update(cameraPos, cameraForward);
+}
+
+WorldRenderData ChunkManager::buildRenderData(const Frustum& frustum) const
 {
     return impl_->buildRenderData(frustum);
 }
@@ -4478,9 +6207,34 @@ int ChunkManager::viewDistance() const noexcept
     return impl_->viewDistance();
 }
 
+int ChunkManager::nearRenderDistance() const noexcept
+{
+    return impl_->nearRenderDistance();
+}
+
+int ChunkManager::farRenderDistanceBlocks() const noexcept
+{
+    return impl_->farRenderDistanceBlocks();
+}
+
+RenderDistanceSettings ChunkManager::renderDistanceSettings() const noexcept
+{
+    return impl_->renderDistanceSettings();
+}
+
 void ChunkManager::setRenderDistance(int distance) noexcept
 {
     impl_->setRenderDistance(distance);
+}
+
+void ChunkManager::setNearRenderDistance(int chunks) noexcept
+{
+    impl_->setNearRenderDistance(chunks);
+}
+
+void ChunkManager::setFarRenderDistanceBlocks(int blocks) noexcept
+{
+    impl_->setFarRenderDistanceBlocks(blocks);
 }
 
 void ChunkManager::setLodEnabled(bool enabled)
@@ -4493,6 +6247,16 @@ bool ChunkManager::lodEnabled() const noexcept
     return impl_->lodEnabled();
 }
 
+void ChunkManager::setFarTerrainEnabled(bool enabled)
+{
+    impl_->setFarTerrainEnabled(enabled);
+}
+
+bool ChunkManager::farTerrainEnabled() const noexcept
+{
+    return impl_->farTerrainEnabled();
+}
+
 BlockId ChunkManager::blockAt(const glm::ivec3& worldPos) const noexcept
 {
     return impl_->blockAt(worldPos);
@@ -4501,6 +6265,41 @@ BlockId ChunkManager::blockAt(const glm::ivec3& worldPos) const noexcept
 glm::vec3 ChunkManager::findSafeSpawnPosition(float worldX, float worldZ) const
 {
     return impl_->findSafeSpawnPosition(worldX, worldZ);
+}
+
+void ChunkManager::beginSpawnPreload(const glm::vec3& spawnPos)
+{
+    impl_->beginSpawnPreload(spawnPos);
+}
+
+bool ChunkManager::isSpawnPreloadReady() const noexcept
+{
+    return impl_->isSpawnPreloadReady();
+}
+
+bool ChunkManager::playerReleaseReady() const noexcept
+{
+    return impl_->playerReleaseReady();
+}
+
+StreamingPhase ChunkManager::streamingPhase() const noexcept
+{
+    return impl_->streamingPhase();
+}
+
+void ChunkManager::setStartupEnabled(bool enabled) noexcept
+{
+    impl_->setStartupEnabled(enabled);
+}
+
+bool ChunkManager::startupEnabled() const noexcept
+{
+    return impl_->startupEnabled();
+}
+
+StreamingStatusSnapshot ChunkManager::streamingStatusSnapshot() const noexcept
+{
+    return impl_->streamingStatusSnapshot();
 }
 
 ChunkProfilingSnapshot ChunkManager::sampleProfilingSnapshot()

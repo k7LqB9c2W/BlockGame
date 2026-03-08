@@ -53,7 +53,7 @@ void charCallback(GLFWwindow* window, unsigned int codepoint)
 
     if (input->showRenderDistanceGUI && codepoint < 128)
     {
-        if (codepoint >= '0' && codepoint <= '9')
+        if ((codepoint >= '0' && codepoint <= '9') || codepoint == ' ' || codepoint == ',')
         {
             if (input->inputBuffer.size() < 10)
             {
@@ -118,8 +118,8 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     inputContext.nKeyPressed = nKeyCurrentlyPressed;
     if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
     {
-        inputContext.showTeleportGUI = true;
-        inputContext.teleportBuffer.clear();
+        inputContext.showRenderDistanceGUI = true;
+        inputContext.inputBuffer.clear();
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
@@ -138,9 +138,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     inputContext.f3Pressed = f3CurrentlyPressed;
     if (inputContext.f3JustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
     {
-        inputContext.showRenderDistanceGUI = true;
-        inputContext.inputBuffer.clear();
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        // F3 is handled by the main loop as a far-terrain toggle.
     }
 
     if (inputContext.showRenderDistanceGUI)
@@ -154,8 +152,19 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
             {
                 try
                 {
-                    int distance = std::stoi(inputContext.inputBuffer);
-                    chunkManager.setRenderDistance(distance);
+                    std::string normalized = inputContext.inputBuffer;
+                    std::replace(normalized.begin(), normalized.end(), ',', ' ');
+                    std::istringstream stream(normalized);
+                    int nearDistance = 0;
+                    int farDistance = chunkManager.farRenderDistanceBlocks();
+                    if (stream >> nearDistance)
+                    {
+                        if (stream >> farDistance)
+                        {
+                            chunkManager.setFarRenderDistanceBlocks(farDistance);
+                        }
+                        chunkManager.setNearRenderDistance(nearDistance);
+                    }
                 }
                 catch (const std::exception& e)
                 {

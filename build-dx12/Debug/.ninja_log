@@ -1,0 +1,7 @@
+# ninja log v6
+26	774	7946576831381531	CMakeFiles/blockgame.dir/src/camera.cpp.obj	2c4ff5f71448bd33
+20	1973	7946576831321538	CMakeFiles/blockgame.dir/src/main.cpp.obj	2d6c716818c9610e
+1974	2982	7946576850856926	CMakeFiles/blockgame.dir/src/input_context.cpp.obj	12522cef8f69e3c7
+2982	4170	7946576860946325	CMakeFiles/blockgame.dir/src/renderer.cpp.obj	17eacc88ff0cc502
+4171	8962	7946576872832206	CMakeFiles/blockgame.dir/src/terrain/biome_database.cpp.obj	e75987bffaa7f192
+8963	294799	7946576920747624	CMakeFiles/blockgame.dir/src/terrain/climate_map.cpp.obj	6b0eaeea6ac2f0db

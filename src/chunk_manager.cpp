@@ -266,6 +266,41 @@ inline bool isAlphaCutoutBlock(BlockId block) noexcept
     return block == BlockId::Leaves || block == BlockId::SpruceLeaves;
 }
 
+inline bool isNonOpaqueBlock(BlockId block) noexcept
+{
+    return block == BlockId::Air || block == BlockId::Water || isAlphaCutoutBlock(block);
+}
+
+inline bool shouldRenderBlockFace(BlockId owningBlock, BlockId neighborBlock) noexcept
+{
+    if (owningBlock == BlockId::Air)
+    {
+        return false;
+    }
+
+    if (neighborBlock == BlockId::Air)
+    {
+        return true;
+    }
+
+    if (isAlphaCutoutBlock(owningBlock))
+    {
+        if (isAlphaCutoutBlock(neighborBlock))
+        {
+            return owningBlock != neighborBlock;
+        }
+
+        return neighborBlock == BlockId::Water;
+    }
+
+    if (owningBlock == BlockId::Water)
+    {
+        return neighborBlock == BlockId::Air;
+    }
+
+    return isNonOpaqueBlock(neighborBlock);
+}
+
 constexpr int kTaigaSpruceCellSize = 14;
 constexpr int kTaigaSpruceMinTrunkHeight = 25;
 constexpr int kTaigaSpruceMaxTrunkHeight = 31;
@@ -5402,6 +5437,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::ivec3 uAxis{1, 0, 0};
         glm::ivec3 vAxis{0, 1, 0};
         BlockFace face{BlockFace::Top};
+        bool mergeable{true};
 
         bool operator==(const FaceMaterial& other) const noexcept
         {
@@ -5409,7 +5445,8 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                    uvSize == other.uvSize &&
                    uAxis == other.uAxis &&
                    vAxis == other.vAxis &&
-                   face == other.face;
+                   face == other.face &&
+                   mergeable == other.mergeable;
         }
     };
 
@@ -5428,6 +5465,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     auto makeMaterial = [&](BlockId block, const glm::vec3& normal) -> FaceMaterial
     {
         FaceMaterial material{};
+        material.mergeable = !isAlphaCutoutBlock(block);
 
         const BlockFace face = [&]() -> BlockFace
         {
@@ -5591,15 +5629,15 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                             (a == 2) ? slice - 1 : ((b == 2) ? bi : ci)
                         };
 
-                        const bool positiveSolid = isSolid(sampleBlock(positiveLocal.x, positiveLocal.y, positiveLocal.z));
-                        const bool negativeSolid = isSolid(sampleBlock(negativeLocal.x, negativeLocal.y, negativeLocal.z));
+                        const BlockId positiveBlock = sampleBlock(positiveLocal.x, positiveLocal.y, positiveLocal.z);
+                        const BlockId negativeBlock = sampleBlock(negativeLocal.x, negativeLocal.y, negativeLocal.z);
 
                         glm::ivec3 owningLocal{0};
                         bool createFace = false;
 
                         if (dir == FaceDir::Positive)
                         {
-                            if (negativeSolid && !positiveSolid && isInsideChunk(negativeLocal))
+                            if (isInsideChunk(negativeLocal) && shouldRenderBlockFace(negativeBlock, positiveBlock))
                             {
                                 owningLocal = negativeLocal;
                                 createFace = true;
@@ -5607,7 +5645,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                         }
                         else
                         {
-                            if (positiveSolid && !negativeSolid && isInsideChunk(positiveLocal))
+                            if (isInsideChunk(positiveLocal) && shouldRenderBlockFace(positiveBlock, negativeBlock))
                             {
                                 owningLocal = positiveLocal;
                                 createFace = true;
@@ -5643,7 +5681,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                         const FaceMaterial material = cell.material;
 
                         int runLengthC = 1;
-                        while (ci + runLengthC < sizeC)
+                        while (material.mergeable && ci + runLengthC < sizeC)
                         {
                             const MaskCell& nextCell = mask[maskIndex(bi, ci + runLengthC)];
                             if (!nextCell.exists || !(nextCell.material == material))
@@ -5654,7 +5692,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                         }
 
                         int runHeightB = 1;
-                        while (bi + runHeightB < sizeB)
+                        while (material.mergeable && bi + runHeightB < sizeB)
                         {
                             bool rowMatches = true;
                             for (int offset = 0; offset < runLengthC; ++offset)

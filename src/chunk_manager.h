@@ -171,7 +171,7 @@ struct RenderDistanceSettings
     int nearChunks{kDefaultNearRenderDistance};
     int farBlocks{kDefaultFarRenderDistanceBlocks};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
-    bool farTerrainEnabled{true};
+    bool farTerrainEnabled{false};
 };
 
 struct ChunkProfilingSnapshot

@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
+if (WIN32 AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    if (DEFINED ENV{VCPKG_ROOT} AND EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "Vcpkg toolchain file")
+    elseif (EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "Vcpkg toolchain file")
+    endif()
+endif()
+
 project(BlockGame VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT CMAKE_GENERATOR MATCHES "Ninja")
@@ -24,13 +32,10 @@ set(SRC_ROOT ${CMAKE_SOURCE_DIR}/src)
 
 set(BLOCKGAME_SOURCES
     ${SRC_ROOT}/main.cpp
-    ${SRC_ROOT}/glad.c
     ${SRC_ROOT}/camera.cpp
     ${SRC_ROOT}/chunk_manager.cpp
     ${SRC_ROOT}/input_context.cpp
     ${SRC_ROOT}/renderer.cpp
-    ${SRC_ROOT}/TextureLoader.cpp
-    ${SRC_ROOT}/text_overlay.cpp
     ${SRC_ROOT}/terrain/biome_database.cpp
     ${SRC_ROOT}/terrain/climate_map.cpp
     ${SRC_ROOT}/terrain/surface_map.cpp
@@ -46,48 +51,51 @@ target_include_directories(blockgame
         ${SRC_ROOT}
 )
 
+target_compile_definitions(blockgame
+    PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _CRT_SECURE_NO_WARNINGS
+)
+
 target_compile_options(blockgame
     PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /Zc:preprocessor>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /Zc:preprocessor /FS>
         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
 )
 
-if (WIN32)
-    target_link_libraries(blockgame
-        PRIVATE
-            "${CMAKE_SOURCE_DIR}/libs/glfw3.lib"
-            opengl32
-            user32
-            gdi32
-            shell32
-            advapi32
-    )
-
-    if (EXISTS "${CMAKE_SOURCE_DIR}/libs/glfw3.dll")
-        add_custom_command(TARGET blockgame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/libs/glfw3.dll"
-                $<TARGET_FILE_DIR:blockgame>
-            COMMENT "Copying GLFW runtime"
-        )
-    else()
-        message(STATUS "glfw3.dll not found; skipping runtime copy.")
-    endif()
-elseif (APPLE)
-    find_library(COCOA_LIBRARY Cocoa REQUIRED)
-    find_library(IOKIT_LIBRARY IOKit REQUIRED)
-    find_library(COREVIDEO_LIBRARY CoreVideo REQUIRED)
-    target_link_libraries(blockgame PRIVATE "-framework OpenGL" ${COCOA_LIBRARY} ${IOKIT_LIBRARY} ${COREVIDEO_LIBRARY})
-
-    find_package(glfw3 REQUIRED)
-    target_link_libraries(blockgame PRIVATE glfw)
-else()
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(blockgame PRIVATE OpenGL::GL pthread dl)
-
-    find_package(glfw3 REQUIRED)
-    target_link_libraries(blockgame PRIVATE glfw)
+if (NOT WIN32)
+    message(FATAL_ERROR "The D3D12 port is Windows-only.")
 endif()
+
+if (NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "Vcpkg target triplet")
+endif()
+
+find_package(glfw3 CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
+
+target_link_libraries(blockgame
+    PRIVATE
+        glfw
+        imgui::imgui
+        d3d12
+        dxgi
+        dxguid
+        d3dcompiler
+        user32
+        gdi32
+        shell32
+        advapi32
+)
+
+add_custom_command(TARGET blockgame POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_RUNTIME_DLLS:blockgame>
+        $<TARGET_FILE_DIR:blockgame>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copying runtime DLLs"
+)
 
 if (EXISTS "${CMAKE_SOURCE_DIR}/block_atlas.png")
     add_custom_command(TARGET blockgame POST_BUILD

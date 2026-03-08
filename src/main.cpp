@@ -1,17 +1,16 @@
-#include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
-#include "TextureLoader.h"
 #include "camera.h"
 #include "chunk_manager.h"
 #include "input_context.h"
 #include "renderer.h"
 #include "terrain/terrain_generator.h"
-#include "text_overlay.h"
+
+#include <imgui.h>
+#include <imgui_stdlib.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
 #include <array>
@@ -50,8 +49,6 @@
 #include <ctime>
 
 #ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <crtdbg.h>
 #include <DbgHelp.h>
@@ -311,203 +308,72 @@ void initializeCrashLogging(const std::filesystem::path& logPath)
 #endif
 }
 
-[[nodiscard]] GLuint compileShader(GLenum type, const char* source)
+bool applyRenderDistanceInput(ChunkManager& chunkManager, const std::string& input)
 {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint success = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (success == GL_FALSE)
+    if (input.empty())
     {
-        GLint logLength = 0;
-        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
-
-        std::string infoLog;
-        if (logLength > 0)
-        {
-            infoLog.resize(static_cast<size_t>(logLength));
-            GLsizei written = 0;
-            glGetShaderInfoLog(shader, logLength, &written, infoLog.data());
-            infoLog.resize(static_cast<size_t>(written));
-        }
-        if (infoLog.empty())
-        {
-            infoLog = "unknown error";
-        }
-
-        glDeleteShader(shader);
-        throw std::runtime_error("Shader compilation failed: " + infoLog);
+        return false;
     }
 
-    return shader;
+    std::string normalized = input;
+    std::replace(normalized.begin(), normalized.end(), ',', ' ');
+    std::istringstream stream(normalized);
+    int nearDistance = 0;
+    int farDistance = chunkManager.farRenderDistanceBlocks();
+    if (!(stream >> nearDistance))
+    {
+        return false;
+    }
+
+    if (stream >> farDistance)
+    {
+        chunkManager.setFarRenderDistanceBlocks(farDistance);
+    }
+    chunkManager.setNearRenderDistance(nearDistance);
+    return true;
 }
 
-[[nodiscard]] GLuint createProgram(const char* vertexSrc, const char* fragmentSrc)
+bool applyTeleportInput(Camera& camera, const std::string& input)
 {
-    GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexSrc);
-    GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentSrc);
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, vertexShader);
-    glAttachShader(program, fragmentShader);
-    glLinkProgram(program);
-
-    GLint success = 0;
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (success == GL_FALSE)
+    if (input.empty())
     {
-        GLint logLength = 0;
-        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLength);
-
-        std::string infoLog;
-        if (logLength > 0)
-        {
-            infoLog.resize(static_cast<size_t>(logLength));
-            GLsizei written = 0;
-            glGetProgramInfoLog(program, logLength, &written, infoLog.data());
-            infoLog.resize(static_cast<size_t>(written));
-        }
-        if (infoLog.empty())
-        {
-            infoLog = "unknown error";
-        }
-
-        glDeleteProgram(program);
-        glDeleteShader(vertexShader);
-        glDeleteShader(fragmentShader);
-        throw std::runtime_error("Program linkage failed: " + infoLog);
+        return false;
     }
 
-    glDetachShader(program, vertexShader);
-    glDetachShader(program, fragmentShader);
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    std::string normalized = input;
+    std::replace(normalized.begin(), normalized.end(), ',', ' ');
+    std::istringstream stream(normalized);
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    if (!(stream >> x >> y >> z))
+    {
+        return false;
+    }
 
-    return program;
+    camera.position = glm::vec3(x, y, z);
+    camera.velocity = glm::vec3(0.0f);
+    camera.onGround = false;
+    return true;
 }
-class Crosshair
+
+void drawCrosshairOverlay(int framebufferWidth, int framebufferHeight)
 {
-public:
-    Crosshair()
-    {
-        setupCrosshair();
-    }
+    const ImVec2 center(static_cast<float>(framebufferWidth) * 0.5f,
+                        static_cast<float>(framebufferHeight) * 0.5f);
+    constexpr float crosshairSize = 8.0f;
+    constexpr float thickness = 2.0f;
 
-    ~Crosshair()
-    {
-        cleanup();
-    }
-
-    void render(int screenWidth, int screenHeight)
-    {
-        glDisable(GL_DEPTH_TEST);
-        glUseProgram(shaderProgram_);
-        
-        if (screenSizeLocation_ >= 0)
-        {
-            glUniform2f(screenSizeLocation_,
-                       static_cast<float>(screenWidth), static_cast<float>(screenHeight));
-        }
-        
-        glBindVertexArray(vao_);
-        glDrawArrays(GL_LINES, 0, 4);
-        glBindVertexArray(0);
-        
-        glUseProgram(0);
-        glEnable(GL_DEPTH_TEST);
-    }
-
-private:
-    GLuint vao_{0};
-    GLuint vbo_{0};
-    GLuint shaderProgram_{0};
-    GLint screenSizeLocation_{-1};
-
-    void setupCrosshair()
-    {
-        // Crosshair vertices (two lines in normalized device coordinates)
-        float crosshairSize = 0.02f;
-        float vertices[] = {
-            // Horizontal line
-            -crosshairSize, 0.0f,
-             crosshairSize, 0.0f,
-            // Vertical line
-             0.0f, -crosshairSize,
-             0.0f,  crosshairSize
-        };
-
-        glGenVertexArrays(1, &vao_);
-        glGenBuffers(1, &vbo_);
-        
-        glBindVertexArray(vao_);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-        
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
-        glEnableVertexAttribArray(0);
-        
-        glBindVertexArray(0);
-
-        // Create crosshair shader
-        const char* crosshairVertexShader = R"(#version 330 core
-layout (location = 0) in vec2 aPos;
-
-void main()
-{
-    gl_Position = vec4(aPos, 0.0, 1.0);
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    drawList->AddLine(ImVec2(center.x - crosshairSize, center.y),
+                      ImVec2(center.x + crosshairSize, center.y),
+                      IM_COL32(255, 255, 255, 220),
+                      thickness);
+    drawList->AddLine(ImVec2(center.x, center.y - crosshairSize),
+                      ImVec2(center.x, center.y + crosshairSize),
+                      IM_COL32(255, 255, 255, 220),
+                      thickness);
 }
-)";
-
-        const char* crosshairFragmentShader = R"(#version 330 core
-out vec4 FragColor;
-
-void main()
-{
-    FragColor = vec4(1.0, 1.0, 1.0, 0.8);
-}
-)";
-
-        try
-        {
-            shaderProgram_ = createProgram(crosshairVertexShader, crosshairFragmentShader);
-        }
-        catch (const std::exception& ex)
-        {
-            std::cerr << "Failed to create crosshair shader: " << ex.what() << std::endl;
-        }
-
-        if (shaderProgram_ != 0)
-        {
-            screenSizeLocation_ = glGetUniformLocation(shaderProgram_, "uScreenSize");
-        }
-        else
-        {
-            screenSizeLocation_ = -1;
-        }
-    }
-
-    void cleanup()
-    {
-        if (vao_ != 0)
-        {
-            glDeleteVertexArrays(1, &vao_);
-            vao_ = 0;
-        }
-        if (vbo_ != 0)
-        {
-            glDeleteBuffers(1, &vbo_);
-            vbo_ = 0;
-        }
-        if (shaderProgram_ != 0)
-        {
-            glDeleteProgram(shaderProgram_);
-            shaderProgram_ = 0;
-        }
-        screenSizeLocation_ = -1;
-    }
-};
 
 void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3& basePosition)
 {
@@ -535,9 +401,6 @@ void runStreamingValidationScenarios(ChunkManager& chunkManager, const glm::vec3
     chunkManager.update(basePosition);
     chunkManager.sampleProfilingSnapshot();
 }
-
-
-#include "text_overlay.h"
 
 // Collision detection helper functions
 struct AABB
@@ -815,13 +678,7 @@ int runGame()
         return EXIT_FAILURE;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-#ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-#endif
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
     constexpr int kInitialWidth = 1280;
     constexpr int kInitialHeight = 720;
@@ -833,22 +690,6 @@ int runGame()
         glfwTerminate();
         return EXIT_FAILURE;
     }
-
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-
-    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)))
-    {
-        std::cerr << "Failed to initialize GLAD" << std::endl;
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return EXIT_FAILURE;
-    }
-
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CCW);
 
     glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
 
@@ -868,180 +709,38 @@ int runGame()
     glfwSetCursorPosCallback(window, mouseCallback);
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
     glfwSetCharCallback(window, charCallback);
+    glfwSetScrollCallback(window, scrollCallback);
+    glfwSetKeyCallback(window, keyCallback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
-    const char* vertexShaderSrc = R"(#version 330 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aNormal;
-layout (location = 2) in vec2 aTileCoord;
-layout (location = 3) in vec2 aAtlasBase;
-layout (location = 4) in vec2 aAtlasSize;
-
-uniform mat4 uViewProj;
-
-out vec3 vNormal;
-out vec3 vWorldPos;
-out vec2 vTileCoord;
-out vec2 vAtlasBase;
-out vec2 vAtlasSize;
-
-void main()
-{
-    vNormal = aNormal;
-    vWorldPos = aPos;
-    vTileCoord = aTileCoord;
-    vAtlasBase = aAtlasBase;
-    vAtlasSize = aAtlasSize;
-    gl_Position = uViewProj * vec4(aPos, 1.0);
-}
-)";
-
-    const char* fragmentShaderSrc = R"(#version 330 core
-out vec4 FragColor;
-
-in vec3 vNormal;
-in vec3 vWorldPos;
-in vec2 vTileCoord;
-in vec2 vAtlasBase;
-in vec2 vAtlasSize;
-
-uniform sampler2D uAtlas;
-uniform vec3 uLightDir;
-uniform vec3 uCameraPos;
-uniform vec3 uHighlightedBlock;
-uniform int uHasHighlight;
-
-void main()
-{
-    vec3 normal = normalize(vNormal);
-    vec3 lightDir = normalize(-uLightDir);
-    vec3 viewDir = normalize(uCameraPos - vWorldPos);
-    float diff = max(dot(normal, lightDir), 0.0);
-    float ambient = 0.35;
-    vec3 halfDir = normalize(lightDir + viewDir);
-    float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
-
-    vec2 tileUV = fract(vTileCoord);
-    vec2 atlasUV = vAtlasBase + vAtlasSize * tileUV;
-    vec3 textureColor = texture(uAtlas, atlasUV).rgb;
-    vec3 color = textureColor * (ambient + diff) + vec3(0.1f) * spec;
-
-    if (uHasHighlight == 1) {
-        ivec3 currentBlock = ivec3(floor(vWorldPos));
-        ivec3 targetBlock = ivec3(uHighlightedBlock);
-
-        if (currentBlock == targetBlock) {
-            color += vec3(0.3f);
-            color = min(color, vec3(1.0));
-        }
-    }
-
-    FragColor = vec4(color, 1.0);
-}
-)";
-
-    const char* farFragmentShaderSrc = R"(#version 330 core
-out vec4 FragColor;
-
-in vec3 vNormal;
-in vec3 vWorldPos;
-in vec2 vTileCoord;
-in vec2 vAtlasBase;
-in vec2 vAtlasSize;
-
-uniform sampler2D uAtlas;
-uniform vec3 uLightDir;
-uniform vec3 uCameraPos;
-uniform vec3 uFogColor;
-uniform float uFogStart;
-uniform float uFogEnd;
-
-void main()
-{
-    vec3 normal = normalize(vNormal);
-    vec3 lightDir = normalize(-uLightDir);
-    float diff = max(dot(normal, lightDir), 0.0);
-    float ambient = 0.45;
-
-    vec2 tileUV = fract(vTileCoord);
-    vec2 atlasUV = vAtlasBase + vAtlasSize * tileUV;
-    vec3 textureColor = texture(uAtlas, atlasUV).rgb;
-    vec3 litColor = textureColor * (ambient + diff * 0.55);
-
-    float horizontalDistance = distance(vWorldPos, uCameraPos);
-    float fogFactor = 0.0;
-    if (uFogEnd > uFogStart)
-    {
-        fogFactor = clamp((horizontalDistance - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
-    }
-
-    vec3 color = mix(litColor, uFogColor, fogFactor);
-    FragColor = vec4(color, 1.0);
-}
-)";
-
-    GLuint shaderProgram = 0;
-    GLuint farShaderProgram = 0;
+    Renderer renderer;
     try
     {
-        shaderProgram = createProgram(vertexShaderSrc, fragmentShaderSrc);
-        farShaderProgram = createProgram(vertexShaderSrc, farFragmentShaderSrc);
+        renderer.initialize(window, kInitialWidth, kInitialHeight);
     }
     catch (const std::exception& ex)
     {
-        std::cerr << "Shader compilation failed: " << ex.what() << std::endl;
-        if (shaderProgram != 0)
-        {
-            glDeleteProgram(shaderProgram);
-        }
+        std::cerr << "Failed to initialize D3D12 renderer: " << ex.what() << std::endl;
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
     }
 
-    ChunkShaderUniformLocations chunkUniforms{};
-    chunkUniforms.uViewProj = glGetUniformLocation(shaderProgram, "uViewProj");
-    chunkUniforms.uLightDir = glGetUniformLocation(shaderProgram, "uLightDir");
-    chunkUniforms.uCameraPos = glGetUniformLocation(shaderProgram, "uCameraPos");
-    chunkUniforms.uAtlas = glGetUniformLocation(shaderProgram, "uAtlas");
-    chunkUniforms.uHighlightedBlock = glGetUniformLocation(shaderProgram, "uHighlightedBlock");
-    chunkUniforms.uHasHighlight = glGetUniformLocation(shaderProgram, "uHasHighlight");
-
-    FarTerrainShaderUniformLocations farUniforms{};
-    farUniforms.uViewProj = glGetUniformLocation(farShaderProgram, "uViewProj");
-    farUniforms.uLightDir = glGetUniformLocation(farShaderProgram, "uLightDir");
-    farUniforms.uAtlas = glGetUniformLocation(farShaderProgram, "uAtlas");
-    farUniforms.uCameraPos = glGetUniformLocation(farShaderProgram, "uCameraPos");
-    farUniforms.uFogColor = glGetUniformLocation(farShaderProgram, "uFogColor");
-    farUniforms.uFogStart = glGetUniformLocation(farShaderProgram, "uFogStart");
-    farUniforms.uFogEnd = glGetUniformLocation(farShaderProgram, "uFogEnd");
-
-    LoadedTexture blockAtlas = loadTexture("block_atlas.png");
-    if (blockAtlas.id == 0)
+    LoadedTexture blockAtlas;
+    try
     {
-        glDeleteProgram(shaderProgram);
-        glDeleteProgram(farShaderProgram);
+        blockAtlas = renderer.loadTexture("block_atlas.png");
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Failed to load block atlas: " << ex.what() << std::endl;
+        renderer.shutdown();
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
     }
-
-    glUseProgram(shaderProgram);
-    if (chunkUniforms.uAtlas >= 0)
-    {
-        glUniform1i(chunkUniforms.uAtlas, 0);
-    }
-    glUseProgram(0);
-
-    glUseProgram(farShaderProgram);
-    if (farUniforms.uAtlas >= 0)
-    {
-        glUniform1i(farUniforms.uAtlas, 0);
-    }
-    glUseProgram(0);
 
     ChunkManager chunkManager(1337u);
-    chunkManager.setAtlasTexture(blockAtlas.id);
+    chunkManager.initializeRendering(renderer.device());
     chunkManager.setBlockTextureAtlasConfig(blockAtlas.size, kAtlasTileSizePixels); // Map block faces to atlas tiles.
     inputContext.lodEnabled = chunkManager.farTerrainEnabled();
     
@@ -1059,9 +758,6 @@ void main()
         runStreamingValidationScenarios(chunkManager, camera.position);
         chunkManager.update(camera.position, camera.front());
     }
-
-    Crosshair crosshair;
-    TextOverlay textOverlay;
 
     constexpr double kFixedTimeStep = 1.0 / 60.0;
     double previousTime = glfwGetTime();
@@ -1322,49 +1018,39 @@ void main()
         inputContext.leftMouseJustPressed = false;
         inputContext.rightMouseJustPressed = false;
 
+        renderer.waitForGpu();
         chunkManager.update(camera.position, camera.front());
-
-        glClearColor(0.55f, 0.78f, 0.95f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         int framebufferWidth = 0;
         int framebufferHeight = 0;
         glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
         framebufferWidth = std::max(framebufferWidth, 1);
         framebufferHeight = std::max(framebufferHeight, 1);
+        if (framebufferWidth != renderer.width() || framebufferHeight != renderer.height())
+        {
+            renderer.resize(framebufferWidth, framebufferHeight);
+        }
         const float aspect = static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight);
 
         const float currentFarPlane = computeFarPlaneForDistanceBlocks(chunkManager.farRenderDistanceBlocks());
         kFarPlane = currentFarPlane;
-        const glm::mat4 projection = glm::perspective(glm::radians(60.0f), aspect, kNearPlane, currentFarPlane);
+        const glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(60.0f), aspect, kNearPlane, currentFarPlane);
         const glm::mat4 view = glm::lookAt(camera.position, camera.position + camera.front(), camera.up());
         const glm::mat4 viewProj = projection * view;
         const Frustum frustum = Frustum::fromMatrix(viewProj);
 
+        renderer.beginFrame(glm::vec4(0.55f, 0.78f, 0.95f, 1.0f));
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
         {
             const WorldRenderData renderData = chunkManager.buildRenderData(frustum);
-            renderWorldGeometry(shaderProgram,
-                                farShaderProgram,
-                                viewProj,
-                                camera.position,
-                                chunkUniforms,
-                                farUniforms,
-                                renderData);
+            renderer.renderWorld(renderData, viewProj, camera.position, blockAtlas);
         }
-
-        if (playerReleased)
-        {
-            crosshair.render(framebufferWidth, framebufferHeight);
-        }
+        renderer.beginImGuiFrame();
 
         const double currentFpsEstimate = (fpsFrameCount > 0 && fpsTimer > 0.0)
                                               ? static_cast<double>(fpsFrameCount) / fpsTimer
                                               : fpsValue;
-        const float overlayMargin = 12.0f;
-        const float debugFontSize = 20.0f;
         std::string debugOverlayText;
-        int debugOverlayLineCount = 0;
 
         if (inputContext.showDebugOverlay)
         {
@@ -1452,126 +1138,121 @@ void main()
             }
 
             debugOverlayText = debugStream.str();
-            debugOverlayLineCount = 1 + static_cast<int>(std::count(debugOverlayText.begin(),
-                                                                    debugOverlayText.end(),
-                                                                    '\n'));
+        }
 
-            textOverlay.render(debugOverlayText,
-                               overlayMargin,
-                               overlayMargin,
-                               framebufferWidth,
-                               framebufferHeight,
-                               debugFontSize,
-                               glm::vec3(1.0f));
+        if (inputContext.showDebugOverlay && !debugOverlayText.empty())
+        {
+            ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.35f);
+            ImGui::Begin("Debug Overlay",
+                         nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
+            ImGui::TextUnformatted(debugOverlayText.c_str());
+            ImGui::End();
+        }
+
+        if (!playerReleased && !loadingOverlayText.empty())
+        {
+            ImGui::SetNextWindowPos(ImVec2(framebufferWidth * 0.5f, framebufferHeight * 0.5f),
+                                    ImGuiCond_Always,
+                                    ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowBgAlpha(0.50f);
+            ImGui::Begin("Loading Overlay",
+                         nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
+            ImGui::TextUnformatted(loadingOverlayText.c_str());
+            ImGui::End();
+        }
+
+        if (inputContext.showRenderDistanceGUI)
+        {
+            ImGui::SetNextWindowPos(ImVec2(framebufferWidth * 0.5f, framebufferHeight * 0.5f),
+                                    ImGuiCond_Always,
+                                    ImVec2(0.5f, 0.5f));
+            ImGui::Begin("Render Distance",
+                         nullptr,
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::TextUnformatted("Enter near chunks and optional far blocks (e.g. 12 4800):");
+            const bool submit = ImGui::InputText("##render-distance",
+                                                 &inputContext.inputBuffer,
+                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+            if (submit || ImGui::Button("Apply"))
+            {
+                if (!applyRenderDistanceInput(chunkManager, inputContext.inputBuffer))
+                {
+                    std::cerr << "Invalid render distance input: " << inputContext.inputBuffer << std::endl;
+                }
+                inputContext.showRenderDistanceGUI = false;
+                inputContext.inputBuffer.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                inputContext.showRenderDistanceGUI = false;
+                inputContext.inputBuffer.clear();
+            }
+            ImGui::End();
+        }
+
+        if (inputContext.showTeleportGUI)
+        {
+            ImGui::SetNextWindowPos(ImVec2(framebufferWidth * 0.5f, framebufferHeight * 0.5f),
+                                    ImGuiCond_Always,
+                                    ImVec2(0.5f, 0.5f));
+            ImGui::Begin("Teleport",
+                         nullptr,
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::TextUnformatted("Enter teleport target (x y z):");
+            const bool submit = ImGui::InputText("##teleport",
+                                                 &inputContext.teleportBuffer,
+                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+            if (submit || ImGui::Button("Teleport"))
+            {
+                if (!applyTeleportInput(camera, inputContext.teleportBuffer))
+                {
+                    std::cerr << "Invalid teleport input: " << inputContext.teleportBuffer << std::endl;
+                }
+                inputContext.showTeleportGUI = false;
+                inputContext.teleportBuffer.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                inputContext.showTeleportGUI = false;
+                inputContext.teleportBuffer.clear();
+            }
+            ImGui::End();
         }
 
 #ifndef NDEBUG
         if (!profilingOverlayText.empty())
         {
-            float overlayY = overlayMargin;
-            if (debugOverlayLineCount > 0)
-            {
-                float lineHeight = textOverlay.lineHeight(debugFontSize);
-                if (lineHeight <= 0.0f)
-                {
-                    lineHeight = debugFontSize * 1.2f;
-                }
-                overlayY += lineHeight * static_cast<float>(debugOverlayLineCount) + 8.0f;
-            }
-
-            textOverlay.render(profilingOverlayText,
-                               overlayMargin,
-                               overlayY,
-                               framebufferWidth,
-                               framebufferHeight,
-                               16.0f,
-                               glm::vec3(0.85f, 0.95f, 1.0f));
+            ImGui::SetNextWindowPos(ImVec2(12.0f, inputContext.showDebugOverlay ? 220.0f : 12.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.30f);
+            ImGui::Begin("Profiling Overlay",
+                         nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
+            ImGui::TextUnformatted(profilingOverlayText.c_str());
+            ImGui::End();
         }
 #endif
 
-        if (!playerReleased && !loadingOverlayText.empty())
+        if (playerReleased && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
         {
-            const float boxLeft = framebufferWidth * 0.5f - 180.0f;
-            const float boxTop = framebufferHeight * 0.5f - 48.0f;
-            textOverlay.render(loadingOverlayText,
-                               boxLeft,
-                               boxTop,
-                               framebufferWidth,
-                               framebufferHeight,
-                               16.0f,
-                               glm::vec3(1.0f, 0.98f, 0.92f));
+            drawCrosshairOverlay(framebufferWidth, framebufferHeight);
         }
 
-        // Render render distance GUI
-        if (inputContext.showRenderDistanceGUI)
-        {
-            // Calculate center of screen for the GUI
-            float centerX = framebufferWidth * 0.5f;
-            float centerY = framebufferHeight * 0.5f;
-
-            // Draw semi-transparent background (using multiple overlapping lines to create a filled rectangle effect)
-            float boxWidth = 620.0f;
-            float boxHeight = 110.0f;
-            float boxLeft = centerX - boxWidth * 0.5f;
-            float boxTop = centerY - boxHeight * 0.5f;
-
-            // Draw prompt text
-            std::string promptText = "Enter near chunks and optional far blocks (e.g. 12 4800):";
-            textOverlay.render(promptText, boxLeft + 20.0f, boxTop + 20.0f, framebufferWidth, framebufferHeight, 8.0f, glm::vec3(1.0f));
-
-            // Draw input text with cursor
-            std::string inputText = inputContext.inputBuffer;
-            if (static_cast<int>(glfwGetTime() * 2) % 2 == 0)  // Blinking cursor
-            {
-                inputText += "_";
-            }
-            textOverlay.render(inputText, boxLeft + 20.0f, boxTop + 50.0f, framebufferWidth, framebufferHeight, 10.0f, glm::vec3(0.5f, 1.0f, 0.5f));
-        }
-
-        if (inputContext.showTeleportGUI)
-        {
-            float centerX = framebufferWidth * 0.5f;
-            float centerY = framebufferHeight * 0.5f;
-
-            float boxWidth = 400.0f;
-            float boxHeight = 120.0f;
-            float boxLeft = centerX - boxWidth * 0.5f;
-            float boxTop = centerY - boxHeight * 0.5f;
-
-            std::string promptText = "Enter teleport target (x y z):";
-            textOverlay.render(promptText,
-                               boxLeft + 20.0f,
-                               boxTop + 20.0f,
-                               framebufferWidth,
-                               framebufferHeight,
-                               8.0f,
-                               glm::vec3(1.0f));
-
-            std::string inputText = inputContext.teleportBuffer;
-            if (static_cast<int>(glfwGetTime() * 2) % 2 == 0)
-            {
-                inputText += "_";
-            }
-            textOverlay.render(inputText,
-                               boxLeft + 20.0f,
-                               boxTop + 55.0f,
-                               framebufferWidth,
-                               framebufferHeight,
-                               10.0f,
-                               glm::vec3(0.5f, 0.8f, 1.0f));
-        }
-
-        glfwSwapBuffers(window);
+        renderer.endFrame();
     }
 
     chunkManager.clear();
-    if (blockAtlas.id != 0)
-    {
-        glDeleteTextures(1, &blockAtlas.id);
-    }
-    glDeleteProgram(shaderProgram);
-    glDeleteProgram(farShaderProgram);
-
+    renderer.shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
     return EXIT_SUCCESS;

@@ -10,7 +10,11 @@
 #include <string>
 #include <vector>
 
-#include <glad/glad.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <d3d12.h>
 #include <glm/glm.hpp>
 
 namespace terrain
@@ -129,42 +133,22 @@ struct RaycastHit
     float distance{0.0f};
 };
 
-struct ChunkShaderUniformLocations
+struct WorldVertex
 {
-    GLint uViewProj{-1};
-    GLint uLightDir{-1};
-    GLint uCameraPos{-1};
-    GLint uAtlas{-1};
-    GLint uHighlightedBlock{-1};
-    GLint uHasHighlight{-1};
-};
-
-struct FarTerrainShaderUniformLocations
-{
-    GLint uViewProj{-1};
-    GLint uLightDir{-1};
-    GLint uAtlas{-1};
-    GLint uCameraPos{-1};
-    GLint uFogColor{-1};
-    GLint uFogStart{-1};
-    GLint uFogEnd{-1};
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec2 tileCoord;
+    glm::vec2 atlasBase;
+    glm::vec2 atlasSize;
 };
 
 struct ChunkRenderBatch
 {
-    GLuint vao{0};
-    std::vector<GLsizei> counts;
-    std::vector<const void*> offsets;
-    std::vector<GLint> baseVertices;
-};
-
-struct ChunkRenderData
-{
-    glm::vec3 lightDirection{0.0f};
-    glm::ivec3 highlightedBlock{0};
-    bool hasHighlight{false};
-    GLuint atlasTexture{0};
-    std::vector<ChunkRenderBatch> batches;
+    D3D12_VERTEX_BUFFER_VIEW vertexBufferView{};
+    D3D12_INDEX_BUFFER_VIEW indexBufferView{};
+    std::vector<std::uint32_t> indexCounts;
+    std::vector<std::uint32_t> firstIndexLocations;
+    std::vector<std::int32_t> baseVertices;
 };
 
 struct WorldRenderData
@@ -172,7 +156,6 @@ struct WorldRenderData
     glm::vec3 lightDirection{0.0f};
     glm::ivec3 highlightedBlock{0};
     bool hasHighlight{false};
-    GLuint atlasTexture{0};
     glm::vec3 fogColor{0.55f, 0.78f, 0.95f};
     float fogStart{static_cast<float>(kDefaultFarFogStartBlocks)};
     float fogEnd{static_cast<float>(kDefaultFarRenderDistanceBlocks)};
@@ -255,7 +238,7 @@ public:
     ChunkManager(ChunkManager&&) = delete;
     ChunkManager& operator=(ChunkManager&&) = delete;
 
-    void setAtlasTexture(GLuint texture) noexcept;
+    void initializeRendering(ID3D12Device* device);
     void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -263,8 +246,8 @@ public:
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
     terrain::ColumnSample sampleColumnAt(const glm::vec3& worldPos,
-                                         int slabMinWorldY = std::numeric_limits<int>::min(),
-                                         int slabMaxWorldY = std::numeric_limits<int>::max()) const;
+                                         int slabMinWorldY = (std::numeric_limits<int>::min)(),
+                                         int slabMaxWorldY = (std::numeric_limits<int>::max)()) const;
     void clear();
 
     bool destroyBlock(const glm::ivec3& worldPos);

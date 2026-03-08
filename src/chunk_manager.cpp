@@ -14,9 +14,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <filesystem>
+#include <cstring>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -38,6 +39,7 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/noise.hpp>
+#include <wrl/client.h>
 
 namespace
 {
@@ -118,14 +120,56 @@ bool Frustum::intersectsAABB(const glm::vec3& minCorner, const glm::vec3& maxCor
 
 namespace
 {
-struct Vertex
+using Vertex = WorldVertex;
+
+void throwIfFailedDx(HRESULT hr, const char* message)
 {
-    glm::vec3 position;
-    glm::vec3 normal;
-    glm::vec2 tileCoord;
-    glm::vec2 atlasBase;
-    glm::vec2 atlasSize;
-};
+    if (FAILED(hr))
+    {
+        throw std::runtime_error(message);
+    }
+}
+
+Microsoft::WRL::ComPtr<ID3D12Resource> createUploadBuffer(ID3D12Device* device,
+                                                          std::uint64_t sizeInBytes,
+                                                          std::byte*& mappedData)
+{
+    mappedData = nullptr;
+    if (device == nullptr || sizeInBytes == 0)
+    {
+        return {};
+    }
+
+    D3D12_HEAP_PROPERTIES heapProps{};
+    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProps.CreationNodeMask = 1;
+    heapProps.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = sizeInBytes;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    throwIfFailedDx(device->CreateCommittedResource(&heapProps,
+                                                    D3D12_HEAP_FLAG_NONE,
+                                                    &desc,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                    nullptr,
+                                                    IID_PPV_ARGS(&resource)),
+                    "failed to create upload buffer");
+
+    void* mapped = nullptr;
+    throwIfFailedDx(resource->Map(0, nullptr, &mapped), "failed to map upload buffer");
+    mappedData = static_cast<std::byte*>(mapped);
+    return resource;
+}
 
 inline int floorDiv(int value, int divisor) noexcept
 {
@@ -273,12 +317,6 @@ struct FarChunk
     int lodStep{kColumnStep};
     int thickness{1};
     std::array<SurfaceCell, kColumnsX * kColumnsZ> strata{};
-    GLuint opaqueVao{0};
-    GLuint opaqueVbo{0};
-    GLuint opaqueIbo{0};
-    GLuint cutoutVao{0};
-    GLuint cutoutVbo{0};
-    GLuint cutoutIbo{0};
 
     static constexpr std::size_t index(int x, int z) noexcept
     {
@@ -335,7 +373,7 @@ struct Chunk
     std::vector<BlockId> blocks;
     std::atomic<ChunkState> state;
 
-    GLsizei indexCount{0};
+    std::uint32_t indexCount{0};
     std::size_t vertexCount{0};
     std::uint32_t bufferPageIndex{kInvalidChunkBufferPage};
     std::size_t vertexOffset{0};
@@ -558,6 +596,12 @@ public:
         return fogStartBlocks_;
     }
 
+    void setDevice(ID3D12Device* device)
+    {
+        device_ = device;
+        clear();
+    }
+
     void update(const glm::ivec3& cameraChunk,
                 const glm::vec3& cameraForward,
                 int nearRadiusChunks,
@@ -673,7 +717,8 @@ public:
         batches.resize(bufferPages_.size());
         for (std::size_t i = 0; i < bufferPages_.size(); ++i)
         {
-            batches[i].vao = bufferPages_[i].vao;
+            batches[i].vertexBufferView = bufferPages_[i].vertexView;
+            batches[i].indexBufferView = bufferPages_[i].indexView;
         }
 
         for (const auto& [key, tile] : tiles_)
@@ -693,16 +738,16 @@ public:
             }
 
             ChunkRenderBatch& batch = batches[tile.pageIndex];
-            batch.counts.push_back(tile.indexCount);
-            batch.offsets.push_back(reinterpret_cast<const void*>(tile.indexOffset * sizeof(std::uint32_t)));
-            batch.baseVertices.push_back(static_cast<GLint>(tile.vertexOffset));
+            batch.indexCounts.push_back(tile.indexCount);
+            batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(tile.indexOffset));
+            batch.baseVertices.push_back(static_cast<std::int32_t>(tile.vertexOffset));
         }
 
         auto emptyIt = std::remove_if(batches.begin(),
                                       batches.end(),
                                       [](const ChunkRenderBatch& batch)
                                       {
-                                          return batch.counts.empty();
+                                          return batch.indexCounts.empty();
                                       });
         batches.erase(emptyIt, batches.end());
         return batches;
@@ -808,9 +853,12 @@ private:
             std::size_t size{0};
         };
 
-        GLuint vao{0};
-        GLuint vbo{0};
-        GLuint ibo{0};
+        Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+        D3D12_VERTEX_BUFFER_VIEW vertexView{};
+        D3D12_INDEX_BUFFER_VIEW indexView{};
+        std::byte* mappedVertexData{nullptr};
+        std::byte* mappedIndexData{nullptr};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
@@ -837,7 +885,7 @@ private:
         std::size_t vertexOffset{0};
         std::size_t indexOffset{0};
         std::size_t vertexCount{0};
-        GLsizei indexCount{0};
+        std::uint32_t indexCount{0};
         std::uint32_t buildVersion{1};
         bool active{false};
         bool dirty{true};
@@ -993,36 +1041,18 @@ private:
         BufferPage page;
         page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
         page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
-
-        glGenVertexArrays(1, &page.vao);
-        glGenBuffers(1, &page.vbo);
-        glGenBuffers(1, &page.ibo);
-
-        glBindVertexArray(page.vao);
-
-        glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(page.vertexCapacity * sizeof(Vertex)),
-                     nullptr,
-                     GL_DYNAMIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, tileCoord)));
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasBase)));
-        glEnableVertexAttribArray(3);
-        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
-        glEnableVertexAttribArray(4);
-
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, page.ibo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(page.indexCapacity * sizeof(std::uint32_t)),
-                     nullptr,
-                     GL_DYNAMIC_DRAW);
-
-        glBindVertexArray(0);
+        page.vertexBuffer = createUploadBuffer(device_.Get(),
+                                               static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                               page.mappedVertexData);
+        page.indexBuffer = createUploadBuffer(device_.Get(),
+                                              static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                              page.mappedIndexData);
+        page.vertexView.BufferLocation = page.vertexBuffer ? page.vertexBuffer->GetGPUVirtualAddress() : 0;
+        page.vertexView.StrideInBytes = sizeof(Vertex);
+        page.vertexView.SizeInBytes = static_cast<UINT>(page.vertexCapacity * sizeof(Vertex));
+        page.indexView.BufferLocation = page.indexBuffer ? page.indexBuffer->GetGPUVirtualAddress() : 0;
+        page.indexView.SizeInBytes = static_cast<UINT>(page.indexCapacity * sizeof(std::uint32_t));
+        page.indexView.Format = DXGI_FORMAT_R32_UINT;
         return page;
     }
 
@@ -1165,18 +1195,10 @@ private:
     {
         for (BufferPage& page : bufferPages_)
         {
-            if (page.vao != 0)
-            {
-                glDeleteVertexArrays(1, &page.vao);
-            }
-            if (page.vbo != 0)
-            {
-                glDeleteBuffers(1, &page.vbo);
-            }
-            if (page.ibo != 0)
-            {
-                glDeleteBuffers(1, &page.ibo);
-            }
+            page.vertexBuffer.Reset();
+            page.indexBuffer.Reset();
+            page.mappedVertexData = nullptr;
+            page.mappedIndexData = nullptr;
         }
         bufferPages_.clear();
     }
@@ -1568,21 +1590,21 @@ private:
         tile.vertexOffset = allocation.vertexOffset;
         tile.indexOffset = allocation.indexOffset;
         tile.vertexCount = mesh.vertices.size();
-        tile.indexCount = static_cast<GLsizei>(mesh.indices.size());
+        tile.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
 
         BufferPage& page = bufferPages_[allocation.pageIndex];
-        glBindVertexArray(page.vao);
-        glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
-        glBufferSubData(GL_ARRAY_BUFFER,
-                        static_cast<GLintptr>(tile.vertexOffset * sizeof(Vertex)),
-                        static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(Vertex)),
-                        mesh.vertices.data());
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, page.ibo);
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,
-                        static_cast<GLintptr>(tile.indexOffset * sizeof(std::uint32_t)),
-                        static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t)),
-                        mesh.indices.data());
-        glBindVertexArray(0);
+        if (page.mappedVertexData != nullptr && !mesh.vertices.empty())
+        {
+            std::memcpy(page.mappedVertexData + tile.vertexOffset * sizeof(Vertex),
+                        mesh.vertices.data(),
+                        mesh.vertices.size() * sizeof(Vertex));
+        }
+        if (page.mappedIndexData != nullptr && !mesh.indices.empty())
+        {
+            std::memcpy(page.mappedIndexData + tile.indexOffset * sizeof(std::uint32_t),
+                        mesh.indices.data(),
+                        mesh.indices.size() * sizeof(std::uint32_t));
+        }
     }
 
     static BuildResult buildTileMesh(const FarTileKey& key,
@@ -1776,6 +1798,7 @@ private:
     double lastAverageBuildMs_{0.0};
     std::vector<LevelConfig> levels_;
     std::vector<BufferPage> bufferPages_;
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
     std::unordered_map<FarTileKey, FarTile, FarTileKeyHasher> tiles_;
     std::mutex configMutex_;
     SampleFn sampleFn_{};
@@ -1800,7 +1823,7 @@ struct ChunkManager::Impl
     explicit Impl(unsigned seed);
     ~Impl();
 
-    void setAtlasTexture(GLuint texture) noexcept;
+    void initializeRendering(ID3D12Device* device);
     void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -1926,9 +1949,12 @@ private:
             std::size_t size{0};
         };
 
-        GLuint vao{0};
-        GLuint vbo{0};
-        GLuint ibo{0};
+        Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+        D3D12_VERTEX_BUFFER_VIEW vertexView{};
+        D3D12_INDEX_BUFFER_VIEW indexView{};
+        std::byte* mappedVertexData{nullptr};
+        std::byte* mappedIndexData{nullptr};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
@@ -2061,11 +2087,11 @@ private:
     std::mutex uploadQueueMutex_;
     std::vector<ChunkBufferPage> bufferPages_;
     mutable std::mutex bufferPageMutex_;
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
 
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
-    GLuint atlasTexture_{0};
     JobQueue jobQueue_;
     ColumnManager columnManager_;
     mutable std::mutex predictedColumnMutex_;
@@ -2428,9 +2454,11 @@ ChunkManager::Impl::~Impl()
     destroyBufferPages();
 }
 
-void ChunkManager::Impl::setAtlasTexture(GLuint texture) noexcept
+void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
 {
-    atlasTexture_ = texture;
+    device_ = device;
+    farTerrainManager_.setDevice(device_.Get());
+    destroyBufferPages();
 }
 
 void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels)
@@ -2852,7 +2880,6 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     renderData.lightDirection = lightDirection_;
     renderData.highlightedBlock = highlightedBlock_;
     renderData.hasHighlight = hasHighlight_;
-    renderData.atlasTexture = atlasTexture_;
     renderData.fogStart = static_cast<float>(renderSettings_.fogStartBlocks);
     renderData.fogEnd = static_cast<float>(renderSettings_.farBlocks);
 
@@ -2872,7 +2899,8 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         renderData.nearBatches.resize(pageCount);
         for (std::size_t i = 0; i < pageCount; ++i)
         {
-            renderData.nearBatches[i].vao = bufferPages_[i].vao;
+            renderData.nearBatches[i].vertexBufferView = bufferPages_[i].vertexView;
+            renderData.nearBatches[i].indexBufferView = bufferPages_[i].indexView;
         }
     }
 
@@ -2907,22 +2935,23 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             continue;
         }
 
-        if (chunkPtr->vertexOffset > static_cast<std::size_t>(std::numeric_limits<GLint>::max()))
+        if (chunkPtr->vertexOffset > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+            chunkPtr->indexOffset > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
         {
             continue;
         }
 
         ChunkRenderBatch& batch = renderData.nearBatches[pageIndex];
-        batch.counts.push_back(chunkPtr->indexCount);
-        batch.offsets.push_back(reinterpret_cast<const void*>(chunkPtr->indexOffset * sizeof(std::uint32_t)));
-        batch.baseVertices.push_back(static_cast<GLint>(chunkPtr->vertexOffset));
+        batch.indexCounts.push_back(chunkPtr->indexCount);
+        batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(chunkPtr->indexOffset));
+        batch.baseVertices.push_back(static_cast<std::int32_t>(chunkPtr->vertexOffset));
     }
 
     auto emptyIt = std::remove_if(renderData.nearBatches.begin(),
                                   renderData.nearBatches.end(),
                                   [](const ChunkRenderBatch& batch)
                                   {
-                                      return batch.counts.empty();
+                                      return batch.indexCounts.empty();
                                   });
     renderData.nearBatches.erase(emptyIt, renderData.nearBatches.end());
     renderData.farBatches = farTerrainManager_.buildRenderBatches(frustum);
@@ -3988,36 +4017,18 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
     ChunkBufferPage page;
     page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
     page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
-
-    glGenVertexArrays(1, &page.vao);
-    glGenBuffers(1, &page.vbo);
-    glGenBuffers(1, &page.ibo);
-
-    glBindVertexArray(page.vao);
-
-    glBindBuffer(GL_ARRAY_BUFFER, page.vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(page.vertexCapacity * sizeof(Vertex)),
-                 nullptr,
-                 GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, tileCoord)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasBase)));
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, atlasSize)));
-    glEnableVertexAttribArray(4);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, page.ibo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(page.indexCapacity * sizeof(std::uint32_t)),
-                 nullptr,
-                 GL_DYNAMIC_DRAW);
-
-    glBindVertexArray(0);
+    page.vertexBuffer = createUploadBuffer(device_.Get(),
+                                           static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                           page.mappedVertexData);
+    page.indexBuffer = createUploadBuffer(device_.Get(),
+                                          static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                          page.mappedIndexData);
+    page.vertexView.BufferLocation = page.vertexBuffer ? page.vertexBuffer->GetGPUVirtualAddress() : 0;
+    page.vertexView.SizeInBytes = static_cast<UINT>(page.vertexCapacity * sizeof(Vertex));
+    page.vertexView.StrideInBytes = sizeof(Vertex);
+    page.indexView.BufferLocation = page.indexBuffer ? page.indexBuffer->GetGPUVirtualAddress() : 0;
+    page.indexView.SizeInBytes = static_cast<UINT>(page.indexCapacity * sizeof(std::uint32_t));
+    page.indexView.Format = DXGI_FORMAT_R32_UINT;
 
     return page;
 }
@@ -4254,18 +4265,10 @@ void ChunkManager::Impl::destroyBufferPages()
     std::lock_guard<std::mutex> lock(bufferPageMutex_);
     for (auto& page : bufferPages_)
     {
-        if (page.ibo != 0)
-        {
-            glDeleteBuffers(1, &page.ibo);
-        }
-        if (page.vbo != 0)
-        {
-            glDeleteBuffers(1, &page.vbo);
-        }
-        if (page.vao != 0)
-        {
-            glDeleteVertexArrays(1, &page.vao);
-        }
+        page.vertexBuffer.Reset();
+        page.indexBuffer.Reset();
+        page.mappedVertexData = nullptr;
+        page.mappedIndexData = nullptr;
     }
     bufferPages_.clear();
 }
@@ -4826,6 +4829,8 @@ bool ChunkManager::Impl::shouldUseSurfaceOnly(const glm::ivec3& center, const gl
 
 bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool surfaceOnly)
 {
+    (void)surfaceOnly;
+
     if (coord.y < 0)
     {
         return false;
@@ -4974,42 +4979,27 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
     chunk.vertexOffset = allocation.vertexOffset;
     chunk.indexOffset = allocation.indexOffset;
     chunk.vertexCount = vertexCount;
-
-    GLuint vao = 0;
-    GLuint vbo = 0;
-    GLuint ibo = 0;
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         if (allocation.pageIndex < bufferPages_.size())
         {
             ChunkBufferPage& page = bufferPages_[allocation.pageIndex];
-            vao = page.vao;
-            vbo = page.vbo;
-            ibo = page.ibo;
+            if (page.mappedVertexData != nullptr && vertexCount > 0)
+            {
+                std::memcpy(page.mappedVertexData + chunk.vertexOffset * sizeof(Vertex),
+                            chunk.meshData.vertices.data(),
+                            vertexCount * sizeof(Vertex));
+            }
+            if (page.mappedIndexData != nullptr && indexCount > 0)
+            {
+                std::memcpy(page.mappedIndexData + chunk.indexOffset * sizeof(std::uint32_t),
+                            chunk.meshData.indices.data(),
+                            indexCount * sizeof(std::uint32_t));
+            }
         }
     }
 
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    if (vertexCount > 0)
-    {
-        glBufferSubData(GL_ARRAY_BUFFER,
-                        static_cast<GLintptr>(chunk.vertexOffset * sizeof(Vertex)),
-                        static_cast<GLsizeiptr>(vertexCount * sizeof(Vertex)),
-                        chunk.meshData.vertices.data());
-    }
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-    if (indexCount > 0)
-    {
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,
-                        static_cast<GLintptr>(chunk.indexOffset * sizeof(std::uint32_t)),
-                        static_cast<GLsizeiptr>(indexCount * sizeof(std::uint32_t)),
-                        chunk.meshData.indices.data());
-    }
-
-    chunk.indexCount = static_cast<GLsizei>(indexCount);
-    glBindVertexArray(0);
+    chunk.indexCount = static_cast<std::uint32_t>(indexCount);
 
     chunk.meshData.clear();
 }
@@ -6135,9 +6125,9 @@ ChunkManager::ChunkManager(unsigned seed)
 
 ChunkManager::~ChunkManager() = default;
 
-void ChunkManager::setAtlasTexture(GLuint texture) noexcept
+void ChunkManager::initializeRendering(ID3D12Device* device)
 {
-    impl_->setAtlasTexture(texture);
+    impl_->initializeRendering(device);
 }
 
 void ChunkManager::setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels)

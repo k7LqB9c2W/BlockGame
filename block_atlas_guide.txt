@@ -4,14 +4,31 @@ Block Atlas Tile Guide
 Grid Basics
 -----------
 - Atlas is a grid of 16x16 pixel tiles.
-- Origin is bottom-left (tile {0,0}).
-- Columns increase to the right; rows increase upward.
+- Origin is top-left in the current D3D12 renderer (tile {0,0} is the top tile in the image).
+- Columns increase to the right; rows increase downward in the atlas image.
 
 Assigning UVs
 -------------
 - Use assignFace(BlockId, BlockFace, {column, row}).
-- Example: {0,2} targets the third tile up in column 0.
+- Example: `{0,2}` targets the third tile down in column 0 of the current atlas image.
 - Give side faces the same tile if they share art.
+
+Current Tile Assignments
+------------------------
+- `{0,0}` Grass top
+- `{0,1}` Grass side
+- `{0,2}` Dirt / grass bottom / podzol bottom
+- `{0,3}` Oak log side
+- `{0,4}` Oak log top and bottom
+- `{0,5}` Oak leaves
+- `{0,6}` Sand
+- `{0,7}` Water
+- `{0,8}` Stone
+- `{0,9}` Spruce log top and bottom
+- `{0,10}` Spruce log side
+- `{0,11}` Spruce leaves
+- `{0,12}` Podzol side
+- `{0,13}` Podzol top
 
 Adding Blocks
 -------------

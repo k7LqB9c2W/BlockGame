@@ -261,6 +261,143 @@ inline float hashToUnitFloat(int x, int y, int z) noexcept
     return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
 }
 
+inline bool isAlphaCutoutBlock(BlockId block) noexcept
+{
+    return block == BlockId::Leaves || block == BlockId::SpruceLeaves;
+}
+
+constexpr int kTaigaSpruceCellSize = 14;
+constexpr int kTaigaSpruceMinTrunkHeight = 25;
+constexpr int kTaigaSpruceMaxTrunkHeight = 31;
+constexpr int kTaigaSpruceMinBareTrunkHeight = 5;
+constexpr int kTaigaSpruceMaxBareTrunkHeight = 9;
+constexpr int kTaigaSpruceMaxLeafRadius = 4;
+
+inline glm::ivec2 taigaSpruceOriginForCell(int cellX, int cellZ) noexcept
+{
+    const int offsetX = 3 + static_cast<int>(hashToUnitFloat(cellX, 911, cellZ) * 4.0f);
+    const int offsetZ = 3 + static_cast<int>(hashToUnitFloat(cellX, 977, cellZ) * 4.0f);
+    return glm::ivec2(cellX * kTaigaSpruceCellSize + offsetX,
+                      cellZ * kTaigaSpruceCellSize + offsetZ);
+}
+
+inline bool isTaigaSpruceOrigin(int worldX, int worldZ) noexcept
+{
+    const int cellX = floorDiv(worldX, kTaigaSpruceCellSize);
+    const int cellZ = floorDiv(worldZ, kTaigaSpruceCellSize);
+    return taigaSpruceOriginForCell(cellX, cellZ) == glm::ivec2(worldX, worldZ);
+}
+
+inline float taigaSpruceOccupancyChance(const BiomeDefinition& biome) noexcept
+{
+    return std::clamp(0.40f + std::max(biome.treeDensityMultiplier, 0.0f) * 0.20f, 0.45f, 0.90f);
+}
+
+inline bool shouldSpawnTaigaSpruce(const BiomeDefinition& biome, int worldX, int groundWorldY, int worldZ) noexcept
+{
+    if (!terrain::isTaigaBiome(biome) || !isTaigaSpruceOrigin(worldX, worldZ))
+    {
+        return false;
+    }
+
+    const int cellX = floorDiv(worldX, kTaigaSpruceCellSize);
+    const int cellZ = floorDiv(worldZ, kTaigaSpruceCellSize);
+    const float occupancyRoll = hashToUnitFloat(cellX, groundWorldY + 151, cellZ);
+    return occupancyRoll <= taigaSpruceOccupancyChance(biome);
+}
+
+inline int taigaSpruceTrunkHeight(int worldX, int groundWorldY, int worldZ) noexcept
+{
+    int height = kTaigaSpruceMinTrunkHeight +
+                 static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 37, worldZ) *
+                                  static_cast<float>(kTaigaSpruceMaxTrunkHeight - kTaigaSpruceMinTrunkHeight + 1));
+    return std::clamp(height, kTaigaSpruceMinTrunkHeight, kTaigaSpruceMaxTrunkHeight);
+}
+
+inline int taigaSpruceBareTrunkHeight(int worldX, int groundWorldY, int worldZ) noexcept
+{
+    int height = kTaigaSpruceMinBareTrunkHeight +
+                 static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 83, worldZ) *
+                                  static_cast<float>(kTaigaSpruceMaxBareTrunkHeight - kTaigaSpruceMinBareTrunkHeight + 1));
+    return std::clamp(height, kTaigaSpruceMinBareTrunkHeight, kTaigaSpruceMaxBareTrunkHeight);
+}
+
+inline int taigaSpruceLeafRadiusForLayer(int layerFromBottom, int totalLayers) noexcept
+{
+    if (totalLayers <= 1)
+    {
+        return 0;
+    }
+
+    const float t = static_cast<float>(layerFromBottom) / static_cast<float>(std::max(totalLayers - 1, 1));
+    int radius = 1 + static_cast<int>(std::round((1.0f - t) * 3.0f));
+
+    if (layerFromBottom % 3 == 0 && layerFromBottom < (totalLayers * 3) / 4)
+    {
+        radius = std::min(radius + 1, kTaigaSpruceMaxLeafRadius);
+    }
+
+    if (t > 0.88f)
+    {
+        radius = 1;
+    }
+    if (t > 0.97f)
+    {
+        radius = 0;
+    }
+
+    return std::clamp(radius, 0, kTaigaSpruceMaxLeafRadius);
+}
+
+inline int distanceToInclusiveRange(int value, int minValue, int maxValue) noexcept
+{
+    if (value < minValue)
+    {
+        return minValue - value;
+    }
+    if (value > maxValue)
+    {
+        return value - maxValue;
+    }
+    return 0;
+}
+
+inline bool taigaSpruceLeafOccupiesCell(int originX,
+                                        int originZ,
+                                        int worldX,
+                                        int worldZ,
+                                        int radius,
+                                        int layerFromBottom,
+                                        int totalLayers) noexcept
+{
+    if (radius <= 0)
+    {
+        return false;
+    }
+
+    if (worldX >= originX && worldX <= originX + 1 &&
+        worldZ >= originZ && worldZ <= originZ + 1)
+    {
+        return false;
+    }
+
+    const int dx = distanceToInclusiveRange(worldX, originX, originX + 1);
+    const int dz = distanceToInclusiveRange(worldZ, originZ, originZ + 1);
+    const int chebyshev = std::max(dx, dz);
+    if (chebyshev > radius)
+    {
+        return false;
+    }
+
+    int manhattanAllowance = radius + 1;
+    if (radius >= 4 && layerFromBottom < totalLayers / 3)
+    {
+        ++manhattanAllowance;
+    }
+
+    return (dx + dz) <= manhattanAllowance;
+}
+
 struct MeshData
 {
     std::vector<Vertex> vertices;
@@ -2525,6 +2662,25 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSiz
         assignFace(BlockId::Stone, face, {0, 8});
     }
 
+    assignFace(BlockId::SpruceLog, BlockFace::Top, {0, 9});
+    assignFace(BlockId::SpruceLog, BlockFace::Bottom, {0, 9});
+    for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::SpruceLog, face, {0, 10});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::SpruceLeaves, face, {0, 11});
+    }
+
+    assignFace(BlockId::Podzol, BlockFace::Top, {0, 13});
+    assignFace(BlockId::Podzol, BlockFace::Bottom, {0, 2});
+    for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::Podzol, face, {0, 12});
+    }
+
     blockAtlasConfigured_ = true;
 }
 
@@ -2550,22 +2706,16 @@ FarTerrainSurfaceSample ChunkManager::Impl::sampleFarTerrainSurfaceLod(int world
     }
 
     const BiomeDefinition& biome = *surfaceColumn.dominantBiome;
-    BlockId surfaceBlock = biome.surfaceBlock;
-    if (!biome.isOcean())
-    {
-        constexpr float kBeachDistanceRange = 6.0f;
-        constexpr int kBeachHeightBand = 2;
-        const bool nearSeaLevel = std::abs(surfaceColumn.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
-        if (nearSeaLevel && std::isfinite(climateSample.distanceToCoast) &&
-            climateSample.distanceToCoast <= kBeachDistanceRange)
-        {
-            const float beachNoise = hashToUnitFloat(worldX, surfaceColumn.surfaceY, worldZ);
-            surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
-        }
-    }
+    ColumnSample resolvedSample{};
+    resolvedSample.surfaceY = surfaceColumn.surfaceY;
+    resolvedSample.distanceToShore = std::isfinite(climateSample.distanceToCoast)
+                                         ? climateSample.distanceToCoast
+                                         : std::numeric_limits<float>::infinity();
+    const terrain::TerrainColumnBlocks resolvedBlocks =
+        terrain::resolveTerrainColumnBlocks(biome, resolvedSample, worldX, worldZ, globalSeaLevel_);
 
     visual.solidTopY = surfaceColumn.surfaceY;
-    visual.solidBlock = surfaceBlock;
+    visual.solidBlock = resolvedBlocks.surfaceBlock;
     const int cachedTop = columnManager_.highestSolidBlock(worldX, worldZ);
     const int cacheTolerance = std::max(1 << std::clamp(lodLevel, 0, 6), 12);
     if (cachedTop != ColumnManager::kNoHeight &&
@@ -3458,7 +3608,7 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
 
     const ColumnSample baseSample = sampleColumn(baseX, baseZ);
 
-    auto predictTreeCanopyTop = [&](const ColumnSample& columnSample) -> int
+    auto predictTreeCanopyTop = [&](int originX, int originZ, const ColumnSample& columnSample, int targetX, int targetZ) -> int
     {
         if (!columnSample.dominantBiome || !columnSample.dominantBiome->generatesTrees)
         {
@@ -3479,13 +3629,105 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
 
         const BiomeDefinition& biome = *columnSample.dominantBiome;
 
-        const float density = noise_.fbm(static_cast<float>(baseX) * 0.05f,
-                                         static_cast<float>(baseZ) * 0.05f,
+        if (terrain::isTaigaBiome(biome))
+        {
+            if (!shouldSpawnTaigaSpruce(biome, originX, groundWorldY, originZ))
+            {
+                return ColumnManager::kNoHeight;
+            }
+
+            int anchorGroundY = std::numeric_limits<int>::min();
+            for (int trunkX = 0; trunkX < 2; ++trunkX)
+            {
+                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+                {
+                    const ColumnSample trunkSample = sampleColumn(originX + trunkX, originZ + trunkZ);
+                    if (!trunkSample.dominantBiome || !terrain::isTaigaBiome(*trunkSample.dominantBiome))
+                    {
+                        return ColumnManager::kNoHeight;
+                    }
+                    if (trunkSample.dominantWeight < kTreeBiomeWeightThreshold)
+                    {
+                        return ColumnManager::kNoHeight;
+                    }
+
+                    const terrain::TerrainColumnBlocks blocks =
+                        terrain::resolveTerrainColumnBlocks(*trunkSample.dominantBiome,
+                                                            trunkSample,
+                                                            originX + trunkX,
+                                                            originZ + trunkZ,
+                                                            globalSeaLevel_);
+                    if (blocks.surfaceBlock != BlockId::Grass && blocks.surfaceBlock != BlockId::Podzol)
+                    {
+                        return ColumnManager::kNoHeight;
+                    }
+
+                    if (anchorGroundY == std::numeric_limits<int>::min())
+                    {
+                        anchorGroundY = trunkSample.surfaceY;
+                    }
+                    else if (trunkSample.surfaceY != anchorGroundY)
+                    {
+                        return ColumnManager::kNoHeight;
+                    }
+                }
+            }
+
+            for (int dx = -2; dx <= 3; ++dx)
+            {
+                for (int dz = -2; dz <= 3; ++dz)
+                {
+                    const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
+                    if (!neighborSample.dominantBiome)
+                    {
+                        return ColumnManager::kNoHeight;
+                    }
+                    if (std::abs(neighborSample.surfaceY - anchorGroundY) > 1)
+                    {
+                        return ColumnManager::kNoHeight;
+                    }
+                }
+            }
+
+            const int trunkHeight = taigaSpruceTrunkHeight(originX, anchorGroundY, originZ);
+            const int bareTrunkHeight = taigaSpruceBareTrunkHeight(originX, anchorGroundY, originZ);
+            const int canopyBaseWorld = anchorGroundY + bareTrunkHeight + 1;
+            const int canopyTopWorld = anchorGroundY + trunkHeight;
+            const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
+
+            int highestCover = ColumnManager::kNoHeight;
+            if (targetX >= originX && targetX <= originX + 1 &&
+                targetZ >= originZ && targetZ <= originZ + 1)
+            {
+                highestCover = canopyTopWorld + 1;
+            }
+
+            for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+            {
+                const int layerFromBottom = worldY - canopyBaseWorld;
+                const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
+                if (taigaSpruceLeafOccupiesCell(originX,
+                                               originZ,
+                                               targetX,
+                                               targetZ,
+                                               radius,
+                                               layerFromBottom,
+                                               totalLayers))
+                {
+                    highestCover = std::max(highestCover, worldY);
+                }
+            }
+
+            return highestCover;
+        }
+
+        const float density = noise_.fbm(static_cast<float>(originX) * 0.05f,
+                                         static_cast<float>(originZ) * 0.05f,
                                          4,
                                          0.55f,
                                          2.0f);
         const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float randomValue = hashToUnitFloat(baseX, groundWorldY, baseZ);
+        const float randomValue = hashToUnitFloat(originX, groundWorldY, originZ);
         const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
         const float spawnThreshold =
             std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
@@ -3504,7 +3746,7 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
                     continue;
                 }
 
-                const ColumnSample neighborSample = sampleColumn(baseX + dx, baseZ + dz);
+                const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
                 if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
                 {
                     terrainSuitable = false;
@@ -3522,18 +3764,72 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
         constexpr int kTreeMaxHeight = 8;
 
         int trunkHeight = kTreeMinHeight +
-                          static_cast<int>(hashToUnitFloat(baseX, groundWorldY + 1, baseZ) *
+                          static_cast<int>(hashToUnitFloat(originX, groundWorldY + 1, originZ) *
                                            static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
         trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
 
-        return groundWorldY + trunkHeight;
+        int highestCover = ColumnManager::kNoHeight;
+        if (targetX == originX && targetZ == originZ)
+        {
+            highestCover = groundWorldY + trunkHeight;
+        }
+
+        const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
+        const int canopyTopWorld = groundWorldY + trunkHeight;
+        for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+        {
+            const int layer = worldY - canopyBaseWorld;
+            int radius = 2;
+            if (worldY >= canopyTopWorld - 1)
+            {
+                radius = 1;
+            }
+
+            for (int dx = -radius; dx <= radius; ++dx)
+            {
+                for (int dz = -radius; dz <= radius; ++dz)
+                {
+                    if (std::abs(dx) == radius && std::abs(dz) == radius && radius > 1)
+                    {
+                        continue;
+                    }
+
+                    if (dx == 0 && dz == 0 && worldY <= groundWorldY + trunkHeight - 1)
+                    {
+                        continue;
+                    }
+
+                    if (layer == 0 && std::abs(dx) + std::abs(dz) > 3)
+                    {
+                        continue;
+                    }
+
+                    if (originX + dx == targetX && originZ + dz == targetZ)
+                    {
+                        highestCover = std::max(highestCover, worldY);
+                    }
+                }
+            }
+        }
+
+        return highestCover;
     };
 
     int predictedHighest = ColumnManager::kNoHeight;
     if (baseSample.dominantBiome)
     {
         predictedHighest = mergeHeight(predictedHighest, baseSample.surfaceY);
-        predictedHighest = mergeHeight(predictedHighest, predictTreeCanopyTop(baseSample));
+    }
+
+    for (int originX = baseX - kTaigaSpruceMaxLeafRadius; originX <= baseX + kTaigaSpruceMaxLeafRadius; ++originX)
+    {
+        for (int originZ = baseZ - kTaigaSpruceMaxLeafRadius; originZ <= baseZ + kTaigaSpruceMaxLeafRadius; ++originZ)
+        {
+            const ColumnSample originSample =
+                (originX == baseX && originZ == baseZ) ? baseSample : sampleColumn(originX, originZ);
+            predictedHighest = mergeHeight(predictedHighest,
+                                           predictTreeCanopyTop(originX, originZ, originSample, baseX, baseZ));
+        }
     }
 
     highestSolid = mergeHeight(highestSolid, predictedHighest);
@@ -5677,21 +5973,9 @@ void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
                     const BiomeDefinition& biome = *sample.dominantBiome;
                     if (sample.slabHasSolid)
                     {
-                        BlockId surfaceBlock = biome.surfaceBlock;
-                        if (!biome.isOcean())
-                        {
-                            constexpr float kBeachDistanceRange = 6.0f;
-                            constexpr int kBeachHeightBand = 2;
-                            const bool nearSeaLevel = std::abs(sample.surfaceY - globalSeaLevel_) <= kBeachHeightBand;
-                            if (nearSeaLevel && std::isfinite(sample.distanceToShore)
-                                && sample.distanceToShore <= kBeachDistanceRange)
-                            {
-                                const float beachNoise = hashToUnitFloat(worldX, sample.surfaceY, worldZ);
-                                surfaceBlock = beachNoise < 0.55f ? BlockId::Sand : BlockId::Grass;
-                            }
-                        }
-
-                        considerTopBlock(sample.slabHighestSolidY, surfaceBlock, localX, localZ);
+                        const terrain::TerrainColumnBlocks resolvedBlocks =
+                            terrain::resolveTerrainColumnBlocks(biome, sample, worldX, worldZ, globalSeaLevel_);
+                        considerTopBlock(sample.slabHighestSolidY, resolvedBlocks.surfaceBlock, localX, localZ);
                     }
 
                     const auto& waterFill = biome.terrainSettings.waterFill;
@@ -5857,50 +6141,209 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         if (slabContainsTerrain)
         {
-            constexpr int kTreeMinHeight = 6;
-            constexpr int kTreeMaxHeight = 8;
-            constexpr int kTreeMaxRadius = 2;
+            constexpr float kTreeBiomeWeightThreshold = 0.55f;
+            constexpr int kDefaultTreeMinHeight = 6;
+            constexpr int kDefaultTreeMaxHeight = 8;
+            constexpr int kDefaultTreeMaxRadius = 2;
 
-            const int minWorldX = baseWorldX - kTreeMaxRadius;
-            const int maxWorldX = baseWorldX + kChunkSizeX + kTreeMaxRadius - 1;
-            const int minWorldZ = baseWorldZ - kTreeMaxRadius;
-            const int maxWorldZ = baseWorldZ + kChunkSizeZ + kTreeMaxRadius - 1;
+            const int treePadding = std::max(kDefaultTreeMaxRadius, kTaigaSpruceMaxLeafRadius);
+            const int minWorldX = baseWorldX - treePadding;
+            const int maxWorldX = baseWorldX + kChunkSizeX + treePadding - 1;
+            const int minWorldZ = baseWorldZ - treePadding;
+            const int maxWorldZ = baseWorldZ + kChunkSizeZ + treePadding - 1;
+
+            auto resolvedSurfaceBlockAt = [&](int worldX, int worldZ, const ColumnSample& sample) -> BlockId
+            {
+                if (!sample.dominantBiome)
+                {
+                    return BlockId::Air;
+                }
+
+                const terrain::TerrainColumnBlocks blocks =
+                    terrain::resolveTerrainColumnBlocks(*sample.dominantBiome, sample, worldX, worldZ, globalSeaLevel_);
+                return blocks.surfaceBlock;
+            };
+
+            auto canAnchorTaigaSpruce = [&](int originX, int originZ, int& outGroundWorldY) -> bool
+            {
+                int groundWorldY = std::numeric_limits<int>::min();
+
+                for (int trunkX = 0; trunkX < 2; ++trunkX)
+                {
+                    for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+                    {
+                        const ColumnSample baseSample = getLocalColumnSample(originX + trunkX, originZ + trunkZ);
+                        if (!baseSample.dominantBiome || !terrain::isTaigaBiome(*baseSample.dominantBiome))
+                        {
+                            return false;
+                        }
+                        if (baseSample.dominantWeight < kTreeBiomeWeightThreshold)
+                        {
+                            return false;
+                        }
+
+                        const BlockId surfaceBlock =
+                            resolvedSurfaceBlockAt(originX + trunkX, originZ + trunkZ, baseSample);
+                        if (surfaceBlock != BlockId::Grass && surfaceBlock != BlockId::Podzol)
+                        {
+                            return false;
+                        }
+
+                        if (groundWorldY == std::numeric_limits<int>::min())
+                        {
+                            groundWorldY = baseSample.surfaceY;
+                        }
+                        else if (baseSample.surfaceY != groundWorldY)
+                        {
+                            return false;
+                        }
+                    }
+                }
+
+                for (int dx = -2; dx <= 3; ++dx)
+                {
+                    for (int dz = -2; dz <= 3; ++dz)
+                    {
+                        const ColumnSample neighborSample = getLocalColumnSample(originX + dx, originZ + dz);
+                        if (!neighborSample.dominantBiome)
+                        {
+                            return false;
+                        }
+                        if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
+                        {
+                            return false;
+                        }
+                    }
+                }
+
+                outGroundWorldY = groundWorldY;
+                return groundWorldY > 2;
+            };
+
+            auto placeTaigaSpruce = [&](int originX, int originZ, int groundWorldY)
+            {
+                const int trunkHeight = taigaSpruceTrunkHeight(originX, groundWorldY, originZ);
+                const int bareTrunkHeight = taigaSpruceBareTrunkHeight(originX, groundWorldY, originZ);
+
+                for (int trunkX = 0; trunkX < 2; ++trunkX)
+                {
+                    for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+                    {
+                        for (int dy = 1; dy <= trunkHeight; ++dy)
+                        {
+                            setOrQueueBlock(originX + trunkX,
+                                            groundWorldY + dy,
+                                            originZ + trunkZ,
+                                            BlockId::SpruceLog,
+                                            true);
+                        }
+                    }
+                }
+
+                const int canopyBaseWorld = groundWorldY + bareTrunkHeight + 1;
+                const int canopyTopWorld = groundWorldY + trunkHeight;
+                const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
+
+                for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+                {
+                    const int layerFromBottom = worldY - canopyBaseWorld;
+                    const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
+                    if (radius <= 0)
+                    {
+                        continue;
+                    }
+
+                    for (int worldX = originX - radius; worldX <= originX + 1 + radius; ++worldX)
+                    {
+                        for (int worldZ = originZ - radius; worldZ <= originZ + 1 + radius; ++worldZ)
+                        {
+                            if (!taigaSpruceLeafOccupiesCell(originX,
+                                                             originZ,
+                                                             worldX,
+                                                             worldZ,
+                                                             radius,
+                                                             layerFromBottom,
+                                                             totalLayers))
+                            {
+                                continue;
+                            }
+
+                            setOrQueueBlock(worldX, worldY, worldZ, BlockId::SpruceLeaves, false);
+                        }
+                    }
+                }
+
+                const int crownWorldY = canopyTopWorld + 1;
+                for (int trunkX = 0; trunkX < 2; ++trunkX)
+                {
+                    for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+                    {
+                        setOrQueueBlock(originX + trunkX,
+                                        crownWorldY,
+                                        originZ + trunkZ,
+                                        BlockId::SpruceLeaves,
+                                        false);
+                    }
+                }
+            };
 
             for (int worldX = minWorldX; worldX <= maxWorldX; ++worldX)
             {
                 for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
                 {
                     const ColumnSample columnSample = getLocalColumnSample(worldX, worldZ);
+                    if (!columnSample.dominantBiome)
+                    {
+                        continue;
+                    }
+
                     const BiomeDefinition& biome = *columnSample.dominantBiome;
                     if (!biome.generatesTrees)
                     {
                         continue;
                     }
 
-                    constexpr float kTreeBiomeWeightThreshold = 0.55f;
                     if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
                     {
                         continue;
                     }
 
                     const int groundWorldY = columnSample.surfaceY;
+                    if (groundWorldY <= 2)
+                    {
+                        continue;
+                    }
+
+                    if (terrain::isTaigaBiome(biome))
+                    {
+                        if (!shouldSpawnTaigaSpruce(biome, worldX, groundWorldY, worldZ))
+                        {
+                            continue;
+                        }
+
+                        int taigaGroundWorldY = std::numeric_limits<int>::min();
+                        if (!canAnchorTaigaSpruce(worldX, worldZ, taigaGroundWorldY))
+                        {
+                            continue;
+                        }
+
+                        placeTaigaSpruce(worldX, worldZ, taigaGroundWorldY);
+                        continue;
+                    }
+
                     const int groundLocalY = groundWorldY - chunk.minWorldY;
                     if (groundLocalY < 0 || groundLocalY >= kChunkSizeY)
                     {
                         continue;
                     }
 
-                    if (groundLocalY <= 2)
-                    {
-                        continue;
-                    }
-
                     const int localX = worldX - baseWorldX;
                     const int localZ = worldZ - baseWorldZ;
+                    const BlockId resolvedSurfaceBlock = resolvedSurfaceBlockAt(worldX, worldZ, columnSample);
                     if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
                     {
                         const std::size_t blockIdx = blockIndex(localX, groundLocalY, localZ);
-                        if (chunk.blocks[blockIdx] != biome.surfaceBlock)
+                        if (chunk.blocks[blockIdx] != resolvedSurfaceBlock)
                         {
                             continue;
                         }
@@ -5946,10 +6389,10 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         continue;
                     }
 
-                    int trunkHeight = kTreeMinHeight +
+                    int trunkHeight = kDefaultTreeMinHeight +
                                       static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 1, worldZ) *
-                                                       static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
-                    trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
+                                                       static_cast<float>(kDefaultTreeMaxHeight - kDefaultTreeMinHeight + 1));
+                    trunkHeight = std::clamp(trunkHeight, kDefaultTreeMinHeight, kDefaultTreeMaxHeight);
 
                     for (int dy = 0; dy < trunkHeight; ++dy)
                     {

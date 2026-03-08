@@ -1,0 +1,40 @@
+id = "taiga"
+name = "Taiga"
+surface_block = "grass"
+filler_block = "grass"
+generates_trees = true
+tree_density_multiplier = 1.6
+radius = 300.0
+radius_variation = 70.0
+spawn_chance = 0.95
+min_height = 30
+max_height = 72
+roughness = 0.55
+hills = 0.35
+min_height_limit = 24
+max_height_limit = 84
+base_slope_bias = 0.42
+max_gradient = 10.0
+footprint_multiplier = 1.0
+flags = ["land"]
+coast_profile = "gentle_beach"
+smooth_beaches = true
+keep_original_terrain = 0.58
+properties = ["cold", "land", "wet", "overgrown"]
+
+[soil_creep]
+strength = 0.36
+max_step = 2
+max_depth = 3
+
+[stripes]
+enabled = false
+block = "grass"
+period = 6
+thickness = 1
+noise_threshold = 0.5
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

@@ -224,7 +224,9 @@ float4 main(PSInput input) : SV_TARGET
 
     float2 tileUv = frac(input.tileCoord);
     float2 atlasUv = input.atlasBase + input.atlasSize * tileUv;
-    float3 textureColor = gAtlas.Sample(gSampler, atlasUv).rgb;
+    float4 textureSample = gAtlas.Sample(gSampler, atlasUv);
+    clip(textureSample.a - 0.5f);
+    float3 textureColor = textureSample.rgb;
     float3 color = textureColor * (ambient + diff) + float3(0.1f, 0.1f, 0.1f) * spec;
 
     if (uParams.z > 0.5f)
@@ -274,7 +276,9 @@ float4 main(PSInput input) : SV_TARGET
 
     float2 tileUv = frac(input.tileCoord);
     float2 atlasUv = input.atlasBase + input.atlasSize * tileUv;
-    float3 textureColor = gAtlas.Sample(gSampler, atlasUv).rgb;
+    float4 textureSample = gAtlas.Sample(gSampler, atlasUv);
+    clip(textureSample.a - 0.5f);
+    float3 textureColor = textureSample.rgb;
     float3 litColor = textureColor * (ambient + diff * 0.55f);
 
     float horizontalDistance = distance(input.worldPos, uCameraPos.xyz);

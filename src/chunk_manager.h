@@ -112,6 +112,9 @@ enum class BlockId : std::uint8_t
     Sand = 4,
     Water = 5,
     Stone = 6,
+    SpruceLog = 7,
+    SpruceLeaves = 8,
+    Podzol = 9,
     Count
 };
 

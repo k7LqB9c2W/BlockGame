@@ -52,6 +52,42 @@ float hashToUnitFloat(int x, int y, int z) noexcept
     return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
 }
 
+float smoothStep(float t) noexcept
+{
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float valueNoise2D(float x, float z, float frequency, int seed) noexcept
+{
+    const float sampleX = x * frequency;
+    const float sampleZ = z * frequency;
+    const int x0 = static_cast<int>(std::floor(sampleX));
+    const int z0 = static_cast<int>(std::floor(sampleZ));
+    const int x1 = x0 + 1;
+    const int z1 = z0 + 1;
+
+    const float tx = smoothStep(sampleX - static_cast<float>(x0));
+    const float tz = smoothStep(sampleZ - static_cast<float>(z0));
+
+    const float v00 = hashToUnitFloat(x0 + seed * 17, seed * 31, z0 - seed * 13);
+    const float v10 = hashToUnitFloat(x1 + seed * 17, seed * 31, z0 - seed * 13);
+    const float v01 = hashToUnitFloat(x0 + seed * 17, seed * 31, z1 - seed * 13);
+    const float v11 = hashToUnitFloat(x1 + seed * 17, seed * 31, z1 - seed * 13);
+
+    const float ix0 = std::lerp(v00, v10, tx);
+    const float ix1 = std::lerp(v01, v11, tx);
+    return std::lerp(ix0, ix1, tz);
+}
+
+float taigaPodzolNoise(int worldX, int worldZ) noexcept
+{
+    const float broad = valueNoise2D(static_cast<float>(worldX), static_cast<float>(worldZ), 1.0f / 16.0f, 19);
+    const float medium = valueNoise2D(static_cast<float>(worldX), static_cast<float>(worldZ), 1.0f / 8.0f, 37);
+    const float detail = valueNoise2D(static_cast<float>(worldX), static_cast<float>(worldZ), 1.0f / 4.0f, 73);
+    return broad * 0.55f + medium * 0.30f + detail * 0.15f;
+}
+
 constexpr bool kEnableTerrainDebugLogs = true;
 
 void logTerrainAnomaly(const char* tag,
@@ -124,6 +160,62 @@ void logTerrainAnomaly(const char* tag,
 }
 
 } // namespace
+
+bool isTaigaBiome(const BiomeDefinition& biome) noexcept
+{
+    return biome.id == "taiga";
+}
+
+TerrainColumnBlocks resolveTerrainColumnBlocks(const BiomeDefinition& biome,
+                                               const ColumnSample& sample,
+                                               int worldX,
+                                               int worldZ,
+                                               int seaLevel) noexcept
+{
+    TerrainColumnBlocks result{biome.surfaceBlock, biome.fillerBlock};
+
+    const bool nearSeaLevel = std::abs(sample.surfaceY - seaLevel) <= 2;
+    constexpr float kBeachDistanceRange = 6.0f;
+    if (!biome.isOcean() && nearSeaLevel && std::isfinite(sample.distanceToShore)
+        && sample.distanceToShore <= kBeachDistanceRange)
+    {
+        const float noise = hashToUnitFloat(worldX, sample.surfaceY, worldZ);
+        if (biome.terrainSettings.smoothBeaches)
+        {
+            const float shorelineWeight = 1.0f - std::clamp(sample.distanceToShore / kBeachDistanceRange, 0.0f, 1.0f);
+            const float sandProbability = glm::mix(0.4f, 0.95f, shorelineWeight);
+            if (noise <= sandProbability)
+            {
+                result.surfaceBlock = BlockId::Sand;
+                result.fillerBlock = BlockId::Sand;
+            }
+            else if (noise < sandProbability + 0.1f)
+            {
+                result.fillerBlock = BlockId::Sand;
+            }
+        }
+        else
+        {
+            result.surfaceBlock = noise < 0.55f ? BlockId::Sand : result.surfaceBlock;
+            result.fillerBlock = BlockId::Sand;
+        }
+    }
+
+    if (isTaigaBiome(biome) && result.surfaceBlock != BlockId::Sand)
+    {
+        const float patchNoise = taigaPodzolNoise(worldX, worldZ);
+        const float patchSelector = hashToUnitFloat(worldX, sample.surfaceY * 23 + 11, worldZ);
+        const bool usePodzol =
+            patchNoise > 0.67f || (patchNoise > 0.59f && patchSelector > 0.45f);
+        if (usePodzol)
+        {
+            result.surfaceBlock = BlockId::Podzol;
+            result.fillerBlock = BlockId::Podzol;
+        }
+    }
+
+    return result;
+}
 
 TerrainGenerator::TerrainGenerator(const ClimateMap& climateMap,
                                    const SurfaceMap& surfaceMap,
@@ -293,35 +385,11 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                 }
             }
 
-            BlockId surfaceBlock = biome.surfaceBlock;
-            BlockId fillerBlock = biome.fillerBlock;
-
-            const bool nearSeaLevel = std::abs(adjustedSurfaceY - seaLevel_) <= 2;
-            constexpr float kBeachDistanceRange = 6.0f;
-            if (!biome.isOcean() && nearSeaLevel && std::isfinite(sample.distanceToShore)
-                && sample.distanceToShore <= kBeachDistanceRange)
-            {
-                const float noise = hashToUnitFloat(worldX, adjustedSurfaceY, worldZ);
-                if (biome.terrainSettings.smoothBeaches)
-                {
-                    const float shorelineWeight = 1.0f - std::clamp(sample.distanceToShore / kBeachDistanceRange, 0.0f, 1.0f);
-                    const float sandProbability = glm::mix(0.4f, 0.95f, shorelineWeight);
-                    if (noise <= sandProbability)
-                    {
-                        surfaceBlock = BlockId::Sand;
-                        fillerBlock = BlockId::Sand;
-                    }
-                    else if (noise < sandProbability + 0.1f)
-                    {
-                        fillerBlock = BlockId::Sand;
-                    }
-                }
-                else
-                {
-                    surfaceBlock = noise < 0.55f ? BlockId::Sand : surfaceBlock;
-                    fillerBlock = BlockId::Sand;
-                }
-            }
+            sample.surfaceY = adjustedSurfaceY;
+            const TerrainColumnBlocks resolvedBlocks =
+                resolveTerrainColumnBlocks(biome, sample, worldX, worldZ, seaLevel_);
+            const BlockId surfaceBlock = resolvedBlocks.surfaceBlock;
+            const BlockId fillerBlock = resolvedBlocks.fillerBlock;
 
 
             const int highestSolidWorld = std::min(sample.slabHighestSolidY, maxWorldY);

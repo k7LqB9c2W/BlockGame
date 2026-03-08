@@ -73,6 +73,19 @@ struct ChunkGenerationSummary
     bool anySolid{false};
 };
 
+struct TerrainColumnBlocks
+{
+    BlockId surfaceBlock{};
+    BlockId fillerBlock{};
+};
+
+[[nodiscard]] bool isTaigaBiome(const BiomeDefinition& biome) noexcept;
+[[nodiscard]] TerrainColumnBlocks resolveTerrainColumnBlocks(const BiomeDefinition& biome,
+                                                            const ColumnSample& sample,
+                                                            int worldX,
+                                                            int worldZ,
+                                                            int seaLevel) noexcept;
+
 class TerrainGenerator
 {
 public:

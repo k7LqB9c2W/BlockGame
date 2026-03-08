@@ -1784,7 +1784,7 @@ private:
     std::condition_variable buildQueueCv_;
     std::deque<BuildJob> buildQueue_;
     std::unordered_set<FarTileKey, FarTileKeyHasher> queuedKeys_;
-    std::mutex completedMutex_;
+    mutable std::mutex completedMutex_;
     std::deque<BuildResult> completedBuilds_;
     std::vector<std::thread> workerThreads_;
     std::atomic<bool> stopWorkers_{false};

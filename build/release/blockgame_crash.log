@@ -1,0 +1,20 @@
+2026-03-07 17:42:16 - SEH crash
+2026-03-07 17:42:16 - stack:
+  [0] 0x7ff6a70f63e7
+  [1] 0x7ff6a70f1163
+  [2] 0x7ff972f3c507
+  [3] 0x7ff9754158d8
+  [4] 0x7ff9753fce46
+  [5] 0x7ff97541296f
+  [6] 0x7ff9753c2554
+  [7] 0x7ff97541147e
+  [8] 0x7ff6a71178d2
+  [9] 0x7ff6a710bd15
+  [10] 0x7ff6a7110749
+  [11] 0x7ff6a711e919
+  [12] 0x7ff6a71010ff
+  [13] 0x7ff972d01bb2
+  [14] 0x7ff973977374
+  [15] 0x7ff9753bcc91
+  exception code: 0xc0000005
+2026-03-07 17:42:16 - minidump: written to blockgame_crash.dmp

@@ -12,11 +12,9 @@ float4 main(PSInput input) : SV_TARGET
     const float3 origin = float3(0.0f, uAtmosphereHeights.x + altitudeKm, 0.0f);
     const float sunZenithCos = input.uv.x * 2.0f - 1.0f;
     const float sunZenithSin = sqrt(saturate(1.0f - sunZenithCos * sunZenithCos));
-    const float3 sunDir = normalize(float3(sunZenithSin, sunZenithCos, 0.0f));
-
     float3 secondOrder = 0.0f.xxx;
     float transferFactor = 0.0f;
-    const int directionCount = 16;
+    const int directionCount = 64;
 
     [loop]
     for (int i = 0; i < directionCount; ++i)
@@ -33,6 +31,7 @@ float4 main(PSInput input) : SV_TARGET
                                                     dir,
                                                     64.0f,
                                                     12,
+                                                    0.0f,
                                                     transmittance);
         secondOrder += radiance * (1.0f / (4.0f * PI));
         transferFactor += (1.0f - dot(transmittance, float3(0.333333f, 0.333333f, 0.333333f))) * (1.0f / directionCount);
@@ -40,6 +39,6 @@ float4 main(PSInput input) : SV_TARGET
 
     transferFactor = saturate(transferFactor * 0.35f);
     const float series = 1.0f / max(1.0f - transferFactor, 0.25f);
-    const float3 result = secondOrder * series * dot(sunDir, float3(0.0f, 1.0f, 0.0f)).xxx * 0.25f;
+    const float3 result = secondOrder * series * 0.25f;
     return float4(max(result, 0.0f.xxx), 1.0f);
 }

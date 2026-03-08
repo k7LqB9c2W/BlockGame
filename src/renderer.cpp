@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1316,6 +1317,155 @@ LoadedTexture Renderer::loadTexture(const char* path)
     return texture;
 }
 
+void Renderer::requestScreenshot(const std::filesystem::path& path)
+{
+    if (path.empty())
+    {
+        throwRenderError("screenshot path must not be empty");
+    }
+
+    if (path.has_parent_path())
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (ec)
+        {
+            throwRenderError("failed to create screenshot directory");
+        }
+    }
+
+    pendingScreenshotPath_ = path;
+    screenshotRequested_ = true;
+}
+
+void Renderer::ensureScreenshotReadbackBuffer()
+{
+    ID3D12Resource* backBuffer = renderTargets_[currentBackBufferIndex_].Get();
+    if (backBuffer == nullptr)
+    {
+        throwRenderError("backbuffer unavailable for screenshot capture");
+    }
+
+    const D3D12_RESOURCE_DESC backBufferDesc = backBuffer->GetDesc();
+    UINT64 requiredSize = 0;
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0;
+    device_->GetCopyableFootprints(&backBufferDesc,
+                                   0,
+                                   1,
+                                   0,
+                                   &screenshotReadbackLayout_,
+                                   &numRows,
+                                   &rowSizeInBytes,
+                                   &requiredSize);
+
+    if (!screenshotReadbackBuffer_ || screenshotReadbackBufferSize_ < requiredSize)
+    {
+        screenshotReadbackBuffer_.Reset();
+        const D3D12_HEAP_PROPERTIES readbackHeap = heapProps(D3D12_HEAP_TYPE_READBACK);
+        const D3D12_RESOURCE_DESC readbackDesc = bufferDesc(requiredSize);
+        throwIfFailed(device_->CreateCommittedResource(&readbackHeap,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &readbackDesc,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST,
+                                                       nullptr,
+                                                       IID_PPV_ARGS(&screenshotReadbackBuffer_)),
+                      "failed to create screenshot readback buffer");
+        screenshotReadbackBufferSize_ = requiredSize;
+    }
+}
+
+void Renderer::writePendingScreenshot(const std::filesystem::path& path)
+{
+    if (!screenshotReadbackBuffer_)
+    {
+        throwRenderError("screenshot readback buffer unavailable");
+    }
+
+#pragma pack(push, 1)
+    struct BmpFileHeader
+    {
+        std::uint16_t type{0x4D42};
+        std::uint32_t size{0};
+        std::uint16_t reserved1{0};
+        std::uint16_t reserved2{0};
+        std::uint32_t offset{0};
+    };
+
+    struct BmpInfoHeader
+    {
+        std::uint32_t size{40};
+        std::int32_t width{0};
+        std::int32_t height{0};
+        std::uint16_t planes{1};
+        std::uint16_t bitCount{32};
+        std::uint32_t compression{0};
+        std::uint32_t sizeImage{0};
+        std::int32_t xPixelsPerMeter{2835};
+        std::int32_t yPixelsPerMeter{2835};
+        std::uint32_t colorsUsed{0};
+        std::uint32_t colorsImportant{0};
+    };
+#pragma pack(pop)
+
+    const UINT width = static_cast<UINT>(std::max(width_, 1));
+    const UINT height = static_cast<UINT>(std::max(height_, 1));
+    const std::size_t dstRowSize = static_cast<std::size_t>(width) * 4u;
+    const std::size_t pixelBytes = dstRowSize * static_cast<std::size_t>(height);
+
+    BmpFileHeader fileHeader;
+    fileHeader.offset = static_cast<std::uint32_t>(sizeof(BmpFileHeader) + sizeof(BmpInfoHeader));
+    fileHeader.size = fileHeader.offset + static_cast<std::uint32_t>(pixelBytes);
+
+    BmpInfoHeader infoHeader;
+    infoHeader.width = static_cast<std::int32_t>(width);
+    infoHeader.height = static_cast<std::int32_t>(height);
+    infoHeader.sizeImage = static_cast<std::uint32_t>(pixelBytes);
+
+    D3D12_RANGE readRange{};
+    readRange.Begin = 0;
+    readRange.End = static_cast<SIZE_T>(screenshotReadbackLayout_.Offset +
+                                        screenshotReadbackLayout_.Footprint.RowPitch * height);
+    std::byte* mapped = nullptr;
+    throwIfFailed(screenshotReadbackBuffer_->Map(0, &readRange, reinterpret_cast<void**>(&mapped)),
+                  "failed to map screenshot readback buffer");
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+        screenshotReadbackBuffer_->Unmap(0, nullptr);
+        throwRenderError("failed to open screenshot output file");
+    }
+
+    out.write(reinterpret_cast<const char*>(&fileHeader), sizeof(fileHeader));
+    out.write(reinterpret_cast<const char*>(&infoHeader), sizeof(infoHeader));
+
+    std::vector<std::byte> row(dstRowSize);
+    for (int y = static_cast<int>(height) - 1; y >= 0; --y)
+    {
+        const std::byte* srcRow = mapped +
+                                  screenshotReadbackLayout_.Offset +
+                                  static_cast<std::size_t>(y) * screenshotReadbackLayout_.Footprint.RowPitch;
+        for (UINT x = 0; x < width; ++x)
+        {
+            const std::size_t srcIndex = static_cast<std::size_t>(x) * 4u;
+            const std::size_t dstIndex = static_cast<std::size_t>(x) * 4u;
+            row[dstIndex + 0] = srcRow[srcIndex + 2];
+            row[dstIndex + 1] = srcRow[srcIndex + 1];
+            row[dstIndex + 2] = srcRow[srcIndex + 0];
+            row[dstIndex + 3] = srcRow[srcIndex + 3];
+        }
+        out.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(row.size()));
+    }
+
+    screenshotReadbackBuffer_->Unmap(0, nullptr);
+
+    if (!out)
+    {
+        throwRenderError("failed while writing screenshot output");
+    }
+}
+
 void Renderer::ensureFrameStarted() const
 {
     if (!frameStarted_)
@@ -1713,9 +1863,44 @@ void Renderer::endFrame()
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList_.Get());
     }
 
-    const D3D12_RESOURCE_BARRIER barrier =
-        transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-    commandList_->ResourceBarrier(1, &barrier);
+    const bool captureThisFrame = screenshotRequested_ && !pendingScreenshotPath_.empty();
+    const std::filesystem::path screenshotPath = pendingScreenshotPath_;
+    if (captureThisFrame)
+    {
+        ensureScreenshotReadbackBuffer();
+
+        const D3D12_RESOURCE_BARRIER copyBarrier =
+            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                              D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              D3D12_RESOURCE_STATE_COPY_SOURCE);
+        commandList_->ResourceBarrier(1, &copyBarrier);
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = renderTargets_[currentBackBufferIndex_].Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = screenshotReadbackBuffer_.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = screenshotReadbackLayout_;
+
+        commandList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        const D3D12_RESOURCE_BARRIER presentBarrier =
+            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                              D3D12_RESOURCE_STATE_COPY_SOURCE,
+                              D3D12_RESOURCE_STATE_PRESENT);
+        commandList_->ResourceBarrier(1, &presentBarrier);
+    }
+    else
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                              D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              D3D12_RESOURCE_STATE_PRESENT);
+        commandList_->ResourceBarrier(1, &barrier);
+    }
     throwIfFailed(commandList_->Close(), "failed to close command list");
 
     ID3D12CommandList* lists[] = {commandList_.Get()};
@@ -1725,6 +1910,19 @@ void Renderer::endFrame()
     ++fenceValue_;
     throwIfFailed(commandQueue_->Signal(fence_.Get(), fenceValue_), "failed to signal frame fence");
     frameResources_[currentBackBufferIndex_].fenceValue = fenceValue_;
+
+    if (captureThisFrame)
+    {
+        if (fence_->GetCompletedValue() < fenceValue_)
+        {
+            throwIfFailed(fence_->SetEventOnCompletion(fenceValue_, fenceEvent_),
+                          "failed to wait for screenshot fence");
+            WaitForSingleObject(fenceEvent_, INFINITE);
+        }
+        writePendingScreenshot(screenshotPath);
+        screenshotRequested_ = false;
+        pendingScreenshotPath_.clear();
+    }
 
     frameStarted_ = false;
     imguiFrameStarted_ = false;

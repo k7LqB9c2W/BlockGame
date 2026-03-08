@@ -17,7 +17,8 @@ cbuffer AtmosphereConstants : register(b0)
 };
 
 static const float PI = 3.14159265f;
-static const float ATMOSPHERE_BRIGHTNESS = 0.05f;
+static const float ATMOSPHERE_BRIGHTNESS = 0.25f;
+static const float KM_TO_METERS = 1000.0f;
 
 struct PSInput
 {
@@ -32,6 +33,26 @@ struct MediumSample
     float ozoneDensity;
     float3 extinction;
 };
+
+float3 rayleighScatteringPerKm()
+{
+    return uRayleighScattering.rgb * KM_TO_METERS;
+}
+
+float3 mieScatteringPerKm()
+{
+    return uMieScattering.rgb * KM_TO_METERS;
+}
+
+float3 mieAbsorptionPerKm()
+{
+    return uMieAbsorption.rgb * KM_TO_METERS;
+}
+
+float3 ozoneAbsorptionPerKm()
+{
+    return uOzoneAbsorption.rgb * KM_TO_METERS;
+}
 
 float3 worldMetersToPlanetKm(float3 worldMeters)
 {
@@ -69,9 +90,9 @@ MediumSample sampleMedium(float3 planetPosKm)
     sample.mieDensity = exp(-altitudeKm / max(uAtmosphereHeights.w, 0.001f));
     sample.ozoneDensity = saturate(1.0f - abs(altitudeKm - uOzoneAndPhase.x) / max(uOzoneAndPhase.y, 0.001f));
     sample.extinction =
-        sample.rayleighDensity * uRayleighScattering.rgb +
-        sample.mieDensity * (uMieScattering.rgb + uMieAbsorption.rgb) +
-        sample.ozoneDensity * uOzoneAbsorption.rgb;
+        sample.rayleighDensity * rayleighScatteringPerKm() +
+        sample.mieDensity * (mieScatteringPerKm() + mieAbsorptionPerKm()) +
+        sample.ozoneDensity * ozoneAbsorptionPerKm();
     return sample;
 }
 
@@ -149,6 +170,7 @@ float3 sampleSkyScattering(Texture2D transLut,
                            float3 dir,
                            float maxDistanceKm,
                            int stepCount,
+                           float multiScatterWeight,
                            out float3 outTransmittance)
 {
     const float3 originKm = worldMetersToPlanetKm(originMeters);
@@ -188,9 +210,9 @@ float3 sampleSkyScattering(Texture2D transLut,
         const float3 multiScatter = sampleMultiScatteringLut(multiLut, linearClamp, altitudeKm, sunCos);
         const float cosTheta = dot(dir, normalize(uSunDirection.xyz));
         const float3 singleScatter =
-            medium.rayleighDensity * uRayleighScattering.rgb * rayleighPhase(cosTheta) +
-            medium.mieDensity * uMieScattering.rgb * miePhase(cosTheta);
-        const float3 scatter = singleScatter + multiScatter * (medium.rayleighDensity + medium.mieDensity) * 0.15f;
+            medium.rayleighDensity * rayleighScatteringPerKm() * rayleighPhase(cosTheta) +
+            medium.mieDensity * mieScatteringPerKm() * miePhase(cosTheta);
+        const float3 scatter = singleScatter + multiScatter * (medium.rayleighDensity + medium.mieDensity) * multiScatterWeight;
         inscattering += transmittance * transToSun * scatter * uSunIlluminance.rgb * stepSize;
         transmittance *= exp(-medium.extinction * stepSize);
     }
@@ -206,5 +228,5 @@ float3 sampleSkyLuminance(Texture2D transLut,
                           float3 dir)
 {
     float3 transmittance = 1.0f.xxx;
-    return sampleSkyScattering(transLut, multiLut, linearClamp, originMeters, dir, 128.0f, 24, transmittance);
+    return sampleSkyScattering(transLut, multiLut, linearClamp, originMeters, dir, 128.0f, 24, 0.15f, transmittance);
 }

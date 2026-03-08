@@ -15,6 +15,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
@@ -56,7 +57,7 @@ struct AtmosphereSettings
 
 struct TonemapSettings
 {
-    float exposure{0.85f};
+    float exposure{0.75f};
     float whitePoint{10.0f};
 };
 
@@ -118,6 +119,7 @@ public:
                      const glm::vec3& cameraPos,
                      const LoadedTexture& atlasTexture,
                      const EnvironmentState& environment);
+    void requestScreenshot(const std::filesystem::path& path);
     void endFrame();
 
     [[nodiscard]] int width() const noexcept;
@@ -205,6 +207,8 @@ private:
     void destroyFrameResources();
     void createSceneColor();
     void destroySceneColor();
+    void ensureScreenshotReadbackBuffer();
+    void writePendingScreenshot(const std::filesystem::path& path);
     void renderShadowMap(const WorldRenderData& renderData,
                          const glm::mat4& view,
                          const glm::vec3& cameraPos,
@@ -248,8 +252,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> sceneColor_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> screenshotReadbackBuffer_;
     D3D12_RESOURCE_STATES shadowMapState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES sceneColorState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT screenshotReadbackLayout_{};
 
     D3D12_CPU_DESCRIPTOR_HANDLE depthDsv_{};
     D3D12_CPU_DESCRIPTOR_HANDLE shadowMapDsv_{};
@@ -267,10 +273,13 @@ private:
     UINT dsvDescriptorSize_{0};
     UINT srvDescriptorSize_{0};
     int shadowMapSrvIndex_{-1};
+    UINT64 screenshotReadbackBufferSize_{0};
     std::vector<bool> srvSlotsInUse_{};
     D3D12_VIEWPORT viewport_{};
     D3D12_RECT scissorRect_{};
     RendererProfilingSnapshot profilingSnapshot_{};
+    std::filesystem::path pendingScreenshotPath_{};
+    bool screenshotRequested_{false};
 
     struct AtmosphereRenderer;
     std::unique_ptr<AtmosphereRenderer> atmosphere_;

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <condition_variable>
 #include <csignal>
 #include <cstddef>
@@ -238,6 +239,132 @@ int __cdecl crtReportHook(int reportType, char* message, int*)
     return FALSE; // allow default processing
 }
 #endif
+
+[[nodiscard]] bool envFlagEnabled(const char* name)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+    {
+        return false;
+    }
+
+    std::string lower(value);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lower != "0" && lower != "false" && lower != "off" && lower != "no";
+}
+
+[[nodiscard]] float envFloatOrDefault(const char* name, float fallback)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+    {
+        return fallback;
+    }
+
+    char* end = nullptr;
+    const float parsed = std::strtof(value, &end);
+    return (end != value) ? parsed : fallback;
+}
+
+struct ScreenshotSweepConfig
+{
+    bool enabled{false};
+    std::filesystem::path outputDir{};
+    int initialSettleFrames{180};
+    int settleFramesPerCapture{18};
+    float heightOffsetBlocks{96.0f};
+    std::vector<float> pitches{-8.0f, -4.0f, -2.0f, 0.0f, 2.0f, 4.0f, 8.0f, 15.0f, 30.0f, 45.0f};
+    std::vector<float> yaws{0.0f, 30.0f, 60.0f, 90.0f, 120.0f, 150.0f, 180.0f, 210.0f, 240.0f, 270.0f, 300.0f, 330.0f};
+};
+
+struct ScreenshotSweepState
+{
+    bool initialized{false};
+    glm::vec3 anchorPosition{0.0f};
+    std::size_t poseIndex{0};
+    int waitFramesRemaining{0};
+    std::ofstream manifest;
+};
+
+[[nodiscard]] ScreenshotSweepConfig loadScreenshotSweepConfig()
+{
+    ScreenshotSweepConfig config;
+    config.enabled = envFlagEnabled("BLOCKGAME_SCREENSHOT_SWEEP");
+    if (!config.enabled)
+    {
+        return config;
+    }
+
+    if (const char* pathValue = std::getenv("BLOCKGAME_SCREENSHOT_SWEEP_DIR"))
+    {
+        config.outputDir = pathValue;
+    }
+
+    if (config.outputDir.empty())
+    {
+        std::error_code ec;
+        std::filesystem::path cwd = std::filesystem::current_path(ec);
+        if (ec)
+        {
+            cwd = ".";
+        }
+        config.outputDir = cwd / "artifacts" / "horizon_sweep";
+    }
+
+    config.heightOffsetBlocks = envFloatOrDefault("BLOCKGAME_SCREENSHOT_SWEEP_HEIGHT_OFFSET",
+                                                  config.heightOffsetBlocks);
+
+    return config;
+}
+
+[[nodiscard]] std::size_t screenshotSweepPoseCount(const ScreenshotSweepConfig& config) noexcept
+{
+    return config.pitches.size() * config.yaws.size();
+}
+
+[[nodiscard]] float screenshotSweepPitchForIndex(const ScreenshotSweepConfig& config, std::size_t poseIndex)
+{
+    return config.pitches[poseIndex / config.yaws.size()];
+}
+
+[[nodiscard]] float screenshotSweepYawForIndex(const ScreenshotSweepConfig& config, std::size_t poseIndex)
+{
+    return config.yaws[poseIndex % config.yaws.size()];
+}
+
+void applyScreenshotSweepPose(Camera& camera,
+                              const glm::vec3& anchorPosition,
+                              float yawDegrees,
+                              float pitchDegrees)
+{
+    camera.position = anchorPosition;
+    camera.velocity = glm::vec3(0.0f);
+    camera.onGround = true;
+    camera.yaw = yawDegrees;
+    camera.pitch = std::clamp(pitchDegrees, -89.0f, 89.0f);
+    camera.updateVectors();
+}
+
+[[nodiscard]] std::string screenshotSweepPoseLabel(std::size_t poseIndex, float yawDegrees, float pitchDegrees)
+{
+    const auto formatSigned = [](float value) -> std::string
+    {
+        std::ostringstream part;
+        part << (value >= 0.0f ? 'p' : 'm')
+             << std::setfill('0') << std::setw(3)
+             << static_cast<int>(std::abs(std::round(value)));
+        return part.str();
+    };
+
+    std::ostringstream name;
+    name << "pose_" << std::setfill('0') << std::setw(3) << poseIndex
+         << "_yaw_" << formatSigned(yawDegrees)
+         << "_pitch_" << formatSigned(pitchDegrees)
+         << ".bmp";
+    return name.str();
+}
 
 void initializeCrashLogging(const std::filesystem::path& logPath)
 {
@@ -727,6 +854,37 @@ int runGame()
     }
 
     EnvironmentState environment{};
+    const ScreenshotSweepConfig screenshotSweepConfig = loadScreenshotSweepConfig();
+    ScreenshotSweepState screenshotSweepState{};
+    if (screenshotSweepConfig.enabled)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(screenshotSweepConfig.outputDir, ec);
+        if (ec)
+        {
+            std::cerr << "Failed to create screenshot sweep directory: "
+                      << screenshotSweepConfig.outputDir << std::endl;
+            renderer.shutdown();
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return EXIT_FAILURE;
+        }
+
+        screenshotSweepState.manifest.open(screenshotSweepConfig.outputDir / "captures.csv",
+                                           std::ios::trunc);
+        if (!screenshotSweepState.manifest)
+        {
+            std::cerr << "Failed to open screenshot sweep manifest in "
+                      << screenshotSweepConfig.outputDir << std::endl;
+            renderer.shutdown();
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return EXIT_FAILURE;
+        }
+        screenshotSweepState.manifest << "file,yaw,pitch,pos_x,pos_y,pos_z\n";
+        std::cout << "Screenshot sweep enabled. Output: "
+                  << screenshotSweepConfig.outputDir << std::endl;
+    }
 
     LoadedTexture blockAtlas;
     try
@@ -984,20 +1142,27 @@ int runGame()
         auto* inputContextPtr = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
         if (playerReleased)
         {
-            while (accumulator >= kFixedTimeStep)
+            if (screenshotSweepConfig.enabled)
             {
-                if (inputContextPtr)
+                accumulator = 0.0;
+            }
+            else
+            {
+                while (accumulator >= kFixedTimeStep)
                 {
-                    PlayerInputState inputState = computePlayerInputState(window, *inputContextPtr, camera, chunkManager);
-                    updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                    if (inputContextPtr)
+                    {
+                        PlayerInputState inputState = computePlayerInputState(window, *inputContextPtr, camera, chunkManager);
+                        updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                    }
+                    else
+                    {
+                        InputContext dummy;
+                        PlayerInputState inputState = computePlayerInputState(window, dummy, camera, chunkManager);
+                        updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                    }
+                    accumulator -= kFixedTimeStep;
                 }
-                else
-                {
-                    InputContext dummy;
-                    PlayerInputState inputState = computePlayerInputState(window, dummy, camera, chunkManager);
-                    updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
-                }
-                accumulator -= kFixedTimeStep;
             }
         }
         else
@@ -1032,6 +1197,60 @@ int runGame()
         }
         inputContext.leftMouseJustPressed = false;
         inputContext.rightMouseJustPressed = false;
+
+        bool screenshotSweepCaptureThisFrame = false;
+        std::filesystem::path screenshotSweepCapturePath;
+        if (screenshotSweepConfig.enabled && playerReleased)
+        {
+            inputContext.showDebugOverlay = false;
+            inputContext.cameraMouseCaptured = true;
+
+            if (!screenshotSweepState.initialized)
+            {
+                screenshotSweepState.initialized = true;
+                screenshotSweepState.anchorPosition = camera.position;
+                screenshotSweepState.anchorPosition.y += screenshotSweepConfig.heightOffsetBlocks;
+                screenshotSweepState.waitFramesRemaining = screenshotSweepConfig.initialSettleFrames;
+            }
+
+            const std::size_t totalSweepPoses = screenshotSweepPoseCount(screenshotSweepConfig);
+            if (screenshotSweepState.poseIndex >= totalSweepPoses)
+            {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+            else
+            {
+                const float sweepYaw =
+                    screenshotSweepYawForIndex(screenshotSweepConfig, screenshotSweepState.poseIndex);
+                const float sweepPitch =
+                    screenshotSweepPitchForIndex(screenshotSweepConfig, screenshotSweepState.poseIndex);
+                applyScreenshotSweepPose(camera,
+                                         screenshotSweepState.anchorPosition,
+                                         sweepYaw,
+                                         sweepPitch);
+
+                if (screenshotSweepState.waitFramesRemaining > 0)
+                {
+                    --screenshotSweepState.waitFramesRemaining;
+                }
+                else
+                {
+                    const std::string captureFileName =
+                        screenshotSweepPoseLabel(screenshotSweepState.poseIndex, sweepYaw, sweepPitch);
+                    screenshotSweepCapturePath = screenshotSweepConfig.outputDir / captureFileName;
+                    screenshotSweepCaptureThisFrame = true;
+                    screenshotSweepState.manifest << captureFileName << ','
+                                                 << sweepYaw << ','
+                                                 << sweepPitch << ','
+                                                 << camera.position.x << ','
+                                                 << camera.position.y << ','
+                                                 << camera.position.z << '\n';
+                    screenshotSweepState.manifest.flush();
+                    ++screenshotSweepState.poseIndex;
+                    screenshotSweepState.waitFramesRemaining = screenshotSweepConfig.settleFramesPerCapture;
+                }
+            }
+        }
 
         chunkManager.update(camera.position, camera.front());
 
@@ -1330,7 +1549,7 @@ int runGame()
             ImGui::End();
         }
 
-        if (!profilingOverlayText.empty())
+        if (!screenshotSweepConfig.enabled && !profilingOverlayText.empty())
         {
             ImGui::SetNextWindowPos(ImVec2(12.0f, inputContext.showDebugOverlay ? 220.0f : 12.0f), ImGuiCond_Always);
             ImGui::SetNextWindowBgAlpha(0.30f);
@@ -1343,7 +1562,12 @@ int runGame()
             ImGui::End();
         }
 
-        if (playerReleased && isGameplayMouseCaptured(inputContext))
+        if (screenshotSweepCaptureThisFrame)
+        {
+            renderer.requestScreenshot(screenshotSweepCapturePath);
+        }
+
+        if (!screenshotSweepConfig.enabled && playerReleased && isGameplayMouseCaptured(inputContext))
         {
             drawCrosshairOverlay(framebufferWidth, framebufferHeight);
         }

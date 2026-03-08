@@ -16,7 +16,7 @@ float4 main(PSInput input) : SV_TARGET
 
     float3 transmittance = 1.0f.xxx;
     const float3 inscattering =
-        sampleSkyScattering(gTransmittanceLut, gMultiScatteringLut, gLinearClamp, uCameraPos.xyz, dir, distanceKm, 16, transmittance);
+        sampleSkyScattering(gTransmittanceLut, gMultiScatteringLut, gLinearClamp, uCameraPos.xyz, dir, distanceKm, 16, 0.15f, transmittance);
     const float meanTransmittance = dot(transmittance, float3(0.333333f, 0.333333f, 0.333333f));
     const float blendedTransmittance = lerp(1.0f, saturate(meanTransmittance), saturate(sliceT));
     return float4(max(inscattering * 0.35f, 0.0f.xxx), blendedTransmittance);

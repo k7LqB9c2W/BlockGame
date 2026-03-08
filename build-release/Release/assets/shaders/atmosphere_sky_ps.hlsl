@@ -23,9 +23,22 @@ float blendRange(float value, float start, float end)
     return saturate((start - value) / max(start - end, 1e-4f));
 }
 
-float3 sampleSkyUpperHemisphere(float3 dir)
+float3 worldToSkyViewLocalDirection(float3 worldDir)
 {
-    const float3 safeDir = normalize(float3(dir.x, max(dir.y, 0.035f), dir.z));
+    return normalize(mul((float3x3)uView, normalize(worldDir)));
+}
+
+float3 sampleSkyView(float3 worldDir)
+{
+    const float3 localDir = worldToSkyViewLocalDirection(worldDir);
+    const float2 uv = directionToSkyUv(localDir);
+    return gSkyViewLut.SampleLevel(gLinearClamp, uv, 0.0f).rgb;
+}
+
+float3 sampleSkyUpperHemisphere(float3 worldDir)
+{
+    const float3 localDir = worldToSkyViewLocalDirection(worldDir);
+    const float3 safeDir = normalize(float3(localDir.x, max(localDir.y, 0.035f), localDir.z));
     float2 uv = directionToSkyUv(safeDir);
     uv.y = max(uv.y, 0.5f + SKY_LUT_SEAM_PADDING);
     return gSkyViewLut.SampleLevel(gLinearClamp, uv, 0.0f).rgb;
@@ -34,7 +47,7 @@ float3 sampleSkyUpperHemisphere(float3 dir)
 float4 main(PSInput input) : SV_TARGET
 {
     const float3 dir = reconstructWorldDirection(input.uv);
-    float3 color = sampleSkyUpperHemisphere(dir);
+    float3 color = sampleSkyView(dir);
 
     const float3 mirroredDir = normalize(float3(dir.x, max(abs(dir.y), 0.06f), dir.z));
     const float3 mirroredSky = sampleSkyUpperHemisphere(mirroredDir);
@@ -45,14 +58,16 @@ float4 main(PSInput input) : SV_TARGET
                                     float3(0.68f, 0.76f, 0.88f),
                                     sunHeight);
     const float3 horizonLift = max(horizonSky * 0.85f, mirroredSky * 0.65f);
-    const float3 lowerHemisphere = max(lerp(horizonLift, horizonTint, 0.18f),
-                                       horizonTint * 0.78f);
-    const float horizonBlend = blendRange(dir.y, 0.18f, -0.08f);
-    color = lerp(color, max(color, lowerHemisphere), horizonBlend);
+    const float3 groundedHaze = max(lerp(horizonLift, horizonTint, 0.18f),
+                                    horizonTint * 0.78f);
+    const float lowerDepth = saturate(-dir.y / 0.25f);
+    const float3 lowerHemisphere = lerp(horizonSky * 0.98f, groundedHaze, lowerDepth);
+    const float horizonLiftBlend = blendRange(dir.y, 0.08f, 0.0f);
+    color = lerp(color, max(color, horizonSky * 0.92f), horizonLiftBlend * 0.20f);
 
-    if (dir.y < 0.02f)
+    if (dir.y < 0.08f)
     {
-        const float groundBlend = blendRange(dir.y, 0.02f, -0.18f);
+        const float groundBlend = blendRange(dir.y, 0.08f, -0.20f);
         color = lerp(color, lowerHemisphere, groundBlend);
     }
 

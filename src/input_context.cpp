@@ -34,7 +34,7 @@ void mouseCallback(GLFWwindow* window, double xpos, double ypos)
     }
 
     const bool imguiCapturingMouse = ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse;
-    if (input->showRenderDistanceGUI || input->showTeleportGUI || imguiCapturingMouse)
+    if (!isGameplayMouseCaptured(*input) || imguiCapturingMouse)
     {
         input->firstMouse = true;
         return;
@@ -77,7 +77,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int /*mods*
     }
 
     const bool imguiCapturingMouse = ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse;
-    if (input->showRenderDistanceGUI || input->showTeleportGUI || imguiCapturingMouse)
+    if (!isGameplayMouseCaptured(*input) || imguiCapturingMouse)
     {
         input->leftMousePressed = false;
         input->leftMouseJustPressed = false;
@@ -131,7 +131,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     {
         inputContext.showRenderDistanceGUI = true;
         inputContext.inputBuffer.clear();
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        inputContext.firstMouse = true;
     }
 
     bool f2CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS);
@@ -141,7 +141,20 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     {
         inputContext.showTeleportGUI = true;
         inputContext.teleportBuffer.clear();
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        inputContext.firstMouse = true;
+    }
+
+    bool periodCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_PERIOD) == GLFW_PRESS);
+    inputContext.periodJustPressed = periodCurrentlyPressed && !inputContext.periodPressed;
+    inputContext.periodPressed = periodCurrentlyPressed;
+    if (inputContext.periodJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    {
+        inputContext.cameraMouseCaptured = !inputContext.cameraMouseCaptured;
+        inputContext.firstMouse = true;
+        inputContext.leftMousePressed = false;
+        inputContext.leftMouseJustPressed = false;
+        inputContext.rightMousePressed = false;
+        inputContext.rightMouseJustPressed = false;
     }
 
     bool f3CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
@@ -152,19 +165,11 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
         // F3 is handled by the main loop as a far-terrain toggle.
     }
 
-    if (inputContext.showRenderDistanceGUI)
-    {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-    }
+    const bool captureMouse = isGameplayMouseCaptured(inputContext);
+    glfwSetInputMode(window, GLFW_CURSOR, captureMouse ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 
-    if (inputContext.showTeleportGUI)
+    if (captureMouse)
     {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-    }
-
-    if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
-    {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         glm::vec3 forward = camera.front();
         forward.y = 0.0f;
         if (glm::length(forward) > kEpsilon)

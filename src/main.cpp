@@ -772,7 +772,7 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -974,10 +974,9 @@ int runGame()
             loadingOverlayText.clear();
         }
 
-        // Only close window with ESC if GUI is not active
-        // (ESC to close GUI is handled in computePlayerInputState)
+        // Only allow ESC to quit while the game has mouse/camera capture.
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS &&
-            !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+            isGameplayMouseCaptured(inputContext))
         {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
@@ -1011,7 +1010,7 @@ int runGame()
             // Update block highlighting based on crosshair
             chunkManager.updateHighlight(camera.position, camera.front());
 
-            if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.leftMouseJustPressed)
+            if (isGameplayMouseCaptured(inputContext) && inputContext.leftMouseJustPressed)
             {
                 RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
                 if (hit.hit)
@@ -1021,7 +1020,7 @@ int runGame()
                 inputContext.leftMouseJustPressed = false;
             }
 
-            if (!inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI && inputContext.rightMouseJustPressed)
+            if (isGameplayMouseCaptured(inputContext) && inputContext.rightMouseJustPressed)
             {
                 RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
                 if (hit.hit)
@@ -1080,6 +1079,20 @@ int runGame()
             environment.sunIlluminance = glm::mix(sunriseTint, middayTint, std::pow(daylight, 0.65f));
         };
         updateEnvironment();
+
+        const glm::vec3 viewDirection = glm::normalize(camera.front());
+        const float viewElevationDeg =
+            glm::degrees(std::asin(std::clamp(viewDirection.y, -1.0f, 1.0f)));
+        const float sunElevationDeg =
+            glm::degrees(std::asin(std::clamp(environment.sunDirection.y, -1.0f, 1.0f)));
+        const float sunViewDot =
+            glm::dot(glm::normalize(environment.sunDirection), viewDirection);
+        const float altitudeAboveGround =
+            camera.position.y - chunkManager.surfaceHeight(camera.position.x, camera.position.z);
+        const float fogSpanBlocks =
+            std::max(environment.farDistanceBlocks - environment.fogStartBlocks, 0.0f);
+        const bool nearHorizonView = std::abs(viewDirection.y) <= 0.08f;
+        const bool lookingBelowHorizon = viewDirection.y < 0.0f;
 
         renderer.beginFrame(glm::vec4(0.10f, 0.16f, 0.26f, 1.0f));
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
@@ -1200,9 +1213,12 @@ int runGame()
             ImGui::SetNextWindowPos(ImVec2(12.0f, 260.0f), ImGuiCond_Always);
             ImGui::SetNextWindowBgAlpha(0.85f);
             ImGui::Begin("Environment", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::TextUnformatted(inputContext.cameraMouseCaptured
+                                       ? "Press . to release the mouse for UI."
+                                       : "Press . again to return to camera look.");
             ImGui::Checkbox("Atmosphere", &environment.atmosphereEnabled);
             ImGui::SliderFloat("Time of Day", &environment.timeOfDay, 0.0f, 24.0f, "%.2f");
-            ImGui::SliderFloat("Exposure", &environment.tonemap.exposure, 0.25f, 2.5f, "%.2f");
+            ImGui::SliderFloat("Exposure", &environment.tonemap.exposure, 0.10f, 3.0f, "%.2f");
             ImGui::SliderFloat("White Point", &environment.tonemap.whitePoint, 2.0f, 16.0f, "%.2f");
             ImGui::SliderFloat("Aerial Distance (km)",
                                &environment.atmosphere.aerialPerspectiveDistanceKm,
@@ -1214,6 +1230,28 @@ int runGame()
                         environment.sunDirection.x,
                         environment.sunDirection.y,
                         environment.sunDirection.z);
+            ImGui::Separator();
+            ImGui::TextUnformatted("Pass Isolation");
+            ImGui::Checkbox("World Pass", &environment.debug.worldPassEnabled);
+            ImGui::Checkbox("Sky Pass", &environment.debug.skyPassEnabled);
+            ImGui::Checkbox("Aerial Perspective", &environment.debug.aerialPerspectiveEnabled);
+            ImGui::Checkbox("Fog Fallback", &environment.debug.fogFallbackEnabled);
+            ImGui::Checkbox("Shadows", &environment.debug.shadowsEnabled);
+            ImGui::Separator();
+            ImGui::TextUnformatted("View Diagnostics");
+            ImGui::Text("View Y: %.3f (%.1f deg)", viewDirection.y, viewElevationDeg);
+            ImGui::Text("Sun Y: %.3f (%.1f deg)", environment.sunDirection.y, sunElevationDeg);
+            ImGui::Text("View.Sun: %.3f", sunViewDot);
+            ImGui::Text("Above Ground: %.2f blocks", altitudeAboveGround);
+            ImGui::Text("Fog Start/Far: %.0f / %.0f", environment.fogStartBlocks, environment.farDistanceBlocks);
+            ImGui::Text("Fog Span: %.0f", fogSpanBlocks);
+            ImGui::Text("Near Horizon: %s", nearHorizonView ? "yes" : "no");
+            ImGui::Text("Looking Below Horizon: %s", lookingBelowHorizon ? "yes" : "no");
+            ImGui::Separator();
+            ImGui::TextUnformatted("How To Isolate");
+            ImGui::TextWrapped("1. Disable Sky Pass. If the band stays, it is not the sky dome.");
+            ImGui::TextWrapped("2. Disable Aerial Perspective. If the band disappears, the aerial LUT is the source.");
+            ImGui::TextWrapped("3. Disable Fog Fallback with Aerial Perspective off. If the band still stays, it is world-side shading or geometry.");
             ImGui::End();
         }
 
@@ -1305,7 +1343,7 @@ int runGame()
             ImGui::End();
         }
 
-        if (playerReleased && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+        if (playerReleased && isGameplayMouseCaptured(inputContext))
         {
             drawCrosshairOverlay(framebufferWidth, framebufferHeight);
         }

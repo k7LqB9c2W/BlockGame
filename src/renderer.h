@@ -56,8 +56,17 @@ struct AtmosphereSettings
 
 struct TonemapSettings
 {
-    float exposure{0.35f};
+    float exposure{0.85f};
     float whitePoint{10.0f};
+};
+
+struct RenderDebugSettings
+{
+    bool worldPassEnabled{true};
+    bool skyPassEnabled{true};
+    bool aerialPerspectiveEnabled{true};
+    bool fogFallbackEnabled{true};
+    bool shadowsEnabled{true};
 };
 
 struct EnvironmentState
@@ -70,6 +79,7 @@ struct EnvironmentState
     float farDistanceBlocks{4800.0f};
     AtmosphereSettings atmosphere{};
     TonemapSettings tonemap{};
+    RenderDebugSettings debug{};
 };
 
 struct RendererProfilingSnapshot

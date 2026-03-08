@@ -1433,6 +1433,11 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const glm::mat4 viewProj = proj * view;
     const glm::vec3 lightDir = glm::normalize(environment.sunDirection);
     const float daylight = std::clamp(lightDir.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    const bool skyPassEnabled = environment.atmosphereEnabled && environment.debug.skyPassEnabled;
+    const bool aerialPerspectiveEnabled =
+        environment.atmosphereEnabled && environment.debug.aerialPerspectiveEnabled;
+    const float fogStartBlocks =
+        environment.debug.fogFallbackEnabled ? environment.fogStartBlocks : environment.farDistanceBlocks;
     const glm::vec3 sunColor = environment.sunIlluminance * 0.18f;
     const glm::vec3 skyAmbient = glm::mix(glm::vec3(0.03f, 0.04f, 0.06f),
                                           glm::vec3(0.20f, 0.24f, 0.30f),
@@ -1446,24 +1451,31 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     nearConstants->lightDirection = glm::vec4(lightDir, 0.0f);
     nearConstants->cameraPos = glm::vec4(cameraPos, 0.0f);
     nearConstants->highlightedBlock = glm::vec4(glm::vec3(renderData.highlightedBlock), 0.0f);
-    nearConstants->params0 = glm::vec4(environment.atmosphereEnabled ? 1.0f : 0.0f,
+    nearConstants->params0 = glm::vec4(aerialPerspectiveEnabled ? 1.0f : 0.0f,
                                        renderData.hasHighlight ? 1.0f : 0.0f,
                                        1.0f / static_cast<float>(std::max(width_, 1)),
                                        1.0f / static_cast<float>(std::max(height_, 1)));
     nearConstants->params1 = glm::vec4(environment.atmosphere.aerialPerspectiveDistanceKm,
                                        static_cast<float>(kAerialPerspectiveSliceCount),
-                                       environment.fogStartBlocks,
+                                       fogStartBlocks,
                                        environment.farDistanceBlocks);
     nearConstants->sunColor = glm::vec4(sunColor, 0.0f);
     nearConstants->skyAmbient = glm::vec4(skyAmbient, 0.0f);
     nearConstants->groundAmbient = glm::vec4(groundAmbient, 0.0f);
     nearConstants->shadowParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    renderShadowMap(renderData, view, cameraPos, environment, *nearConstants);
+    if (environment.debug.shadowsEnabled)
+    {
+        renderShadowMap(renderData, view, cameraPos, environment, *nearConstants);
+    }
 
-    if (environment.atmosphereEnabled && atmosphere_)
+    if ((skyPassEnabled || aerialPerspectiveEnabled) && atmosphere_)
     {
         atmosphere_->update(*this, environment, view, proj, cameraPos);
+    }
+
+    if (skyPassEnabled && atmosphere_)
+    {
         atmosphere_->renderSky(*this, environment, view, proj, cameraPos);
     }
 
@@ -1478,42 +1490,45 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
     commandList_->SetGraphicsRootDescriptorTable(3, shadowMapSrvGpu_);
 
-    commandList_->SetPipelineState(nearPipelineState_.Get());
-    commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
-    for (const ChunkRenderBatch& batch : renderData.nearBatches)
+    if (environment.debug.worldPassEnabled)
     {
-        if (batch.indexCounts.empty())
+        commandList_->SetPipelineState(nearPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        for (const ChunkRenderBatch& batch : renderData.nearBatches)
         {
-            continue;
+            if (batch.indexCounts.empty())
+            {
+                continue;
+            }
+
+            commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
+            commandList_->IASetIndexBuffer(&batch.indexBufferView);
+            for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
+            {
+                commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+            }
         }
 
-        commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
-        commandList_->IASetIndexBuffer(&batch.indexBufferView);
-        for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
+        void* farCpu = nullptr;
+        const std::uint64_t farCb = allocateFrameConstantBytes(sizeof(WorldConstants), &farCpu);
+        auto* farConstants = static_cast<WorldConstants*>(farCpu);
+        *farConstants = *nearConstants;
+        farConstants->shadowParams.w = 0.0f;
+        commandList_->SetPipelineState(farPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, farCb);
+        for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
-            commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
-        }
-    }
+            if (batch.indexCounts.empty())
+            {
+                continue;
+            }
 
-    void* farCpu = nullptr;
-    const std::uint64_t farCb = allocateFrameConstantBytes(sizeof(WorldConstants), &farCpu);
-    auto* farConstants = static_cast<WorldConstants*>(farCpu);
-    *farConstants = *nearConstants;
-    farConstants->shadowParams.w = 0.0f;
-    commandList_->SetPipelineState(farPipelineState_.Get());
-    commandList_->SetGraphicsRootConstantBufferView(0, farCb);
-    for (const ChunkRenderBatch& batch : renderData.farBatches)
-    {
-        if (batch.indexCounts.empty())
-        {
-            continue;
-        }
-
-        commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
-        commandList_->IASetIndexBuffer(&batch.indexBufferView);
-        for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
-        {
-            commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+            commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
+            commandList_->IASetIndexBuffer(&batch.indexBufferView);
+            for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
+            {
+                commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+            }
         }
     }
     profilingSnapshot_.worldDrawMs =
@@ -1621,7 +1636,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
     shadowCenter.y += 24.0f;
 
     glm::vec3 lightUp = (std::abs(lightDir.y) > 0.95f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
-    glm::vec3 lightPos = shadowCenter - lightDir * kShadowDistance;
+    glm::vec3 lightPos = shadowCenter + lightDir * kShadowDistance;
     glm::mat4 lightView = glm::lookAtRH(lightPos, shadowCenter, lightUp);
 
     const float texelWorldSize = (2.0f * kShadowExtent) / static_cast<float>(kShadowMapResolution);
@@ -1630,7 +1645,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
     centerLightSpace.y = std::floor(centerLightSpace.y / texelWorldSize) * texelWorldSize;
     const glm::mat4 invLightView = glm::inverse(lightView);
     shadowCenter = glm::vec3(invLightView * glm::vec4(centerLightSpace.x, centerLightSpace.y, centerLightSpace.z, 1.0f));
-    lightPos = shadowCenter - lightDir * kShadowDistance;
+    lightPos = shadowCenter + lightDir * kShadowDistance;
     lightView = glm::lookAtRH(lightPos, shadowCenter, lightUp);
 
     const glm::mat4 lightProj = glm::orthoRH_ZO(-kShadowExtent,

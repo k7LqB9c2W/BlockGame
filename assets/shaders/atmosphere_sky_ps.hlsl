@@ -6,6 +6,9 @@ Texture2D gUnused2 : register(t2);
 
 SamplerState gLinearClamp : register(s0);
 
+static const float SKY_LUT_HEIGHT = 128.0f;
+static const float SKY_LUT_SEAM_PADDING = 1.5f / SKY_LUT_HEIGHT;
+
 float2 directionToSkyUv(float3 dir)
 {
     const float azimuth = atan2(dir.x, dir.z);
@@ -15,22 +18,41 @@ float2 directionToSkyUv(float3 dir)
     return float2(u, v);
 }
 
+float blendRange(float value, float start, float end)
+{
+    return saturate((start - value) / max(start - end, 1e-4f));
+}
+
+float3 sampleSkyUpperHemisphere(float3 dir)
+{
+    const float3 safeDir = normalize(float3(dir.x, max(dir.y, 0.035f), dir.z));
+    float2 uv = directionToSkyUv(safeDir);
+    uv.y = max(uv.y, 0.5f + SKY_LUT_SEAM_PADDING);
+    return gSkyViewLut.SampleLevel(gLinearClamp, uv, 0.0f).rgb;
+}
+
 float4 main(PSInput input) : SV_TARGET
 {
     const float3 dir = reconstructWorldDirection(input.uv);
-    const float2 skyUv = directionToSkyUv(dir);
-    float3 color = gSkyViewLut.SampleLevel(gLinearClamp, skyUv, 0.0f).rgb;
+    float3 color = sampleSkyUpperHemisphere(dir);
+
+    const float3 mirroredDir = normalize(float3(dir.x, max(abs(dir.y), 0.06f), dir.z));
+    const float3 mirroredSky = sampleSkyUpperHemisphere(mirroredDir);
+    const float3 horizonProbeDir = normalize(float3(dir.x, 0.12f, dir.z));
+    const float3 horizonSky = sampleSkyUpperHemisphere(horizonProbeDir);
+    const float sunHeight = saturate(uSunDirection.y * 0.5f + 0.5f);
+    const float3 horizonTint = lerp(float3(0.20f, 0.24f, 0.30f),
+                                    float3(0.68f, 0.76f, 0.88f),
+                                    sunHeight);
+    const float3 horizonLift = max(horizonSky * 0.85f, mirroredSky * 0.65f);
+    const float3 lowerHemisphere = max(lerp(horizonLift, horizonTint, 0.18f),
+                                       horizonTint * 0.78f);
+    const float horizonBlend = blendRange(dir.y, 0.18f, -0.08f);
+    color = lerp(color, max(color, lowerHemisphere), horizonBlend);
 
     if (dir.y < 0.02f)
     {
-        const float3 mirroredDir = normalize(float3(dir.x, max(abs(dir.y), 0.04f), dir.z));
-        const float3 mirroredSky = gSkyViewLut.SampleLevel(gLinearClamp, directionToSkyUv(mirroredDir), 0.0f).rgb;
-        const float sunHeight = saturate(uSunDirection.y * 0.5f + 0.5f);
-        const float3 horizonTint = lerp(float3(0.06f, 0.08f, 0.12f),
-                                        float3(0.20f, 0.26f, 0.34f),
-                                        sunHeight);
-        const float3 lowerHemisphere = lerp(horizonTint, mirroredSky * 0.35f + horizonTint * 0.65f, 0.5f);
-        const float groundBlend = smoothstep(0.02f, -0.12f, dir.y);
+        const float groundBlend = blendRange(dir.y, 0.02f, -0.18f);
         color = lerp(color, lowerHemisphere, groundBlend);
     }
 

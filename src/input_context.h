@@ -21,12 +21,15 @@ struct InputContext
     bool rightMouseJustPressed{false};
     bool nKeyPressed{false};
     bool nKeyJustPressed{false};
+    bool periodPressed{false};
+    bool periodJustPressed{false};
     bool f2Pressed{false};
     bool f2JustPressed{false};
     bool f1Pressed{false};
     bool f1JustPressed{false};
     bool f3Pressed{false};
     bool f3JustPressed{false};
+    bool cameraMouseCaptured{true};
     bool lodEnabled{false};
     bool showDebugOverlay{false};
     bool showRenderDistanceGUI{false};
@@ -34,6 +37,13 @@ struct InputContext
     std::string inputBuffer{};
     std::string teleportBuffer{};
 };
+
+[[nodiscard]] inline bool isGameplayMouseCaptured(const InputContext& inputContext) noexcept
+{
+    return inputContext.cameraMouseCaptured &&
+           !inputContext.showRenderDistanceGUI &&
+           !inputContext.showTeleportGUI;
+}
 
 struct PlayerInputState
 {

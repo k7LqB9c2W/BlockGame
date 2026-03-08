@@ -171,6 +171,201 @@ Microsoft::WRL::ComPtr<ID3D12Resource> createUploadBuffer(ID3D12Device* device,
     return resource;
 }
 
+Microsoft::WRL::ComPtr<ID3D12Resource> createDefaultBuffer(ID3D12Device* device,
+                                                           std::uint64_t sizeInBytes,
+                                                           D3D12_RESOURCE_STATES initialState)
+{
+    if (device == nullptr || sizeInBytes == 0)
+    {
+        return {};
+    }
+
+    D3D12_HEAP_PROPERTIES heapProps{};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProps.CreationNodeMask = 1;
+    heapProps.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = sizeInBytes;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    throwIfFailedDx(device->CreateCommittedResource(&heapProps,
+                                                    D3D12_HEAP_FLAG_NONE,
+                                                    &desc,
+                                                    initialState,
+                                                    nullptr,
+                                                    IID_PPV_ARGS(&resource)),
+                    "failed to create default buffer");
+    return resource;
+}
+
+D3D12_RESOURCE_BARRIER transitionBarrier(ID3D12Resource* resource,
+                                         D3D12_RESOURCE_STATES before,
+                                         D3D12_RESOURCE_STATES after) noexcept
+{
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    return barrier;
+}
+
+class UploadContext
+{
+public:
+    ~UploadContext()
+    {
+        shutdown();
+    }
+
+    void initialize(ID3D12Device* device)
+    {
+        shutdown();
+        if (device == nullptr)
+        {
+            return;
+        }
+
+        device_ = device;
+
+        D3D12_COMMAND_QUEUE_DESC queueDesc{};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        throwIfFailedDx(device_->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue_)),
+                        "failed to create upload command queue");
+        throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_)),
+                        "failed to create upload command allocator");
+        throwIfFailedDx(device_->CreateCommandList(0,
+                                                   D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                   allocator_.Get(),
+                                                   nullptr,
+                                                   IID_PPV_ARGS(&commandList_)),
+                        "failed to create upload command list");
+        throwIfFailedDx(commandList_->Close(), "failed to close initial upload command list");
+        throwIfFailedDx(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)),
+                        "failed to create upload fence");
+        fenceEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (fenceEvent_ == nullptr)
+        {
+            throw std::runtime_error("failed to create upload fence event");
+        }
+    }
+
+    void shutdown()
+    {
+        if (fenceEvent_ != nullptr)
+        {
+            CloseHandle(fenceEvent_);
+            fenceEvent_ = nullptr;
+        }
+        commandList_.Reset();
+        allocator_.Reset();
+        queue_.Reset();
+        fence_.Reset();
+        device_.Reset();
+        open_ = false;
+        hasCommands_ = false;
+    }
+
+    void begin()
+    {
+        if (device_ == nullptr)
+        {
+            return;
+        }
+        if (open_)
+        {
+            return;
+        }
+
+        throwIfFailedDx(allocator_->Reset(), "failed to reset upload command allocator");
+        throwIfFailedDx(commandList_->Reset(allocator_.Get(), nullptr), "failed to reset upload command list");
+        open_ = true;
+        hasCommands_ = false;
+    }
+
+    void transition(ID3D12Resource* resource,
+                    D3D12_RESOURCE_STATES before,
+                    D3D12_RESOURCE_STATES after)
+    {
+        if (!open_ || resource == nullptr || before == after)
+        {
+            return;
+        }
+
+        const D3D12_RESOURCE_BARRIER barrier = transitionBarrier(resource, before, after);
+        commandList_->ResourceBarrier(1, &barrier);
+        hasCommands_ = true;
+    }
+
+    void copyBuffer(ID3D12Resource* destination,
+                    std::uint64_t destinationOffset,
+                    ID3D12Resource* source,
+                    std::uint64_t sourceOffset,
+                    std::uint64_t sizeInBytes)
+    {
+        if (!open_ || destination == nullptr || source == nullptr || sizeInBytes == 0)
+        {
+            return;
+        }
+
+        commandList_->CopyBufferRegion(destination, destinationOffset, source, sourceOffset, sizeInBytes);
+        hasCommands_ = true;
+    }
+
+    void flush()
+    {
+        if (!open_)
+        {
+            return;
+        }
+
+        throwIfFailedDx(commandList_->Close(), "failed to close upload command list");
+        if (hasCommands_)
+        {
+            ID3D12CommandList* lists[] = {commandList_.Get()};
+            queue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
+
+            ++fenceValue_;
+            throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal upload fence");
+            if (fence_->GetCompletedValue() < fenceValue_)
+            {
+                throwIfFailedDx(fence_->SetEventOnCompletion(fenceValue_, fenceEvent_),
+                                "failed to wait for upload fence");
+                WaitForSingleObject(fenceEvent_, INFINITE);
+            }
+        }
+
+        open_ = false;
+        hasCommands_ = false;
+    }
+
+    [[nodiscard]] bool ready() const noexcept
+    {
+        return device_ != nullptr && queue_ != nullptr && allocator_ != nullptr && commandList_ != nullptr;
+    }
+
+private:
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    HANDLE fenceEvent_{nullptr};
+    UINT64 fenceValue_{0};
+    bool open_{false};
+    bool hasCommands_{false};
+};
+
 inline int floorDiv(int value, int divisor) noexcept
 {
     int quotient = value / divisor;
@@ -714,6 +909,7 @@ public:
     {
         stopWorkers();
         clear();
+        uploadContext_.shutdown();
     }
 
     void setEnabled(bool enabled)
@@ -771,6 +967,7 @@ public:
     void setDevice(ID3D12Device* device)
     {
         device_ = device;
+        uploadContext_.initialize(device_.Get());
         clear();
     }
 
@@ -967,6 +1164,8 @@ public:
         destroyBufferPages();
         builtTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
+        lastCollectMs_ = 0.0;
+        lastUploadMs_ = 0.0;
     }
 
     [[nodiscard]] int activeTileCount() const noexcept
@@ -991,6 +1190,16 @@ public:
     [[nodiscard]] int builtTilesLastUpdate() const noexcept
     {
         return builtTilesLastUpdate_;
+    }
+
+    [[nodiscard]] double lastCollectMs() const noexcept
+    {
+        return lastCollectMs_;
+    }
+
+    [[nodiscard]] double lastUploadMs() const noexcept
+    {
+        return lastUploadMs_;
     }
 
 private:
@@ -1027,10 +1236,14 @@ private:
 
         Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> vertexUploadBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> indexUploadBuffer;
         D3D12_VERTEX_BUFFER_VIEW vertexView{};
         D3D12_INDEX_BUFFER_VIEW indexView{};
         std::byte* mappedVertexData{nullptr};
         std::byte* mappedIndexData{nullptr};
+        D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
+        D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_INDEX_BUFFER};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
@@ -1213,12 +1426,18 @@ private:
         BufferPage page;
         page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
         page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
-        page.vertexBuffer = createUploadBuffer(device_.Get(),
-                                               static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
-                                               page.mappedVertexData);
-        page.indexBuffer = createUploadBuffer(device_.Get(),
-                                              static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
-                                              page.mappedIndexData);
+        page.vertexBuffer = createDefaultBuffer(device_.Get(),
+                                                static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        page.indexBuffer = createDefaultBuffer(device_.Get(),
+                                               static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                               D3D12_RESOURCE_STATE_INDEX_BUFFER);
+        page.vertexUploadBuffer = createUploadBuffer(device_.Get(),
+                                                     static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                                     page.mappedVertexData);
+        page.indexUploadBuffer = createUploadBuffer(device_.Get(),
+                                                    static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                                    page.mappedIndexData);
         page.vertexView.BufferLocation = page.vertexBuffer ? page.vertexBuffer->GetGPUVirtualAddress() : 0;
         page.vertexView.StrideInBytes = sizeof(Vertex);
         page.vertexView.SizeInBytes = static_cast<UINT>(page.vertexCapacity * sizeof(Vertex));
@@ -1369,6 +1588,8 @@ private:
         {
             page.vertexBuffer.Reset();
             page.indexBuffer.Reset();
+            page.vertexUploadBuffer.Reset();
+            page.indexUploadBuffer.Reset();
             page.mappedVertexData = nullptr;
             page.mappedIndexData = nullptr;
         }
@@ -1687,7 +1908,12 @@ private:
 
     void collectCompletedBuilds(double uploadBudgetMs)
     {
+        const auto collectStart = std::chrono::steady_clock::now();
         const auto uploadStart = std::chrono::steady_clock::now();
+        if (uploadContext_.ready())
+        {
+            uploadContext_.begin();
+        }
         while (true)
         {
             BuildResult result{};
@@ -1739,6 +1965,11 @@ private:
                 break;
             }
         }
+        uploadContext_.flush();
+        lastCollectMs_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - collectStart).count();
+        lastUploadMs_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadStart).count();
     }
 
     void uploadBuiltTile(FarTile& tile, const TileMesh& mesh)
@@ -1770,12 +2001,44 @@ private:
             std::memcpy(page.mappedVertexData + tile.vertexOffset * sizeof(Vertex),
                         mesh.vertices.data(),
                         mesh.vertices.size() * sizeof(Vertex));
+            if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
+            {
+                uploadContext_.transition(page.vertexBuffer.Get(),
+                                          page.vertexState,
+                                          D3D12_RESOURCE_STATE_COPY_DEST);
+                page.vertexState = D3D12_RESOURCE_STATE_COPY_DEST;
+                uploadContext_.copyBuffer(page.vertexBuffer.Get(),
+                                          static_cast<std::uint64_t>(tile.vertexOffset * sizeof(Vertex)),
+                                          page.vertexUploadBuffer.Get(),
+                                          static_cast<std::uint64_t>(tile.vertexOffset * sizeof(Vertex)),
+                                          static_cast<std::uint64_t>(mesh.vertices.size() * sizeof(Vertex)));
+                uploadContext_.transition(page.vertexBuffer.Get(),
+                                          page.vertexState,
+                                          D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                page.vertexState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+            }
         }
         if (page.mappedIndexData != nullptr && !mesh.indices.empty())
         {
             std::memcpy(page.mappedIndexData + tile.indexOffset * sizeof(std::uint32_t),
                         mesh.indices.data(),
                         mesh.indices.size() * sizeof(std::uint32_t));
+            if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
+            {
+                uploadContext_.transition(page.indexBuffer.Get(),
+                                          page.indexState,
+                                          D3D12_RESOURCE_STATE_COPY_DEST);
+                page.indexState = D3D12_RESOURCE_STATE_COPY_DEST;
+                uploadContext_.copyBuffer(page.indexBuffer.Get(),
+                                          static_cast<std::uint64_t>(tile.indexOffset * sizeof(std::uint32_t)),
+                                          page.indexUploadBuffer.Get(),
+                                          static_cast<std::uint64_t>(tile.indexOffset * sizeof(std::uint32_t)),
+                                          static_cast<std::uint64_t>(mesh.indices.size() * sizeof(std::uint32_t)));
+                uploadContext_.transition(page.indexBuffer.Get(),
+                                          page.indexState,
+                                          D3D12_RESOURCE_STATE_INDEX_BUFFER);
+                page.indexState = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+            }
         }
     }
 
@@ -1968,9 +2231,12 @@ private:
     std::uint64_t updateStamp_{0};
     int builtTilesLastUpdate_{0};
     double lastAverageBuildMs_{0.0};
+    double lastCollectMs_{0.0};
+    double lastUploadMs_{0.0};
     std::vector<LevelConfig> levels_;
     std::vector<BufferPage> bufferPages_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    UploadContext uploadContext_{};
     std::unordered_map<FarTileKey, FarTile, FarTileKeyHasher> tiles_;
     std::mutex configMutex_;
     SampleFn sampleFn_{};
@@ -2123,10 +2389,14 @@ private:
 
         Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> vertexUploadBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> indexUploadBuffer;
         D3D12_VERTEX_BUFFER_VIEW vertexView{};
         D3D12_INDEX_BUFFER_VIEW indexView{};
         std::byte* mappedVertexData{nullptr};
         std::byte* mappedIndexData{nullptr};
+        D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
+        D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_INDEX_BUFFER};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
@@ -2260,6 +2530,7 @@ private:
     std::vector<ChunkBufferPage> bufferPages_;
     mutable std::mutex bufferPageMutex_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    UploadContext uploadContext_{};
 
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
@@ -2288,6 +2559,7 @@ private:
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
     double uploadBudgetMsThisFrame_{4.0};
+    double updateMsLastFrame_{0.0};
     std::size_t lastUploadBytesUsed_{0};
     std::size_t pendingUploadsLastFrame_{0};
     int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
@@ -2624,11 +2896,13 @@ ChunkManager::Impl::~Impl()
     clear();
     farTerrainManager_.clear();
     destroyBufferPages();
+    uploadContext_.shutdown();
 }
 
 void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
 {
     device_ = device;
+    uploadContext_.initialize(device_.Get());
     farTerrainManager_.setDevice(device_.Get());
     destroyBufferPages();
 }
@@ -2776,6 +3050,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 
 void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cameraForward)
 {
+    const auto updateStart = std::chrono::steady_clock::now();
     if (glm::dot(cameraForward, cameraForward) > kEpsilon)
     {
         lastCameraForward_ = glm::normalize(cameraForward);
@@ -3057,16 +3332,16 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             break;
         }
     }
+
+    updateMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
 }
 
 WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) const
 {
     WorldRenderData renderData;
-    renderData.lightDirection = lightDirection_;
     renderData.highlightedBlock = highlightedBlock_;
     renderData.hasHighlight = hasHighlight_;
-    renderData.fogStart = static_cast<float>(renderSettings_.fogStartBlocks);
-    renderData.fogEnd = static_cast<float>(renderSettings_.farBlocks);
 
     std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
     {
@@ -4074,11 +4349,14 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
 
     snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
     snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
+    snapshot.updateMsLastFrame = updateMsLastFrame_;
     snapshot.uploadMsLastFrame = lastUploadMsUsed_;
     const std::size_t pendingUploads = pendingUploadsLastFrame_;
     snapshot.pendingUploadChunks = static_cast<int>(
         std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
     snapshot.farBuildMsAverage = farTerrainManager_.averageBuildMs();
+    snapshot.farCollectMsLastFrame = farTerrainManager_.lastCollectMs();
+    snapshot.farUploadMsLastFrame = farTerrainManager_.lastUploadMs();
     snapshot.farActiveTiles = farTerrainManager_.activeTileCount();
     snapshot.farDirtyTiles = farTerrainManager_.dirtyTileCount();
     snapshot.farShellTilesReady = farTerrainManager_.readyTileCount();
@@ -4348,12 +4626,18 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
     ChunkBufferPage page;
     page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
     page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
-    page.vertexBuffer = createUploadBuffer(device_.Get(),
-                                           static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
-                                           page.mappedVertexData);
-    page.indexBuffer = createUploadBuffer(device_.Get(),
-                                          static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
-                                          page.mappedIndexData);
+    page.vertexBuffer = createDefaultBuffer(device_.Get(),
+                                            static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    page.indexBuffer = createDefaultBuffer(device_.Get(),
+                                           static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                           D3D12_RESOURCE_STATE_INDEX_BUFFER);
+    page.vertexUploadBuffer = createUploadBuffer(device_.Get(),
+                                                 static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                                 page.mappedVertexData);
+    page.indexUploadBuffer = createUploadBuffer(device_.Get(),
+                                                static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                                page.mappedIndexData);
     page.vertexView.BufferLocation = page.vertexBuffer ? page.vertexBuffer->GetGPUVirtualAddress() : 0;
     page.vertexView.SizeInBytes = static_cast<UINT>(page.vertexCapacity * sizeof(Vertex));
     page.vertexView.StrideInBytes = sizeof(Vertex);
@@ -4598,6 +4882,8 @@ void ChunkManager::Impl::destroyBufferPages()
     {
         page.vertexBuffer.Reset();
         page.indexBuffer.Reset();
+        page.vertexUploadBuffer.Reset();
+        page.indexUploadBuffer.Reset();
         page.mappedVertexData = nullptr;
         page.mappedIndexData = nullptr;
     }
@@ -5205,6 +5491,10 @@ void ChunkManager::Impl::uploadReadyMeshes()
     std::size_t attempts = 0;
     const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
     const auto uploadStart = std::chrono::steady_clock::now();
+    if (uploadContext_.ready())
+    {
+        uploadContext_.begin();
+    }
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
@@ -5270,6 +5560,9 @@ void ChunkManager::Impl::uploadReadyMeshes()
             break;
         }
     }
+
+    uploadContext_.flush();
+
     if (initialBudget > remainingBudget)
     {
         lastUploadBytesUsed_ = initialBudget - remainingBudget;
@@ -5320,12 +5613,44 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                 std::memcpy(page.mappedVertexData + chunk.vertexOffset * sizeof(Vertex),
                             chunk.meshData.vertices.data(),
                             vertexCount * sizeof(Vertex));
+                if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
+                {
+                    uploadContext_.transition(page.vertexBuffer.Get(),
+                                              page.vertexState,
+                                              D3D12_RESOURCE_STATE_COPY_DEST);
+                    page.vertexState = D3D12_RESOURCE_STATE_COPY_DEST;
+                    uploadContext_.copyBuffer(page.vertexBuffer.Get(),
+                                              static_cast<std::uint64_t>(chunk.vertexOffset * sizeof(Vertex)),
+                                              page.vertexUploadBuffer.Get(),
+                                              static_cast<std::uint64_t>(chunk.vertexOffset * sizeof(Vertex)),
+                                              static_cast<std::uint64_t>(vertexCount * sizeof(Vertex)));
+                    uploadContext_.transition(page.vertexBuffer.Get(),
+                                              page.vertexState,
+                                              D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                    page.vertexState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+                }
             }
             if (page.mappedIndexData != nullptr && indexCount > 0)
             {
                 std::memcpy(page.mappedIndexData + chunk.indexOffset * sizeof(std::uint32_t),
                             chunk.meshData.indices.data(),
                             indexCount * sizeof(std::uint32_t));
+                if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
+                {
+                    uploadContext_.transition(page.indexBuffer.Get(),
+                                              page.indexState,
+                                              D3D12_RESOURCE_STATE_COPY_DEST);
+                    page.indexState = D3D12_RESOURCE_STATE_COPY_DEST;
+                    uploadContext_.copyBuffer(page.indexBuffer.Get(),
+                                              static_cast<std::uint64_t>(chunk.indexOffset * sizeof(std::uint32_t)),
+                                              page.indexUploadBuffer.Get(),
+                                              static_cast<std::uint64_t>(chunk.indexOffset * sizeof(std::uint32_t)),
+                                              static_cast<std::uint64_t>(indexCount * sizeof(std::uint32_t)));
+                    uploadContext_.transition(page.indexBuffer.Get(),
+                                              page.indexState,
+                                              D3D12_RESOURCE_STATE_INDEX_BUFFER);
+                    page.indexState = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+                }
             }
         }
     }

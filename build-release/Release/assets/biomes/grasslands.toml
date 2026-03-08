@@ -1,0 +1,49 @@
+id = "grasslands"
+name = "Grasslands"
+surface_block = "grass"
+filler_block = "grass"
+generates_trees = false
+tree_density_multiplier = 0.0
+radius = 360.0
+radius_variation = 90.0
+spawn_chance = 1.1
+min_height = 24
+max_height = 52
+roughness = 0.4
+hills = 0.1
+min_height_limit = 20
+max_height_limit = 54
+base_slope_bias = 0.65
+max_gradient = 6.0
+footprint_multiplier = 1.0
+flags = ["land"]
+coast_profile = "gentle_beach"
+smooth_beaches = true
+keep_original_terrain = 0.4
+properties = ["temperate", "land", "neither_wet_nor_dry", "balanced"]
+
+max_sub_biome_count = 1.5
+sub_biome_total_chance = 0.25
+
+[[sub_biomes]]
+id = "forest"
+chance = 0.25
+min_radius = 48.0
+max_radius = 140.0
+
+[soil_creep]
+strength = 0.3
+max_step = 2
+max_depth = 4
+
+[stripes]
+enabled = false
+block = "grass"
+period = 6
+thickness = 1
+noise_threshold = 0.5
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

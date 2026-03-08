@@ -1,8 +1,11 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,6 +23,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include "renderer.h"
@@ -28,6 +32,21 @@ namespace
 {
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthBufferFormat = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kShadowMapFormat = DXGI_FORMAT_R32_TYPELESS;
+constexpr DXGI_FORMAT kShadowMapDsvFormat = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kShadowMapSrvFormat = DXGI_FORMAT_R32_FLOAT;
+constexpr DXGI_FORMAT kSceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr DXGI_FORMAT kAtmosphereFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+constexpr UINT kFrameConstantBufferSize = 64u * 1024u;
+constexpr UINT kShadowMapResolution = 2048u;
+constexpr UINT kRtvIndexSceneColor = 2;
+constexpr UINT kRtvIndexTransmittance = 3;
+constexpr UINT kRtvIndexMultiScattering = 4;
+constexpr UINT kRtvIndexSkyView = 5;
+constexpr UINT kRtvIndexAerialPerspectiveBase = 6;
+constexpr UINT kAerialPerspectiveSliceCount = 32;
+constexpr UINT kRtvHeapCapacity = kRtvIndexAerialPerspectiveBase + kAerialPerspectiveSliceCount;
 
 [[noreturn]] void throwRenderError(const std::string& message)
 {
@@ -46,16 +65,42 @@ void throwIfFailed(HRESULT hr, const std::string& message)
 {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Alignment = 0;
     desc.Width = sizeInBytes;
     desc.Height = 1;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
     desc.Format = DXGI_FORMAT_UNKNOWN;
     desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
     desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    return desc;
+}
+
+[[nodiscard]] D3D12_RESOURCE_DESC texture2DDesc(DXGI_FORMAT format,
+                                                UINT width,
+                                                UINT height,
+                                                D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) noexcept
+{
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = flags;
+    return desc;
+}
+
+[[nodiscard]] D3D12_RESOURCE_DESC texture2DArrayDesc(DXGI_FORMAT format,
+                                                     UINT width,
+                                                     UINT height,
+                                                     UINT arraySize,
+                                                     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) noexcept
+{
+    D3D12_RESOURCE_DESC desc = texture2DDesc(format, width, height, flags);
+    desc.DepthOrArraySize = static_cast<UINT16>(arraySize);
     return desc;
 }
 
@@ -83,9 +128,9 @@ void throwIfFailed(HRESULT hr, const std::string& message)
     return barrier;
 }
 
-Microsoft::WRL::ComPtr<ID3DBlob> compileShader(const char* source,
-                                               const char* entryPoint,
-                                               const char* target)
+Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFile(const std::string& path,
+                                                       const char* entryPoint,
+                                                       const char* target)
 {
     UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifndef NDEBUG
@@ -94,20 +139,19 @@ Microsoft::WRL::ComPtr<ID3DBlob> compileShader(const char* source,
 
     Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
     Microsoft::WRL::ComPtr<ID3DBlob> errors;
-    const HRESULT hr = D3DCompile(source,
-                                  std::strlen(source),
-                                  nullptr,
-                                  nullptr,
-                                  nullptr,
-                                  entryPoint,
-                                  target,
-                                  flags,
-                                  0,
-                                  &bytecode,
-                                  &errors);
+    const std::wstring widePath = std::filesystem::path(path).wstring();
+    const HRESULT hr = D3DCompileFromFile(widePath.c_str(),
+                                          nullptr,
+                                          D3D_COMPILE_STANDARD_FILE_INCLUDE,
+                                          entryPoint,
+                                          target,
+                                          flags,
+                                          0,
+                                          &bytecode,
+                                          &errors);
     if (FAILED(hr))
     {
-        std::string message = "shader compilation failed";
+        std::string message = "shader compilation failed for " + path;
         if (errors)
         {
             message += ": ";
@@ -145,154 +189,119 @@ Microsoft::WRL::ComPtr<IDXGIAdapter1> chooseHardwareAdapter(IDXGIFactory6* facto
     return adapter;
 }
 
-const char* kWorldVertexShader = R"(
-cbuffer SceneConstants : register(b0)
+[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE rtvHandleAt(ID3D12DescriptorHeap* heap,
+                                                      UINT descriptorSize,
+                                                      UINT index) noexcept
 {
-    float4x4 uViewProj;
-    float4 uLightDirection;
-    float4 uCameraPos;
-    float4 uHighlightedBlock;
-    float4 uFogColor;
-    float4 uParams;
-};
-
-struct VSInput
-{
-    float3 position : POSITION;
-    float3 normal : NORMAL;
-    float2 tileCoord : TEXCOORD0;
-    float2 atlasBase : TEXCOORD1;
-    float2 atlasSize : TEXCOORD2;
-};
-
-struct VSOutput
-{
-    float4 position : SV_POSITION;
-    float3 worldPos : POSITION0;
-    float3 normal : NORMAL0;
-    float2 tileCoord : TEXCOORD0;
-    float2 atlasBase : TEXCOORD1;
-    float2 atlasSize : TEXCOORD2;
-};
-
-VSOutput main(VSInput input)
-{
-    VSOutput output;
-    output.worldPos = input.position;
-    output.normal = input.normal;
-    output.tileCoord = input.tileCoord;
-    output.atlasBase = input.atlasBase;
-    output.atlasSize = input.atlasSize;
-    output.position = mul(uViewProj, float4(input.position, 1.0f));
-    return output;
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = heap->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += static_cast<SIZE_T>(descriptorSize) * static_cast<SIZE_T>(index);
+    return handle;
 }
-)";
-
-const char* kNearPixelShader = R"(
-Texture2D gAtlas : register(t0);
-SamplerState gSampler : register(s0);
-
-cbuffer SceneConstants : register(b0)
-{
-    float4x4 uViewProj;
-    float4 uLightDirection;
-    float4 uCameraPos;
-    float4 uHighlightedBlock;
-    float4 uFogColor;
-    float4 uParams;
-};
-
-struct PSInput
-{
-    float4 position : SV_POSITION;
-    float3 worldPos : POSITION0;
-    float3 normal : NORMAL0;
-    float2 tileCoord : TEXCOORD0;
-    float2 atlasBase : TEXCOORD1;
-    float2 atlasSize : TEXCOORD2;
-};
-
-float4 main(PSInput input) : SV_TARGET
-{
-    float3 normal = normalize(input.normal);
-    float3 lightDir = normalize(-uLightDirection.xyz);
-    float3 viewDir = normalize(uCameraPos.xyz - input.worldPos);
-    float diff = max(dot(normal, lightDir), 0.0f);
-    float ambient = 0.35f;
-    float3 halfDir = normalize(lightDir + viewDir);
-    float spec = pow(max(dot(normal, halfDir), 0.0f), 32.0f);
-
-    float2 tileUv = frac(input.tileCoord);
-    float2 atlasUv = input.atlasBase + input.atlasSize * tileUv;
-    float4 textureSample = gAtlas.Sample(gSampler, atlasUv);
-    clip(textureSample.a - 0.5f);
-    float3 textureColor = textureSample.rgb;
-    float3 color = textureColor * (ambient + diff) + float3(0.1f, 0.1f, 0.1f) * spec;
-
-    if (uParams.z > 0.5f)
-    {
-        int3 currentBlock = int3(floor(input.worldPos));
-        int3 targetBlock = int3(uHighlightedBlock.xyz);
-        if (all(currentBlock == targetBlock))
-        {
-            color = min(color + float3(0.3f, 0.3f, 0.3f), float3(1.0f, 1.0f, 1.0f));
-        }
-    }
-
-    return float4(color, 1.0f);
-}
-)";
-
-const char* kFarPixelShader = R"(
-Texture2D gAtlas : register(t0);
-SamplerState gSampler : register(s0);
-
-cbuffer SceneConstants : register(b0)
-{
-    float4x4 uViewProj;
-    float4 uLightDirection;
-    float4 uCameraPos;
-    float4 uHighlightedBlock;
-    float4 uFogColor;
-    float4 uParams;
-};
-
-struct PSInput
-{
-    float4 position : SV_POSITION;
-    float3 worldPos : POSITION0;
-    float3 normal : NORMAL0;
-    float2 tileCoord : TEXCOORD0;
-    float2 atlasBase : TEXCOORD1;
-    float2 atlasSize : TEXCOORD2;
-};
-
-float4 main(PSInput input) : SV_TARGET
-{
-    float3 normal = normalize(input.normal);
-    float3 lightDir = normalize(-uLightDirection.xyz);
-    float diff = max(dot(normal, lightDir), 0.0f);
-    float ambient = 0.45f;
-
-    float2 tileUv = frac(input.tileCoord);
-    float2 atlasUv = input.atlasBase + input.atlasSize * tileUv;
-    float4 textureSample = gAtlas.Sample(gSampler, atlasUv);
-    clip(textureSample.a - 0.5f);
-    float3 textureColor = textureSample.rgb;
-    float3 litColor = textureColor * (ambient + diff * 0.55f);
-
-    float horizontalDistance = distance(input.worldPos, uCameraPos.xyz);
-    float fogFactor = 0.0f;
-    if (uParams.y > uParams.x)
-    {
-        fogFactor = saturate((horizontalDistance - uParams.x) / (uParams.y - uParams.x));
-    }
-
-    float3 color = lerp(litColor, uFogColor.rgb, fogFactor);
-    return float4(color, 1.0f);
-}
-)";
 } // namespace
+
+struct Renderer::AtmosphereRenderer
+{
+    struct LutTexture
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        UINT srvIndex{(std::numeric_limits<UINT>::max)()};
+        D3D12_CPU_DESCRIPTOR_HANDLE srvCpu{};
+        D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+        D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    };
+
+    struct AerialPerspectiveTexture
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        UINT srvIndex{(std::numeric_limits<UINT>::max)()};
+        D3D12_CPU_DESCRIPTOR_HANDLE srvCpu{};
+        D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kAerialPerspectiveSliceCount> rtvs{};
+        D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    };
+
+    void initialize(Renderer& renderer);
+    void shutdown(Renderer& renderer);
+    void resize(Renderer& renderer);
+    [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv() const noexcept;
+    void update(Renderer& renderer,
+                const EnvironmentState& environment,
+                const glm::mat4& view,
+                const glm::mat4& proj,
+                const glm::vec3& cameraPos);
+    void renderSky(Renderer& renderer,
+                   const EnvironmentState& environment,
+                   const glm::mat4& view,
+                   const glm::mat4& proj,
+                   const glm::vec3& cameraPos);
+
+private:
+    void ensureResources(Renderer& renderer);
+    void createPipelines(Renderer& renderer);
+    void createResources(Renderer& renderer);
+    void destroyResources(Renderer& renderer);
+    void transition(Renderer& renderer,
+                    ID3D12Resource* resource,
+                    D3D12_RESOURCE_STATES& currentState,
+                    D3D12_RESOURCE_STATES nextState);
+    std::uint64_t uploadConstants(Renderer& renderer,
+                                  const EnvironmentState& environment,
+                                  const glm::mat4& view,
+                                  const glm::mat4& proj,
+                                  const glm::vec3& cameraPos,
+                                  float sliceIndex);
+    void renderLut(Renderer& renderer,
+                   ID3D12PipelineState* pipelineState,
+                   ID3D12Resource* targetResource,
+                   D3D12_RESOURCE_STATES& targetState,
+                   D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                   const EnvironmentState& environment,
+                   const glm::mat4& view,
+                   const glm::mat4& proj,
+                   const glm::vec3& cameraPos,
+                   D3D12_GPU_DESCRIPTOR_HANDLE texture0,
+                   D3D12_GPU_DESCRIPTOR_HANDLE texture1,
+                   D3D12_GPU_DESCRIPTOR_HANDLE texture2,
+                   float sliceIndex,
+                   UINT width,
+                   UINT height);
+    void renderTransmittance(Renderer& renderer,
+                             const EnvironmentState& environment,
+                             const glm::mat4& view,
+                             const glm::mat4& proj,
+                             const glm::vec3& cameraPos);
+    void renderMultiScattering(Renderer& renderer,
+                               const EnvironmentState& environment,
+                               const glm::mat4& view,
+                               const glm::mat4& proj,
+                               const glm::vec3& cameraPos);
+    void renderSkyView(Renderer& renderer,
+                       const EnvironmentState& environment,
+                       const glm::mat4& view,
+                       const glm::mat4& proj,
+                       const glm::vec3& cameraPos);
+    void renderAerialPerspective(Renderer& renderer,
+                                 const EnvironmentState& environment,
+                                 const glm::mat4& view,
+                                 const glm::mat4& proj,
+                                 const glm::vec3& cameraPos);
+
+    LutTexture transmittance{};
+    LutTexture multiScattering{};
+    LutTexture skyView{};
+    AerialPerspectiveTexture aerialPerspective{};
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> transmittancePso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> multiScatteringPso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> skyViewPso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> skyPso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> aerialPerspectivePso;
+    bool initializedStaticLuts{false};
+    glm::vec3 lastSunDirection{0.0f, 1.0f, 0.0f};
+    float lastGroundRadius{0.0f};
+    float lastAtmosphereRadius{0.0f};
+    float lastMieAnisotropy{0.0f};
+};
 
 Renderer::Renderer()
     : srvSlotsInUse_(kSrvHeapCapacity, false)
@@ -302,6 +311,100 @@ Renderer::Renderer()
 Renderer::~Renderer()
 {
     shutdown();
+}
+
+void Renderer::AtmosphereRenderer::initialize(Renderer& renderer)
+{
+    createPipelines(renderer);
+    createResources(renderer);
+}
+
+void Renderer::AtmosphereRenderer::shutdown(Renderer& renderer)
+{
+    destroyResources(renderer);
+    transmittancePso.Reset();
+    multiScatteringPso.Reset();
+    skyViewPso.Reset();
+    skyPso.Reset();
+    aerialPerspectivePso.Reset();
+    initializedStaticLuts = false;
+}
+
+void Renderer::AtmosphereRenderer::resize(Renderer& renderer)
+{
+    destroyResources(renderer);
+    createResources(renderer);
+    initializedStaticLuts = false;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE Renderer::AtmosphereRenderer::aerialPerspectiveSrv() const noexcept
+{
+    return aerialPerspective.srvGpu;
+}
+
+void Renderer::AtmosphereRenderer::update(Renderer& renderer,
+                                          const EnvironmentState& environment,
+                                          const glm::mat4& view,
+                                          const glm::mat4& proj,
+                                          const glm::vec3& cameraPos)
+{
+    if (!environment.atmosphereEnabled)
+    {
+        return;
+    }
+
+    ensureResources(renderer);
+    const bool staticLutsDirty =
+        !initializedStaticLuts ||
+        glm::distance(lastSunDirection, glm::normalize(environment.sunDirection)) > 1e-4f ||
+        std::abs(lastGroundRadius - environment.atmosphere.groundRadiusKm) > 1e-3f ||
+        std::abs(lastAtmosphereRadius - environment.atmosphere.atmosphereRadiusKm) > 1e-3f ||
+        std::abs(lastMieAnisotropy - environment.atmosphere.mieAnisotropy) > 1e-4f;
+
+    const auto start = std::chrono::steady_clock::now();
+    if (staticLutsDirty)
+    {
+        renderTransmittance(renderer, environment, view, proj, cameraPos);
+        renderMultiScattering(renderer, environment, view, proj, cameraPos);
+        initializedStaticLuts = true;
+        lastSunDirection = glm::normalize(environment.sunDirection);
+        lastGroundRadius = environment.atmosphere.groundRadiusKm;
+        lastAtmosphereRadius = environment.atmosphere.atmosphereRadiusKm;
+        lastMieAnisotropy = environment.atmosphere.mieAnisotropy;
+    }
+    renderSkyView(renderer, environment, view, proj, cameraPos);
+    renderAerialPerspective(renderer, environment, view, proj, cameraPos);
+    renderer.profilingSnapshot_.atmosphereLutMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+void Renderer::AtmosphereRenderer::renderSky(Renderer& renderer,
+                                             const EnvironmentState& environment,
+                                             const glm::mat4& view,
+                                             const glm::mat4& proj,
+                                             const glm::vec3& cameraPos)
+{
+    if (!environment.atmosphereEnabled)
+    {
+        return;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = renderer.depthDsv_;
+    renderer.commandList_->OMSetRenderTargets(1, &renderer.sceneColorRtv_, FALSE, &depthHandle);
+    renderer.commandList_->RSSetViewports(1, &renderer.viewport_);
+    renderer.commandList_->RSSetScissorRects(1, &renderer.scissorRect_);
+    renderer.commandList_->SetGraphicsRootSignature(renderer.fullscreenRootSignature_.Get());
+    renderer.commandList_->SetPipelineState(skyPso.Get());
+    const std::uint64_t cbAddress = uploadConstants(renderer, environment, view, proj, cameraPos, -1.0f);
+    renderer.commandList_->SetGraphicsRootConstantBufferView(0, cbAddress);
+    renderer.commandList_->SetGraphicsRootDescriptorTable(1, skyView.srvGpu);
+    renderer.commandList_->SetGraphicsRootDescriptorTable(2, transmittance.srvGpu);
+    renderer.commandList_->SetGraphicsRootDescriptorTable(3, multiScattering.srvGpu);
+    renderer.commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    renderer.commandList_->DrawInstanced(3, 1, 0, 0);
+    renderer.profilingSnapshot_.skyDrawMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 void Renderer::initialize(GLFWwindow* window, int width, int height)
@@ -322,8 +425,12 @@ void Renderer::initialize(GLFWwindow* window, int width, int height)
     createSwapChain(window);
     createRenderTargets();
     createDepthBuffer();
-    createConstantBuffer();
+    createShadowResources();
+    createFrameResources();
+    createSceneColor();
     createPipelines();
+    atmosphere_ = std::make_unique<AtmosphereRenderer>();
+    atmosphere_->initialize(*this);
     createImGui(window);
     updateViewport(width_, height_);
     initialized_ = true;
@@ -345,11 +452,22 @@ void Renderer::shutdown()
         ImGui::DestroyContext();
     }
 
-    mappedSceneConstants_ = nullptr;
-    sceneConstantBuffer_.Reset();
+    if (atmosphere_)
+    {
+        atmosphere_->shutdown(*this);
+        atmosphere_.reset();
+    }
+
+    destroySceneColor();
+    destroyFrameResources();
+    toneMapPipelineState_.Reset();
+    shadowPipelineState_.Reset();
     nearPipelineState_.Reset();
     farPipelineState_.Reset();
-    rootSignature_.Reset();
+    fullscreenRootSignature_.Reset();
+    shadowRootSignature_.Reset();
+    worldRootSignature_.Reset();
+    destroyShadowResources();
     destroyDepthBuffer();
     destroyRenderTargets();
     srvHeap_.Reset();
@@ -357,7 +475,7 @@ void Renderer::shutdown()
     rtvHeap_.Reset();
     swapChain_.Reset();
     commandList_.Reset();
-    commandAllocator_.Reset();
+    uploadCommandAllocator_.Reset();
     commandQueue_.Reset();
     fence_.Reset();
     device_.Reset();
@@ -387,6 +505,11 @@ int Renderer::width() const noexcept
 int Renderer::height() const noexcept
 {
     return height_;
+}
+
+RendererProfilingSnapshot Renderer::profilingSnapshot() const noexcept
+{
+    return profilingSnapshot_;
 }
 
 void Renderer::createFactory()
@@ -421,15 +544,14 @@ void Renderer::createCommandObjects()
 {
     D3D12_COMMAND_QUEUE_DESC queueDesc{};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
     throwIfFailed(device_->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&commandQueue_)),
                   "failed to create command queue");
 
-    throwIfFailed(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocator_)),
-                  "failed to create command allocator");
+    throwIfFailed(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&uploadCommandAllocator_)),
+                  "failed to create upload command allocator");
     throwIfFailed(device_->CreateCommandList(0,
                                              D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                             commandAllocator_.Get(),
+                                             uploadCommandAllocator_.Get(),
                                              nullptr,
                                              IID_PPV_ARGS(&commandList_)),
                   "failed to create command list");
@@ -456,7 +578,7 @@ void Renderer::createSwapChain(GLFWwindow* window)
     swapChainDesc.SampleDesc.Count = 1;
 
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain;
-    HWND hwnd = glfwGetWin32Window(window);
+    const HWND hwnd = glfwGetWin32Window(window);
     throwIfFailed(factory_->CreateSwapChainForHwnd(commandQueue_.Get(),
                                                    hwnd,
                                                    &swapChainDesc,
@@ -474,13 +596,13 @@ void Renderer::createDescriptorHeaps()
 {
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvDesc.NumDescriptors = kBackBufferCount;
+    rtvDesc.NumDescriptors = kRtvHeapCapacity;
     throwIfFailed(device_->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&rtvHeap_)),
                   "failed to create RTV heap");
 
     D3D12_DESCRIPTOR_HEAP_DESC dsvDesc{};
     dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsvDesc.NumDescriptors = 1;
+    dsvDesc.NumDescriptors = 2;
     throwIfFailed(device_->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&dsvHeap_)),
                   "failed to create DSV heap");
 
@@ -494,17 +616,19 @@ void Renderer::createDescriptorHeaps()
     rtvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     dsvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     srvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    depthDsv_ = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    shadowMapDsv_ = depthDsv_;
+    shadowMapDsv_.ptr += static_cast<SIZE_T>(dsvDescriptorSize_);
 }
 
 void Renderer::createRenderTargets()
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
     for (UINT i = 0; i < kBackBufferCount; ++i)
     {
         throwIfFailed(swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i])),
                       "failed to get back buffer");
-        device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, rtvHandle);
-        rtvHandle.ptr += static_cast<SIZE_T>(rtvDescriptorSize_);
+        device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, i));
     }
 }
 
@@ -521,19 +645,12 @@ void Renderer::createDepthBuffer()
     D3D12_CLEAR_VALUE clearValue{};
     clearValue.Format = kDepthBufferFormat;
     clearValue.DepthStencil.Depth = 1.0f;
-    clearValue.DepthStencil.Stencil = 0;
 
-    D3D12_RESOURCE_DESC depthDesc{};
-    depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    depthDesc.Width = static_cast<UINT>(width_);
-    depthDesc.Height = static_cast<UINT>(height_);
-    depthDesc.DepthOrArraySize = 1;
-    depthDesc.MipLevels = 1;
-    depthDesc.Format = kDepthBufferFormat;
-    depthDesc.SampleDesc.Count = 1;
-    depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
+    const D3D12_RESOURCE_DESC depthDesc =
+        texture2DDesc(kDepthBufferFormat,
+                      static_cast<UINT>(width_),
+                      static_cast<UINT>(height_),
+                      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
@@ -546,7 +663,7 @@ void Renderer::createDepthBuffer()
     D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
     dsvDesc.Format = kDepthBufferFormat;
     dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device_->CreateDepthStencilView(depthBuffer_.Get(), &dsvDesc, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    device_->CreateDepthStencilView(depthBuffer_.Get(), &dsvDesc, depthDsv_);
 }
 
 void Renderer::destroyDepthBuffer()
@@ -554,73 +671,313 @@ void Renderer::destroyDepthBuffer()
     depthBuffer_.Reset();
 }
 
-void Renderer::createConstantBuffer()
+void Renderer::createShadowResources()
 {
-    const std::uint64_t alignedSize = (sizeof(SceneConstants) + 255ull) & ~255ull;
-    const std::uint64_t bufferSize = alignedSize * 2ull;
-    const D3D12_HEAP_PROPERTIES uploadHeap = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    const D3D12_RESOURCE_DESC cbDesc = bufferDesc(bufferSize);
-    throwIfFailed(device_->CreateCommittedResource(&uploadHeap,
+    destroyShadowResources();
+
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = kShadowMapDsvFormat;
+    clearValue.DepthStencil.Depth = 1.0f;
+
+    const D3D12_RESOURCE_DESC shadowDesc =
+        texture2DDesc(kShadowMapFormat,
+                      kShadowMapResolution,
+                      kShadowMapResolution,
+                      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
-                                                   &cbDesc,
-                                                   D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                   nullptr,
-                                                   IID_PPV_ARGS(&sceneConstantBuffer_)),
-                  "failed to create scene constant buffer");
-    throwIfFailed(sceneConstantBuffer_->Map(0, nullptr, reinterpret_cast<void**>(&mappedSceneConstants_)),
-                  "failed to map scene constant buffer");
+                                                   &shadowDesc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                   &clearValue,
+                                                   IID_PPV_ARGS(&shadowMap_)),
+                  "failed to create shadow map");
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+    dsvDesc.Format = kShadowMapDsvFormat;
+    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    device_->CreateDepthStencilView(shadowMap_.Get(), &dsvDesc, shadowMapDsv_);
+
+    shadowMapSrvIndex_ = static_cast<int>(allocateSrvDescriptor());
+    shadowMapSrvCpu_ = srvCpuHandle(static_cast<UINT>(shadowMapSrvIndex_));
+    shadowMapSrvGpu_ = srvGpuHandle(static_cast<UINT>(shadowMapSrvIndex_));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = kShadowMapSrvFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(shadowMap_.Get(), &srvDesc, shadowMapSrvCpu_);
+
+    shadowMapState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::destroyShadowResources()
+{
+    if (shadowMapSrvIndex_ >= 0)
+    {
+        freeSrvDescriptor(static_cast<UINT>(shadowMapSrvIndex_));
+        shadowMapSrvIndex_ = -1;
+    }
+
+    shadowMapSrvCpu_ = {};
+    shadowMapSrvGpu_ = {};
+    shadowMap_.Reset();
+    shadowMapState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::createFrameResources()
+{
+    const D3D12_HEAP_PROPERTIES uploadHeap = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    const D3D12_RESOURCE_DESC bufferDescription = bufferDesc(kFrameConstantBufferSize);
+    for (auto& frame : frameResources_)
+    {
+        throwIfFailed(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame.allocator)),
+                      "failed to create frame command allocator");
+        throwIfFailed(device_->CreateCommittedResource(&uploadHeap,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &bufferDescription,
+                                                       D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                       nullptr,
+                                                       IID_PPV_ARGS(&frame.constantBuffer)),
+                      "failed to create frame constant buffer");
+        throwIfFailed(frame.constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&frame.mappedConstants)),
+                      "failed to map frame constant buffer");
+        frame.fenceValue = 0;
+    }
+}
+
+void Renderer::destroyFrameResources()
+{
+    for (auto& frame : frameResources_)
+    {
+        frame.mappedConstants = nullptr;
+        frame.constantBuffer.Reset();
+        frame.allocator.Reset();
+        frame.fenceValue = 0;
+    }
+}
+
+void Renderer::createSceneColor()
+{
+    destroySceneColor();
+
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = kSceneColorFormat;
+    const D3D12_RESOURCE_DESC sceneDesc =
+        texture2DDesc(kSceneColorFormat,
+                      static_cast<UINT>(width_),
+                      static_cast<UINT>(height_),
+                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
+                                                   D3D12_HEAP_FLAG_NONE,
+                                                   &sceneDesc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                   &clearValue,
+                                                   IID_PPV_ARGS(&sceneColor_)),
+                  "failed to create HDR scene color");
+
+    sceneColorRtv_ = rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, kRtvIndexSceneColor);
+    device_->CreateRenderTargetView(sceneColor_.Get(), nullptr, sceneColorRtv_);
+
+    const UINT descriptorIndex = allocateSrvDescriptor();
+    sceneColorSrvIndex_ = static_cast<int>(descriptorIndex);
+    sceneColorSrvCpu_ = srvCpuHandle(descriptorIndex);
+    sceneColorSrvGpu_ = srvGpuHandle(descriptorIndex);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = kSceneColorFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(sceneColor_.Get(), &srvDesc, sceneColorSrvCpu_);
+    sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::destroySceneColor()
+{
+    if (sceneColorSrvIndex_ >= 0)
+    {
+        freeSrvDescriptor(static_cast<UINT>(sceneColorSrvIndex_));
+        sceneColorSrvIndex_ = -1;
+    }
+    sceneColorSrvCpu_ = {};
+    sceneColorSrvGpu_ = {};
+    sceneColorRtv_ = {};
+    sceneColor_.Reset();
+    sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 }
 
 void Renderer::createPipelines()
 {
-    Microsoft::WRL::ComPtr<ID3DBlob> vertexShader = compileShader(kWorldVertexShader, "main", "vs_5_0");
-    Microsoft::WRL::ComPtr<ID3DBlob> nearPixelShader = compileShader(kNearPixelShader, "main", "ps_5_0");
-    Microsoft::WRL::ComPtr<ID3DBlob> farPixelShader = compileShader(kFarPixelShader, "main", "ps_5_0");
+    D3D12_ROOT_PARAMETER shadowRootParam{};
+    shadowRootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    shadowRootParam.Descriptor.ShaderRegister = 0;
+    shadowRootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
-    D3D12_DESCRIPTOR_RANGE srvRange{};
-    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = 1;
-    srvRange.BaseShaderRegister = 0;
-    srvRange.OffsetInDescriptorsFromTableStart = 0;
+    D3D12_ROOT_SIGNATURE_DESC shadowRootDesc{};
+    shadowRootDesc.NumParameters = 1;
+    shadowRootDesc.pParameters = &shadowRootParam;
+    shadowRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
-    std::array<D3D12_ROOT_PARAMETER, 2> rootParameters{};
-    rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameters[0].Descriptor.ShaderRegister = 0;
-    rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[1].DescriptorTable.pDescriptorRanges = &srvRange;
-    rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
-    rootSignatureDesc.NumParameters = static_cast<UINT>(rootParameters.size());
-    rootSignatureDesc.pParameters = rootParameters.data();
-    rootSignatureDesc.NumStaticSamplers = 1;
-    rootSignatureDesc.pStaticSamplers = &sampler;
-    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    Microsoft::WRL::ComPtr<ID3DBlob> serializedRootSignature;
-    Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-    throwIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc,
+    Microsoft::WRL::ComPtr<ID3DBlob> serializedRoot;
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    throwIfFailed(D3D12SerializeRootSignature(&shadowRootDesc,
                                               D3D_ROOT_SIGNATURE_VERSION_1,
-                                              &serializedRootSignature,
-                                              &errorBlob),
-                  "failed to serialize root signature");
+                                              &serializedRoot,
+                                              &errors),
+                  "failed to serialize shadow root signature");
     throwIfFailed(device_->CreateRootSignature(0,
-                                               serializedRootSignature->GetBufferPointer(),
-                                               serializedRootSignature->GetBufferSize(),
-                                               IID_PPV_ARGS(&rootSignature_)),
-                  "failed to create root signature");
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&shadowRootSignature_)),
+                  "failed to create shadow root signature");
+
+    D3D12_DESCRIPTOR_RANGE worldAtlasRange{};
+    worldAtlasRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    worldAtlasRange.NumDescriptors = 1;
+    worldAtlasRange.BaseShaderRegister = 0;
+
+    D3D12_DESCRIPTOR_RANGE worldAerialRange{};
+    worldAerialRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    worldAerialRange.NumDescriptors = 1;
+    worldAerialRange.BaseShaderRegister = 1;
+
+    D3D12_DESCRIPTOR_RANGE worldShadowRange{};
+    worldShadowRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    worldShadowRange.NumDescriptors = 1;
+    worldShadowRange.BaseShaderRegister = 2;
+
+    std::array<D3D12_ROOT_PARAMETER, 4> worldRootParams{};
+    worldRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    worldRootParams[0].Descriptor.ShaderRegister = 0;
+    worldRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    worldRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    worldRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    worldRootParams[1].DescriptorTable.pDescriptorRanges = &worldAtlasRange;
+    worldRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    worldRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    worldRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    worldRootParams[2].DescriptorTable.pDescriptorRanges = &worldAerialRange;
+    worldRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    worldRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    worldRootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    worldRootParams[3].DescriptorTable.pDescriptorRanges = &worldShadowRange;
+    worldRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    std::array<D3D12_STATIC_SAMPLER_DESC, 3> worldSamplers{};
+    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    worldSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    worldSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    worldSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    worldSamplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    worldSamplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    worldSamplers[0].ShaderRegister = 0;
+    worldSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    worldSamplers[1] = worldSamplers[0];
+    worldSamplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    worldSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    worldSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    worldSamplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    worldSamplers[1].ShaderRegister = 1;
+    worldSamplers[2] = worldSamplers[1];
+    worldSamplers[2].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    worldSamplers[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    worldSamplers[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    worldSamplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    worldSamplers[2].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    worldSamplers[2].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    worldSamplers[2].ShaderRegister = 2;
+
+    D3D12_ROOT_SIGNATURE_DESC worldRootDesc{};
+    worldRootDesc.NumParameters = static_cast<UINT>(worldRootParams.size());
+    worldRootDesc.pParameters = worldRootParams.data();
+    worldRootDesc.NumStaticSamplers = static_cast<UINT>(worldSamplers.size());
+    worldRootDesc.pStaticSamplers = worldSamplers.data();
+    worldRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    serializedRoot.Reset();
+    errors.Reset();
+    throwIfFailed(D3D12SerializeRootSignature(&worldRootDesc,
+                                              D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &serializedRoot,
+                                              &errors),
+                  "failed to serialize world root signature");
+    throwIfFailed(device_->CreateRootSignature(0,
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&worldRootSignature_)),
+                  "failed to create world root signature");
+
+    D3D12_DESCRIPTOR_RANGE fullscreenRange0{};
+    fullscreenRange0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    fullscreenRange0.NumDescriptors = 1;
+    fullscreenRange0.BaseShaderRegister = 0;
+    D3D12_DESCRIPTOR_RANGE fullscreenRange1 = fullscreenRange0;
+    fullscreenRange1.BaseShaderRegister = 1;
+    D3D12_DESCRIPTOR_RANGE fullscreenRange2 = fullscreenRange0;
+    fullscreenRange2.BaseShaderRegister = 2;
+
+    std::array<D3D12_ROOT_PARAMETER, 4> fullscreenRootParams{};
+    fullscreenRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    fullscreenRootParams[0].Descriptor.ShaderRegister = 0;
+    fullscreenRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    fullscreenRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    fullscreenRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    fullscreenRootParams[1].DescriptorTable.pDescriptorRanges = &fullscreenRange0;
+    fullscreenRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    fullscreenRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    fullscreenRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    fullscreenRootParams[2].DescriptorTable.pDescriptorRanges = &fullscreenRange1;
+    fullscreenRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    fullscreenRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    fullscreenRootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    fullscreenRootParams[3].DescriptorTable.pDescriptorRanges = &fullscreenRange2;
+    fullscreenRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC fullscreenSampler{};
+    fullscreenSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    fullscreenSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    fullscreenSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    fullscreenSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    fullscreenSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    fullscreenSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    fullscreenSampler.ShaderRegister = 0;
+    fullscreenSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC fullscreenRootDesc{};
+    fullscreenRootDesc.NumParameters = static_cast<UINT>(fullscreenRootParams.size());
+    fullscreenRootDesc.pParameters = fullscreenRootParams.data();
+    fullscreenRootDesc.NumStaticSamplers = 1;
+    fullscreenRootDesc.pStaticSamplers = &fullscreenSampler;
+    fullscreenRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    serializedRoot.Reset();
+    errors.Reset();
+    throwIfFailed(D3D12SerializeRootSignature(&fullscreenRootDesc,
+                                              D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &serializedRoot,
+                                              &errors),
+                  "failed to serialize fullscreen root signature");
+    throwIfFailed(device_->CreateRootSignature(0,
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&fullscreenRootSignature_)),
+                  "failed to create fullscreen root signature");
+
+    Microsoft::WRL::ComPtr<ID3DBlob> worldVs =
+        compileShaderFromFile(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> shadowVs =
+        compileShaderFromFile(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
+        compileShaderFromFile(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> farPs =
+        compileShaderFromFile(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
+        compileShaderFromFile(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
+        compileShaderFromFile(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 5> inputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -630,32 +987,76 @@ void Renderer::createPipelines()
         {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasSize)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
-    psoDesc.InputLayout = {inputLayout.data(), static_cast<UINT>(inputLayout.size())};
-    psoDesc.pRootSignature = rootSignature_.Get();
-    psoDesc.VS = {vertexShader->GetBufferPointer(), vertexShader->GetBufferSize()};
-    psoDesc.PS = {nearPixelShader->GetBufferPointer(), nearPixelShader->GetBufferSize()};
-    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-    psoDesc.RasterizerState.FrontCounterClockwise = TRUE;
-    psoDesc.RasterizerState.DepthClipEnable = TRUE;
-    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    psoDesc.SampleMask = UINT_MAX;
-    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets = 1;
-    psoDesc.RTVFormats[0] = kBackBufferFormat;
-    psoDesc.DSVFormat = kDepthBufferFormat;
-    psoDesc.SampleDesc.Count = 1;
-    psoDesc.DepthStencilState.DepthEnable = TRUE;
-    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 1> shadowInputLayout = {{
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    }};
 
-    throwIfFailed(device_->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&nearPipelineState_)),
-                  "failed to create near-world pipeline");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPso{};
+    shadowPso.InputLayout = {shadowInputLayout.data(), static_cast<UINT>(shadowInputLayout.size())};
+    shadowPso.pRootSignature = shadowRootSignature_.Get();
+    shadowPso.VS = {shadowVs->GetBufferPointer(), shadowVs->GetBufferSize()};
+    shadowPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    shadowPso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    shadowPso.RasterizerState.FrontCounterClockwise = TRUE;
+    shadowPso.RasterizerState.DepthClipEnable = TRUE;
+    shadowPso.RasterizerState.DepthBias = 1000;
+    shadowPso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+    shadowPso.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
+    shadowPso.SampleMask = UINT_MAX;
+    shadowPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    shadowPso.NumRenderTargets = 0;
+    shadowPso.DSVFormat = kShadowMapDsvFormat;
+    shadowPso.SampleDesc.Count = 1;
+    shadowPso.DepthStencilState.DepthEnable = TRUE;
+    shadowPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    shadowPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&shadowPso, IID_PPV_ARGS(&shadowPipelineState_)),
+                  "failed to create shadow pipeline");
 
-    psoDesc.PS = {farPixelShader->GetBufferPointer(), farPixelShader->GetBufferSize()};
-    throwIfFailed(device_->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&farPipelineState_)),
-                  "failed to create far-world pipeline");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC worldPso{};
+    worldPso.InputLayout = {inputLayout.data(), static_cast<UINT>(inputLayout.size())};
+    worldPso.pRootSignature = worldRootSignature_.Get();
+    worldPso.VS = {worldVs->GetBufferPointer(), worldVs->GetBufferSize()};
+    worldPso.PS = {nearPs->GetBufferPointer(), nearPs->GetBufferSize()};
+    worldPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    worldPso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    worldPso.RasterizerState.FrontCounterClockwise = TRUE;
+    worldPso.RasterizerState.DepthClipEnable = TRUE;
+    worldPso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    worldPso.SampleMask = UINT_MAX;
+    worldPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    worldPso.NumRenderTargets = 1;
+    worldPso.RTVFormats[0] = kSceneColorFormat;
+    worldPso.DSVFormat = kDepthBufferFormat;
+    worldPso.SampleDesc.Count = 1;
+    worldPso.DepthStencilState.DepthEnable = TRUE;
+    worldPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    worldPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&nearPipelineState_)),
+                  "failed to create near pipeline");
+
+    worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
+    throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
+                  "failed to create far pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC tonePso{};
+    tonePso.pRootSignature = fullscreenRootSignature_.Get();
+    tonePso.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
+    tonePso.PS = {tonePs->GetBufferPointer(), tonePs->GetBufferSize()};
+    tonePso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    tonePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    tonePso.RasterizerState.DepthClipEnable = TRUE;
+    tonePso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    tonePso.SampleMask = UINT_MAX;
+    tonePso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    tonePso.NumRenderTargets = 1;
+    tonePso.RTVFormats[0] = kBackBufferFormat;
+    tonePso.SampleDesc.Count = 1;
+    tonePso.DepthStencilState.DepthEnable = FALSE;
+    tonePso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    tonePso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&tonePso, IID_PPV_ARGS(&toneMapPipelineState_)),
+                  "failed to create tone map pipeline");
 }
 
 void Renderer::createImGui(GLFWwindow* window)
@@ -716,6 +1117,11 @@ void Renderer::waitForGpu()
         throwIfFailed(fence_->SetEventOnCompletion(fenceValue_, fenceEvent_), "failed to set fence event");
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
+
+    for (auto& frame : frameResources_)
+    {
+        frame.fenceValue = fenceValue_;
+    }
 }
 
 void Renderer::resize(int width, int height)
@@ -730,6 +1136,7 @@ void Renderer::resize(int width, int height)
     }
 
     waitForGpu();
+    destroySceneColor();
     destroyDepthBuffer();
     destroyRenderTargets();
 
@@ -747,20 +1154,25 @@ void Renderer::resize(int width, int height)
     currentBackBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
     createRenderTargets();
     createDepthBuffer();
+    createSceneColor();
+    if (atmosphere_)
+    {
+        atmosphere_->resize(*this);
+    }
     updateViewport(width_, height_);
 }
 
 UINT Renderer::allocateSrvDescriptor()
 {
-    auto it = std::find(srvSlotsInUse_.begin(), srvSlotsInUse_.end(), false);
-    if (it == srvSlotsInUse_.end())
+    for (UINT i = 0; i < srvSlotsInUse_.size(); ++i)
     {
-        throwRenderError("SRV heap exhausted");
+        if (!srvSlotsInUse_[i])
+        {
+            srvSlotsInUse_[i] = true;
+            return i;
+        }
     }
-
-    const UINT index = static_cast<UINT>(std::distance(srvSlotsInUse_.begin(), it));
-    srvSlotsInUse_[index] = true;
-    return index;
+    throwRenderError("SRV heap exhausted");
 }
 
 void Renderer::freeSrvDescriptor(UINT index)
@@ -825,20 +1237,13 @@ LoadedTexture Renderer::loadTexture(const char* path)
     }
 
     texture.size = glm::ivec2(width, height);
-    const UINT descriptorIndex = allocateSrvDescriptor();
-    texture.srvCpu = srvCpuHandle(descriptorIndex);
-    texture.srvGpu = srvGpuHandle(descriptorIndex);
+    texture.srvIndex = allocateSrvDescriptor();
+    texture.srvCpu = srvCpuHandle(texture.srvIndex);
+    texture.srvGpu = srvGpuHandle(texture.srvIndex);
 
-    D3D12_RESOURCE_DESC textureDesc{};
-    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    textureDesc.Width = static_cast<UINT>(width);
-    textureDesc.Height = static_cast<UINT>(height);
-    textureDesc.DepthOrArraySize = 1;
-    textureDesc.MipLevels = 1;
-    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    textureDesc.SampleDesc.Count = 1;
-    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-
+    const D3D12_RESOURCE_DESC textureDesc = texture2DDesc(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                                          static_cast<UINT>(width),
+                                                          static_cast<UINT>(height));
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
@@ -877,9 +1282,9 @@ LoadedTexture Renderer::loadTexture(const char* path)
     }
     uploadBuffer->Unmap(0, nullptr);
 
-    throwIfFailed(commandAllocator_->Reset(), "failed to reset command allocator for texture upload");
-    throwIfFailed(commandList_->Reset(commandAllocator_.Get(), nullptr),
-                  "failed to reset command list for texture upload");
+    throwIfFailed(uploadCommandAllocator_->Reset(), "failed to reset upload allocator");
+    throwIfFailed(commandList_->Reset(uploadCommandAllocator_.Get(), nullptr),
+                  "failed to reset upload command list");
 
     D3D12_TEXTURE_COPY_LOCATION dst{};
     dst.pResource = texture.resource.Get();
@@ -895,15 +1300,14 @@ LoadedTexture Renderer::loadTexture(const char* path)
     const D3D12_RESOURCE_BARRIER barrier =
         transitionBarrier(texture.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     commandList_->ResourceBarrier(1, &barrier);
-
-    throwIfFailed(commandList_->Close(), "failed to close texture upload command list");
+    throwIfFailed(commandList_->Close(), "failed to close upload command list");
     ID3D12CommandList* commandLists[] = {commandList_.Get()};
     commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(commandLists)), commandLists);
     waitForGpu();
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MipLevels = 1;
     device_->CreateShaderResourceView(texture.resource.Get(), &srvDesc, texture.srvCpu);
@@ -920,6 +1324,30 @@ void Renderer::ensureFrameStarted() const
     }
 }
 
+std::string Renderer::shaderPath(const char* relativePath) const
+{
+    return (std::filesystem::path("assets") / "shaders" / relativePath).string();
+}
+
+std::uint64_t Renderer::allocateFrameConstantBytes(std::size_t size, void** cpuPtrOut)
+{
+    ensureFrameStarted();
+    const std::size_t alignedSize = (size + 255ull) & ~255ull;
+    if (currentFrameConstantOffset_ + alignedSize > kFrameConstantBufferSize)
+    {
+        throwRenderError("frame constant buffer exhausted");
+    }
+
+    FrameResource& frame = frameResources_[currentBackBufferIndex_];
+    if (cpuPtrOut != nullptr)
+    {
+        *cpuPtrOut = frame.mappedConstants + currentFrameConstantOffset_;
+    }
+    const std::uint64_t gpuAddress = frame.constantBuffer->GetGPUVirtualAddress() + currentFrameConstantOffset_;
+    currentFrameConstantOffset_ += alignedSize;
+    return gpuAddress;
+}
+
 void Renderer::beginFrame(const glm::vec4& clearColor)
 {
     if (frameStarted_)
@@ -928,26 +1356,46 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
     }
 
     currentBackBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
-    throwIfFailed(commandAllocator_->Reset(), "failed to reset command allocator");
-    throwIfFailed(commandList_->Reset(commandAllocator_.Get(), nullptr), "failed to reset command list");
+    FrameResource& frame = frameResources_[currentBackBufferIndex_];
+    if (frame.fenceValue != 0 && fence_->GetCompletedValue() < frame.fenceValue)
+    {
+        throwIfFailed(fence_->SetEventOnCompletion(frame.fenceValue, fenceEvent_), "failed to wait for frame fence");
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
 
-    const D3D12_RESOURCE_BARRIER barrier =
+    throwIfFailed(frame.allocator->Reset(), "failed to reset frame allocator");
+    throwIfFailed(commandList_->Reset(frame.allocator.Get(), nullptr), "failed to reset command list");
+
+    const D3D12_RESOURCE_BARRIER backbufferBarrier =
         transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    commandList_->ResourceBarrier(1, &barrier);
+    commandList_->ResourceBarrier(1, &backbufferBarrier);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-    rtvHandle.ptr += static_cast<SIZE_T>(currentBackBufferIndex_) * static_cast<SIZE_T>(rtvDescriptorSize_);
-    const D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    if (sceneColor_ != nullptr && sceneColorState_ != D3D12_RESOURCE_STATE_RENDER_TARGET)
+    {
+        const D3D12_RESOURCE_BARRIER sceneBarrier =
+            transitionBarrier(sceneColor_.Get(), sceneColorState_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        commandList_->ResourceBarrier(1, &sceneBarrier);
+        sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
 
-    commandList_->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+    const D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv =
+        rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, currentBackBufferIndex_);
+    const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
+    commandList_->OMSetRenderTargets(1, &backbufferRtv, FALSE, &depthHandle);
     commandList_->RSSetViewports(1, &viewport_);
     commandList_->RSSetScissorRects(1, &scissorRect_);
-    commandList_->ClearRenderTargetView(rtvHandle, &clearColor.x, 0, nullptr);
-    commandList_->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    commandList_->ClearRenderTargetView(backbufferRtv, &clearColor.x, 0, nullptr);
+    if (sceneColor_ != nullptr)
+    {
+        commandList_->ClearRenderTargetView(sceneColorRtv_, &clearColor.x, 0, nullptr);
+    }
+    commandList_->ClearDepthStencilView(depthHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    ID3D12DescriptorHeap* descriptorHeaps[] = {srvHeap_.Get()};
-    commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(descriptorHeaps)), descriptorHeaps);
+    ID3D12DescriptorHeap* heaps[] = {srvHeap_.Get()};
+    commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
 
+    currentFrameConstantOffset_ = 0;
+    profilingSnapshot_ = {};
     frameStarted_ = true;
     imguiFrameStarted_ = false;
 }
@@ -967,9 +1415,11 @@ void Renderer::beginImGuiFrame()
 }
 
 void Renderer::renderWorld(const WorldRenderData& renderData,
-                           const glm::mat4& viewProj,
+                           const glm::mat4& view,
+                           const glm::mat4& proj,
                            const glm::vec3& cameraPos,
-                           const LoadedTexture& atlasTexture)
+                           const LoadedTexture& atlasTexture,
+                           const EnvironmentState& environment)
 {
     ensureFrameStarted();
     if (!atlasTexture.valid())
@@ -977,25 +1427,59 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         return;
     }
 
-    commandList_->SetGraphicsRootSignature(rootSignature_.Get());
+    void* worldCpu = nullptr;
+    const std::uint64_t worldCb = allocateFrameConstantBytes(sizeof(WorldConstants), &worldCpu);
+    auto* nearConstants = static_cast<WorldConstants*>(worldCpu);
+    const glm::mat4 viewProj = proj * view;
+    const glm::vec3 lightDir = glm::normalize(environment.sunDirection);
+    const float daylight = std::clamp(lightDir.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    const glm::vec3 sunColor = environment.sunIlluminance * 0.18f;
+    const glm::vec3 skyAmbient = glm::mix(glm::vec3(0.03f, 0.04f, 0.06f),
+                                          glm::vec3(0.20f, 0.24f, 0.30f),
+                                          std::pow(daylight, 0.55f));
+    const glm::vec3 groundAmbient = glm::mix(glm::vec3(0.025f, 0.022f, 0.020f),
+                                             glm::vec3(0.08f, 0.075f, 0.065f),
+                                             std::pow(daylight, 0.8f));
+
+    nearConstants->viewProj = viewProj;
+    nearConstants->shadowViewProj = glm::mat4(1.0f);
+    nearConstants->lightDirection = glm::vec4(lightDir, 0.0f);
+    nearConstants->cameraPos = glm::vec4(cameraPos, 0.0f);
+    nearConstants->highlightedBlock = glm::vec4(glm::vec3(renderData.highlightedBlock), 0.0f);
+    nearConstants->params0 = glm::vec4(environment.atmosphereEnabled ? 1.0f : 0.0f,
+                                       renderData.hasHighlight ? 1.0f : 0.0f,
+                                       1.0f / static_cast<float>(std::max(width_, 1)),
+                                       1.0f / static_cast<float>(std::max(height_, 1)));
+    nearConstants->params1 = glm::vec4(environment.atmosphere.aerialPerspectiveDistanceKm,
+                                       static_cast<float>(kAerialPerspectiveSliceCount),
+                                       environment.fogStartBlocks,
+                                       environment.farDistanceBlocks);
+    nearConstants->sunColor = glm::vec4(sunColor, 0.0f);
+    nearConstants->skyAmbient = glm::vec4(skyAmbient, 0.0f);
+    nearConstants->groundAmbient = glm::vec4(groundAmbient, 0.0f);
+    nearConstants->shadowParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    renderShadowMap(renderData, view, cameraPos, environment, *nearConstants);
+
+    if (environment.atmosphereEnabled && atmosphere_)
+    {
+        atmosphere_->update(*this, environment, view, proj, cameraPos);
+        atmosphere_->renderSky(*this, environment, view, proj, cameraPos);
+    }
+
+    const auto worldStart = std::chrono::steady_clock::now();
+    const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
+    commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
+    commandList_->RSSetViewports(1, &viewport_);
+    commandList_->RSSetScissorRects(1, &scissorRect_);
+    commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->SetGraphicsRootDescriptorTable(1, atlasTexture.srvGpu);
-    const std::uint64_t alignedSize = (sizeof(SceneConstants) + 255ull) & ~255ull;
-    const D3D12_GPU_VIRTUAL_ADDRESS constantBufferBase = sceneConstantBuffer_->GetGPUVirtualAddress();
-
-    SceneConstants& nearConstants = mappedSceneConstants_[0];
-    nearConstants.viewProj = viewProj;
-    nearConstants.lightDirection = glm::vec4(renderData.lightDirection, 0.0f);
-    nearConstants.cameraPos = glm::vec4(cameraPos, 0.0f);
-    nearConstants.highlightedBlock = glm::vec4(glm::vec3(renderData.highlightedBlock), 0.0f);
-    nearConstants.fogColor = glm::vec4(renderData.fogColor, 1.0f);
-    nearConstants.params = glm::vec4(renderData.fogStart,
-                                     renderData.fogEnd,
-                                     renderData.hasHighlight ? 1.0f : 0.0f,
-                                     0.0f);
+    commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+    commandList_->SetGraphicsRootDescriptorTable(3, shadowMapSrvGpu_);
 
     commandList_->SetPipelineState(nearPipelineState_.Get());
-    commandList_->SetGraphicsRootConstantBufferView(0, constantBufferBase);
+    commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
     for (const ChunkRenderBatch& batch : renderData.nearBatches)
     {
         if (batch.indexCounts.empty())
@@ -1011,11 +1495,13 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         }
     }
 
-    SceneConstants& farConstants = mappedSceneConstants_[1];
-    farConstants = nearConstants;
-    farConstants.params = glm::vec4(renderData.fogStart, renderData.fogEnd, 0.0f, 0.0f);
+    void* farCpu = nullptr;
+    const std::uint64_t farCb = allocateFrameConstantBytes(sizeof(WorldConstants), &farCpu);
+    auto* farConstants = static_cast<WorldConstants*>(farCpu);
+    *farConstants = *nearConstants;
+    farConstants->shadowParams.w = 0.0f;
     commandList_->SetPipelineState(farPipelineState_.Get());
-    commandList_->SetGraphicsRootConstantBufferView(0, constantBufferBase + alignedSize);
+    commandList_->SetGraphicsRootConstantBufferView(0, farCb);
     for (const ChunkRenderBatch& batch : renderData.farBatches)
     {
         if (batch.indexCounts.empty())
@@ -1030,11 +1516,180 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
         }
     }
+    profilingSnapshot_.worldDrawMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldStart).count();
+
+    if (sceneColorState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(sceneColor_.Get(), sceneColorState_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &barrier);
+        sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
+    const auto toneMapStart = std::chrono::steady_clock::now();
+    const D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv =
+        rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, currentBackBufferIndex_);
+    commandList_->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
+    commandList_->RSSetViewports(1, &viewport_);
+    commandList_->RSSetScissorRects(1, &scissorRect_);
+    commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
+    commandList_->SetPipelineState(toneMapPipelineState_.Get());
+
+    void* toneCpu = nullptr;
+    const std::uint64_t toneCb = allocateFrameConstantBytes(sizeof(ToneMapConstants), &toneCpu);
+    auto* toneConstants = static_cast<ToneMapConstants*>(toneCpu);
+    toneConstants->exposureWhitePoint = glm::vec4(environment.tonemap.exposure, environment.tonemap.whitePoint, 0.0f, 0.0f);
+    commandList_->SetGraphicsRootConstantBufferView(0, toneCb);
+    commandList_->SetGraphicsRootDescriptorTable(1, sceneColorSrvGpu_);
+    commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+    commandList_->SetGraphicsRootDescriptorTable(3, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->DrawInstanced(3, 1, 0, 0);
+    profilingSnapshot_.toneMapMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - toneMapStart).count();
+}
+
+void Renderer::renderShadowMap(const WorldRenderData& renderData,
+                               const glm::mat4& view,
+                               const glm::vec3& cameraPos,
+                               const EnvironmentState& environment,
+                               WorldConstants& nearConstants)
+{
+    nearConstants.shadowViewProj = glm::mat4(1.0f);
+    nearConstants.shadowParams = glm::vec4(1.0f / static_cast<float>(kShadowMapResolution),
+                                           0.35f,
+                                           1.0f,
+                                           0.0f);
+
+    if (!shadowMap_ || renderData.nearBatches.empty())
+    {
+        return;
+    }
+
+    const glm::vec3 lightDir = glm::normalize(environment.sunDirection);
+    if (lightDir.y <= 0.02f)
+    {
+        return;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    if (shadowMapState_ != D3D12_RESOURCE_STATE_DEPTH_WRITE)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(shadowMap_.Get(), shadowMapState_, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        commandList_->ResourceBarrier(1, &barrier);
+        shadowMapState_ = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+
+    D3D12_VIEWPORT shadowViewport{};
+    shadowViewport.Width = static_cast<float>(kShadowMapResolution);
+    shadowViewport.Height = static_cast<float>(kShadowMapResolution);
+    shadowViewport.MaxDepth = 1.0f;
+    D3D12_RECT shadowScissor{0, 0, static_cast<LONG>(kShadowMapResolution), static_cast<LONG>(kShadowMapResolution)};
+
+    commandList_->OMSetRenderTargets(0, nullptr, FALSE, &shadowMapDsv_);
+    commandList_->RSSetViewports(1, &shadowViewport);
+    commandList_->RSSetScissorRects(1, &shadowScissor);
+    commandList_->ClearDepthStencilView(shadowMapDsv_, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    commandList_->SetGraphicsRootSignature(shadowRootSignature_.Get());
+    commandList_->SetPipelineState(shadowPipelineState_.Get());
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    const glm::mat4 invView = glm::inverse(view);
+    glm::vec3 cameraForward = -glm::normalize(glm::vec3(invView[2]));
+    if (glm::dot(cameraForward, cameraForward) <= 1e-5f)
+    {
+        cameraForward = glm::vec3(0.0f, 0.0f, -1.0f);
+    }
+
+    glm::vec3 forwardFlat{cameraForward.x, 0.0f, cameraForward.z};
+    if (glm::dot(forwardFlat, forwardFlat) <= 1e-5f)
+    {
+        forwardFlat = glm::vec3(0.0f, 0.0f, -1.0f);
+    }
+    else
+    {
+        forwardFlat = glm::normalize(forwardFlat);
+    }
+
+    constexpr float kShadowExtent = 220.0f;
+    constexpr float kShadowDepth = 640.0f;
+    constexpr float kShadowDistance = 320.0f;
+
+    glm::vec3 shadowCenter = cameraPos + forwardFlat * 48.0f;
+    shadowCenter.y += 24.0f;
+
+    glm::vec3 lightUp = (std::abs(lightDir.y) > 0.95f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 lightPos = shadowCenter - lightDir * kShadowDistance;
+    glm::mat4 lightView = glm::lookAtRH(lightPos, shadowCenter, lightUp);
+
+    const float texelWorldSize = (2.0f * kShadowExtent) / static_cast<float>(kShadowMapResolution);
+    glm::vec4 centerLightSpace = lightView * glm::vec4(shadowCenter, 1.0f);
+    centerLightSpace.x = std::floor(centerLightSpace.x / texelWorldSize) * texelWorldSize;
+    centerLightSpace.y = std::floor(centerLightSpace.y / texelWorldSize) * texelWorldSize;
+    const glm::mat4 invLightView = glm::inverse(lightView);
+    shadowCenter = glm::vec3(invLightView * glm::vec4(centerLightSpace.x, centerLightSpace.y, centerLightSpace.z, 1.0f));
+    lightPos = shadowCenter - lightDir * kShadowDistance;
+    lightView = glm::lookAtRH(lightPos, shadowCenter, lightUp);
+
+    const glm::mat4 lightProj = glm::orthoRH_ZO(-kShadowExtent,
+                                                kShadowExtent,
+                                                -kShadowExtent,
+                                                kShadowExtent,
+                                                1.0f,
+                                                kShadowDepth);
+    const glm::mat4 lightViewProj = lightProj * lightView;
+
+    void* shadowCpu = nullptr;
+    const std::uint64_t shadowCbAddress = allocateFrameConstantBytes(sizeof(ShadowConstants), &shadowCpu);
+    auto* shadowConstants = static_cast<ShadowConstants*>(shadowCpu);
+    shadowConstants->lightViewProj = lightViewProj;
+    commandList_->SetGraphicsRootConstantBufferView(0, shadowCbAddress);
+
+    for (const ChunkRenderBatch& batch : renderData.nearBatches)
+    {
+        if (batch.indexCounts.empty())
+        {
+            continue;
+        }
+
+        commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
+        commandList_->IASetIndexBuffer(&batch.indexBufferView);
+        for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
+        {
+            commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+        }
+    }
+
+    if (shadowMapState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(shadowMap_.Get(), shadowMapState_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &barrier);
+        shadowMapState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
+    nearConstants.shadowViewProj = lightViewProj;
+    nearConstants.shadowParams = glm::vec4(1.0f / static_cast<float>(kShadowMapResolution),
+                                           0.45f,
+                                           1.0f,
+                                           1.0f);
+    profilingSnapshot_.shadowDrawMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 void Renderer::endFrame()
 {
     ensureFrameStarted();
+
+    if (sceneColor_ != nullptr && sceneColorState_ == D3D12_RESOURCE_STATE_RENDER_TARGET)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(sceneColor_.Get(), sceneColorState_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &barrier);
+        sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
 
     if (imguiFrameStarted_)
     {
@@ -1048,13 +1703,387 @@ void Renderer::endFrame()
     commandList_->ResourceBarrier(1, &barrier);
     throwIfFailed(commandList_->Close(), "failed to close command list");
 
-    ID3D12CommandList* commandLists[] = {commandList_.Get()};
-    commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(commandLists)), commandLists);
+    ID3D12CommandList* lists[] = {commandList_.Get()};
+    commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
     throwIfFailed(swapChain_->Present(1, 0), "failed to present swap chain");
 
     ++fenceValue_;
     throwIfFailed(commandQueue_->Signal(fence_.Get(), fenceValue_), "failed to signal frame fence");
+    frameResources_[currentBackBufferIndex_].fenceValue = fenceValue_;
 
     frameStarted_ = false;
     imguiFrameStarted_ = false;
+}
+
+void Renderer::AtmosphereRenderer::ensureResources(Renderer& renderer)
+{
+    if (!transmittance.resource || !multiScattering.resource || !skyView.resource || !aerialPerspective.resource)
+    {
+        createResources(renderer);
+    }
+}
+
+void Renderer::AtmosphereRenderer::createPipelines(Renderer& renderer)
+{
+    Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
+        compileShaderFromFile(renderer.shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> transPs =
+        compileShaderFromFile(renderer.shaderPath("atmosphere_transmittance_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> multiPs =
+        compileShaderFromFile(renderer.shaderPath("atmosphere_multiscattering_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> skyViewPs =
+        compileShaderFromFile(renderer.shaderPath("atmosphere_skyview_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> skyPs =
+        compileShaderFromFile(renderer.shaderPath("atmosphere_sky_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> aerialPs =
+        compileShaderFromFile(renderer.shaderPath("atmosphere_aerial_perspective_ps.hlsl"), "main", "ps_5_0");
+
+    auto makePso = [&](ID3DBlob* ps, DXGI_FORMAT rtvFormat) -> Microsoft::WRL::ComPtr<ID3D12PipelineState>
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = renderer.fullscreenRootSignature_.Get();
+        desc.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
+        desc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthClipEnable = TRUE;
+        desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        desc.SampleMask = UINT_MAX;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.NumRenderTargets = 1;
+        desc.RTVFormats[0] = rtvFormat;
+        desc.SampleDesc.Count = 1;
+        desc.DepthStencilState.DepthEnable = FALSE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> state;
+        throwIfFailed(renderer.device_->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&state)),
+                      "failed to create atmosphere pipeline");
+        return state;
+    };
+
+    transmittancePso = makePso(transPs.Get(), kAtmosphereFormat);
+    multiScatteringPso = makePso(multiPs.Get(), kAtmosphereFormat);
+    skyViewPso = makePso(skyViewPs.Get(), kAtmosphereFormat);
+    skyPso = makePso(skyPs.Get(), kSceneColorFormat);
+    aerialPerspectivePso = makePso(aerialPs.Get(), kAtmosphereFormat);
+}
+
+void Renderer::AtmosphereRenderer::createResources(Renderer& renderer)
+{
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto createLutResource = [&](LutTexture& texture,
+                                 UINT width,
+                                 UINT height,
+                                 UINT rtvIndex,
+                                 D3D12_SRV_DIMENSION srvDimension)
+    {
+        D3D12_CLEAR_VALUE clearValue{};
+        clearValue.Format = kAtmosphereFormat;
+        const D3D12_RESOURCE_DESC desc =
+            texture2DDesc(kAtmosphereFormat, width, height, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        throwIfFailed(renderer.device_->CreateCommittedResource(&defaultHeap,
+                                                                D3D12_HEAP_FLAG_NONE,
+                                                                &desc,
+                                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                                &clearValue,
+                                                                IID_PPV_ARGS(&texture.resource)),
+                      "failed to create atmosphere LUT texture");
+
+        texture.rtv = rtvHandleAt(renderer.rtvHeap_.Get(), renderer.rtvDescriptorSize_, rtvIndex);
+        renderer.device_->CreateRenderTargetView(texture.resource.Get(), nullptr, texture.rtv);
+
+        texture.srvIndex = renderer.allocateSrvDescriptor();
+        texture.srvCpu = renderer.srvCpuHandle(texture.srvIndex);
+        texture.srvGpu = renderer.srvGpuHandle(texture.srvIndex);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = kAtmosphereFormat;
+        srvDesc.ViewDimension = srvDimension;
+        srvDesc.Texture2D.MipLevels = 1;
+        renderer.device_->CreateShaderResourceView(texture.resource.Get(), &srvDesc, texture.srvCpu);
+        texture.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    };
+
+    createLutResource(transmittance, 256, 64, kRtvIndexTransmittance, D3D12_SRV_DIMENSION_TEXTURE2D);
+    createLutResource(multiScattering, 32, 32, kRtvIndexMultiScattering, D3D12_SRV_DIMENSION_TEXTURE2D);
+    createLutResource(skyView, 256, 128, kRtvIndexSkyView, D3D12_SRV_DIMENSION_TEXTURE2D);
+
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = kAtmosphereFormat;
+    const D3D12_RESOURCE_DESC aerialDesc =
+        texture2DArrayDesc(kAtmosphereFormat,
+                           32,
+                           32,
+                           kAerialPerspectiveSliceCount,
+                           D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    throwIfFailed(renderer.device_->CreateCommittedResource(&defaultHeap,
+                                                            D3D12_HEAP_FLAG_NONE,
+                                                            &aerialDesc,
+                                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                            &clearValue,
+                                                            IID_PPV_ARGS(&aerialPerspective.resource)),
+                  "failed to create aerial perspective texture");
+
+    aerialPerspective.srvIndex = renderer.allocateSrvDescriptor();
+    aerialPerspective.srvCpu = renderer.srvCpuHandle(aerialPerspective.srvIndex);
+    aerialPerspective.srvGpu = renderer.srvGpuHandle(aerialPerspective.srvIndex);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC aerialSrvDesc{};
+    aerialSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    aerialSrvDesc.Format = kAtmosphereFormat;
+    aerialSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    aerialSrvDesc.Texture2DArray.MipLevels = 1;
+    aerialSrvDesc.Texture2DArray.ArraySize = kAerialPerspectiveSliceCount;
+    renderer.device_->CreateShaderResourceView(aerialPerspective.resource.Get(), &aerialSrvDesc, aerialPerspective.srvCpu);
+
+    for (UINT slice = 0; slice < kAerialPerspectiveSliceCount; ++slice)
+    {
+        aerialPerspective.rtvs[slice] =
+            rtvHandleAt(renderer.rtvHeap_.Get(), renderer.rtvDescriptorSize_, kRtvIndexAerialPerspectiveBase + slice);
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = kAtmosphereFormat;
+        rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtvDesc.Texture2DArray.FirstArraySlice = slice;
+        rtvDesc.Texture2DArray.ArraySize = 1;
+        renderer.device_->CreateRenderTargetView(aerialPerspective.resource.Get(), &rtvDesc, aerialPerspective.rtvs[slice]);
+    }
+    aerialPerspective.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::AtmosphereRenderer::destroyResources(Renderer& renderer)
+{
+    auto destroyLut = [&](LutTexture& texture)
+    {
+        if (texture.srvIndex != (std::numeric_limits<UINT>::max)())
+        {
+            renderer.freeSrvDescriptor(texture.srvIndex);
+            texture.srvIndex = (std::numeric_limits<UINT>::max)();
+        }
+        texture.resource.Reset();
+        texture.srvCpu = {};
+        texture.srvGpu = {};
+        texture.rtv = {};
+        texture.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    };
+
+    destroyLut(transmittance);
+    destroyLut(multiScattering);
+    destroyLut(skyView);
+    if (aerialPerspective.srvIndex != (std::numeric_limits<UINT>::max)())
+    {
+        renderer.freeSrvDescriptor(aerialPerspective.srvIndex);
+        aerialPerspective.srvIndex = (std::numeric_limits<UINT>::max)();
+    }
+    aerialPerspective.resource.Reset();
+    aerialPerspective.srvCpu = {};
+    aerialPerspective.srvGpu = {};
+    for (auto& rtv : aerialPerspective.rtvs)
+    {
+        rtv = {};
+    }
+    aerialPerspective.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::AtmosphereRenderer::transition(Renderer& renderer,
+                                              ID3D12Resource* resource,
+                                              D3D12_RESOURCE_STATES& currentState,
+                                              D3D12_RESOURCE_STATES nextState)
+{
+    if (resource == nullptr || currentState == nextState)
+    {
+        return;
+    }
+
+    const D3D12_RESOURCE_BARRIER barrier = transitionBarrier(resource, currentState, nextState);
+    renderer.commandList_->ResourceBarrier(1, &barrier);
+    currentState = nextState;
+}
+
+std::uint64_t Renderer::AtmosphereRenderer::uploadConstants(Renderer& renderer,
+                                                            const EnvironmentState& environment,
+                                                            const glm::mat4& view,
+                                                            const glm::mat4& proj,
+                                                            const glm::vec3& cameraPos,
+                                                            float sliceIndex)
+{
+    void* cpuMemory = nullptr;
+    const std::uint64_t gpuAddress = renderer.allocateFrameConstantBytes(sizeof(AtmosphereConstants), &cpuMemory);
+    auto* constants = static_cast<AtmosphereConstants*>(cpuMemory);
+    if (constants == nullptr)
+    {
+        return 0;
+    }
+
+    constants->invViewProj = glm::inverse(proj * view);
+    constants->view = view;
+    constants->proj = proj;
+    constants->cameraPosKm = glm::vec4(cameraPos, 1.0f);
+    constants->sunDirection = glm::vec4(glm::normalize(environment.sunDirection), 0.0f);
+    constants->sunIlluminance = glm::vec4(environment.sunIlluminance, 0.0f);
+    constants->atmosphereHeights = glm::vec4(environment.atmosphere.groundRadiusKm,
+                                             environment.atmosphere.atmosphereRadiusKm,
+                                             environment.atmosphere.rayleighScaleHeightKm,
+                                             environment.atmosphere.mieScaleHeightKm);
+    constants->ozoneAndPhase = glm::vec4(environment.atmosphere.ozoneCenterHeightKm,
+                                         environment.atmosphere.ozoneHalfWidthKm,
+                                         environment.atmosphere.mieAnisotropy,
+                                         environment.atmosphere.aerialPerspectiveDistanceKm);
+    constants->rayleighScattering = glm::vec4(environment.atmosphere.rayleighScattering, 0.0f);
+    constants->mieScattering = glm::vec4(environment.atmosphere.mieScattering, 0.0f);
+    constants->mieAbsorption = glm::vec4(environment.atmosphere.mieAbsorption, 0.0f);
+    constants->ozoneAbsorption = glm::vec4(environment.atmosphere.ozoneAbsorption, 0.0f);
+    constants->viewportAndDepth =
+        glm::vec4(static_cast<float>(renderer.width_), static_cast<float>(renderer.height_), kNearPlane, static_cast<float>(kAerialPerspectiveSliceCount));
+    constants->sliceParams =
+        glm::vec4(sliceIndex,
+                  static_cast<float>(kAerialPerspectiveSliceCount),
+                  environment.atmosphere.aerialPerspectiveDistanceKm,
+                  environment.timeOfDay);
+    return gpuAddress;
+}
+
+void Renderer::AtmosphereRenderer::renderLut(Renderer& renderer,
+                                             ID3D12PipelineState* pipelineState,
+                                             ID3D12Resource* targetResource,
+                                             D3D12_RESOURCE_STATES& targetState,
+                                             D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                                             const EnvironmentState& environment,
+                                             const glm::mat4& view,
+                                             const glm::mat4& proj,
+                                             const glm::vec3& cameraPos,
+                                             D3D12_GPU_DESCRIPTOR_HANDLE texture0,
+                                             D3D12_GPU_DESCRIPTOR_HANDLE texture1,
+                                             D3D12_GPU_DESCRIPTOR_HANDLE texture2,
+                                             float sliceIndex,
+                                             UINT width,
+                                             UINT height)
+{
+    transition(renderer, targetResource, targetState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_VIEWPORT viewport{};
+    viewport.Width = static_cast<float>(width);
+    viewport.Height = static_cast<float>(height);
+    viewport.MaxDepth = 1.0f;
+    D3D12_RECT scissor{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    renderer.commandList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    renderer.commandList_->RSSetViewports(1, &viewport);
+    renderer.commandList_->RSSetScissorRects(1, &scissor);
+    const std::uint64_t cbAddress = uploadConstants(renderer, environment, view, proj, cameraPos, sliceIndex);
+    renderer.commandList_->SetGraphicsRootSignature(renderer.fullscreenRootSignature_.Get());
+    renderer.commandList_->SetPipelineState(pipelineState);
+    renderer.commandList_->SetGraphicsRootConstantBufferView(0, cbAddress);
+    renderer.commandList_->SetGraphicsRootDescriptorTable(1, texture0);
+    renderer.commandList_->SetGraphicsRootDescriptorTable(2, texture1);
+    renderer.commandList_->SetGraphicsRootDescriptorTable(3, texture2);
+    renderer.commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    renderer.commandList_->DrawInstanced(3, 1, 0, 0);
+    transition(renderer, targetResource, targetState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+void Renderer::AtmosphereRenderer::renderTransmittance(Renderer& renderer,
+                                                       const EnvironmentState& environment,
+                                                       const glm::mat4& view,
+                                                       const glm::mat4& proj,
+                                                       const glm::vec3& cameraPos)
+{
+    renderLut(renderer,
+              transmittancePso.Get(),
+              transmittance.resource.Get(),
+              transmittance.state,
+              transmittance.rtv,
+              environment,
+              view,
+              proj,
+              cameraPos,
+              transmittance.srvGpu,
+              multiScattering.srvGpu,
+              skyView.srvGpu,
+              -1.0f,
+              256,
+              64);
+}
+
+void Renderer::AtmosphereRenderer::renderMultiScattering(Renderer& renderer,
+                                                         const EnvironmentState& environment,
+                                                         const glm::mat4& view,
+                                                         const glm::mat4& proj,
+                                                         const glm::vec3& cameraPos)
+{
+    renderLut(renderer,
+              multiScatteringPso.Get(),
+              multiScattering.resource.Get(),
+              multiScattering.state,
+              multiScattering.rtv,
+              environment,
+              view,
+              proj,
+              cameraPos,
+              transmittance.srvGpu,
+              transmittance.srvGpu,
+              skyView.srvGpu,
+              -1.0f,
+              32,
+              32);
+}
+
+void Renderer::AtmosphereRenderer::renderSkyView(Renderer& renderer,
+                                                 const EnvironmentState& environment,
+                                                 const glm::mat4& view,
+                                                 const glm::mat4& proj,
+                                                 const glm::vec3& cameraPos)
+{
+    renderLut(renderer,
+              skyViewPso.Get(),
+              skyView.resource.Get(),
+              skyView.state,
+              skyView.rtv,
+              environment,
+              view,
+              proj,
+              cameraPos,
+              transmittance.srvGpu,
+              multiScattering.srvGpu,
+              skyView.srvGpu,
+              -1.0f,
+              256,
+              128);
+}
+
+void Renderer::AtmosphereRenderer::renderAerialPerspective(Renderer& renderer,
+                                                           const EnvironmentState& environment,
+                                                           const glm::mat4& view,
+                                                           const glm::mat4& proj,
+                                                           const glm::vec3& cameraPos)
+{
+    transition(renderer,
+               aerialPerspective.resource.Get(),
+               aerialPerspective.state,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_VIEWPORT viewport{};
+    viewport.Width = 32.0f;
+    viewport.Height = 32.0f;
+    viewport.MaxDepth = 1.0f;
+    D3D12_RECT scissor{0, 0, 32, 32};
+    renderer.commandList_->RSSetViewports(1, &viewport);
+    renderer.commandList_->RSSetScissorRects(1, &scissor);
+    renderer.commandList_->SetGraphicsRootSignature(renderer.fullscreenRootSignature_.Get());
+    renderer.commandList_->SetPipelineState(aerialPerspectivePso.Get());
+    renderer.commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    for (UINT slice = 0; slice < kAerialPerspectiveSliceCount; ++slice)
+    {
+        renderer.commandList_->OMSetRenderTargets(1, &aerialPerspective.rtvs[slice], FALSE, nullptr);
+        const std::uint64_t cbAddress = uploadConstants(renderer, environment, view, proj, cameraPos, static_cast<float>(slice));
+        renderer.commandList_->SetGraphicsRootConstantBufferView(0, cbAddress);
+        renderer.commandList_->SetGraphicsRootDescriptorTable(1, transmittance.srvGpu);
+        renderer.commandList_->SetGraphicsRootDescriptorTable(2, multiScattering.srvGpu);
+        renderer.commandList_->SetGraphicsRootDescriptorTable(3, skyView.srvGpu);
+        renderer.commandList_->DrawInstanced(3, 1, 0, 0);
+    }
+    transition(renderer,
+               aerialPerspective.resource.Get(),
+               aerialPerspective.state,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }

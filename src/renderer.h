@@ -12,7 +12,12 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
+#include <string>
 #include <vector>
 
 struct GLFWwindow;
@@ -22,6 +27,7 @@ struct LoadedTexture
 {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     glm::ivec2 size{0};
+    UINT srvIndex{(std::numeric_limits<UINT>::max)()};
     D3D12_CPU_DESCRIPTOR_HANDLE srvCpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};
 
@@ -29,6 +35,50 @@ struct LoadedTexture
     {
         return resource != nullptr;
     }
+};
+
+struct AtmosphereSettings
+{
+    float groundRadiusKm{6360.0f};
+    float atmosphereRadiusKm{6460.0f};
+    float rayleighScaleHeightKm{8.0f};
+    float mieScaleHeightKm{1.2f};
+    float ozoneCenterHeightKm{25.0f};
+    float ozoneHalfWidthKm{15.0f};
+    float mieAnisotropy{0.76f};
+    float aerialPerspectiveDistanceKm{12.0f};
+    glm::vec3 rayleighScattering{5.802e-6f, 13.558e-6f, 33.1e-6f};
+    glm::vec3 rayleighAbsorption{0.0f};
+    glm::vec3 mieScattering{3.996e-6f};
+    glm::vec3 mieAbsorption{4.40e-6f};
+    glm::vec3 ozoneAbsorption{0.650e-6f, 1.881e-6f, 0.085e-6f};
+};
+
+struct TonemapSettings
+{
+    float exposure{0.35f};
+    float whitePoint{10.0f};
+};
+
+struct EnvironmentState
+{
+    glm::vec3 sunDirection{-0.35f, 0.9f, -0.2f};
+    glm::vec3 sunIlluminance{4.5f, 4.8f, 5.5f};
+    float timeOfDay{12.0f};
+    bool atmosphereEnabled{true};
+    float fogStartBlocks{1400.0f};
+    float farDistanceBlocks{4800.0f};
+    AtmosphereSettings atmosphere{};
+    TonemapSettings tonemap{};
+};
+
+struct RendererProfilingSnapshot
+{
+    double atmosphereLutMs{0.0};
+    double skyDrawMs{0.0};
+    double shadowDrawMs{0.0};
+    double worldDrawMs{0.0};
+    double toneMapMs{0.0};
 };
 
 class Renderer
@@ -53,27 +103,71 @@ public:
     void beginFrame(const glm::vec4& clearColor);
     void beginImGuiFrame();
     void renderWorld(const WorldRenderData& renderData,
-                     const glm::mat4& viewProj,
+                     const glm::mat4& view,
+                     const glm::mat4& proj,
                      const glm::vec3& cameraPos,
-                     const LoadedTexture& atlasTexture);
+                     const LoadedTexture& atlasTexture,
+                     const EnvironmentState& environment);
     void endFrame();
 
     [[nodiscard]] int width() const noexcept;
     [[nodiscard]] int height() const noexcept;
+    [[nodiscard]] RendererProfilingSnapshot profilingSnapshot() const noexcept;
 
 private:
-    struct SceneConstants
+    struct WorldConstants
     {
         glm::mat4 viewProj{1.0f};
+        glm::mat4 shadowViewProj{1.0f};
         glm::vec4 lightDirection{0.0f, 1.0f, 0.0f, 0.0f};
         glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 0.0f};
         glm::vec4 highlightedBlock{0.0f, 0.0f, 0.0f, 0.0f};
-        glm::vec4 fogColor{0.55f, 0.78f, 0.95f, 1.0f};
-        glm::vec4 params{0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec4 params0{0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec4 params1{0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec4 sunColor{1.0f, 1.0f, 1.0f, 0.0f};
+        glm::vec4 skyAmbient{0.1f, 0.12f, 0.16f, 0.0f};
+        glm::vec4 groundAmbient{0.05f, 0.045f, 0.04f, 0.0f};
+        glm::vec4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
+    };
+
+    struct ToneMapConstants
+    {
+        glm::vec4 exposureWhitePoint{1.0f, 8.0f, 0.0f, 0.0f};
+    };
+
+    struct AtmosphereConstants
+    {
+        glm::mat4 invViewProj{1.0f};
+        glm::mat4 view{1.0f};
+        glm::mat4 proj{1.0f};
+        glm::vec4 cameraPosKm{0.0f};
+        glm::vec4 sunDirection{0.0f, -1.0f, 0.0f, 0.0f};
+        glm::vec4 sunIlluminance{18.0f, 17.0f, 15.0f, 0.0f};
+        glm::vec4 atmosphereHeights{6360.0f, 6460.0f, 8.0f, 1.2f};
+        glm::vec4 ozoneAndPhase{25.0f, 15.0f, 0.8f, 32.0f};
+        glm::vec4 rayleighScattering{5.802e-6f, 13.558e-6f, 33.1e-6f, 0.0f};
+        glm::vec4 mieScattering{3.996e-6f, 3.996e-6f, 3.996e-6f, 0.0f};
+        glm::vec4 mieAbsorption{4.40e-6f, 4.40e-6f, 4.40e-6f, 0.0f};
+        glm::vec4 ozoneAbsorption{0.650e-6f, 1.881e-6f, 0.085e-6f, 0.0f};
+        glm::vec4 viewportAndDepth{1.0f, 1.0f, 1.0f, 32.0f};
+        glm::vec4 sliceParams{0.0f, 0.0f, 0.0f, 0.0f};
+    };
+
+    struct FrameResource
+    {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+        Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer;
+        std::byte* mappedConstants{nullptr};
+        UINT64 fenceValue{0};
+    };
+
+    struct ShadowConstants
+    {
+        glm::mat4 lightViewProj{1.0f};
     };
 
     static constexpr UINT kBackBufferCount = 2;
-    static constexpr UINT kSrvHeapCapacity = 64;
+    static constexpr UINT kSrvHeapCapacity = 128;
 
     static void imguiSrvAlloc(ImGui_ImplDX12_InitInfo* info,
                               D3D12_CPU_DESCRIPTOR_HANDLE* outCpuHandle,
@@ -89,13 +183,26 @@ private:
     void createDescriptorHeaps();
     void createRenderTargets();
     void createDepthBuffer();
-    void createConstantBuffer();
+    void createShadowResources();
     void createPipelines();
     void createImGui(GLFWwindow* window);
     void destroyRenderTargets();
     void destroyDepthBuffer();
+    void destroyShadowResources();
     void updateViewport(int width, int height);
     void ensureFrameStarted() const;
+    void createFrameResources();
+    void destroyFrameResources();
+    void createSceneColor();
+    void destroySceneColor();
+    void renderShadowMap(const WorldRenderData& renderData,
+                         const glm::mat4& view,
+                         const glm::vec3& cameraPos,
+                         const EnvironmentState& environment,
+                         WorldConstants& nearConstants);
+
+    [[nodiscard]] std::string shaderPath(const char* relativePath) const;
+    [[nodiscard]] std::uint64_t allocateFrameConstantBytes(std::size_t size, void** cpuPtrOut);
 
     [[nodiscard]] UINT allocateSrvDescriptor();
     void freeSrvDescriptor(UINT index);
@@ -105,6 +212,7 @@ private:
     GLFWwindow* window_{nullptr};
     int width_{0};
     int height_{0};
+    int sceneColorSrvIndex_{-1};
     bool frameStarted_{false};
     bool imguiFrameStarted_{false};
     bool initialized_{false};
@@ -112,28 +220,48 @@ private:
     Microsoft::WRL::ComPtr<IDXGIFactory6> factory_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> commandQueue_;
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> uploadCommandAllocator_;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap_;
-    Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> shadowRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> worldRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> fullscreenRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> sceneConstantBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> sceneColor_;
+    D3D12_RESOURCE_STATES shadowMapState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES sceneColorState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
 
-    SceneConstants* mappedSceneConstants_{nullptr};
+    D3D12_CPU_DESCRIPTOR_HANDLE depthDsv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE shadowMapDsv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE shadowMapSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneColorRtv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneColorSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE sceneColorSrvGpu_{};
+    std::array<FrameResource, kBackBufferCount> frameResources_{};
+    std::size_t currentFrameConstantOffset_{0};
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
     UINT currentBackBufferIndex_{0};
     UINT rtvDescriptorSize_{0};
     UINT dsvDescriptorSize_{0};
     UINT srvDescriptorSize_{0};
+    int shadowMapSrvIndex_{-1};
     std::vector<bool> srvSlotsInUse_{};
     D3D12_VIEWPORT viewport_{};
     D3D12_RECT scissorRect_{};
+    RendererProfilingSnapshot profilingSnapshot_{};
+
+    struct AtmosphereRenderer;
+    std::unique_ptr<AtmosphereRenderer> atmosphere_;
 };

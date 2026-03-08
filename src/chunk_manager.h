@@ -156,12 +156,8 @@ struct ChunkRenderBatch
 
 struct WorldRenderData
 {
-    glm::vec3 lightDirection{0.0f};
     glm::ivec3 highlightedBlock{0};
     bool hasHighlight{false};
-    glm::vec3 fogColor{0.55f, 0.78f, 0.95f};
-    float fogStart{static_cast<float>(kDefaultFarFogStartBlocks)};
-    float fogEnd{static_cast<float>(kDefaultFarRenderDistanceBlocks)};
     std::vector<ChunkRenderBatch> nearBatches;
     std::vector<ChunkRenderBatch> farBatches;
 };
@@ -179,8 +175,11 @@ struct ChunkProfilingSnapshot
     StreamingPhase phase{StreamingPhase::SteadyState};
     double averageGenerationMs{0.0};
     double averageMeshingMs{0.0};
+    double updateMsLastFrame{0.0};
     double uploadMsLastFrame{0.0};
     double farBuildMsAverage{0.0};
+    double farCollectMsLastFrame{0.0};
+    double farUploadMsLastFrame{0.0};
     std::size_t uploadedBytes{0};
     int generatedChunks{0};
     int meshedChunks{0};

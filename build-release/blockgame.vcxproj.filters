@@ -1,0 +1,46 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\camera.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\input_context.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\biome_database.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\climate_map.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\surface_map.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\terrain_generator.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\worldgen_profile.cpp">
+      <Filter>src\terrain</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\Jacob\Documents\code\BlockGame\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{578C947C-5E9E-3A4A-A7D1-89C825E25CF3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\terrain">
+      <UniqueIdentifier>{7C8E7C1D-6633-359C-9DCE-EA77E0EC2FF1}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

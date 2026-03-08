@@ -10,6 +10,7 @@
 #include <imgui_stdlib.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
@@ -725,6 +726,8 @@ int runGame()
         return EXIT_FAILURE;
     }
 
+    EnvironmentState environment{};
+
     LoadedTexture blockAtlas;
     try
     {
@@ -767,10 +770,8 @@ int runGame()
     double fpsValue = 0.0;
     double loadingOverlayTimer = 0.0;
     std::string loadingOverlayText;
-#ifndef NDEBUG
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-#endif
     std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
@@ -791,12 +792,12 @@ int runGame()
             fpsTimer = 0.0;
             fpsFrameCount = 0;
         }
-#ifndef NDEBUG
         profilingOverlayTimer += frameTime;
 
         if (profilingOverlayTimer >= 1.0)
         {
             ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
+            const RendererProfilingSnapshot rendererSnapshot = renderer.profilingSnapshot();
             const char* phaseName = "steady";
             switch (snapshot.phase)
             {
@@ -884,11 +885,26 @@ int runGame()
                 }
             }
             profilingStream << " | UploadMs " << snapshot.uploadMsLastFrame;
+            profilingStream << " | UpdateMs " << snapshot.updateMsLastFrame;
+            if (snapshot.farCollectMsLastFrame > 0.0 || snapshot.farUploadMsLastFrame > 0.0)
+            {
+                profilingStream << " | FarCollect " << snapshot.farCollectMsLastFrame
+                                << " FarUpload " << snapshot.farUploadMsLastFrame;
+            }
+            if (rendererSnapshot.atmosphereLutMs > 0.0 || rendererSnapshot.skyDrawMs > 0.0 ||
+                rendererSnapshot.shadowDrawMs > 0.0 || rendererSnapshot.worldDrawMs > 0.0 ||
+                rendererSnapshot.toneMapMs > 0.0)
+            {
+                profilingStream << " | Atmo " << rendererSnapshot.atmosphereLutMs
+                                << " Sky " << rendererSnapshot.skyDrawMs
+                                << " Shadow " << rendererSnapshot.shadowDrawMs
+                                << " World " << rendererSnapshot.worldDrawMs
+                                << " Tone " << rendererSnapshot.toneMapMs;
+            }
 
             profilingOverlayText = profilingStream.str();
             profilingOverlayTimer = 0.0;
         }
-#endif
 
         glfwPollEvents();
 
@@ -1018,7 +1034,6 @@ int runGame()
         inputContext.leftMouseJustPressed = false;
         inputContext.rightMouseJustPressed = false;
 
-        renderer.waitForGpu();
         chunkManager.update(camera.position, camera.front());
 
         int framebufferWidth = 0;
@@ -1039,11 +1054,38 @@ int runGame()
         const glm::mat4 viewProj = projection * view;
         const Frustum frustum = Frustum::fromMatrix(viewProj);
 
-        renderer.beginFrame(glm::vec4(0.55f, 0.78f, 0.95f, 1.0f));
+        const auto updateEnvironment = [&]()
+        {
+            environment.fogStartBlocks = static_cast<float>(chunkManager.renderDistanceSettings().fogStartBlocks);
+            environment.farDistanceBlocks = static_cast<float>(chunkManager.farRenderDistanceBlocks());
+
+            const float dayAngle = ((environment.timeOfDay - 6.0f) / 24.0f) * glm::two_pi<float>();
+            const float elevation = std::sin(dayAngle);
+            const float azimuth = dayAngle - glm::half_pi<float>();
+            const float horizontal = std::max(0.05f, std::cos(dayAngle));
+            glm::vec3 sunDir{
+                std::cos(azimuth) * horizontal,
+                elevation,
+                std::sin(azimuth) * horizontal
+            };
+            if (glm::length(sunDir) <= 1e-4f)
+            {
+                sunDir = glm::vec3(-0.35f, 0.9f, -0.2f);
+            }
+            environment.sunDirection = glm::normalize(sunDir);
+
+            const float daylight = std::clamp(environment.sunDirection.y * 0.5f + 0.5f, 0.0f, 1.0f);
+            const glm::vec3 sunriseTint{0.85f, 0.45f, 0.22f};
+            const glm::vec3 middayTint{4.5f, 4.8f, 5.5f};
+            environment.sunIlluminance = glm::mix(sunriseTint, middayTint, std::pow(daylight, 0.65f));
+        };
+        updateEnvironment();
+
+        renderer.beginFrame(glm::vec4(0.10f, 0.16f, 0.26f, 1.0f));
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
         {
             const WorldRenderData renderData = chunkManager.buildRenderData(frustum);
-            renderer.renderWorld(renderData, viewProj, camera.position, blockAtlas);
+            renderer.renderWorld(renderData, view, projection, camera.position, blockAtlas, environment);
         }
         renderer.beginImGuiFrame();
 
@@ -1153,6 +1195,28 @@ int runGame()
             ImGui::End();
         }
 
+        if (inputContext.showDebugOverlay)
+        {
+            ImGui::SetNextWindowPos(ImVec2(12.0f, 260.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.85f);
+            ImGui::Begin("Environment", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::Checkbox("Atmosphere", &environment.atmosphereEnabled);
+            ImGui::SliderFloat("Time of Day", &environment.timeOfDay, 0.0f, 24.0f, "%.2f");
+            ImGui::SliderFloat("Exposure", &environment.tonemap.exposure, 0.25f, 2.5f, "%.2f");
+            ImGui::SliderFloat("White Point", &environment.tonemap.whitePoint, 2.0f, 16.0f, "%.2f");
+            ImGui::SliderFloat("Aerial Distance (km)",
+                               &environment.atmosphere.aerialPerspectiveDistanceKm,
+                               4.0f,
+                               64.0f,
+                               "%.1f");
+            ImGui::SliderFloat("Mie G", &environment.atmosphere.mieAnisotropy, 0.5f, 0.95f, "%.2f");
+            ImGui::Text("Sun Dir: %.2f %.2f %.2f",
+                        environment.sunDirection.x,
+                        environment.sunDirection.y,
+                        environment.sunDirection.z);
+            ImGui::End();
+        }
+
         if (!playerReleased && !loadingOverlayText.empty())
         {
             ImGui::SetNextWindowPos(ImVec2(framebufferWidth * 0.5f, framebufferHeight * 0.5f),
@@ -1228,7 +1292,6 @@ int runGame()
             ImGui::End();
         }
 
-#ifndef NDEBUG
         if (!profilingOverlayText.empty())
         {
             ImGui::SetNextWindowPos(ImVec2(12.0f, inputContext.showDebugOverlay ? 220.0f : 12.0f), ImGuiCond_Always);
@@ -1241,7 +1304,6 @@ int runGame()
             ImGui::TextUnformatted(profilingOverlayText.c_str());
             ImGui::End();
         }
-#endif
 
         if (playerReleased && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
         {

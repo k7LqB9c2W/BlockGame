@@ -5,7 +5,7 @@ rem ====== Config ======
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "PROJECT_ROOT=%~dp0"
 if "%PROJECT_ROOT:~-1%"=="\" set "PROJECT_ROOT=%PROJECT_ROOT:~0,-1%"
-set "BUILD_ROOT=%PROJECT_ROOT%\build"
+set "BUILD_ROOT=%PROJECT_ROOT%\build-dx12"
 set "RELEASE_BUILD_DIR=%BUILD_ROOT%\release"
 set "DEBUG_BUILD_DIR=%BUILD_ROOT%\debug"
 set "OUT=blockgame.exe"
@@ -14,6 +14,7 @@ set "VSDEVCMD="
 set "CMAKE_EXE="
 set "NINJA_EXE="
 set "PARALLEL_JOBS="
+set "VCPKG_TOOLCHAIN="
 
 rem ====== Help ======
 if "%~1"=="" goto :usage
@@ -89,6 +90,22 @@ if defined NINJA_EXE if exist "%NINJA_EXE%" exit /b 0
 echo Could not find ninja.exe.
 exit /b 1
 
+:find_vcpkg_toolchain
+if defined VCPKG_TOOLCHAIN if exist "%VCPKG_TOOLCHAIN%" exit /b 0
+if exist "C:\vcpkg\scripts\buildsystems\vcpkg.cmake" (
+    set "VCPKG_TOOLCHAIN=C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+    exit /b 0
+)
+if defined VCPKG_ROOT if exist "%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" (
+    set "VCPKG_TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
+    exit /b 0
+)
+echo Could not find a usable vcpkg toolchain file.
+echo Expected one of:
+echo   C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+echo   %%VCPKG_ROOT%%\scripts\buildsystems\vcpkg.cmake
+exit /b 1
+
 :resolve_jobs
 set "PARALLEL_JOBS=%BLOCKGAME_JOBS%"
 if not defined PARALLEL_JOBS set "PARALLEL_JOBS=%DEFAULT_JOBS%"
@@ -106,6 +123,12 @@ if exist "%TARGET_BUILD_DIR%\.ninja_lock" del /q "%TARGET_BUILD_DIR%\.ninja_lock
 if exist "%TARGET_BUILD_DIR%\.ninja_log.restat" del /q "%TARGET_BUILD_DIR%\.ninja_log.restat" >nul 2>nul
 exit /b 0
 
+:clear_stale_cmake_state
+set "TARGET_BUILD_DIR=%~1"
+if exist "%TARGET_BUILD_DIR%\CMakeCache.txt" del /q "%TARGET_BUILD_DIR%\CMakeCache.txt" >nul 2>nul
+if exist "%TARGET_BUILD_DIR%\CMakeFiles" rd /s /q "%TARGET_BUILD_DIR%\CMakeFiles" >nul 2>nul
+exit /b 0
+
 :do_build
 set "TARGET_BUILD_DIR=%~1"
 set "TARGET_BUILD_TYPE=%~2"
@@ -121,9 +144,15 @@ call :find_ninja || (
     exit /b %ERR%
 )
 call :resolve_jobs
+call :find_vcpkg_toolchain || (
+    set "ERR=%ERRORLEVEL%"
+    call :teardown_env
+    exit /b %ERR%
+)
 echo.
 echo Using CMake: %CMAKE_EXE%
 echo Using Ninja: %NINJA_EXE%
+echo Using vcpkg toolchain: %VCPKG_TOOLCHAIN%
 echo Parallel jobs: %PARALLEL_JOBS%
 echo Build dir: %TARGET_BUILD_DIR%
 call :ensure_build_root || (
@@ -133,9 +162,12 @@ call :ensure_build_root || (
 )
 if not exist "%TARGET_BUILD_DIR%" mkdir "%TARGET_BUILD_DIR%" >nul 2>nul
 call :clear_stale_ninja_state "%TARGET_BUILD_DIR%"
+call :clear_stale_cmake_state "%TARGET_BUILD_DIR%"
 "%CMAKE_EXE%" -S "%PROJECT_ROOT%" -B "%TARGET_BUILD_DIR%" -G Ninja ^
   "-DCMAKE_MAKE_PROGRAM:FILEPATH=%NINJA_EXE%" ^
-  "-DCMAKE_BUILD_TYPE:STRING=%TARGET_BUILD_TYPE%"
+  "-DCMAKE_BUILD_TYPE:STRING=%TARGET_BUILD_TYPE%" ^
+  "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=%VCPKG_TOOLCHAIN%" ^
+  "-DVCPKG_TARGET_TRIPLET:STRING=x64-windows"
 if errorlevel 1 (
     set "ERR=%ERRORLEVEL%"
     call :teardown_env
@@ -179,6 +211,7 @@ exit /b %ERRORLEVEL%
 echo.
 echo === Cleaning build artifacts ===
 if exist "%BUILD_ROOT%" rd /s /q "%BUILD_ROOT%" 2>nul
+if exist "%PROJECT_ROOT%\build" rd /s /q "%PROJECT_ROOT%\build" 2>nul
 del /q "%PROJECT_ROOT%\blockgame.exe" 2>nul
 del /q "%PROJECT_ROOT%\blockgame.pdb" 2>nul
 del /q "%PROJECT_ROOT%\glfw3.dll" 2>nul
@@ -194,6 +227,8 @@ echo   build_blockgame.bat run       Build Release then run the app
 echo   build_blockgame.bat clean     Delete build outputs
 echo.
 echo Notes:
+echo   - This script builds the Direct3D 12 version of BlockGame.
+echo   - The default build root is now build-dx12.
 echo   - This script no longer uses the legacy one-shot CL release build.
 echo   - Release builds default to %DEFAULT_JOBS% parallel jobs to keep memory usage controlled.
 echo   - Override jobs if needed with: set BLOCKGAME_JOBS=1 ^& build_blockgame.bat release

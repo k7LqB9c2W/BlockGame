@@ -11,6 +11,7 @@ cbuffer WorldConstants : register(b0)
     float4 uSkyAmbient;
     float4 uGroundAmbient;
     float4 uShadowParams;
+    float4 uTerrainDebug;
 };
 
 struct VSInput
@@ -20,6 +21,7 @@ struct VSInput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint lighting : COLOR0;
 };
 
 struct VSOutput
@@ -30,6 +32,7 @@ struct VSOutput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint lighting : COLOR0;
 };
 
 VSOutput main(VSInput input)
@@ -40,6 +43,7 @@ VSOutput main(VSInput input)
     output.tileCoord = input.tileCoord;
     output.atlasBase = input.atlasBase;
     output.atlasSize = input.atlasSize;
+    output.lighting = input.lighting;
     output.position = mul(uViewProj, float4(input.position, 1.0f));
     return output;
 }

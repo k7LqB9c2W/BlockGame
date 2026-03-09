@@ -28,8 +28,13 @@ struct LoadedTexture
 {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     glm::ivec2 size{0};
+    glm::ivec2 sourceSize{0};
+    glm::ivec2 tileCounts{0};
     UINT mipLevels{1};
     UINT srvIndex{(std::numeric_limits<UINT>::max)()};
+    int tileSizePixels{0};
+    int tileStridePixels{0};
+    int tilePaddingPixels{0};
     D3D12_CPU_DESCRIPTOR_HANDLE srvCpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};
 
@@ -37,6 +42,15 @@ struct LoadedTexture
     {
         return resource != nullptr;
     }
+};
+
+enum class TerrainDebugView : int
+{
+    None = 0,
+    SkyLight = 1,
+    BlockLight = 2,
+    MipLevel = 3,
+    AmbientOcclusion = 4
 };
 
 struct AtmosphereSettings
@@ -69,6 +83,8 @@ struct RenderDebugSettings
     bool aerialPerspectiveEnabled{true};
     bool fogFallbackEnabled{true};
     bool shadowsEnabled{true};
+    bool directSunEnabled{true};
+    TerrainDebugView terrainDebugView{TerrainDebugView::None};
 };
 
 struct EnvironmentState
@@ -141,6 +157,7 @@ private:
         glm::vec4 skyAmbient{0.1f, 0.12f, 0.16f, 0.0f};
         glm::vec4 groundAmbient{0.05f, 0.045f, 0.04f, 0.0f};
         glm::vec4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec4 terrainDebug{0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     struct ToneMapConstants

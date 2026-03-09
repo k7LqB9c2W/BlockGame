@@ -115,6 +115,7 @@ enum class BlockId : std::uint8_t
     SpruceLog = 7,
     SpruceLeaves = 8,
     Podzol = 9,
+    DebugLamp = 10,
     Count
 };
 
@@ -143,6 +144,21 @@ struct WorldVertex
     glm::vec2 tileCoord;
     glm::vec2 atlasBase;
     glm::vec2 atlasSize;
+    std::uint32_t lightingData{0};
+};
+
+struct BlockTextureAtlasConfig
+{
+    glm::ivec2 textureSizePixels{0};
+    int tileSizePixels{0};
+    int tileStridePixels{0};
+    int tilePaddingPixels{0};
+};
+
+struct LightSample
+{
+    std::uint8_t sky{15};
+    std::uint8_t block{0};
 };
 
 struct ChunkRenderBatch
@@ -241,7 +257,7 @@ public:
     ChunkManager& operator=(ChunkManager&&) = delete;
 
     void initializeRendering(ID3D12Device* device);
-    void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
+    void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
     WorldRenderData buildRenderData(const Frustum& frustum) const;
@@ -253,7 +269,9 @@ public:
     void clear();
 
     bool destroyBlock(const glm::ivec3& worldPos);
-    bool placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal);
+    bool placeBlock(const glm::ivec3& targetBlockPos,
+                    const glm::ivec3& faceNormal,
+                    BlockId block = BlockId::Grass);
 
     RaycastHit raycast(const glm::vec3& origin, const glm::vec3& direction) const;
     void updateHighlight(const glm::vec3& cameraPos, const glm::vec3& cameraDirection);
@@ -266,12 +284,14 @@ public:
     void setRenderDistance(int distance) noexcept;
     void setNearRenderDistance(int chunks) noexcept;
     void setFarRenderDistanceBlocks(int blocks) noexcept;
+    void setFogStartBlocks(int blocks) noexcept;
     void setLodEnabled(bool enabled);
     bool lodEnabled() const noexcept;
     void setFarTerrainEnabled(bool enabled);
     bool farTerrainEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
+    LightSample lightAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
     void beginSpawnPreload(const glm::vec3& spawnPos);
     bool isSpawnPreloadReady() const noexcept;

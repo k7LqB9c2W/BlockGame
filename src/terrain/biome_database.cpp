@@ -96,6 +96,7 @@ BlockId parseBlockId(const std::string& text, const std::filesystem::path& fileP
     if (lower == "spruce_log" || lower == "sprucewood" || lower == "spruce_wood") return BlockId::SpruceLog;
     if (lower == "spruce_leaves") return BlockId::SpruceLeaves;
     if (lower == "podzol") return BlockId::Podzol;
+    if (lower == "debug_lamp" || lower == "lamp") return BlockId::DebugLamp;
 
     std::ostringstream oss;
     oss << "Unknown block id '" << text << "' in " << filePath;

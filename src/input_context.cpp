@@ -165,6 +165,14 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
         // F3 is handled by the main loop as a far-terrain toggle.
     }
 
+    bool lKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS);
+    inputContext.lKeyJustPressed = lKeyCurrentlyPressed && !inputContext.lKeyPressed;
+    inputContext.lKeyPressed = lKeyCurrentlyPressed;
+    if (inputContext.lKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    {
+        inputContext.placeLampMode = !inputContext.placeLampMode;
+    }
+
     const bool captureMouse = isGameplayMouseCaptured(inputContext);
     glfwSetInputMode(window, GLFW_CURSOR, captureMouse ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 

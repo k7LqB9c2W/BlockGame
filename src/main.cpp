@@ -287,6 +287,25 @@ int __cdecl crtReportHook(int reportType, char* message, int*)
     return true;
 }
 
+[[nodiscard]] bool tryGetEnvInt(const char* name, int& outValue)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+    {
+        return false;
+    }
+
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value)
+    {
+        return false;
+    }
+
+    outValue = static_cast<int>(parsed);
+    return true;
+}
+
 struct ScreenshotSweepConfig
 {
     bool enabled{false};
@@ -325,6 +344,191 @@ struct ScreenshotReproState
     bool captureRequested{false};
     int waitFramesRemaining{0};
 };
+
+struct CapturePlacementAction
+{
+    glm::ivec3 targetBlockPos{0};
+    glm::ivec3 faceNormal{0, 1, 0};
+    BlockId block{BlockId::DebugLamp};
+    bool applied{false};
+};
+
+struct CaptureOverridesConfig
+{
+    bool hasTimeOfDay{false};
+    float timeOfDay{12.0f};
+    bool hasNearChunks{false};
+    int nearChunks{kDefaultNearRenderDistance};
+    bool hasFarBlocks{false};
+    int farBlocks{kDefaultFarRenderDistanceBlocks};
+    bool hasFogStartBlocks{false};
+    int fogStartBlocks{kDefaultFarFogStartBlocks};
+    bool hasFarTerrainEnabled{false};
+    bool farTerrainEnabled{false};
+    bool hasDebugView{false};
+    TerrainDebugView terrainDebugView{TerrainDebugView::None};
+    bool hasDirectSunEnabled{false};
+    bool directSunEnabled{true};
+    std::vector<CapturePlacementAction> placements;
+};
+
+[[nodiscard]] BlockId parseCaptureBlockId(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    if (text == "air")
+    {
+        return BlockId::Air;
+    }
+    if (text == "debug_lamp" || text == "lamp")
+    {
+        return BlockId::DebugLamp;
+    }
+    if (text == "grass")
+    {
+        return BlockId::Grass;
+    }
+    if (text == "stone")
+    {
+        return BlockId::Stone;
+    }
+    if (text == "sand")
+    {
+        return BlockId::Sand;
+    }
+    if (text == "water")
+    {
+        return BlockId::Water;
+    }
+    if (text == "wood" || text == "log")
+    {
+        return BlockId::Wood;
+    }
+    if (text == "leaves" || text == "leaf")
+    {
+        return BlockId::Leaves;
+    }
+    if (text == "spruce_log" || text == "sprucelog")
+    {
+        return BlockId::SpruceLog;
+    }
+    if (text == "spruce_leaves" || text == "spruceleaves")
+    {
+        return BlockId::SpruceLeaves;
+    }
+    if (text == "podzol")
+    {
+        return BlockId::Podzol;
+    }
+
+    return BlockId::DebugLamp;
+}
+
+[[nodiscard]] TerrainDebugView parseTerrainDebugView(int value) noexcept
+{
+    switch (value)
+    {
+    case 1:
+        return TerrainDebugView::SkyLight;
+    case 2:
+        return TerrainDebugView::BlockLight;
+    case 3:
+        return TerrainDebugView::MipLevel;
+    case 4:
+        return TerrainDebugView::AmbientOcclusion;
+    default:
+        return TerrainDebugView::None;
+    }
+}
+
+[[nodiscard]] std::vector<CapturePlacementAction> loadCapturePlacements()
+{
+    std::vector<CapturePlacementAction> actions;
+    const char* value = std::getenv("BLOCKGAME_CAPTURE_PLACEMENTS");
+    if (value == nullptr || value[0] == '\0')
+    {
+        return actions;
+    }
+
+    std::stringstream stream(value);
+    std::string entry;
+    while (std::getline(stream, entry, ';'))
+    {
+        if (entry.empty())
+        {
+            continue;
+        }
+
+        const std::size_t firstPipe = entry.find('|');
+        const std::size_t secondPipe = entry.find('|', firstPipe == std::string::npos ? std::string::npos : firstPipe + 1);
+        if (firstPipe == std::string::npos || secondPipe == std::string::npos)
+        {
+            continue;
+        }
+
+        CapturePlacementAction action;
+        {
+            std::string positionPart = entry.substr(0, firstPipe);
+            std::replace(positionPart.begin(), positionPart.end(), ',', ' ');
+            std::istringstream positionStream(positionPart);
+            if (!(positionStream >> action.targetBlockPos.x >> action.targetBlockPos.y >> action.targetBlockPos.z))
+            {
+                continue;
+            }
+        }
+        {
+            std::string normalPart = entry.substr(firstPipe + 1, secondPipe - firstPipe - 1);
+            std::replace(normalPart.begin(), normalPart.end(), ',', ' ');
+            std::istringstream normalStream(normalPart);
+            if (!(normalStream >> action.faceNormal.x >> action.faceNormal.y >> action.faceNormal.z))
+            {
+                continue;
+            }
+        }
+
+        action.block = parseCaptureBlockId(entry.substr(secondPipe + 1));
+        actions.push_back(action);
+    }
+
+    return actions;
+}
+
+[[nodiscard]] CaptureOverridesConfig loadCaptureOverridesConfig()
+{
+    CaptureOverridesConfig config;
+    config.placements = loadCapturePlacements();
+
+    config.hasTimeOfDay = tryGetEnvFloat("BLOCKGAME_CAPTURE_TIME_OF_DAY", config.timeOfDay);
+    config.hasNearChunks = tryGetEnvInt("BLOCKGAME_CAPTURE_NEAR_CHUNKS", config.nearChunks);
+    config.hasFarBlocks = tryGetEnvInt("BLOCKGAME_CAPTURE_FAR_BLOCKS", config.farBlocks);
+    config.hasFogStartBlocks = tryGetEnvInt("BLOCKGAME_CAPTURE_FOG_START_BLOCKS", config.fogStartBlocks);
+    if (const char* debugViewValue = std::getenv("BLOCKGAME_CAPTURE_DEBUG_VIEW"))
+    {
+        char* end = nullptr;
+        const long parsed = std::strtol(debugViewValue, &end, 10);
+        if (end != debugViewValue)
+        {
+            config.hasDebugView = true;
+            config.terrainDebugView = parseTerrainDebugView(static_cast<int>(parsed));
+        }
+    }
+    if (const char* directSunValue = std::getenv("BLOCKGAME_CAPTURE_DIRECT_SUN"))
+    {
+        config.hasDirectSunEnabled = true;
+        config.directSunEnabled = envFlagEnabled("BLOCKGAME_CAPTURE_DIRECT_SUN");
+        (void)directSunValue;
+    }
+    if (const char* farTerrainValue = std::getenv("BLOCKGAME_CAPTURE_FAR_TERRAIN"))
+    {
+        config.hasFarTerrainEnabled = true;
+        config.farTerrainEnabled = envFlagEnabled("BLOCKGAME_CAPTURE_FAR_TERRAIN");
+        (void)farTerrainValue;
+    }
+
+    return config;
+}
 
 [[nodiscard]] ScreenshotSweepConfig loadScreenshotSweepConfig()
 {
@@ -967,6 +1171,7 @@ int runGame()
     EnvironmentState environment{};
     const ScreenshotReproConfig screenshotReproConfig = loadScreenshotReproConfig();
     const ScreenshotSweepConfig screenshotSweepConfig = loadScreenshotSweepConfig();
+    CaptureOverridesConfig captureOverrides = loadCaptureOverridesConfig();
     ScreenshotReproState screenshotReproState{};
     ScreenshotSweepState screenshotSweepState{};
     if (screenshotReproConfig.enabled)
@@ -1032,8 +1237,42 @@ int runGame()
 
     ChunkManager chunkManager(1337u);
     chunkManager.initializeRendering(renderer.device());
-    chunkManager.setBlockTextureAtlasConfig(blockAtlas.size, kAtlasTileSizePixels); // Map block faces to atlas tiles.
+    chunkManager.setBlockTextureAtlasConfig(BlockTextureAtlasConfig{
+        blockAtlas.size,
+        blockAtlas.tileSizePixels > 0 ? blockAtlas.tileSizePixels : kAtlasTileSizePixels,
+        blockAtlas.tileStridePixels > 0 ? blockAtlas.tileStridePixels : kAtlasTileSizePixels,
+        blockAtlas.tilePaddingPixels});
     inputContext.lodEnabled = chunkManager.farTerrainEnabled();
+
+    if (captureOverrides.hasNearChunks)
+    {
+        chunkManager.setNearRenderDistance(captureOverrides.nearChunks);
+    }
+    if (captureOverrides.hasFarBlocks)
+    {
+        chunkManager.setFarRenderDistanceBlocks(captureOverrides.farBlocks);
+    }
+    if (captureOverrides.hasFogStartBlocks)
+    {
+        chunkManager.setFogStartBlocks(captureOverrides.fogStartBlocks);
+    }
+    if (captureOverrides.hasFarTerrainEnabled)
+    {
+        chunkManager.setFarTerrainEnabled(captureOverrides.farTerrainEnabled);
+        inputContext.lodEnabled = captureOverrides.farTerrainEnabled;
+    }
+    if (captureOverrides.hasTimeOfDay)
+    {
+        environment.timeOfDay = captureOverrides.timeOfDay;
+    }
+    if (captureOverrides.hasDebugView)
+    {
+        environment.debug.terrainDebugView = captureOverrides.terrainDebugView;
+    }
+    if (captureOverrides.hasDirectSunEnabled)
+    {
+        environment.debug.directSunEnabled = captureOverrides.directSunEnabled;
+    }
     
     // Find a guaranteed safe spawn position above ground
     std::cout << "Finding safe spawn position..." << std::endl;
@@ -1302,8 +1541,11 @@ int runGame()
 
         if (playerReleased)
         {
-            // Update block highlighting based on crosshair
-            chunkManager.updateHighlight(camera.position, camera.front());
+            const bool scriptedCaptureActive = screenshotSweepConfig.enabled || screenshotReproConfig.enabled;
+            if (!scriptedCaptureActive)
+            {
+                chunkManager.updateHighlight(camera.position, camera.front());
+            }
 
             if (isGameplayMouseCaptured(inputContext) && inputContext.leftMouseJustPressed)
             {
@@ -1320,13 +1562,63 @@ int runGame()
                 RaycastHit hit = chunkManager.raycast(camera.position, camera.front());
                 if (hit.hit)
                 {
-                    chunkManager.placeBlock(hit.blockPos, hit.faceNormal);
+                    chunkManager.placeBlock(hit.blockPos,
+                                           hit.faceNormal,
+                                           inputContext.placeLampMode ? BlockId::DebugLamp : BlockId::Grass);
                 }
                 inputContext.rightMouseJustPressed = false;
             }
         }
         inputContext.leftMouseJustPressed = false;
         inputContext.rightMouseJustPressed = false;
+
+        bool capturePlacementsApplied = true;
+        if (playerReleased && !captureOverrides.placements.empty())
+        {
+            for (auto& action : captureOverrides.placements)
+            {
+                if (action.applied)
+                {
+                    continue;
+                }
+
+                const glm::ivec3 placedWorldPos = action.targetBlockPos + action.faceNormal;
+                const BlockId existingPlacedBlock = chunkManager.blockAt(placedWorldPos);
+                if (existingPlacedBlock == action.block)
+                {
+                    action.applied = true;
+                    continue;
+                }
+
+                capturePlacementsApplied = false;
+                if (action.block == BlockId::Air)
+                {
+                    if (existingPlacedBlock == BlockId::Air || chunkManager.destroyBlock(placedWorldPos))
+                    {
+                        action.applied = (chunkManager.blockAt(placedWorldPos) == BlockId::Air);
+                    }
+                    continue;
+                }
+
+                if (existingPlacedBlock != BlockId::Air)
+                {
+                    chunkManager.destroyBlock(placedWorldPos);
+                    continue;
+                }
+
+                if (chunkManager.placeBlock(action.targetBlockPos, action.faceNormal, action.block))
+                {
+                    action.applied = true;
+                }
+            }
+
+            capturePlacementsApplied = std::all_of(captureOverrides.placements.begin(),
+                                                   captureOverrides.placements.end(),
+                                                   [](const CapturePlacementAction& action)
+                                                   {
+                                                       return action.applied;
+                                                   });
+        }
 
         bool screenshotReproCaptureThisFrame = false;
         std::filesystem::path screenshotReproCapturePath;
@@ -1357,7 +1649,11 @@ int runGame()
 
             if (!screenshotReproState.captureRequested)
             {
-                if (screenshotReproState.waitFramesRemaining > 0)
+                if (!capturePlacementsApplied)
+                {
+                    screenshotReproState.waitFramesRemaining = screenshotReproConfig.settleFrames;
+                }
+                else if (screenshotReproState.waitFramesRemaining > 0)
                 {
                     --screenshotReproState.waitFramesRemaining;
                 }
@@ -1404,7 +1700,11 @@ int runGame()
                                 sweepYaw,
                                 sweepPitch);
 
-                if (screenshotSweepState.waitFramesRemaining > 0)
+                if (!capturePlacementsApplied)
+                {
+                    screenshotSweepState.waitFramesRemaining = screenshotSweepConfig.settleFramesPerCapture;
+                }
+                else if (screenshotSweepState.waitFramesRemaining > 0)
                 {
                     --screenshotSweepState.waitFramesRemaining;
                 }
@@ -1519,11 +1819,15 @@ int runGame()
              debugStream << std::setprecision(1);
              debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position) << '\n';
 
-              const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
-              glm::vec3 samplePosition = camera.position;
+             const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
+             glm::vec3 samplePosition = camera.position;
+             glm::ivec3 lightProbeBlock(static_cast<int>(std::floor(camera.position.x)),
+                                        static_cast<int>(std::floor(camera.position.y)),
+                                        static_cast<int>(std::floor(camera.position.z)));
               if (debugHit.hit)
               {
                   samplePosition = glm::vec3(debugHit.blockPos);
+                  lightProbeBlock = debugHit.blockPos + debugHit.faceNormal;
                   debugStream << "Hit Block: " << debugHit.blockPos.x << ", "
                               << debugHit.blockPos.y << ", "
                               << debugHit.blockPos.z << '\n';
@@ -1532,6 +1836,12 @@ int runGame()
               {
                   debugStream << "Hit Block: none\n";
               }
+             const LightSample probeLight = chunkManager.lightAt(lightProbeBlock);
+             debugStream << "Light Probe: sky=" << static_cast<int>(probeLight.sky)
+                         << " block=" << static_cast<int>(probeLight.block) << '\n';
+             debugStream << "Place Mode: "
+                         << (inputContext.placeLampMode ? "DebugLamp" : "Grass")
+                         << '\n';
 
             const int columnX = static_cast<int>(std::floor(samplePosition.x));
             const int columnZ = static_cast<int>(std::floor(samplePosition.z));
@@ -1624,6 +1934,8 @@ int runGame()
             ImGui::TextUnformatted(inputContext.cameraMouseCaptured
                                        ? "Press . to release the mouse for UI."
                                        : "Press . again to return to camera look.");
+            ImGui::Text("Placement Block: %s (press L to toggle)",
+                        inputContext.placeLampMode ? "DebugLamp" : "Grass");
             ImGui::Checkbox("Atmosphere", &environment.atmosphereEnabled);
             ImGui::SliderFloat("Time of Day", &environment.timeOfDay, 0.0f, 24.0f, "%.2f");
             ImGui::SliderFloat("Exposure", &environment.tonemap.exposure, 0.10f, 3.0f, "%.2f");
@@ -1645,6 +1957,15 @@ int runGame()
             ImGui::Checkbox("Aerial Perspective", &environment.debug.aerialPerspectiveEnabled);
             ImGui::Checkbox("Fog Fallback", &environment.debug.fogFallbackEnabled);
             ImGui::Checkbox("Shadows", &environment.debug.shadowsEnabled);
+            ImGui::Checkbox("Direct Sun", &environment.debug.directSunEnabled);
+            int terrainDebugView = static_cast<int>(environment.debug.terrainDebugView);
+            if (ImGui::Combo("Terrain Debug",
+                             &terrainDebugView,
+                             "None\0Sky Light\0Block Light\0Mip Level\0AO (Phase 3)\0"))
+            {
+                environment.debug.terrainDebugView =
+                    static_cast<TerrainDebugView>(terrainDebugView);
+            }
             ImGui::Separator();
              ImGui::TextUnformatted("View Diagnostics");
              ImGui::Text("Yaw/Pitch: %.1f / %.1f", camera.yaw, camera.pitch);

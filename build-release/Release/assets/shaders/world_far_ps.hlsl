@@ -2,7 +2,7 @@ Texture2D gAtlas : register(t0);
 Texture2DArray gAerialPerspective : register(t1);
 Texture2D gShadowMap : register(t2);
 
-SamplerState gPointWrap : register(s0);
+SamplerState gTerrainSampler : register(s0);
 SamplerState gLinearClamp : register(s1);
 SamplerComparisonState gShadowSampler : register(s2);
 
@@ -19,6 +19,7 @@ cbuffer WorldConstants : register(b0)
     float4 uSkyAmbient;
     float4 uGroundAmbient;
     float4 uShadowParams;
+    float4 uTerrainDebug;
 };
 
 struct PSInput
@@ -29,6 +30,7 @@ struct PSInput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint lighting : COLOR0;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
@@ -44,20 +46,76 @@ float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCou
     return lerp(ap0, ap1, blend);
 }
 
+float decodeLightLevel(uint level)
+{
+    return saturate((float)level / 15.0f);
+}
+
+float computeMipLevel(float2 atlasUvDdx, float2 atlasUvDdy)
+{
+    uint width = 1;
+    uint height = 1;
+    uint mipCount = 1;
+    gAtlas.GetDimensions(0, width, height, mipCount);
+    const float2 texelScale = float2((float)width, (float)height);
+    const float2 dx = atlasUvDdx * texelScale;
+    const float2 dy = atlasUvDdy * texelScale;
+    const float rho = max(dot(dx, dx), dot(dy, dy));
+    return max(0.0f, 0.5f * log2(max(rho, 1e-8f)));
+}
+
+float3 debugMipColor(float mipLevel)
+{
+    uint width = 1;
+    uint height = 1;
+    uint mipCount = 1;
+    gAtlas.GetDimensions(0, width, height, mipCount);
+    const float mip01 = saturate(mipLevel / max((float)(mipCount - 1), 1.0f));
+    return lerp(float3(0.10f, 0.55f, 0.95f), float3(0.95f, 0.30f, 0.10f), mip01);
+}
+
 float4 main(PSInput input) : SV_TARGET
 {
+    const float2 wrappedTileUv = frac(input.tileCoord);
+    const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv;
+    const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
+    const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
+    const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
+    clip(textureSample.a - 0.5f);
+
+    const uint packedLight = input.lighting & 0xFFu;
+    const float skyLight = decodeLightLevel((packedLight >> 4) & 0xFu);
+    const float blockLight = decodeLightLevel(packedLight & 0xFu);
+    const int debugView = (int)uTerrainDebug.y;
+
+    if (debugView == 1)
+    {
+        return float4(skyLight.xxx, 1.0f);
+    }
+    if (debugView == 2)
+    {
+        return float4(blockLight.xxx, 1.0f);
+    }
+    if (debugView == 3)
+    {
+        return float4(debugMipColor(computeMipLevel(atlasUvDdx, atlasUvDdy)), 1.0f);
+    }
+    if (debugView == 4)
+    {
+        return float4(float3(1.0f, 1.0f, 1.0f), 1.0f);
+    }
+
     const float3 normal = normalize(input.normal);
     const float3 lightDir = normalize(uLightDirection.xyz);
     const float diff = max(dot(normal, lightDir), 0.0f);
     const float hemi = saturate(normal.y * 0.5f + 0.5f);
-    const float3 ambientColor = lerp(uGroundAmbient.rgb, uSkyAmbient.rgb, hemi);
+    const float3 ambientTint = lerp(uGroundAmbient.rgb, uSkyAmbient.rgb, hemi);
+    const float3 skyIndirect = ambientTint * skyLight;
+    const float3 blockIndirect = float3(1.00f, 0.82f, 0.55f) * blockLight;
+    const float directSun = uTerrainDebug.x * saturate(skyLight * 1.1f);
 
-    const float2 tileUv = frac(input.tileCoord);
-    const float2 atlasUv = input.atlasBase + input.atlasSize * tileUv;
-    const float4 textureSample = gAtlas.Sample(gPointWrap, atlasUv);
-    clip(textureSample.a - 0.5f);
-
-    float3 color = textureSample.rgb * (ambientColor + uSunColor.rgb * (diff * 0.8f));
+    float3 color =
+        textureSample.rgb * (skyIndirect + blockIndirect + uGroundAmbient.rgb * 0.08f + uSunColor.rgb * (diff * 0.6f * directSun));
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
 
     if (uParams0.x > 0.5f)

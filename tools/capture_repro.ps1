@@ -14,6 +14,15 @@ param(
     [string]$Config = "Release",
     [string]$OutputPath = "artifacts\\repro_capture\\repro.bmp",
     [int]$SettleFrames = 20,
+    [double]$TimeOfDay,
+    [int]$NearChunks,
+    [int]$FarBlocks,
+    [int]$FogStartBlocks,
+    [bool]$FarTerrainEnabled,
+    [int]$DebugView,
+    [bool]$DirectSun = $true,
+    [string]$CapturePlacements,
+    [switch]$KeepOutputDir,
     [switch]$SkipBuild
 )
 
@@ -56,10 +65,16 @@ if (-not (Test-Path $exePath)) {
 
 if ($outputDir) {
     if (Test-Path $outputDir) {
-        Get-ChildItem -Path $outputDir -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        if (-not $KeepOutputDir) {
+            Get-ChildItem -Path $outputDir -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        }
     } else {
         New-Item -ItemType Directory -Path $outputDir | Out-Null
     }
+}
+
+if (Test-Path $resolvedOutputPath) {
+    Remove-Item $resolvedOutputPath -Force -ErrorAction SilentlyContinue
 }
 
 $previousValues = @{
@@ -74,6 +89,14 @@ $previousValues = @{
     BLOCKGAME_REPRO_LOOK_Z = $env:BLOCKGAME_REPRO_LOOK_Z
     BLOCKGAME_REPRO_OUTPUT = $env:BLOCKGAME_REPRO_OUTPUT
     BLOCKGAME_REPRO_SETTLE_FRAMES = $env:BLOCKGAME_REPRO_SETTLE_FRAMES
+    BLOCKGAME_CAPTURE_TIME_OF_DAY = $env:BLOCKGAME_CAPTURE_TIME_OF_DAY
+    BLOCKGAME_CAPTURE_NEAR_CHUNKS = $env:BLOCKGAME_CAPTURE_NEAR_CHUNKS
+    BLOCKGAME_CAPTURE_FAR_BLOCKS = $env:BLOCKGAME_CAPTURE_FAR_BLOCKS
+    BLOCKGAME_CAPTURE_FOG_START_BLOCKS = $env:BLOCKGAME_CAPTURE_FOG_START_BLOCKS
+    BLOCKGAME_CAPTURE_FAR_TERRAIN = $env:BLOCKGAME_CAPTURE_FAR_TERRAIN
+    BLOCKGAME_CAPTURE_DEBUG_VIEW = $env:BLOCKGAME_CAPTURE_DEBUG_VIEW
+    BLOCKGAME_CAPTURE_DIRECT_SUN = $env:BLOCKGAME_CAPTURE_DIRECT_SUN
+    BLOCKGAME_CAPTURE_PLACEMENTS = $env:BLOCKGAME_CAPTURE_PLACEMENTS
 }
 
 try {
@@ -83,6 +106,47 @@ try {
     $env:BLOCKGAME_REPRO_Z = "$Z"
     $env:BLOCKGAME_REPRO_OUTPUT = $resolvedOutputPath
     $env:BLOCKGAME_REPRO_SETTLE_FRAMES = "$SettleFrames"
+
+    if ($PSBoundParameters.ContainsKey("TimeOfDay")) {
+        $env:BLOCKGAME_CAPTURE_TIME_OF_DAY = "$TimeOfDay"
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_TIME_OF_DAY -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("NearChunks")) {
+        $env:BLOCKGAME_CAPTURE_NEAR_CHUNKS = "$NearChunks"
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_NEAR_CHUNKS -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("FarBlocks")) {
+        $env:BLOCKGAME_CAPTURE_FAR_BLOCKS = "$FarBlocks"
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_FAR_BLOCKS -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("FogStartBlocks")) {
+        $env:BLOCKGAME_CAPTURE_FOG_START_BLOCKS = "$FogStartBlocks"
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_FOG_START_BLOCKS -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("FarTerrainEnabled")) {
+        $env:BLOCKGAME_CAPTURE_FAR_TERRAIN = $(if ($FarTerrainEnabled) { "1" } else { "0" })
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_FAR_TERRAIN -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("DebugView")) {
+        $env:BLOCKGAME_CAPTURE_DEBUG_VIEW = "$DebugView"
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_DEBUG_VIEW -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("DirectSun")) {
+        $env:BLOCKGAME_CAPTURE_DIRECT_SUN = $(if ($DirectSun) { "1" } else { "0" })
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_DIRECT_SUN -ErrorAction SilentlyContinue
+    }
+    if ($PSBoundParameters.ContainsKey("CapturePlacements") -and -not [string]::IsNullOrWhiteSpace($CapturePlacements)) {
+        $env:BLOCKGAME_CAPTURE_PLACEMENTS = $CapturePlacements
+    } else {
+        Remove-Item Env:BLOCKGAME_CAPTURE_PLACEMENTS -ErrorAction SilentlyContinue
+    }
 
     $hasLookTarget =
         $PSBoundParameters.ContainsKey("LookX") -and

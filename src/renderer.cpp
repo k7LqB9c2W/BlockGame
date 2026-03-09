@@ -48,7 +48,7 @@ constexpr UINT kRtvIndexSkyView = 5;
 constexpr UINT kRtvIndexAerialPerspectiveBase = 6;
 constexpr UINT kAerialPerspectiveSliceCount = 32;
 constexpr UINT kRtvHeapCapacity = kRtvIndexAerialPerspectiveBase + kAerialPerspectiveSliceCount;
-constexpr UINT kTextureMipLevelCount = 4;
+constexpr int kAtlasMinimumPaddingPixels = 2;
 
 [[noreturn]] void throwRenderError(const std::string& message)
 {
@@ -124,22 +124,143 @@ void throwIfFailed(HRESULT hr, const std::string& message)
     return mipLevels;
 }
 
+[[nodiscard]] bool shouldBuildRuntimeAtlas(const char* path, int width, int height) noexcept
+{
+    if (path == nullptr)
+    {
+        return false;
+    }
+
+    const std::string fileName = std::filesystem::path(path).filename().string();
+    return fileName.find("atlas") != std::string::npos &&
+           width >= kAtlasTileSizePixels &&
+           height >= kAtlasTileSizePixels &&
+           (width % kAtlasTileSizePixels) == 0 &&
+           (height % kAtlasTileSizePixels) == 0;
+}
+
+[[nodiscard]] int nextPowerOfTwo(int value) noexcept
+{
+    int power = 1;
+    while (power < value)
+    {
+        power <<= 1;
+    }
+    return power;
+}
+
+struct RuntimeAtlasInfo
+{
+    bool enabled{false};
+    int tileSizePixels{0};
+    int tileStridePixels{0};
+    int tilePaddingPixels{0};
+    glm::ivec2 tileCounts{0};
+};
+
+[[nodiscard]] RuntimeAtlasInfo makeRuntimeAtlasInfo(int sourceWidth, int sourceHeight)
+{
+    RuntimeAtlasInfo info{};
+    info.enabled = true;
+    info.tileSizePixels = kAtlasTileSizePixels;
+    info.tileCounts = glm::ivec2(sourceWidth / kAtlasTileSizePixels,
+                                 sourceHeight / kAtlasTileSizePixels);
+    info.tileStridePixels = nextPowerOfTwo(kAtlasTileSizePixels + kAtlasMinimumPaddingPixels * 2);
+    info.tilePaddingPixels = (info.tileStridePixels - kAtlasTileSizePixels) / 2;
+    return info;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> buildRuntimeAtlasPixels(const std::uint8_t* sourcePixels,
+                                                                int sourceWidth,
+                                                                int sourceHeight,
+                                                                const RuntimeAtlasInfo& atlasInfo)
+{
+    const int runtimeWidth = atlasInfo.tileCounts.x * atlasInfo.tileStridePixels;
+    const int runtimeHeight = atlasInfo.tileCounts.y * atlasInfo.tileStridePixels;
+    std::vector<std::uint8_t> paddedPixels(static_cast<std::size_t>(runtimeWidth) *
+                                               static_cast<std::size_t>(runtimeHeight) * 4u,
+                                           0);
+
+    auto copyPixel = [&](int dstX, int dstY, int srcX, int srcY)
+    {
+        srcX = std::clamp(srcX, 0, sourceWidth - 1);
+        srcY = std::clamp(srcY, 0, sourceHeight - 1);
+        const std::size_t srcIndex =
+            (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth) + static_cast<std::size_t>(srcX)) * 4u;
+        const std::size_t dstIndex =
+            (static_cast<std::size_t>(dstY) * static_cast<std::size_t>(runtimeWidth) + static_cast<std::size_t>(dstX)) * 4u;
+        for (int channel = 0; channel < 4; ++channel)
+        {
+            paddedPixels[dstIndex + static_cast<std::size_t>(channel)] =
+                sourcePixels[srcIndex + static_cast<std::size_t>(channel)];
+        }
+    };
+
+    for (int tileY = 0; tileY < atlasInfo.tileCounts.y; ++tileY)
+    {
+        for (int tileX = 0; tileX < atlasInfo.tileCounts.x; ++tileX)
+        {
+            const int srcOriginX = tileX * atlasInfo.tileSizePixels;
+            const int srcOriginY = tileY * atlasInfo.tileSizePixels;
+            const int srcTileMaxX = srcOriginX + atlasInfo.tileSizePixels - 1;
+            const int srcTileMaxY = srcOriginY + atlasInfo.tileSizePixels - 1;
+            const int dstOriginX = tileX * atlasInfo.tileStridePixels;
+            const int dstOriginY = tileY * atlasInfo.tileStridePixels;
+
+            for (int y = 0; y < atlasInfo.tileStridePixels; ++y)
+            {
+                const int srcY = std::clamp(srcOriginY + (y - atlasInfo.tilePaddingPixels),
+                                            srcOriginY,
+                                            srcTileMaxY);
+                for (int x = 0; x < atlasInfo.tileStridePixels; ++x)
+                {
+                    const int srcX = std::clamp(srcOriginX + (x - atlasInfo.tilePaddingPixels),
+                                                srcOriginX,
+                                                srcTileMaxX);
+                    copyPixel(dstOriginX + x, dstOriginY + y, srcX, srcY);
+                }
+            }
+        }
+    }
+
+    return paddedPixels;
+}
+
 [[nodiscard]] std::vector<std::vector<std::uint8_t>> buildTextureMipChain(const std::uint8_t* basePixels,
                                                                           int width,
                                                                           int height,
-                                                                          UINT mipLevels)
+                                                                          UINT mipLevels,
+                                                                          glm::ivec2 tileCounts = glm::ivec2(1))
 {
+    auto srgbChannelToLinear = [](std::uint8_t value) noexcept -> float
+    {
+        const float srgb = static_cast<float>(value) / 255.0f;
+        if (srgb <= 0.04045f)
+        {
+            return srgb / 12.92f;
+        }
+        return std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+    };
+
+    auto linearChannelToSrgb = [](float value) noexcept -> std::uint8_t
+    {
+        const float clamped = std::clamp(value, 0.0f, 1.0f);
+        const float srgb = (clamped <= 0.0031308f)
+                               ? (clamped * 12.92f)
+                               : (1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f);
+        return static_cast<std::uint8_t>(std::lround(srgb * 255.0f));
+    };
+
     std::vector<std::vector<std::uint8_t>> mipChain;
     mipChain.reserve(mipLevels);
-    mipChain.emplace_back(basePixels, basePixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+    mipChain.emplace_back(basePixels,
+                          basePixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
 
-    const bool useTileAwareDownsample =
-        width >= kAtlasTileSizePixels &&
-        height >= kAtlasTileSizePixels &&
-        (width % kAtlasTileSizePixels) == 0 &&
-        (height % kAtlasTileSizePixels) == 0;
-    const int tilesX = useTileAwareDownsample ? width / kAtlasTileSizePixels : 1;
-    const int tilesY = useTileAwareDownsample ? height / kAtlasTileSizePixels : 1;
+    const bool useTileAwareDownsample = tileCounts.x > 0 && tileCounts.y > 0 &&
+                                        (width % tileCounts.x) == 0 &&
+                                        (height % tileCounts.y) == 0;
+    const int tilesX = useTileAwareDownsample ? tileCounts.x : 1;
+    const int tilesY = useTileAwareDownsample ? tileCounts.y : 1;
 
     int srcWidth = width;
     int srcHeight = height;
@@ -188,13 +309,26 @@ void throwIfFailed(HRESULT hr, const std::string& message)
                                 return srcPixels[srcIndex];
                             };
 
-                            const std::uint32_t sum =
-                                sample(srcX0, srcY0) +
-                                sample(srcX1, srcY0) +
-                                sample(srcX0, srcY1) +
-                                sample(srcX1, srcY1);
-                            dstPixels[dstIndex + static_cast<std::size_t>(channel)] =
-                                static_cast<std::uint8_t>((sum + 2u) / 4u);
+                            if (channel == 3)
+                            {
+                                const std::uint32_t sum =
+                                    sample(srcX0, srcY0) +
+                                    sample(srcX1, srcY0) +
+                                    sample(srcX0, srcY1) +
+                                    sample(srcX1, srcY1);
+                                dstPixels[dstIndex + static_cast<std::size_t>(channel)] =
+                                    static_cast<std::uint8_t>((sum + 2u) / 4u);
+                            }
+                            else
+                            {
+                                const float average =
+                                    (srgbChannelToLinear(static_cast<std::uint8_t>(sample(srcX0, srcY0))) +
+                                     srgbChannelToLinear(static_cast<std::uint8_t>(sample(srcX1, srcY0))) +
+                                     srgbChannelToLinear(static_cast<std::uint8_t>(sample(srcX0, srcY1))) +
+                                     srgbChannelToLinear(static_cast<std::uint8_t>(sample(srcX1, srcY1)))) * 0.25f;
+                                dstPixels[dstIndex + static_cast<std::size_t>(channel)] =
+                                    linearChannelToSrgb(average);
+                            }
                         }
                     }
                 }
@@ -207,6 +341,18 @@ void throwIfFailed(HRESULT hr, const std::string& message)
     }
 
     return mipChain;
+}
+
+[[nodiscard]] UINT16 computeRuntimeAtlasMipLevelCount(int tileStridePixels) noexcept
+{
+    UINT16 mipLevels = 1;
+    int mipSize = std::max(tileStridePixels, 1);
+    while (mipSize > 1)
+    {
+        mipSize = std::max(1, mipSize / 2);
+        ++mipLevels;
+    }
+    return mipLevels;
 }
 
 [[nodiscard]] D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) noexcept
@@ -975,10 +1121,10 @@ void Renderer::createPipelines()
     worldRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> worldSamplers{};
-    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
-    worldSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    worldSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    worldSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    worldSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    worldSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    worldSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     worldSamplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     worldSamplers[0].MaxLOD = D3D12_FLOAT32_MAX;
     worldSamplers[0].ShaderRegister = 0;
@@ -1087,12 +1233,13 @@ void Renderer::createPipelines()
     Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
         compileShaderFromFile(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
 
-    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 5> inputLayout = {{
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 6> inputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, normal)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, tileCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasBase)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasSize)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(WorldVertex, lightingData)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 1> shadowInputLayout = {{
@@ -1344,18 +1491,47 @@ LoadedTexture Renderer::loadTexture(const char* path)
         throwRenderError(std::string("failed to load texture: ") + path);
     }
 
-    texture.size = glm::ivec2(width, height);
-    texture.mipLevels = computeMipLevelCount(width, height, kTextureMipLevelCount);
+    texture.sourceSize = glm::ivec2(width, height);
+    texture.tileCounts = glm::ivec2(1, 1);
+
+    RuntimeAtlasInfo atlasInfo{};
+    std::vector<std::uint8_t> runtimeAtlasPixels;
+    const std::uint8_t* uploadPixels = pixels;
+    int uploadWidth = width;
+    int uploadHeight = height;
+    if (shouldBuildRuntimeAtlas(path, width, height))
+    {
+        atlasInfo = makeRuntimeAtlasInfo(width, height);
+        runtimeAtlasPixels = buildRuntimeAtlasPixels(pixels, width, height, atlasInfo);
+        uploadPixels = runtimeAtlasPixels.data();
+        uploadWidth = atlasInfo.tileCounts.x * atlasInfo.tileStridePixels;
+        uploadHeight = atlasInfo.tileCounts.y * atlasInfo.tileStridePixels;
+        texture.tileCounts = atlasInfo.tileCounts;
+        texture.tileSizePixels = atlasInfo.tileSizePixels;
+        texture.tileStridePixels = atlasInfo.tileStridePixels;
+        texture.tilePaddingPixels = atlasInfo.tilePaddingPixels;
+    }
+
+    texture.size = glm::ivec2(uploadWidth, uploadHeight);
+    texture.mipLevels = atlasInfo.enabled
+                            ? computeRuntimeAtlasMipLevelCount(atlasInfo.tileStridePixels)
+                            : computeMipLevelCount(uploadWidth,
+                                                   uploadHeight,
+                                                   (std::numeric_limits<UINT>::max)());
     texture.srvIndex = allocateSrvDescriptor();
     texture.srvCpu = srvCpuHandle(texture.srvIndex);
     texture.srvGpu = srvGpuHandle(texture.srvIndex);
     const std::vector<std::vector<std::uint8_t>> mipChain =
-        buildTextureMipChain(pixels, width, height, texture.mipLevels);
+        buildTextureMipChain(uploadPixels,
+                            uploadWidth,
+                            uploadHeight,
+                            texture.mipLevels,
+                            texture.tileCounts);
 
     const D3D12_RESOURCE_DESC textureDesc = texture2DDesc(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                                                          static_cast<UINT>(width),
-                                                          static_cast<UINT>(height),
-                                                          texture.mipLevels);
+                                                          static_cast<UINT>(uploadWidth),
+                                                          static_cast<UINT>(uploadHeight),
+                                                          static_cast<UINT16>(texture.mipLevels));
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
@@ -1391,14 +1567,16 @@ LoadedTexture Renderer::loadTexture(const char* path)
     unsigned char* mapped = nullptr;
     throwIfFailed(uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)),
                   "failed to map texture upload buffer");
-    int mipWidth = width;
+    int mipWidth = uploadWidth;
+    int mipHeight = uploadHeight;
     for (UINT mipIndex = 0; mipIndex < texture.mipLevels; ++mipIndex)
     {
         const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& layout = layouts[mipIndex];
         const std::vector<std::uint8_t>& mipPixels = mipChain[mipIndex];
         const std::size_t srcRowPitch = static_cast<std::size_t>(mipWidth) * 4u;
+        const UINT rowsToCopy = std::min(numRows[mipIndex], static_cast<UINT>(mipHeight));
 
-        for (UINT row = 0; row < numRows[mipIndex]; ++row)
+        for (UINT row = 0; row < rowsToCopy; ++row)
         {
             const std::size_t srcOffset = static_cast<std::size_t>(row) * srcRowPitch;
             const std::size_t dstOffset = static_cast<std::size_t>(layout.Offset) +
@@ -1407,6 +1585,7 @@ LoadedTexture Renderer::loadTexture(const char* path)
         }
 
         mipWidth = std::max(1, mipWidth / 2);
+        mipHeight = std::max(1, mipHeight / 2);
     }
     uploadBuffer->Unmap(0, nullptr);
 
@@ -1743,6 +1922,10 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     nearConstants->skyAmbient = glm::vec4(skyAmbient, 0.0f);
     nearConstants->groundAmbient = glm::vec4(groundAmbient, 0.0f);
     nearConstants->shadowParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    nearConstants->terrainDebug = glm::vec4(environment.debug.directSunEnabled ? 1.0f : 0.0f,
+                                            static_cast<float>(static_cast<int>(environment.debug.terrainDebugView)),
+                                            0.0f,
+                                            0.0f);
 
     if (environment.debug.shadowsEnabled)
     {

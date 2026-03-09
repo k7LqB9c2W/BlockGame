@@ -413,6 +413,47 @@ constexpr std::size_t toIndex(BlockFace face) noexcept
 }
 
 constexpr std::size_t kBlockFaceCount = toIndex(BlockFace::Count);
+constexpr std::uint8_t kMaxLightLevel = 15;
+
+inline glm::ivec3 faceOffset(BlockFace face) noexcept
+{
+    switch (face)
+    {
+    case BlockFace::Top:
+        return glm::ivec3(0, 1, 0);
+    case BlockFace::Bottom:
+        return glm::ivec3(0, -1, 0);
+    case BlockFace::North:
+        return glm::ivec3(0, 0, -1);
+    case BlockFace::South:
+        return glm::ivec3(0, 0, 1);
+    case BlockFace::East:
+        return glm::ivec3(1, 0, 0);
+    case BlockFace::West:
+    default:
+        return glm::ivec3(-1, 0, 0);
+    }
+}
+
+inline BlockFace oppositeFace(BlockFace face) noexcept
+{
+    switch (face)
+    {
+    case BlockFace::Top:
+        return BlockFace::Bottom;
+    case BlockFace::Bottom:
+        return BlockFace::Top;
+    case BlockFace::North:
+        return BlockFace::South;
+    case BlockFace::South:
+        return BlockFace::North;
+    case BlockFace::East:
+        return BlockFace::West;
+    case BlockFace::West:
+    default:
+        return BlockFace::East;
+    }
+}
 
 inline std::size_t blockIndex(int x, int y, int z) noexcept
 {
@@ -454,6 +495,74 @@ inline float hashToUnitFloat(int x, int y, int z) noexcept
     h = (h ^ (h >> 13)) * kMixMul;
     h ^= (h >> 16);
     return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
+}
+
+struct BlockLightingProperties
+{
+    bool opaque{true};
+    std::uint8_t skyAttenuation{kMaxLightLevel};
+    std::uint8_t blockEmission{0};
+    bool aoSolid{true};
+};
+
+constexpr std::array<BlockLightingProperties, toIndex(BlockId::Count)> kBlockLightingTable{{
+    {false, 0, 0, false},              // Air
+    {true, kMaxLightLevel, 0, true},   // Grass
+    {true, kMaxLightLevel, 0, true},   // Wood
+    {false, 1, 0, true},               // Leaves
+    {true, kMaxLightLevel, 0, true},   // Sand
+    {false, 2, 0, false},              // Water
+    {true, kMaxLightLevel, 0, true},   // Stone
+    {true, kMaxLightLevel, 0, true},   // SpruceLog
+    {false, 1, 0, true},               // SpruceLeaves
+    {true, kMaxLightLevel, 0, true},   // Podzol
+    {true, kMaxLightLevel, 14, true},  // DebugLamp
+}};
+
+inline const BlockLightingProperties& blockLightingProperties(BlockId block) noexcept
+{
+    return kBlockLightingTable[toIndex(block)];
+}
+
+inline bool isOpaqueForLighting(BlockId block) noexcept
+{
+    return blockLightingProperties(block).opaque;
+}
+
+inline std::uint8_t packLightLevels(std::uint8_t sky, std::uint8_t block) noexcept
+{
+    return static_cast<std::uint8_t>(((std::min<std::uint8_t>)(sky, kMaxLightLevel) << 4) |
+                                     (std::min<std::uint8_t>)(block, kMaxLightLevel));
+}
+
+inline std::uint8_t skyLightFromPacked(std::uint8_t packed) noexcept
+{
+    return static_cast<std::uint8_t>((packed >> 4) & 0x0F);
+}
+
+inline std::uint8_t blockLightFromPacked(std::uint8_t packed) noexcept
+{
+    return static_cast<std::uint8_t>(packed & 0x0F);
+}
+
+inline void setSkyLight(std::uint8_t& packed, std::uint8_t sky) noexcept
+{
+    packed = packLightLevels(sky, blockLightFromPacked(packed));
+}
+
+inline void setBlockLight(std::uint8_t& packed, std::uint8_t block) noexcept
+{
+    packed = packLightLevels(skyLightFromPacked(packed), block);
+}
+
+inline std::uint8_t propagationLossFor(BlockId block) noexcept
+{
+    return static_cast<std::uint8_t>(1 + blockLightingProperties(block).skyAttenuation);
+}
+
+inline std::uint32_t packVertexLighting(std::uint8_t packedLight) noexcept
+{
+    return static_cast<std::uint32_t>(packedLight);
 }
 
 inline bool isAlphaCutoutBlock(BlockId block) noexcept
@@ -701,6 +810,7 @@ struct Chunk
           minWorldY(c.y * kChunkSizeY),
           maxWorldY(minWorldY + kChunkSizeY - 1),
           blocks(kChunkBlockCount, BlockId::Air),
+          lightLevels(kChunkBlockCount, packLightLevels(kMaxLightLevel, 0)),
           state(ChunkState::Empty)
     {
     }
@@ -718,6 +828,14 @@ struct Chunk
         {
             std::fill(blocks.begin(), blocks.end(), BlockId::Air);
         }
+        if (lightLevels.size() != static_cast<std::size_t>(kChunkBlockCount))
+        {
+            lightLevels.assign(kChunkBlockCount, packLightLevels(kMaxLightLevel, 0));
+        }
+        else
+        {
+            std::fill(lightLevels.begin(), lightLevels.end(), packLightLevels(kMaxLightLevel, 0));
+        }
         state.store(ChunkState::Empty, std::memory_order_relaxed);
         meshData.clear();
         meshReady = false;
@@ -731,6 +849,7 @@ struct Chunk
         inFlight.store(0, std::memory_order_relaxed);
         surfaceOnly = false;
         lodData.reset();
+        lightBoundaryDirtyMask = 0;
     }
 
 
@@ -738,6 +857,7 @@ struct Chunk
     int minWorldY{0};
     int maxWorldY{0};
     std::vector<BlockId> blocks;
+    std::vector<std::uint8_t> lightLevels;
     std::atomic<ChunkState> state;
 
     std::uint32_t indexCount{0};
@@ -754,6 +874,7 @@ struct Chunk
     std::atomic<int> inFlight{0};
     bool surfaceOnly{false};
     std::unique_ptr<FarChunk> lodData;
+    std::uint8_t lightBoundaryDirtyMask{0};
 };
 
 struct ProfilingCounters
@@ -1334,10 +1455,11 @@ private:
                            const std::pair<glm::vec2, glm::vec2>& uv)
     {
         const std::uint32_t baseIndex = static_cast<std::uint32_t>(vertices.size());
-        vertices.push_back(Vertex{p0, normal, projectTileCoord(p0, normal), uv.first, uv.second});
-        vertices.push_back(Vertex{p1, normal, projectTileCoord(p1, normal), uv.first, uv.second});
-        vertices.push_back(Vertex{p2, normal, projectTileCoord(p2, normal), uv.first, uv.second});
-        vertices.push_back(Vertex{p3, normal, projectTileCoord(p3, normal), uv.first, uv.second});
+        const std::uint32_t lightingData = packVertexLighting(packLightLevels(kMaxLightLevel, 0));
+        vertices.push_back(Vertex{p0, normal, projectTileCoord(p0, normal), uv.first, uv.second, lightingData});
+        vertices.push_back(Vertex{p1, normal, projectTileCoord(p1, normal), uv.first, uv.second, lightingData});
+        vertices.push_back(Vertex{p2, normal, projectTileCoord(p2, normal), uv.first, uv.second, lightingData});
+        vertices.push_back(Vertex{p3, normal, projectTileCoord(p3, normal), uv.first, uv.second, lightingData});
 
         indices.push_back(baseIndex + 0);
         indices.push_back(baseIndex + 1);
@@ -2262,7 +2384,7 @@ struct ChunkManager::Impl
     ~Impl();
 
     void initializeRendering(ID3D12Device* device);
-    void setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels);
+    void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
     WorldRenderData buildRenderData(const Frustum& frustum) const;
@@ -2274,7 +2396,7 @@ struct ChunkManager::Impl
     void clear();
 
     bool destroyBlock(const glm::ivec3& worldPos);
-    bool placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal);
+    bool placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal, BlockId block);
 
     RaycastHit raycast(const glm::vec3& origin, const glm::vec3& direction) const;
     void updateHighlight(const glm::vec3& cameraPos, const glm::vec3& cameraDirection);
@@ -2287,12 +2409,14 @@ struct ChunkManager::Impl
     void setRenderDistance(int distance) noexcept;
     void setNearRenderDistance(int chunks) noexcept;
     void setFarRenderDistanceBlocks(int blocks) noexcept;
+    void setFogStartBlocks(int blocks) noexcept;
     void setLodEnabled(bool enabled);
     bool lodEnabled() const noexcept;
     void setFarTerrainEnabled(bool enabled);
     bool farTerrainEnabled() const noexcept;
 
     BlockId blockAt(const glm::ivec3& worldPos) const noexcept;
+    LightSample lightAt(const glm::ivec3& worldPos) const noexcept;
     glm::vec3 findSafeSpawnPosition(float worldX, float worldZ) const;
     void beginSpawnPreload(const glm::vec3& spawnPos);
     bool isSpawnPreloadReady() const noexcept;
@@ -2476,6 +2600,9 @@ private:
     Chunk* getChunk(const glm::ivec3& coord) noexcept;
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
+    void relightAroundChunk(const glm::ivec3& centerCoord);
+    void queueChunkForLightingRemesh(const std::shared_ptr<Chunk>& chunk);
+    std::uint8_t packedLightAtWorld(const glm::ivec3& worldPos) const noexcept;
     void generateChunkBlocks(Chunk& chunk);
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
@@ -2495,7 +2622,10 @@ private:
     bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
     std::pair<glm::vec2, glm::vec2> atlasUvFor(BlockId block, BlockFace face) const;
 
-    glm::vec2 atlasTileScale_{1.0f, 1.0f};
+    glm::ivec2 atlasTextureSizePixels_{1, 1};
+    int atlasTileSizePixels_{kAtlasTileSizePixels};
+    int atlasTileStridePixels_{kAtlasTileSizePixels};
+    int atlasTilePaddingPixels_{0};
     struct FaceUV
     {
         glm::vec2 base{0.0f};
@@ -2907,34 +3037,43 @@ void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
     destroyBufferPages();
 }
 
-void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels)
+void ChunkManager::Impl::setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config)
 {
-    if (tileSizePixels <= 0 || textureSizePixels.x <= 0 || textureSizePixels.y <= 0)
+    if (config.tileSizePixels <= 0 || config.textureSizePixels.x <= 0 || config.textureSizePixels.y <= 0)
     {
         std::cerr << "Invalid block atlas dimensions provided" << std::endl;
         blockAtlasConfigured_ = false;
         return;
     }
 
-    atlasTileScale_ = glm::vec2(
-        static_cast<float>(tileSizePixels) / static_cast<float>(textureSizePixels.x),
-        static_cast<float>(tileSizePixels) / static_cast<float>(textureSizePixels.y));
+    atlasTextureSizePixels_ = config.textureSizePixels;
+    atlasTileSizePixels_ = config.tileSizePixels;
+    atlasTileStridePixels_ = (config.tileStridePixels > 0) ? config.tileStridePixels : config.tileSizePixels;
+    atlasTilePaddingPixels_ = std::max(config.tilePaddingPixels, 0);
+    const glm::vec2 atlasTexelScale(
+        1.0f / static_cast<float>(atlasTextureSizePixels_.x),
+        1.0f / static_cast<float>(atlasTextureSizePixels_.y));
 
     for (auto& blockEntry : blockUVTable_)
     {
         for (auto& face : blockEntry.faces)
         {
             face.base = glm::vec2(0.0f);
-            face.size = atlasTileScale_;
+            face.size = glm::vec2(static_cast<float>(atlasTileSizePixels_) * atlasTexelScale.x,
+                                  static_cast<float>(atlasTileSizePixels_) * atlasTexelScale.y);
         }
     }
 
     auto assignFace = [&](BlockId block, BlockFace face, const glm::ivec2& tile)
     {
-        const glm::vec2 base = glm::vec2(static_cast<float>(tile.x), static_cast<float>(tile.y)) * atlasTileScale_;
+        const glm::ivec2 tilePixelOrigin(tile.x * atlasTileStridePixels_ + atlasTilePaddingPixels_,
+                                         tile.y * atlasTileStridePixels_ + atlasTilePaddingPixels_);
+        const glm::vec2 base = glm::vec2(static_cast<float>(tilePixelOrigin.x) * atlasTexelScale.x,
+                                         static_cast<float>(tilePixelOrigin.y) * atlasTexelScale.y);
         auto& faceUV = blockUVTable_[toIndex(block)].faces[toIndex(face)];
         faceUV.base = base;
-        faceUV.size = atlasTileScale_;
+        faceUV.size = glm::vec2(static_cast<float>(atlasTileSizePixels_) * atlasTexelScale.x,
+                                static_cast<float>(atlasTileSizePixels_) * atlasTexelScale.y);
     };
 
     assignFace(BlockId::Grass, BlockFace::Top, {0, 0});
@@ -2988,6 +3127,11 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const glm::ivec2& textureSiz
     for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
     {
         assignFace(BlockId::Podzol, face, {0, 12});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::DebugLamp, face, {0, 8});
     }
 
     blockAtlasConfigured_ = true;
@@ -3574,15 +3718,14 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
     }
 
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
-
-    enqueueJob(chunk, JobType::Mesh, chunkCoord);
+    relightAroundChunk(chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(worldPos);
 
     return true;
 }
 
-bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal)
+bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal, BlockId block)
 {
     const glm::ivec3 placePos = targetBlockPos + faceNormal;
 
@@ -3615,7 +3758,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
             return false;
         }
 
-        chunk->blocks[blockIdx] = BlockId::Grass;
+        chunk->blocks[blockIdx] = block;
         chunk->hasBlocks = true;
 
         columnManager_.updateColumn(*chunk, local.x, local.z);
@@ -3623,8 +3766,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
     }
 
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
-
-    enqueueJob(chunk, JobType::Mesh, chunkCoord);
+    relightAroundChunk(chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(placePos);
 
@@ -3854,6 +3996,12 @@ void ChunkManager::Impl::setFarRenderDistanceBlocks(int blocks) noexcept
     }
 }
 
+void ChunkManager::Impl::setFogStartBlocks(int blocks) noexcept
+{
+    renderSettings_.fogStartBlocks = std::max(blocks, 0);
+    farTerrainManager_.setFogStartBlocks(renderSettings_.fogStartBlocks);
+}
+
 void ChunkManager::Impl::setFarTerrainEnabled(bool enabled)
 {
     renderSettings_.farTerrainEnabled = enabled;
@@ -3895,6 +4043,12 @@ BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
     const int localY = worldPos.y - chunk->minWorldY;
     return chunk->blocks[blockIndex(local.x, localY, local.z)];
 
+}
+
+LightSample ChunkManager::Impl::lightAt(const glm::ivec3& worldPos) const noexcept
+{
+    const std::uint8_t packed = packedLightAtWorld(worldPos);
+    return LightSample{skyLightFromPacked(packed), blockLightFromPacked(packed)};
 }
 
 glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) const
@@ -4500,6 +4654,7 @@ void ChunkManager::Impl::processJob(const Job& job)
     {
         const auto start = std::chrono::steady_clock::now();
         generateChunkBlocks(*chunk);
+        relightAroundChunk(job.chunkCoord);
         const auto end = std::chrono::steady_clock::now();
         const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         profilingCounters_.generationMicros.fetch_add(micros, std::memory_order_relaxed);
@@ -5697,12 +5852,13 @@ void ChunkManager::Impl::buildSurfaceOnlyMesh(Chunk& chunk)
             const glm::vec3 p3{minX, worldY, maxZ};
 
             const auto& uv = blockUVTable_[toIndex(cell.block)].faces[toIndex(BlockFace::Top)];
+            const std::uint32_t lightingData = packVertexLighting(packLightLevels(kMaxLightLevel, 0));
 
             const std::uint32_t baseIndex = static_cast<std::uint32_t>(chunk.meshData.vertices.size());
-            chunk.meshData.vertices.push_back(Vertex{p0, normal, glm::vec2{0.0f, 0.0f}, uv.base, uv.size});
-            chunk.meshData.vertices.push_back(Vertex{p1, normal, glm::vec2{1.0f, 0.0f}, uv.base, uv.size});
-            chunk.meshData.vertices.push_back(Vertex{p2, normal, glm::vec2{1.0f, 1.0f}, uv.base, uv.size});
-            chunk.meshData.vertices.push_back(Vertex{p3, normal, glm::vec2{0.0f, 1.0f}, uv.base, uv.size});
+            chunk.meshData.vertices.push_back(Vertex{p0, normal, glm::vec2{0.0f, 0.0f}, uv.base, uv.size, lightingData});
+            chunk.meshData.vertices.push_back(Vertex{p1, normal, glm::vec2{1.0f, 0.0f}, uv.base, uv.size, lightingData});
+            chunk.meshData.vertices.push_back(Vertex{p2, normal, glm::vec2{1.0f, 1.0f}, uv.base, uv.size, lightingData});
+            chunk.meshData.vertices.push_back(Vertex{p3, normal, glm::vec2{0.0f, 1.0f}, uv.base, uv.size, lightingData});
 
             chunk.meshData.indices.push_back(baseIndex + 0);
             chunk.meshData.indices.push_back(baseIndex + 1);
@@ -5762,6 +5918,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::ivec3 uAxis{1, 0, 0};
         glm::ivec3 vAxis{0, 1, 0};
         BlockFace face{BlockFace::Top};
+        std::uint32_t lightingData{0};
         bool mergeable{true};
 
         bool operator==(const FaceMaterial& other) const noexcept
@@ -5771,6 +5928,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                    uAxis == other.uAxis &&
                    vAxis == other.vAxis &&
                    face == other.face &&
+                   lightingData == other.lightingData &&
                    mergeable == other.mergeable;
         }
     };
@@ -5787,10 +5945,11 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::vec3{0.0f, 0.0f, 1.0f}
     };
 
-    auto makeMaterial = [&](BlockId block, const glm::vec3& normal) -> FaceMaterial
+    auto makeMaterial = [&](BlockId block, const glm::vec3& normal, const glm::ivec3& lightSampleWorld) -> FaceMaterial
     {
         FaceMaterial material{};
         material.mergeable = !isAlphaCutoutBlock(block);
+        material.lightingData = packVertexLighting(packedLightAtWorld(lightSampleWorld));
 
         const BlockFace face = [&]() -> BlockFace
         {
@@ -5898,6 +6057,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
             vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
             vertex.atlasBase = material.uvBase;
             vertex.atlasSize = material.uvSize;
+            vertex.lightingData = material.lightingData;
             chunk.meshData.vertices.push_back(vertex);
         }
 
@@ -5983,7 +6143,11 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                             cell.exists = true;
                             const std::size_t blockIdx = blockIndex(owningLocal.x, owningLocal.y, owningLocal.z);
                             const BlockId owningBlock = chunk.blocks[blockIdx];
-                            cell.material = makeMaterial(owningBlock, normal);
+                            const glm::ivec3 lightSampleWorld =
+                                localToWorld(owningLocal.x + static_cast<int>(normal.x),
+                                             owningLocal.y + static_cast<int>(normal.y),
+                                             owningLocal.z + static_cast<int>(normal.z));
+                            cell.material = makeMaterial(owningBlock, normal, lightSampleWorld);
                         }
 
                         mask[maskIdx] = cell;
@@ -6174,6 +6338,412 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     if (localY == kChunkSizeY - 1)
     {
         queueNeighbor(coord + glm::ivec3{0, 1, 0});
+    }
+}
+
+void ChunkManager::Impl::queueChunkForLightingRemesh(const std::shared_ptr<Chunk>& chunk)
+{
+    if (!chunk)
+    {
+        return;
+    }
+
+    if (!chunk->hasBlocks && chunk->indexCount == 0)
+    {
+        return;
+    }
+
+    const ChunkState state = chunk->state.load(std::memory_order_acquire);
+    if (state == ChunkState::Generating || state == ChunkState::Meshing)
+    {
+        return;
+    }
+
+    if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
+    {
+        chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
+        enqueueJob(chunk, JobType::Mesh, chunk->coord);
+    }
+}
+
+std::uint8_t ChunkManager::Impl::packedLightAtWorld(const glm::ivec3& worldPos) const noexcept
+{
+    if (worldPos.y < 0)
+    {
+        return packLightLevels(0, 0);
+    }
+
+    const glm::ivec3 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+    auto chunk = getChunkShared(chunkCoord);
+    if (!chunk)
+    {
+        return packLightLevels(kMaxLightLevel, 0);
+    }
+
+    if (worldPos.y < chunk->minWorldY || worldPos.y > chunk->maxWorldY)
+    {
+        return packLightLevels(kMaxLightLevel, 0);
+    }
+
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    if (local.x < 0 || local.x >= kChunkSizeX ||
+        local.z < 0 || local.z >= kChunkSizeZ)
+    {
+        return packLightLevels(kMaxLightLevel, 0);
+    }
+
+    const int localY = worldPos.y - chunk->minWorldY;
+    return chunk->lightLevels[blockIndex(local.x, localY, local.z)];
+}
+
+void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
+{
+    std::vector<std::shared_ptr<Chunk>> regionChunks;
+    regionChunks.reserve(27);
+    for (int dx = -1; dx <= 1; ++dx)
+    {
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int dz = -1; dz <= 1; ++dz)
+            {
+                auto chunk = getChunkShared(centerCoord + glm::ivec3(dx, dy, dz));
+                if (chunk)
+                {
+                    regionChunks.push_back(std::move(chunk));
+                }
+            }
+        }
+    }
+
+    if (regionChunks.empty())
+    {
+        return;
+    }
+
+    std::sort(regionChunks.begin(),
+              regionChunks.end(),
+              [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
+              {
+                  if (lhs->coord.x != rhs->coord.x)
+                  {
+                      return lhs->coord.x < rhs->coord.x;
+                  }
+                  if (lhs->coord.y != rhs->coord.y)
+                  {
+                      return lhs->coord.y < rhs->coord.y;
+                  }
+                  return lhs->coord.z < rhs->coord.z;
+              });
+    regionChunks.erase(std::unique(regionChunks.begin(), regionChunks.end()), regionChunks.end());
+
+    std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> regionLookup;
+    regionLookup.reserve(regionChunks.size());
+    for (const auto& chunk : regionChunks)
+    {
+        regionLookup.emplace(chunk->coord, chunk);
+    }
+
+    std::vector<std::unique_lock<std::mutex>> locks;
+    locks.reserve(regionChunks.size());
+    for (auto& chunk : regionChunks)
+    {
+        locks.emplace_back(chunk->meshMutex);
+    }
+
+    std::vector<std::vector<std::uint8_t>> previousLights;
+    previousLights.reserve(regionChunks.size());
+    for (auto& chunk : regionChunks)
+    {
+        previousLights.push_back(chunk->lightLevels);
+        std::fill(chunk->lightLevels.begin(), chunk->lightLevels.end(), packLightLevels(0, 0));
+        chunk->lightBoundaryDirtyMask = 0;
+    }
+
+    struct LightNode
+    {
+        glm::ivec3 worldPos{0};
+        std::uint8_t level{0};
+    };
+
+    std::deque<LightNode> skyQueue;
+    std::deque<LightNode> blockQueue;
+
+    auto accessRegionVoxel = [&](const glm::ivec3& worldPos) -> std::pair<Chunk*, std::size_t>
+    {
+        const glm::ivec3 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+        auto it = regionLookup.find(chunkCoord);
+        if (it == regionLookup.end())
+        {
+            return {nullptr, 0};
+        }
+
+        const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.z < 0 || local.z >= kChunkSizeZ ||
+            worldPos.y < it->second->minWorldY ||
+            worldPos.y > it->second->maxWorldY)
+        {
+            return {nullptr, 0};
+        }
+
+        const int localY = worldPos.y - it->second->minWorldY;
+        return {it->second.get(), blockIndex(local.x, localY, local.z)};
+    };
+
+    auto seedSkyLight = [&](const glm::ivec3& worldPos, std::uint8_t level)
+    {
+        auto [chunk, idx] = accessRegionVoxel(worldPos);
+        if (!chunk || isOpaqueForLighting(chunk->blocks[idx]))
+        {
+            return;
+        }
+
+        if (level > skyLightFromPacked(chunk->lightLevels[idx]))
+        {
+            setSkyLight(chunk->lightLevels[idx], level);
+            if (level > 1)
+            {
+                skyQueue.push_back({worldPos, level});
+            }
+        }
+    };
+
+    auto seedBlockLight = [&](const glm::ivec3& worldPos, std::uint8_t level)
+    {
+        auto [chunk, idx] = accessRegionVoxel(worldPos);
+        if (!chunk)
+        {
+            return;
+        }
+
+        if (level > blockLightFromPacked(chunk->lightLevels[idx]))
+        {
+            setBlockLight(chunk->lightLevels[idx], level);
+            if (level > 1)
+            {
+                blockQueue.push_back({worldPos, level});
+            }
+        }
+    };
+
+    std::vector<std::shared_ptr<Chunk>> verticalOrder = regionChunks;
+    std::sort(verticalOrder.begin(),
+              verticalOrder.end(),
+              [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
+              {
+                  if (lhs->coord.y != rhs->coord.y)
+                  {
+                      return lhs->coord.y > rhs->coord.y;
+                  }
+                  if (lhs->coord.x != rhs->coord.x)
+                  {
+                      return lhs->coord.x < rhs->coord.x;
+                  }
+                  return lhs->coord.z < rhs->coord.z;
+              });
+
+    for (const auto& chunk : verticalOrder)
+    {
+        const int baseWorldX = chunk->coord.x * kChunkSizeX;
+        const int baseWorldZ = chunk->coord.z * kChunkSizeZ;
+
+        for (int localX = 0; localX < kChunkSizeX; ++localX)
+        {
+            for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+            {
+                const int worldX = baseWorldX + localX;
+                const int worldZ = baseWorldZ + localZ;
+                std::uint8_t incomingSky =
+                    skyLightFromPacked(packedLightAtWorld(glm::ivec3(worldX, chunk->maxWorldY + 1, worldZ)));
+
+                for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
+                {
+                    const std::size_t idx = blockIndex(localX, localY, localZ);
+                    const BlockId block = chunk->blocks[idx];
+                    const glm::ivec3 worldPos(worldX, chunk->minWorldY + localY, worldZ);
+
+                    if (isOpaqueForLighting(block))
+                    {
+                        setSkyLight(chunk->lightLevels[idx], 0);
+                        incomingSky = 0;
+                    }
+                    else
+                    {
+                        const std::uint8_t attenuation = blockLightingProperties(block).skyAttenuation;
+                        incomingSky = static_cast<std::uint8_t>(
+                            std::max(0, static_cast<int>(incomingSky) - static_cast<int>(attenuation)));
+                        setSkyLight(chunk->lightLevels[idx], incomingSky);
+                        if (incomingSky > 0)
+                        {
+                            skyQueue.push_back({worldPos, incomingSky});
+                        }
+                    }
+
+                    const std::uint8_t emission = blockLightingProperties(block).blockEmission;
+                    if (emission > 0)
+                    {
+                        setBlockLight(chunk->lightLevels[idx], emission);
+                        blockQueue.push_back({worldPos, emission});
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto& chunk : regionChunks)
+    {
+        for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+        {
+            const glm::ivec3 neighborCoord = chunk->coord + faceOffset(face);
+            if (regionLookup.find(neighborCoord) != regionLookup.end())
+            {
+                continue;
+            }
+
+            auto outsideChunk = getChunkShared(neighborCoord);
+            if (!outsideChunk)
+            {
+                chunk->lightBoundaryDirtyMask |= static_cast<std::uint8_t>(1u << toIndex(face));
+                continue;
+            }
+
+            const glm::ivec3 offset = faceOffset(face);
+            for (int localX = 0; localX < kChunkSizeX; ++localX)
+            {
+                for (int localY = 0; localY < kChunkSizeY; ++localY)
+                {
+                    for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+                    {
+                        if ((offset.x < 0 && localX != 0) ||
+                            (offset.x > 0 && localX != kChunkSizeX - 1) ||
+                            (offset.y < 0 && localY != 0) ||
+                            (offset.y > 0 && localY != kChunkSizeY - 1) ||
+                            (offset.z < 0 && localZ != 0) ||
+                            (offset.z > 0 && localZ != kChunkSizeZ - 1))
+                        {
+                            continue;
+                        }
+
+                        const std::size_t idx = blockIndex(localX, localY, localZ);
+                        const BlockId block = chunk->blocks[idx];
+                        if (isOpaqueForLighting(block))
+                        {
+                            continue;
+                        }
+
+                        const glm::ivec3 worldPos(chunk->coord.x * kChunkSizeX + localX,
+                                                  chunk->minWorldY + localY,
+                                                  chunk->coord.z * kChunkSizeZ + localZ);
+                        const std::uint8_t neighborPacked = packedLightAtWorld(worldPos + offset);
+                        const std::uint8_t loss = propagationLossFor(block);
+                        const std::uint8_t skySeed =
+                            (skyLightFromPacked(neighborPacked) > loss)
+                                ? static_cast<std::uint8_t>(skyLightFromPacked(neighborPacked) - loss)
+                                : 0;
+                        const std::uint8_t blockSeed =
+                            (blockLightFromPacked(neighborPacked) > loss)
+                                ? static_cast<std::uint8_t>(blockLightFromPacked(neighborPacked) - loss)
+                                : 0;
+                        if (skySeed > 0)
+                        {
+                            seedSkyLight(worldPos, skySeed);
+                        }
+                        if (blockSeed > 0)
+                        {
+                            seedBlockLight(worldPos, blockSeed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    auto propagateLight = [&](std::deque<LightNode>& queue, bool skyChannel)
+    {
+        while (!queue.empty())
+        {
+            const LightNode node = queue.front();
+            queue.pop_front();
+
+            auto [sourceChunk, sourceIdx] = accessRegionVoxel(node.worldPos);
+            if (!sourceChunk)
+            {
+                continue;
+            }
+
+            const std::uint8_t currentLevel =
+                skyChannel ? skyLightFromPacked(sourceChunk->lightLevels[sourceIdx])
+                           : blockLightFromPacked(sourceChunk->lightLevels[sourceIdx]);
+            if (currentLevel != node.level || currentLevel == 0)
+            {
+                continue;
+            }
+
+            for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+            {
+                const glm::ivec3 neighborPos = node.worldPos + faceOffset(face);
+                auto [targetChunk, targetIdx] = accessRegionVoxel(neighborPos);
+                if (!targetChunk)
+                {
+                    continue;
+                }
+
+                const BlockId targetBlock = targetChunk->blocks[targetIdx];
+                if (isOpaqueForLighting(targetBlock))
+                {
+                    continue;
+                }
+
+                const std::uint8_t loss = propagationLossFor(targetBlock);
+                if (currentLevel <= loss)
+                {
+                    continue;
+                }
+
+                const std::uint8_t nextLevel = static_cast<std::uint8_t>(currentLevel - loss);
+                const std::uint8_t existingLevel =
+                    skyChannel ? skyLightFromPacked(targetChunk->lightLevels[targetIdx])
+                               : blockLightFromPacked(targetChunk->lightLevels[targetIdx]);
+                if (nextLevel <= existingLevel)
+                {
+                    continue;
+                }
+
+                if (skyChannel)
+                {
+                    setSkyLight(targetChunk->lightLevels[targetIdx], nextLevel);
+                }
+                else
+                {
+                    setBlockLight(targetChunk->lightLevels[targetIdx], nextLevel);
+                }
+
+                if (nextLevel > 1)
+                {
+                    queue.push_back({neighborPos, nextLevel});
+                }
+            }
+        }
+    };
+
+    propagateLight(skyQueue, true);
+    propagateLight(blockQueue, false);
+
+    std::vector<std::shared_ptr<Chunk>> changedChunks;
+    changedChunks.reserve(regionChunks.size());
+    for (std::size_t i = 0; i < regionChunks.size(); ++i)
+    {
+        if (regionChunks[i]->lightLevels != previousLights[i])
+        {
+            changedChunks.push_back(regionChunks[i]);
+        }
+    }
+
+    locks.clear();
+
+    for (const auto& chunk : changedChunks)
+    {
+        queueChunkForLightingRemesh(chunk);
     }
 }
 
@@ -6910,11 +7480,9 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
             continue;
         }
 
-        if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
-        {
-            chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
-            enqueueJob(chunk, JobType::Mesh, coord);
-        }
+        relightAroundChunk(coord);
+
+        (void)state;
     }
 }
 
@@ -6936,9 +7504,9 @@ void ChunkManager::initializeRendering(ID3D12Device* device)
     impl_->initializeRendering(device);
 }
 
-void ChunkManager::setBlockTextureAtlasConfig(const glm::ivec2& textureSizePixels, int tileSizePixels)
+void ChunkManager::setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config)
 {
-    impl_->setBlockTextureAtlasConfig(textureSizePixels, tileSizePixels);
+    impl_->setBlockTextureAtlasConfig(config);
 }
 
 void ChunkManager::update(const glm::vec3& cameraPos)
@@ -6978,9 +7546,11 @@ bool ChunkManager::destroyBlock(const glm::ivec3& worldPos)
     return impl_->destroyBlock(worldPos);
 }
 
-bool ChunkManager::placeBlock(const glm::ivec3& targetBlockPos, const glm::ivec3& faceNormal)
+bool ChunkManager::placeBlock(const glm::ivec3& targetBlockPos,
+                              const glm::ivec3& faceNormal,
+                              BlockId block)
 {
-    return impl_->placeBlock(targetBlockPos, faceNormal);
+    return impl_->placeBlock(targetBlockPos, faceNormal, block);
 }
 
 RaycastHit ChunkManager::raycast(const glm::vec3& origin, const glm::vec3& direction) const
@@ -7033,6 +7603,11 @@ void ChunkManager::setFarRenderDistanceBlocks(int blocks) noexcept
     impl_->setFarRenderDistanceBlocks(blocks);
 }
 
+void ChunkManager::setFogStartBlocks(int blocks) noexcept
+{
+    impl_->setFogStartBlocks(blocks);
+}
+
 void ChunkManager::setLodEnabled(bool enabled)
 {
     impl_->setLodEnabled(enabled);
@@ -7056,6 +7631,11 @@ bool ChunkManager::farTerrainEnabled() const noexcept
 BlockId ChunkManager::blockAt(const glm::ivec3& worldPos) const noexcept
 {
     return impl_->blockAt(worldPos);
+}
+
+LightSample ChunkManager::lightAt(const glm::ivec3& worldPos) const noexcept
+{
+    return impl_->lightAt(worldPos);
 }
 
 glm::vec3 ChunkManager::findSafeSpawnPosition(float worldX, float worldZ) const

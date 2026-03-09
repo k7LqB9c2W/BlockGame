@@ -29,8 +29,11 @@ struct InputContext
     bool f1JustPressed{false};
     bool f3Pressed{false};
     bool f3JustPressed{false};
+    bool lKeyPressed{false};
+    bool lKeyJustPressed{false};
     bool cameraMouseCaptured{true};
     bool lodEnabled{false};
+    bool placeLampMode{false};
     bool showDebugOverlay{false};
     bool showRenderDistanceGUI{false};
     bool showTeleportGUI{false};

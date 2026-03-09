@@ -28,6 +28,7 @@ struct LoadedTexture
 {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     glm::ivec2 size{0};
+    UINT mipLevels{1};
     UINT srvIndex{(std::numeric_limits<UINT>::max)()};
     D3D12_CPU_DESCRIPTOR_HANDLE srvCpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};

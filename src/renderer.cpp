@@ -48,6 +48,7 @@ constexpr UINT kRtvIndexSkyView = 5;
 constexpr UINT kRtvIndexAerialPerspectiveBase = 6;
 constexpr UINT kAerialPerspectiveSliceCount = 32;
 constexpr UINT kRtvHeapCapacity = kRtvIndexAerialPerspectiveBase + kAerialPerspectiveSliceCount;
+constexpr UINT kTextureMipLevelCount = 4;
 
 [[noreturn]] void throwRenderError(const std::string& message)
 {
@@ -79,6 +80,7 @@ void throwIfFailed(HRESULT hr, const std::string& message)
 [[nodiscard]] D3D12_RESOURCE_DESC texture2DDesc(DXGI_FORMAT format,
                                                 UINT width,
                                                 UINT height,
+                                                UINT16 mipLevels = 1,
                                                 D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) noexcept
 {
     D3D12_RESOURCE_DESC desc{};
@@ -86,7 +88,7 @@ void throwIfFailed(HRESULT hr, const std::string& message)
     desc.Width = width;
     desc.Height = height;
     desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
+    desc.MipLevels = mipLevels;
     desc.Format = format;
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -98,11 +100,113 @@ void throwIfFailed(HRESULT hr, const std::string& message)
                                                      UINT width,
                                                      UINT height,
                                                      UINT arraySize,
+                                                     UINT16 mipLevels = 1,
                                                      D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) noexcept
 {
-    D3D12_RESOURCE_DESC desc = texture2DDesc(format, width, height, flags);
+    D3D12_RESOURCE_DESC desc = texture2DDesc(format, width, height, mipLevels, flags);
     desc.DepthOrArraySize = static_cast<UINT16>(arraySize);
     return desc;
+}
+
+[[nodiscard]] UINT16 computeMipLevelCount(int width, int height, UINT maxLevels) noexcept
+{
+    UINT16 mipLevels = 1;
+    int mipWidth = std::max(width, 1);
+    int mipHeight = std::max(height, 1);
+
+    while (mipLevels < maxLevels && (mipWidth > 1 || mipHeight > 1))
+    {
+        mipWidth = std::max(1, mipWidth / 2);
+        mipHeight = std::max(1, mipHeight / 2);
+        ++mipLevels;
+    }
+
+    return mipLevels;
+}
+
+[[nodiscard]] std::vector<std::vector<std::uint8_t>> buildTextureMipChain(const std::uint8_t* basePixels,
+                                                                          int width,
+                                                                          int height,
+                                                                          UINT mipLevels)
+{
+    std::vector<std::vector<std::uint8_t>> mipChain;
+    mipChain.reserve(mipLevels);
+    mipChain.emplace_back(basePixels, basePixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+
+    const bool useTileAwareDownsample =
+        width >= kAtlasTileSizePixels &&
+        height >= kAtlasTileSizePixels &&
+        (width % kAtlasTileSizePixels) == 0 &&
+        (height % kAtlasTileSizePixels) == 0;
+    const int tilesX = useTileAwareDownsample ? width / kAtlasTileSizePixels : 1;
+    const int tilesY = useTileAwareDownsample ? height / kAtlasTileSizePixels : 1;
+
+    int srcWidth = width;
+    int srcHeight = height;
+
+    for (UINT mipIndex = 1; mipIndex < mipLevels; ++mipIndex)
+    {
+        const int dstWidth = std::max(1, srcWidth / 2);
+        const int dstHeight = std::max(1, srcHeight / 2);
+        std::vector<std::uint8_t> dstPixels(static_cast<std::size_t>(dstWidth) * static_cast<std::size_t>(dstHeight) * 4u, 0);
+        const std::vector<std::uint8_t>& srcPixels = mipChain.back();
+
+        const int srcTileWidth = useTileAwareDownsample ? std::max(1, srcWidth / tilesX) : srcWidth;
+        const int srcTileHeight = useTileAwareDownsample ? std::max(1, srcHeight / tilesY) : srcHeight;
+        const int dstTileWidth = useTileAwareDownsample ? std::max(1, dstWidth / tilesX) : dstWidth;
+        const int dstTileHeight = useTileAwareDownsample ? std::max(1, dstHeight / tilesY) : dstHeight;
+
+        for (int tileY = 0; tileY < tilesY; ++tileY)
+        {
+            for (int tileX = 0; tileX < tilesX; ++tileX)
+            {
+                const int srcTileOriginX = tileX * srcTileWidth;
+                const int srcTileOriginY = tileY * srcTileHeight;
+                const int dstTileOriginX = tileX * dstTileWidth;
+                const int dstTileOriginY = tileY * dstTileHeight;
+
+                for (int y = 0; y < dstTileHeight; ++y)
+                {
+                    for (int x = 0; x < dstTileWidth; ++x)
+                    {
+                        const int srcX0 = std::min(srcTileOriginX + x * 2, srcTileOriginX + srcTileWidth - 1);
+                        const int srcY0 = std::min(srcTileOriginY + y * 2, srcTileOriginY + srcTileHeight - 1);
+                        const int srcX1 = std::min(srcX0 + 1, srcTileOriginX + srcTileWidth - 1);
+                        const int srcY1 = std::min(srcY0 + 1, srcTileOriginY + srcTileHeight - 1);
+                        const int dstX = dstTileOriginX + x;
+                        const int dstY = dstTileOriginY + y;
+                        const std::size_t dstIndex =
+                            (static_cast<std::size_t>(dstY) * static_cast<std::size_t>(dstWidth) + static_cast<std::size_t>(dstX)) * 4u;
+
+                        for (int channel = 0; channel < 4; ++channel)
+                        {
+                            const auto sample = [&](int sampleX, int sampleY) -> std::uint32_t {
+                                const std::size_t srcIndex =
+                                    (static_cast<std::size_t>(sampleY) * static_cast<std::size_t>(srcWidth) +
+                                     static_cast<std::size_t>(sampleX)) * 4u +
+                                    static_cast<std::size_t>(channel);
+                                return srcPixels[srcIndex];
+                            };
+
+                            const std::uint32_t sum =
+                                sample(srcX0, srcY0) +
+                                sample(srcX1, srcY0) +
+                                sample(srcX0, srcY1) +
+                                sample(srcX1, srcY1);
+                            dstPixels[dstIndex + static_cast<std::size_t>(channel)] =
+                                static_cast<std::uint8_t>((sum + 2u) / 4u);
+                        }
+                    }
+                }
+            }
+        }
+
+        mipChain.push_back(std::move(dstPixels));
+        srcWidth = dstWidth;
+        srcHeight = dstHeight;
+    }
+
+    return mipChain;
 }
 
 [[nodiscard]] D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) noexcept
@@ -651,6 +755,7 @@ void Renderer::createDepthBuffer()
         texture2DDesc(kDepthBufferFormat,
                       static_cast<UINT>(width_),
                       static_cast<UINT>(height_),
+                      1,
                       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
@@ -685,6 +790,7 @@ void Renderer::createShadowResources()
         texture2DDesc(kShadowMapFormat,
                       kShadowMapResolution,
                       kShadowMapResolution,
+                      1,
                       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
@@ -770,6 +876,7 @@ void Renderer::createSceneColor()
         texture2DDesc(kSceneColorFormat,
                       static_cast<UINT>(width_),
                       static_cast<UINT>(height_),
+                      1,
                       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
@@ -868,7 +975,7 @@ void Renderer::createPipelines()
     worldRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> worldSamplers{};
-    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
     worldSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     worldSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     worldSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -1238,13 +1345,17 @@ LoadedTexture Renderer::loadTexture(const char* path)
     }
 
     texture.size = glm::ivec2(width, height);
+    texture.mipLevels = computeMipLevelCount(width, height, kTextureMipLevelCount);
     texture.srvIndex = allocateSrvDescriptor();
     texture.srvCpu = srvCpuHandle(texture.srvIndex);
     texture.srvGpu = srvGpuHandle(texture.srvIndex);
+    const std::vector<std::vector<std::uint8_t>> mipChain =
+        buildTextureMipChain(pixels, width, height, texture.mipLevels);
 
     const D3D12_RESOURCE_DESC textureDesc = texture2DDesc(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                                                           static_cast<UINT>(width),
-                                                          static_cast<UINT>(height));
+                                                          static_cast<UINT>(height),
+                                                          texture.mipLevels);
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
                                                    D3D12_HEAP_FLAG_NONE,
@@ -1255,10 +1366,16 @@ LoadedTexture Renderer::loadTexture(const char* path)
                   "failed to create texture resource");
 
     UINT64 uploadSize = 0;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
-    UINT numRows = 0;
-    UINT64 rowSizeInBytes = 0;
-    device_->GetCopyableFootprints(&textureDesc, 0, 1, 0, &layout, &numRows, &rowSizeInBytes, &uploadSize);
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(texture.mipLevels);
+    std::vector<UINT> numRows(texture.mipLevels, 0);
+    device_->GetCopyableFootprints(&textureDesc,
+                                   0,
+                                   texture.mipLevels,
+                                   0,
+                                   layouts.data(),
+                                   numRows.data(),
+                                   nullptr,
+                                   &uploadSize);
 
     Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProps(D3D12_HEAP_TYPE_UPLOAD);
@@ -1274,12 +1391,22 @@ LoadedTexture Renderer::loadTexture(const char* path)
     unsigned char* mapped = nullptr;
     throwIfFailed(uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)),
                   "failed to map texture upload buffer");
-    for (UINT row = 0; row < numRows; ++row)
+    int mipWidth = width;
+    for (UINT mipIndex = 0; mipIndex < texture.mipLevels; ++mipIndex)
     {
-        const std::size_t srcOffset = static_cast<std::size_t>(row) * static_cast<std::size_t>(width) * 4u;
-        const std::size_t dstOffset = static_cast<std::size_t>(layout.Offset) +
-                                      static_cast<std::size_t>(row) * static_cast<std::size_t>(layout.Footprint.RowPitch);
-        std::memcpy(mapped + dstOffset, pixels + srcOffset, static_cast<std::size_t>(width) * 4u);
+        const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& layout = layouts[mipIndex];
+        const std::vector<std::uint8_t>& mipPixels = mipChain[mipIndex];
+        const std::size_t srcRowPitch = static_cast<std::size_t>(mipWidth) * 4u;
+
+        for (UINT row = 0; row < numRows[mipIndex]; ++row)
+        {
+            const std::size_t srcOffset = static_cast<std::size_t>(row) * srcRowPitch;
+            const std::size_t dstOffset = static_cast<std::size_t>(layout.Offset) +
+                                          static_cast<std::size_t>(row) * static_cast<std::size_t>(layout.Footprint.RowPitch);
+            std::memcpy(mapped + dstOffset, mipPixels.data() + srcOffset, srcRowPitch);
+        }
+
+        mipWidth = std::max(1, mipWidth / 2);
     }
     uploadBuffer->Unmap(0, nullptr);
 
@@ -1287,17 +1414,20 @@ LoadedTexture Renderer::loadTexture(const char* path)
     throwIfFailed(commandList_->Reset(uploadCommandAllocator_.Get(), nullptr),
                   "failed to reset upload command list");
 
-    D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = texture.resource.Get();
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = 0;
+    for (UINT mipIndex = 0; mipIndex < texture.mipLevels; ++mipIndex)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = texture.resource.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = mipIndex;
 
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = uploadBuffer.Get();
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint = layout;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = uploadBuffer.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = layouts[mipIndex];
 
-    commandList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        commandList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
     const D3D12_RESOURCE_BARRIER barrier =
         transitionBarrier(texture.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     commandList_->ResourceBarrier(1, &barrier);
@@ -1310,7 +1440,7 @@ LoadedTexture Renderer::loadTexture(const char* path)
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Texture2D.MipLevels = texture.mipLevels;
     device_->CreateShaderResourceView(texture.resource.Get(), &srvDesc, texture.srvCpu);
 
     stbi_image_free(pixels);
@@ -1995,7 +2125,7 @@ void Renderer::AtmosphereRenderer::createResources(Renderer& renderer)
         D3D12_CLEAR_VALUE clearValue{};
         clearValue.Format = kAtmosphereFormat;
         const D3D12_RESOURCE_DESC desc =
-            texture2DDesc(kAtmosphereFormat, width, height, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+            texture2DDesc(kAtmosphereFormat, width, height, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
         throwIfFailed(renderer.device_->CreateCommittedResource(&defaultHeap,
                                                                 D3D12_HEAP_FLAG_NONE,
                                                                 &desc,
@@ -2031,6 +2161,7 @@ void Renderer::AtmosphereRenderer::createResources(Renderer& renderer)
                            32,
                            32,
                            kAerialPerspectiveSliceCount,
+                           1,
                            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
     throwIfFailed(renderer.device_->CreateCommittedResource(&defaultHeap,
                                                             D3D12_HEAP_FLAG_NONE,

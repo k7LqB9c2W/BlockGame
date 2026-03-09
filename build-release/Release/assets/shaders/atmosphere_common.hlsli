@@ -19,6 +19,7 @@ cbuffer AtmosphereConstants : register(b0)
 static const float PI = 3.14159265f;
 static const float ATMOSPHERE_BRIGHTNESS = 0.25f;
 static const float KM_TO_METERS = 1000.0f;
+static const float3 ATMOSPHERE_GROUND_ALBEDO = float3(0.18f, 0.20f, 0.24f);
 
 struct PSInput
 {
@@ -227,6 +228,30 @@ float3 sampleSkyLuminance(Texture2D transLut,
                           float3 originMeters,
                           float3 dir)
 {
+    const float maxDistanceKm = 128.0f;
     float3 transmittance = 1.0f.xxx;
-    return sampleSkyScattering(transLut, multiLut, linearClamp, originMeters, dir, 128.0f, 24, 0.15f, transmittance);
+    const float3 sky =
+        sampleSkyScattering(transLut, multiLut, linearClamp, originMeters, dir, maxDistanceKm, 24, 0.15f, transmittance);
+
+    const float3 originKm = worldMetersToPlanetKm(originMeters);
+    const float topDistance = raySphereExitDistance(originKm, dir, uAtmosphereHeights.y);
+    const float groundDistance = raySphereExitDistance(originKm, dir, uAtmosphereHeights.x);
+    const bool hitsGround =
+        groundDistance > 0.0f &&
+        groundDistance <= maxDistanceKm &&
+        (topDistance < 0.0f || groundDistance <= topDistance);
+    if (!hitsGround)
+    {
+        return sky;
+    }
+
+    const float3 groundHitPosKm = originKm + dir * groundDistance;
+    const float3 groundNormal = normalize(groundHitPosKm);
+    const float sunCos = dot(groundNormal, normalize(uSunDirection.xyz));
+    const float3 groundToSun = sampleTransmittanceLut(transLut, linearClamp, 0.0f, sunCos);
+    const float3 groundDirect = uSunIlluminance.rgb * groundToSun * saturate(sunCos);
+    const float3 groundAmbient =
+        uSunIlluminance.rgb * sampleMultiScatteringLut(multiLut, linearClamp, 0.0f, sunCos) * 0.35f;
+    const float3 groundRadiance = ATMOSPHERE_GROUND_ALBEDO * (groundDirect + groundAmbient) * (1.0f / PI);
+    return sky + transmittance * groundRadiance;
 }

@@ -56,7 +56,7 @@ if (-not (Test-Path $exePath)) {
 
 if ($outputDir) {
     if (Test-Path $outputDir) {
-        Get-ChildItem -Path $outputDir -Force | Remove-Item -Force -Recurse
+        Get-ChildItem -Path $outputDir -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
     } else {
         New-Item -ItemType Directory -Path $outputDir | Out-Null
     }

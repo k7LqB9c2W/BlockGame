@@ -34,3 +34,10 @@
 - REMINDER, OUR GAME THAT YOU WILL 99.999% OF THE TIME WILL BE EDITING IS BLOCK GAME.
 - WE ARE USING CUBYZ as a "REFERENCE" FOR SOME FEATURES, LIKE TERRAIN GEN!. THATS NOT THE MAIN GAME THOUGH, JUST REMEMBER WE ALWAYS WILL USE BLOCKGAME.
 - BUT I CAN REFERENCE CUBYZ SOMEITMES, like "ADD A FEATURE FROM CUBYZ"
+
+## Debugging / Repro
+- BlockGame supports renderer-driven automated screenshots for visual debugging.
+- Sweep captures: run `powershell -ExecutionPolicy Bypass -File tools\run_horizon_sweep.ps1` to launch the game, rotate through a pose grid, delete old sweep screenshots, save fresh captures under `artifacts/horizon_sweep`, and write `captures.csv` plus `analysis.csv`.
+- Single-view repro captures: run `powershell -ExecutionPolicy Bypass -File tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -Yaw <yaw> -Pitch <pitch>` to teleport to an exact camera pose, capture one screenshot, and delete old repro screenshots in `artifacts/repro_capture`.
+- Single-view repro also supports a look target instead of yaw/pitch: `tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -LookX <x> -LookY <y> -LookZ <z>`.
+- The in-game debug overlay now includes `Yaw/Pitch`, `Front`, and `Hit Block` so a screenshot contains enough information to recreate the exact view later.

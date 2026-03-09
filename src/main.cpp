@@ -268,6 +268,25 @@ int __cdecl crtReportHook(int reportType, char* message, int*)
     return (end != value) ? parsed : fallback;
 }
 
+[[nodiscard]] bool tryGetEnvFloat(const char* name, float& outValue)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+    {
+        return false;
+    }
+
+    char* end = nullptr;
+    const float parsed = std::strtof(value, &end);
+    if (end == value)
+    {
+        return false;
+    }
+
+    outValue = parsed;
+    return true;
+}
+
 struct ScreenshotSweepConfig
 {
     bool enabled{false};
@@ -286,6 +305,25 @@ struct ScreenshotSweepState
     std::size_t poseIndex{0};
     int waitFramesRemaining{0};
     std::ofstream manifest;
+};
+
+struct ScreenshotReproConfig
+{
+    bool enabled{false};
+    glm::vec3 position{0.0f};
+    float yawDegrees{0.0f};
+    float pitchDegrees{0.0f};
+    bool useLookTarget{false};
+    glm::vec3 lookTarget{0.0f};
+    std::filesystem::path outputPath{};
+    int settleFrames{20};
+};
+
+struct ScreenshotReproState
+{
+    bool initialized{false};
+    bool captureRequested{false};
+    int waitFramesRemaining{0};
 };
 
 [[nodiscard]] ScreenshotSweepConfig loadScreenshotSweepConfig()
@@ -319,6 +357,71 @@ struct ScreenshotSweepState
     return config;
 }
 
+[[nodiscard]] ScreenshotReproConfig loadScreenshotReproConfig()
+{
+    ScreenshotReproConfig config;
+    config.enabled = envFlagEnabled("BLOCKGAME_REPRO_CAPTURE");
+    if (!config.enabled)
+    {
+        return config;
+    }
+
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    if (!tryGetEnvFloat("BLOCKGAME_REPRO_X", x) ||
+        !tryGetEnvFloat("BLOCKGAME_REPRO_Y", y) ||
+        !tryGetEnvFloat("BLOCKGAME_REPRO_Z", z))
+    {
+        config.enabled = false;
+        return config;
+    }
+    config.position = glm::vec3(x, y, z);
+
+    float lookX = 0.0f;
+    float lookY = 0.0f;
+    float lookZ = 0.0f;
+    const bool hasLookTarget =
+        tryGetEnvFloat("BLOCKGAME_REPRO_LOOK_X", lookX) &&
+        tryGetEnvFloat("BLOCKGAME_REPRO_LOOK_Y", lookY) &&
+        tryGetEnvFloat("BLOCKGAME_REPRO_LOOK_Z", lookZ);
+    if (hasLookTarget)
+    {
+        config.useLookTarget = true;
+        config.lookTarget = glm::vec3(lookX, lookY, lookZ);
+    }
+    else
+    {
+        if (!tryGetEnvFloat("BLOCKGAME_REPRO_YAW", config.yawDegrees) ||
+            !tryGetEnvFloat("BLOCKGAME_REPRO_PITCH", config.pitchDegrees))
+        {
+            config.enabled = false;
+            return config;
+        }
+    }
+
+    if (const char* outputValue = std::getenv("BLOCKGAME_REPRO_OUTPUT"))
+    {
+        config.outputPath = outputValue;
+    }
+
+    if (config.outputPath.empty())
+    {
+        std::error_code ec;
+        std::filesystem::path cwd = std::filesystem::current_path(ec);
+        if (ec)
+        {
+            cwd = ".";
+        }
+        config.outputPath = cwd / "artifacts" / "repro_capture" / "repro.bmp";
+    }
+
+    config.settleFrames = std::max(0, static_cast<int>(std::lround(
+        envFloatOrDefault("BLOCKGAME_REPRO_SETTLE_FRAMES", static_cast<float>(config.settleFrames)))));
+
+    return config;
+}
+
 [[nodiscard]] std::size_t screenshotSweepPoseCount(const ScreenshotSweepConfig& config) noexcept
 {
     return config.pitches.size() * config.yaws.size();
@@ -334,17 +437,25 @@ struct ScreenshotSweepState
     return config.yaws[poseIndex % config.yaws.size()];
 }
 
-void applyScreenshotSweepPose(Camera& camera,
-                              const glm::vec3& anchorPosition,
-                              float yawDegrees,
-                              float pitchDegrees)
+void applyCameraPose(Camera& camera,
+                     const glm::vec3& position,
+                     float yawDegrees,
+                     float pitchDegrees)
 {
-    camera.position = anchorPosition;
+    camera.position = position;
     camera.velocity = glm::vec3(0.0f);
     camera.onGround = true;
     camera.yaw = yawDegrees;
     camera.pitch = std::clamp(pitchDegrees, -89.0f, 89.0f);
     camera.updateVectors();
+}
+
+[[nodiscard]] glm::vec2 yawPitchFromLookTarget(const glm::vec3& position, const glm::vec3& lookTarget)
+{
+    const glm::vec3 direction = glm::normalize(lookTarget - position);
+    const float yawDegrees = glm::degrees(std::atan2(direction.z, direction.x));
+    const float pitchDegrees = glm::degrees(std::asin(std::clamp(direction.y, -1.0f, 1.0f)));
+    return glm::vec2(yawDegrees, pitchDegrees);
 }
 
 [[nodiscard]] std::string screenshotSweepPoseLabel(std::size_t poseIndex, float yawDegrees, float pitchDegrees)
@@ -854,9 +965,28 @@ int runGame()
     }
 
     EnvironmentState environment{};
+    const ScreenshotReproConfig screenshotReproConfig = loadScreenshotReproConfig();
     const ScreenshotSweepConfig screenshotSweepConfig = loadScreenshotSweepConfig();
+    ScreenshotReproState screenshotReproState{};
     ScreenshotSweepState screenshotSweepState{};
-    if (screenshotSweepConfig.enabled)
+    if (screenshotReproConfig.enabled)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(screenshotReproConfig.outputPath.parent_path(), ec);
+        if (ec)
+        {
+            std::cerr << "Failed to create repro capture directory: "
+                      << screenshotReproConfig.outputPath.parent_path() << std::endl;
+            renderer.shutdown();
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return EXIT_FAILURE;
+        }
+
+        std::cout << "Single repro capture enabled. Output: "
+                  << screenshotReproConfig.outputPath << std::endl;
+    }
+    if (screenshotSweepConfig.enabled && !screenshotReproConfig.enabled)
     {
         std::error_code ec;
         std::filesystem::create_directories(screenshotSweepConfig.outputDir, ec);
@@ -1142,7 +1272,7 @@ int runGame()
         auto* inputContextPtr = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
         if (playerReleased)
         {
-            if (screenshotSweepConfig.enabled)
+            if (screenshotSweepConfig.enabled || screenshotReproConfig.enabled)
             {
                 accumulator = 0.0;
             }
@@ -1198,9 +1328,54 @@ int runGame()
         inputContext.leftMouseJustPressed = false;
         inputContext.rightMouseJustPressed = false;
 
+        bool screenshotReproCaptureThisFrame = false;
+        std::filesystem::path screenshotReproCapturePath;
         bool screenshotSweepCaptureThisFrame = false;
         std::filesystem::path screenshotSweepCapturePath;
-        if (screenshotSweepConfig.enabled && playerReleased)
+        if (screenshotReproConfig.enabled && playerReleased)
+        {
+            inputContext.showDebugOverlay = false;
+            inputContext.cameraMouseCaptured = true;
+
+            if (!screenshotReproState.initialized)
+            {
+                screenshotReproState.initialized = true;
+                screenshotReproState.waitFramesRemaining = screenshotReproConfig.settleFrames;
+            }
+
+            float reproYaw = screenshotReproConfig.yawDegrees;
+            float reproPitch = screenshotReproConfig.pitchDegrees;
+            if (screenshotReproConfig.useLookTarget)
+            {
+                const glm::vec2 yawPitch =
+                    yawPitchFromLookTarget(screenshotReproConfig.position, screenshotReproConfig.lookTarget);
+                reproYaw = yawPitch.x;
+                reproPitch = yawPitch.y;
+            }
+
+            applyCameraPose(camera, screenshotReproConfig.position, reproYaw, reproPitch);
+
+            if (!screenshotReproState.captureRequested)
+            {
+                if (screenshotReproState.waitFramesRemaining > 0)
+                {
+                    --screenshotReproState.waitFramesRemaining;
+                }
+                else
+                {
+                    screenshotReproCapturePath = screenshotReproConfig.outputPath;
+                    screenshotReproCaptureThisFrame = true;
+                    screenshotReproState.captureRequested = true;
+                    std::cout << "Capturing repro screenshot at XYZ: "
+                              << camera.position.x << ", "
+                              << camera.position.y << ", "
+                              << camera.position.z
+                              << " yaw=" << camera.yaw
+                              << " pitch=" << camera.pitch << std::endl;
+                }
+            }
+        }
+        if (screenshotSweepConfig.enabled && !screenshotReproConfig.enabled && playerReleased)
         {
             inputContext.showDebugOverlay = false;
             inputContext.cameraMouseCaptured = true;
@@ -1224,10 +1399,10 @@ int runGame()
                     screenshotSweepYawForIndex(screenshotSweepConfig, screenshotSweepState.poseIndex);
                 const float sweepPitch =
                     screenshotSweepPitchForIndex(screenshotSweepConfig, screenshotSweepState.poseIndex);
-                applyScreenshotSweepPose(camera,
-                                         screenshotSweepState.anchorPosition,
-                                         sweepYaw,
-                                         sweepPitch);
+                applyCameraPose(camera,
+                                screenshotSweepState.anchorPosition,
+                                sweepYaw,
+                                sweepPitch);
 
                 if (screenshotSweepState.waitFramesRemaining > 0)
                 {
@@ -1331,18 +1506,32 @@ int runGame()
             std::ostringstream debugStream;
             debugStream.setf(std::ios::fixed, std::ios::floatfield);
             debugStream << "FPS: " << std::setprecision(0) << currentFpsEstimate << '\n';
-            debugStream << std::setprecision(1);
-            debugStream << "XYZ: " << camera.position.x << ", "
-                        << camera.position.y << ", "
-                        << camera.position.z << '\n';
-            debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position) << '\n';
+             debugStream << std::setprecision(1);
+             debugStream << "XYZ: " << camera.position.x << ", "
+                         << camera.position.y << ", "
+                         << camera.position.z << '\n';
+             debugStream << "Yaw/Pitch: " << camera.yaw << ", "
+                         << camera.pitch << '\n';
+             debugStream << std::setprecision(3);
+             debugStream << "Front: " << camera.front().x << ", "
+                         << camera.front().y << ", "
+                         << camera.front().z << '\n';
+             debugStream << std::setprecision(1);
+             debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position) << '\n';
 
-            const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
-            glm::vec3 samplePosition = camera.position;
-            if (debugHit.hit)
-            {
-                samplePosition = glm::vec3(debugHit.blockPos);
-            }
+              const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
+              glm::vec3 samplePosition = camera.position;
+              if (debugHit.hit)
+              {
+                  samplePosition = glm::vec3(debugHit.blockPos);
+                  debugStream << "Hit Block: " << debugHit.blockPos.x << ", "
+                              << debugHit.blockPos.y << ", "
+                              << debugHit.blockPos.z << '\n';
+              }
+              else
+              {
+                  debugStream << "Hit Block: none\n";
+              }
 
             const int columnX = static_cast<int>(std::floor(samplePosition.x));
             const int columnZ = static_cast<int>(std::floor(samplePosition.z));
@@ -1457,10 +1646,15 @@ int runGame()
             ImGui::Checkbox("Fog Fallback", &environment.debug.fogFallbackEnabled);
             ImGui::Checkbox("Shadows", &environment.debug.shadowsEnabled);
             ImGui::Separator();
-            ImGui::TextUnformatted("View Diagnostics");
-            ImGui::Text("View Y: %.3f (%.1f deg)", viewDirection.y, viewElevationDeg);
-            ImGui::Text("Sun Y: %.3f (%.1f deg)", environment.sunDirection.y, sunElevationDeg);
-            ImGui::Text("View.Sun: %.3f", sunViewDot);
+             ImGui::TextUnformatted("View Diagnostics");
+             ImGui::Text("Yaw/Pitch: %.1f / %.1f", camera.yaw, camera.pitch);
+             ImGui::Text("Front: %.3f %.3f %.3f",
+                         viewDirection.x,
+                         viewDirection.y,
+                         viewDirection.z);
+             ImGui::Text("View Y: %.3f (%.1f deg)", viewDirection.y, viewElevationDeg);
+             ImGui::Text("Sun Y: %.3f (%.1f deg)", environment.sunDirection.y, sunElevationDeg);
+             ImGui::Text("View.Sun: %.3f", sunViewDot);
             ImGui::Text("Above Ground: %.2f blocks", altitudeAboveGround);
             ImGui::Text("Fog Start/Far: %.0f / %.0f", environment.fogStartBlocks, environment.farDistanceBlocks);
             ImGui::Text("Fog Span: %.0f", fogSpanBlocks);
@@ -1549,7 +1743,7 @@ int runGame()
             ImGui::End();
         }
 
-        if (!screenshotSweepConfig.enabled && !profilingOverlayText.empty())
+        if (!screenshotSweepConfig.enabled && !screenshotReproConfig.enabled && !profilingOverlayText.empty())
         {
             ImGui::SetNextWindowPos(ImVec2(12.0f, inputContext.showDebugOverlay ? 220.0f : 12.0f), ImGuiCond_Always);
             ImGui::SetNextWindowBgAlpha(0.30f);
@@ -1562,17 +1756,29 @@ int runGame()
             ImGui::End();
         }
 
+        if (screenshotReproCaptureThisFrame)
+        {
+            renderer.requestScreenshot(screenshotReproCapturePath);
+        }
         if (screenshotSweepCaptureThisFrame)
         {
             renderer.requestScreenshot(screenshotSweepCapturePath);
         }
 
-        if (!screenshotSweepConfig.enabled && playerReleased && isGameplayMouseCaptured(inputContext))
+        if (!screenshotSweepConfig.enabled &&
+            !screenshotReproConfig.enabled &&
+            playerReleased &&
+            isGameplayMouseCaptured(inputContext))
         {
             drawCrosshairOverlay(framebufferWidth, framebufferHeight);
         }
 
         renderer.endFrame();
+
+        if (screenshotReproConfig.enabled && screenshotReproState.captureRequested)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
     }
 
     chunkManager.clear();

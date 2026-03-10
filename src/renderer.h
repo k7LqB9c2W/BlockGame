@@ -72,8 +72,8 @@ struct AtmosphereSettings
 
 struct TonemapSettings
 {
-    float exposure{0.75f};
-    float whitePoint{10.0f};
+    float exposure{0.62f};
+    float whitePoint{9.0f};
 };
 
 struct RenderDebugSettings

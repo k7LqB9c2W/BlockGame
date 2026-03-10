@@ -443,6 +443,56 @@ struct CaptureOverridesConfig
     }
 }
 
+[[nodiscard]] const char* terrainDebugViewLabel(TerrainDebugView view) noexcept
+{
+    switch (view)
+    {
+    case TerrainDebugView::SkyLight:
+        return "Sky Light";
+    case TerrainDebugView::BlockLight:
+        return "Block Light";
+    case TerrainDebugView::MipLevel:
+        return "Mip Level";
+    case TerrainDebugView::AmbientOcclusion:
+        return "AO (Phase 3)";
+    case TerrainDebugView::None:
+    default:
+        return "None";
+    }
+}
+
+[[nodiscard]] const char* blockIdLabel(BlockId block) noexcept
+{
+    switch (block)
+    {
+    case BlockId::Air:
+        return "Air";
+    case BlockId::Grass:
+        return "Grass";
+    case BlockId::Wood:
+        return "Wood";
+    case BlockId::Leaves:
+        return "Leaves";
+    case BlockId::Sand:
+        return "Sand";
+    case BlockId::Water:
+        return "Water";
+    case BlockId::Stone:
+        return "Stone";
+    case BlockId::SpruceLog:
+        return "SpruceLog";
+    case BlockId::SpruceLeaves:
+        return "SpruceLeaves";
+    case BlockId::Podzol:
+        return "Podzol";
+    case BlockId::DebugLamp:
+        return "DebugLamp";
+    case BlockId::Count:
+    default:
+        return "Unknown";
+    }
+}
+
 [[nodiscard]] std::vector<CapturePlacementAction> loadCapturePlacements()
 {
     std::vector<CapturePlacementAction> actions;
@@ -1800,6 +1850,15 @@ int runGame()
                                               ? static_cast<double>(fpsFrameCount) / fpsTimer
                                               : fpsValue;
         std::string debugOverlayText;
+        std::string lightingSnapshotText;
+        std::string hitBlockSummary{"none"};
+        std::string hitBlockType{"none"};
+        glm::vec3 samplePosition = camera.position;
+        glm::ivec3 lightProbeBlock(static_cast<int>(std::floor(camera.position.x)),
+                                   static_cast<int>(std::floor(camera.position.y)),
+                                   static_cast<int>(std::floor(camera.position.z)));
+        std::string probeBlockType{blockIdLabel(chunkManager.blockAt(lightProbeBlock))};
+        LightSample probeLight = chunkManager.lightAt(lightProbeBlock);
 
         if (inputContext.showDebugOverlay)
         {
@@ -1819,29 +1878,34 @@ int runGame()
              debugStream << std::setprecision(1);
              debugStream << "Biome: " << chunkManager.biomeNameAt(camera.position) << '\n';
 
-             const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
-             glm::vec3 samplePosition = camera.position;
-             glm::ivec3 lightProbeBlock(static_cast<int>(std::floor(camera.position.x)),
-                                        static_cast<int>(std::floor(camera.position.y)),
-                                        static_cast<int>(std::floor(camera.position.z)));
-              if (debugHit.hit)
-              {
-                  samplePosition = glm::vec3(debugHit.blockPos);
-                  lightProbeBlock = debugHit.blockPos + debugHit.faceNormal;
-                  debugStream << "Hit Block: " << debugHit.blockPos.x << ", "
-                              << debugHit.blockPos.y << ", "
-                              << debugHit.blockPos.z << '\n';
-              }
-              else
-              {
-                  debugStream << "Hit Block: none\n";
-              }
-             const LightSample probeLight = chunkManager.lightAt(lightProbeBlock);
-             debugStream << "Light Probe: sky=" << static_cast<int>(probeLight.sky)
-                         << " block=" << static_cast<int>(probeLight.block) << '\n';
-             debugStream << "Place Mode: "
-                         << (inputContext.placeLampMode ? "DebugLamp" : "Grass")
-                         << '\n';
+            const RaycastHit debugHit = chunkManager.raycast(camera.position, camera.front());
+            if (debugHit.hit)
+            {
+                samplePosition = glm::vec3(debugHit.blockPos);
+                lightProbeBlock = debugHit.blockPos + debugHit.faceNormal;
+                hitBlockType = blockIdLabel(chunkManager.blockAt(debugHit.blockPos));
+                probeBlockType = blockIdLabel(chunkManager.blockAt(lightProbeBlock));
+
+                std::ostringstream hitStream;
+                hitStream << debugHit.blockPos.x << ", " << debugHit.blockPos.y << ", " << debugHit.blockPos.z
+                          << " face " << debugHit.faceNormal.x << ", " << debugHit.faceNormal.y << ", " << debugHit.faceNormal.z;
+                hitBlockSummary = hitStream.str();
+                debugStream << "Hit Block: " << hitBlockSummary << " [" << hitBlockType << "]\n";
+            }
+            else
+            {
+                debugStream << "Hit Block: none\n";
+            }
+
+            probeLight = chunkManager.lightAt(lightProbeBlock);
+            debugStream << "Probe Block: " << lightProbeBlock.x << ", "
+                        << lightProbeBlock.y << ", "
+                        << lightProbeBlock.z << " [" << probeBlockType << "]\n";
+            debugStream << "Light Probe: sky=" << static_cast<int>(probeLight.sky)
+                        << " block=" << static_cast<int>(probeLight.block) << '\n';
+            debugStream << "Place Mode: "
+                        << (inputContext.placeLampMode ? "DebugLamp" : "Grass")
+                        << '\n';
 
             const int columnX = static_cast<int>(std::floor(samplePosition.x));
             const int columnZ = static_cast<int>(std::floor(samplePosition.z));
@@ -1911,6 +1975,49 @@ int runGame()
             }
 
             debugOverlayText = debugStream.str();
+
+            const RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
+            std::ostringstream snapshotStream;
+            snapshotStream.setf(std::ios::fixed, std::ios::floatfield);
+            snapshotStream << std::setprecision(1);
+            snapshotStream << "XYZ: " << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << '\n';
+            snapshotStream << "Yaw/Pitch: " << camera.yaw << ", " << camera.pitch << '\n';
+            snapshotStream << "Hit Block: " << hitBlockSummary;
+            if (hitBlockType != "none")
+            {
+                snapshotStream << " [" << hitBlockType << "]";
+            }
+            snapshotStream << '\n';
+            snapshotStream << "Probe Block: " << lightProbeBlock.x << ", " << lightProbeBlock.y << ", " << lightProbeBlock.z
+                           << " [" << probeBlockType << "]\n";
+            snapshotStream << "Light Probe: sky=" << static_cast<int>(probeLight.sky)
+                           << " block=" << static_cast<int>(probeLight.block) << '\n';
+            snapshotStream << "Time/Exposure/WP: " << environment.timeOfDay << " / "
+                           << environment.tonemap.exposure << " / "
+                           << environment.tonemap.whitePoint << '\n';
+            snapshotStream << "Near/Far/Fog/FarTerrain: " << renderSettings.nearChunks << " / "
+                           << renderSettings.farBlocks << " / "
+                           << renderSettings.fogStartBlocks << " / "
+                           << (renderSettings.farTerrainEnabled ? "on" : "off") << '\n';
+            snapshotStream << "Terrain Debug: " << terrainDebugViewLabel(environment.debug.terrainDebugView) << '\n';
+            snapshotStream << "Passes: world=" << (environment.debug.worldPassEnabled ? "on" : "off")
+                           << " sky=" << (environment.debug.skyPassEnabled ? "on" : "off")
+                           << " aerial=" << (environment.debug.aerialPerspectiveEnabled ? "on" : "off")
+                           << " fog=" << (environment.debug.fogFallbackEnabled ? "on" : "off")
+                           << " shadows=" << (environment.debug.shadowsEnabled ? "on" : "off")
+                           << " sun=" << (environment.debug.directSunEnabled ? "on" : "off") << '\n';
+            snapshotStream << "Atmosphere: " << (environment.atmosphereEnabled ? "on" : "off")
+                           << " mieG=" << environment.atmosphere.mieAnisotropy
+                           << " aerialKm=" << environment.atmosphere.aerialPerspectiveDistanceKm << '\n';
+            snapshotStream << "View/Sun: viewY=" << viewDirection.y
+                           << " sunY=" << environment.sunDirection.y
+                           << " dot=" << sunViewDot
+                           << " nearHorizon=" << (nearHorizonView ? "yes" : "no")
+                           << " belowHorizon=" << (lookingBelowHorizon ? "yes" : "no") << '\n';
+            snapshotStream << "Streaming: exact " << streamingStatus.exactReadyChunks << "/" << streamingStatus.exactRequiredChunks
+                           << " farReady=" << streamingStatus.farReadyTiles
+                           << " farQueued=" << streamingStatus.farQueuedTiles;
+            lightingSnapshotText = snapshotStream.str();
         }
 
         if (inputContext.showDebugOverlay && !debugOverlayText.empty())
@@ -1926,16 +2033,146 @@ int runGame()
             ImGui::End();
         }
 
+        if (inputContext.showControlsOverlay)
+        {
+            static constexpr const char* kControlsHelp =
+                "Controls\n"
+                "W/A/S/D: Move\n"
+                "Space: Jump\n"
+                "Mouse: Look\n"
+                "Left Mouse: Break block\n"
+                "Right Mouse: Place block\n"
+                "L: Toggle Grass / DebugLamp placement\n"
+                ". : Release or recapture mouse\n"
+                "F1: Debug overlay and lighting lab\n"
+                "F2: Teleport dialog\n"
+                "F3: Toggle far terrain\n"
+                "N: Render distance dialog\n"
+                "H: Toggle this help\n"
+                "Esc: Quit while mouse is captured\n"
+                "\n"
+                "Lighting isolation\n"
+                "1. Press F1, then press . to use the UI.\n"
+                "2. Use Exact Only, World Only, No Sun, or the terrain debug modes.\n"
+                "3. Use Copy Lighting Snapshot and send the text back.";
+
+            ImGui::SetNextWindowPos(ImVec2(static_cast<float>(framebufferWidth) - 18.0f, 18.0f),
+                                    ImGuiCond_Always,
+                                    ImVec2(1.0f, 0.0f));
+            ImGui::SetNextWindowBgAlpha(0.78f);
+            ImGui::Begin("Controls",
+                         nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
+            ImGui::TextUnformatted(kControlsHelp);
+            ImGui::End();
+        }
+
         if (inputContext.showDebugOverlay)
         {
             ImGui::SetNextWindowPos(ImVec2(12.0f, 260.0f), ImGuiCond_Always);
             ImGui::SetNextWindowBgAlpha(0.85f);
-            ImGui::Begin("Environment", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::Begin("Lighting Lab", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
             ImGui::TextUnformatted(inputContext.cameraMouseCaptured
-                                       ? "Press . to release the mouse for UI."
-                                       : "Press . again to return to camera look.");
+                                       ? "Press . to release the mouse for UI. Press H for controls."
+                                       : "Press . again to return to camera look. Press H for controls.");
             ImGui::Text("Placement Block: %s (press L to toggle)",
                         inputContext.placeLampMode ? "DebugLamp" : "Grass");
+            ImGui::Separator();
+            ImGui::TextUnformatted("Quick Isolate");
+
+            const auto applyBeautyPreset = [&]()
+            {
+                environment.atmosphereEnabled = true;
+                environment.debug.worldPassEnabled = true;
+                environment.debug.skyPassEnabled = true;
+                environment.debug.aerialPerspectiveEnabled = true;
+                environment.debug.fogFallbackEnabled = true;
+                environment.debug.shadowsEnabled = true;
+                environment.debug.directSunEnabled = true;
+                environment.debug.terrainDebugView = TerrainDebugView::None;
+            };
+            const auto applyWorldOnlyPreset = [&]()
+            {
+                environment.atmosphereEnabled = false;
+                environment.debug.worldPassEnabled = true;
+                environment.debug.skyPassEnabled = false;
+                environment.debug.aerialPerspectiveEnabled = false;
+                environment.debug.fogFallbackEnabled = false;
+                environment.debug.shadowsEnabled = true;
+                environment.debug.directSunEnabled = true;
+                environment.debug.terrainDebugView = TerrainDebugView::None;
+            };
+            const auto applyNoSunPreset = [&]()
+            {
+                environment.debug.shadowsEnabled = false;
+                environment.debug.directSunEnabled = false;
+                environment.debug.terrainDebugView = TerrainDebugView::None;
+            };
+            const auto applyDefaultsPreset = [&]()
+            {
+                applyBeautyPreset();
+                environment.timeOfDay = 12.0f;
+                environment.tonemap.exposure = 0.62f;
+                environment.tonemap.whitePoint = 9.0f;
+                environment.atmosphere.aerialPerspectiveDistanceKm = 12.0f;
+                environment.atmosphere.mieAnisotropy = 0.76f;
+                chunkManager.setNearRenderDistance(kDefaultNearRenderDistance);
+                chunkManager.setFarRenderDistanceBlocks(kDefaultFarRenderDistanceBlocks);
+                chunkManager.setFogStartBlocks(kDefaultFarFogStartBlocks);
+                chunkManager.setFarTerrainEnabled(false);
+                inputContext.lodEnabled = false;
+            };
+
+            if (ImGui::Button("Beauty"))
+            {
+                applyBeautyPreset();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("World Only"))
+            {
+                applyWorldOnlyPreset();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("No Sun"))
+            {
+                applyNoSunPreset();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Exact Only"))
+            {
+                chunkManager.setFarTerrainEnabled(false);
+                inputContext.lodEnabled = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Defaults"))
+            {
+                applyDefaultsPreset();
+            }
+
+            if (ImGui::Button("None"))
+            {
+                environment.debug.terrainDebugView = TerrainDebugView::None;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Sky Light"))
+            {
+                environment.debug.terrainDebugView = TerrainDebugView::SkyLight;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Block Light"))
+            {
+                environment.debug.terrainDebugView = TerrainDebugView::BlockLight;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Mip"))
+            {
+                environment.debug.terrainDebugView = TerrainDebugView::MipLevel;
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Environment");
             ImGui::Checkbox("Atmosphere", &environment.atmosphereEnabled);
             ImGui::SliderFloat("Time of Day", &environment.timeOfDay, 0.0f, 24.0f, "%.2f");
             ImGui::SliderFloat("Exposure", &environment.tonemap.exposure, 0.10f, 3.0f, "%.2f");
@@ -1948,8 +2185,8 @@ int runGame()
             ImGui::SliderFloat("Mie G", &environment.atmosphere.mieAnisotropy, 0.5f, 0.95f, "%.2f");
             ImGui::Text("Sun Dir: %.2f %.2f %.2f",
                         environment.sunDirection.x,
-                        environment.sunDirection.y,
-                        environment.sunDirection.z);
+                       environment.sunDirection.y,
+                       environment.sunDirection.z);
             ImGui::Separator();
             ImGui::TextUnformatted("Pass Isolation");
             ImGui::Checkbox("World Pass", &environment.debug.worldPassEnabled);
@@ -1967,25 +2204,76 @@ int runGame()
                     static_cast<TerrainDebugView>(terrainDebugView);
             }
             ImGui::Separator();
-             ImGui::TextUnformatted("View Diagnostics");
-             ImGui::Text("Yaw/Pitch: %.1f / %.1f", camera.yaw, camera.pitch);
-             ImGui::Text("Front: %.3f %.3f %.3f",
-                         viewDirection.x,
-                         viewDirection.y,
-                         viewDirection.z);
-             ImGui::Text("View Y: %.3f (%.1f deg)", viewDirection.y, viewElevationDeg);
-             ImGui::Text("Sun Y: %.3f (%.1f deg)", environment.sunDirection.y, sunElevationDeg);
-             ImGui::Text("View.Sun: %.3f", sunViewDot);
+            ImGui::TextUnformatted("Render Distance");
+            RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
+            bool farTerrainEnabled = renderSettings.farTerrainEnabled;
+            if (ImGui::Checkbox("Far Terrain", &farTerrainEnabled))
+            {
+                chunkManager.setFarTerrainEnabled(farTerrainEnabled);
+                inputContext.lodEnabled = farTerrainEnabled;
+                renderSettings.farTerrainEnabled = farTerrainEnabled;
+            }
+            int nearChunks = renderSettings.nearChunks;
+            if (ImGui::SliderInt("Near Chunks", &nearChunks, 1, kMaxUserRenderDistance))
+            {
+                chunkManager.setNearRenderDistance(nearChunks);
+                renderSettings.nearChunks = nearChunks;
+            }
+            int farBlocks = renderSettings.farBlocks;
+            if (ImGui::SliderInt("Far Blocks", &farBlocks, 256, 12000))
+            {
+                chunkManager.setFarRenderDistanceBlocks(farBlocks);
+                environment.farDistanceBlocks = static_cast<float>(farBlocks);
+                renderSettings.farBlocks = farBlocks;
+            }
+            int fogStartBlocks = renderSettings.fogStartBlocks;
+            if (ImGui::SliderInt("Fog Start", &fogStartBlocks, 0, (std::max)(renderSettings.farBlocks, 256)))
+            {
+                chunkManager.setFogStartBlocks(fogStartBlocks);
+                environment.fogStartBlocks = static_cast<float>(fogStartBlocks);
+                renderSettings.fogStartBlocks = fogStartBlocks;
+            }
+            ImGui::Text("Streaming: Exact %d/%d | Far Ready %d | Far Queued %d",
+                        streamingStatus.exactReadyChunks,
+                        streamingStatus.exactRequiredChunks,
+                        streamingStatus.farReadyTiles,
+                        streamingStatus.farQueuedTiles);
+            ImGui::Separator();
+            ImGui::TextUnformatted("View Diagnostics");
+            ImGui::Text("Yaw/Pitch: %.1f / %.1f", camera.yaw, camera.pitch);
+            ImGui::Text("Front: %.3f %.3f %.3f",
+                        viewDirection.x,
+                        viewDirection.y,
+                        viewDirection.z);
+            ImGui::Text("View Y: %.3f (%.1f deg)", viewDirection.y, viewElevationDeg);
+            ImGui::Text("Sun Y: %.3f (%.1f deg)", environment.sunDirection.y, sunElevationDeg);
+            ImGui::Text("View.Sun: %.3f", sunViewDot);
             ImGui::Text("Above Ground: %.2f blocks", altitudeAboveGround);
             ImGui::Text("Fog Start/Far: %.0f / %.0f", environment.fogStartBlocks, environment.farDistanceBlocks);
             ImGui::Text("Fog Span: %.0f", fogSpanBlocks);
             ImGui::Text("Near Horizon: %s", nearHorizonView ? "yes" : "no");
             ImGui::Text("Looking Below Horizon: %s", lookingBelowHorizon ? "yes" : "no");
+            ImGui::Text("Hit Block: %s", hitBlockSummary.c_str());
+            ImGui::Text("Hit Block Type: %s", hitBlockType.c_str());
+            ImGui::Text("Probe Block: %d %d %d", lightProbeBlock.x, lightProbeBlock.y, lightProbeBlock.z);
+            ImGui::Text("Probe Block Type: %s", probeBlockType.c_str());
+            ImGui::Text("Probe Light: sky=%d block=%d", static_cast<int>(probeLight.sky), static_cast<int>(probeLight.block));
+            ImGui::Separator();
+            ImGui::TextUnformatted("Snapshot");
+            if (ImGui::Button("Copy Lighting Snapshot"))
+            {
+                ImGui::SetClipboardText(lightingSnapshotText.c_str());
+            }
+            ImGui::BeginChild("LightingSnapshot", ImVec2(430.0f, 145.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::TextUnformatted(lightingSnapshotText.c_str());
+            ImGui::EndChild();
             ImGui::Separator();
             ImGui::TextUnformatted("How To Isolate");
             ImGui::TextWrapped("1. Disable Sky Pass. If the band stays, it is not the sky dome.");
             ImGui::TextWrapped("2. Disable Aerial Perspective. If the band disappears, the aerial LUT is the source.");
-            ImGui::TextWrapped("3. Disable Fog Fallback with Aerial Perspective off. If the band still stays, it is world-side shading or geometry.");
+            ImGui::TextWrapped("3. Use Exact Only. If the artifact disappears, the far terrain path is involved.");
+            ImGui::TextWrapped("4. Use Sky Light or Block Light terrain debug to confirm whether the bad region is actually carrying broken light data.");
+            ImGui::TextWrapped("5. Disable Fog Fallback with Aerial Perspective off. If the band still stays, it is world-side shading or geometry.");
             ImGui::End();
         }
 

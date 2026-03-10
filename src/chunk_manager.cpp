@@ -838,18 +838,19 @@ struct Chunk
         }
         state.store(ChunkState::Empty, std::memory_order_relaxed);
         meshData.clear();
-        meshReady = false;
-        hasBlocks = false;
-        queuedForUpload = false;
-        indexCount = 0;
-        vertexCount = 0;
-        bufferPageIndex = kInvalidChunkBufferPage;
-        vertexOffset = 0;
-        indexOffset = 0;
+        meshReady.store(false, std::memory_order_relaxed);
+        hasBlocks.store(false, std::memory_order_relaxed);
+        queuedForUpload.store(false, std::memory_order_relaxed);
+        indexCount.store(0, std::memory_order_relaxed);
+        vertexCount.store(0, std::memory_order_relaxed);
+        bufferPageIndex.store(kInvalidChunkBufferPage, std::memory_order_relaxed);
+        vertexOffset.store(0, std::memory_order_relaxed);
+        indexOffset.store(0, std::memory_order_relaxed);
         inFlight.store(0, std::memory_order_relaxed);
         surfaceOnly = false;
         lodData.reset();
         lightBoundaryDirtyMask = 0;
+        pendingMeshRefresh.store(false, std::memory_order_relaxed);
     }
 
 
@@ -860,21 +861,22 @@ struct Chunk
     std::vector<std::uint8_t> lightLevels;
     std::atomic<ChunkState> state;
 
-    std::uint32_t indexCount{0};
-    std::size_t vertexCount{0};
-    std::uint32_t bufferPageIndex{kInvalidChunkBufferPage};
-    std::size_t vertexOffset{0};
-    std::size_t indexOffset{0};
-    bool queuedForUpload{false};
+    std::atomic<std::uint32_t> indexCount{0};
+    std::atomic<std::size_t> vertexCount{0};
+    std::atomic<std::uint32_t> bufferPageIndex{kInvalidChunkBufferPage};
+    std::atomic<std::size_t> vertexOffset{0};
+    std::atomic<std::size_t> indexOffset{0};
+    std::atomic<bool> queuedForUpload{false};
 
     mutable std::mutex meshMutex;
     MeshData meshData;
-    bool meshReady{false};
-    bool hasBlocks{false};
+    std::atomic<bool> meshReady{false};
+    std::atomic<bool> hasBlocks{false};
     std::atomic<int> inFlight{0};
     bool surfaceOnly{false};
     std::unique_ptr<FarChunk> lodData;
     std::uint8_t lightBoundaryDirtyMask{0};
+    std::atomic<bool> pendingMeshRefresh{false};
 };
 
 struct ProfilingCounters
@@ -2599,6 +2601,7 @@ private:
     std::shared_ptr<const Chunk> getChunkShared(const glm::ivec3& coord) const noexcept;
     Chunk* getChunk(const glm::ivec3& coord) noexcept;
     const Chunk* getChunk(const glm::ivec3& coord) const noexcept;
+    void requestChunkRemesh(const std::shared_ptr<Chunk>& chunk);
     void markNeighborsForRemeshingIfNeeded(const glm::ivec3& coord, int localX, int localY, int localZ);
     void relightAroundChunk(const glm::ivec3& centerCoord);
     void queueChunkForLightingRemesh(const std::shared_ptr<Chunk>& chunk);
@@ -3516,7 +3519,8 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         }
 
         ChunkState state = chunkPtr->state.load();
-        if ((state != ChunkState::Uploaded && state != ChunkState::Remeshing) || chunkPtr->indexCount == 0)
+        const std::uint32_t indexCount = chunkPtr->indexCount.load(std::memory_order_acquire);
+        if ((state != ChunkState::Uploaded && state != ChunkState::Remeshing) || indexCount == 0)
         {
             continue;
         }
@@ -3533,22 +3537,24 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             continue;
         }
 
-        const std::uint32_t pageIndex = chunkPtr->bufferPageIndex;
+        const std::uint32_t pageIndex = chunkPtr->bufferPageIndex.load(std::memory_order_acquire);
         if (pageIndex == kInvalidChunkBufferPage || pageIndex >= renderData.nearBatches.size())
         {
             continue;
         }
 
-        if (chunkPtr->vertexOffset > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
-            chunkPtr->indexOffset > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+        const std::size_t vertexOffset = chunkPtr->vertexOffset.load(std::memory_order_acquire);
+        const std::size_t indexOffset = chunkPtr->indexOffset.load(std::memory_order_acquire);
+        if (vertexOffset > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+            indexOffset > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
         {
             continue;
         }
 
         ChunkRenderBatch& batch = renderData.nearBatches[pageIndex];
-        batch.indexCounts.push_back(chunkPtr->indexCount);
-        batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(chunkPtr->indexOffset));
-        batch.baseVertices.push_back(static_cast<std::int32_t>(chunkPtr->vertexOffset));
+        batch.indexCounts.push_back(indexCount);
+        batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(indexOffset));
+        batch.baseVertices.push_back(static_cast<std::int32_t>(vertexOffset));
     }
 
     auto emptyIt = std::remove_if(renderData.nearBatches.begin(),
@@ -3708,9 +3714,9 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         }
 
         chunk->blocks[blockIdx] = BlockId::Air;
-        if (chunk->hasBlocks)
+        if (chunk->hasBlocks.load(std::memory_order_relaxed))
         {
-            chunk->hasBlocks = chunkHasSolidBlocks(*chunk);
+            chunk->hasBlocks.store(chunkHasSolidBlocks(*chunk), std::memory_order_relaxed);
         }
 
         columnManager_.updateColumn(*chunk, local.x, local.z);
@@ -3759,7 +3765,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         }
 
         chunk->blocks[blockIdx] = block;
-        chunk->hasBlocks = true;
+        chunk->hasBlocks.store(true, std::memory_order_relaxed);
 
         columnManager_.updateColumn(*chunk, local.x, local.z);
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
@@ -4660,38 +4666,58 @@ void ChunkManager::Impl::processJob(const Job& job)
         profilingCounters_.generationMicros.fetch_add(micros, std::memory_order_relaxed);
         profilingCounters_.generatedChunks.fetch_add(1, std::memory_order_relaxed);
 
-        if (chunk->hasBlocks)
+        if (chunk->hasBlocks.load(std::memory_order_acquire))
         {
+            chunk->pendingMeshRefresh.store(false, std::memory_order_release);
             chunk->state.store(ChunkState::Meshing, std::memory_order_release);
             enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
         }
         else
         {
             chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
-            chunk->meshReady = false;
-            chunk->indexCount = 0;
+            chunk->meshReady.store(false, std::memory_order_release);
+            chunk->indexCount.store(0, std::memory_order_release);
         }
     }
     else if (job.type == JobType::Mesh)
     {
         const auto start = std::chrono::steady_clock::now();
+        chunk->pendingMeshRefresh.store(false, std::memory_order_release);
         buildChunkMeshAsync(*chunk);
         const auto end = std::chrono::steady_clock::now();
         const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         profilingCounters_.meshingMicros.fetch_add(micros, std::memory_order_relaxed);
         profilingCounters_.meshedChunks.fetch_add(1, std::memory_order_relaxed);
 
-        if (chunk->meshData.empty())
+        const bool meshEmpty = chunk->meshData.empty();
+        if (meshEmpty)
         {
-            recycleChunkGPU(*chunk);
-            chunk->meshReady = false;
             chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
-            chunk->indexCount = 0;
+        }
+        else
+        {
+            chunk->state.store(ChunkState::Ready, std::memory_order_release);
+        }
+
+        if (chunk->pendingMeshRefresh.exchange(false, std::memory_order_acq_rel))
+        {
+            chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
+            enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
             return;
         }
 
-        chunk->state.store(ChunkState::Ready, std::memory_order_release);
-        queueChunkForUpload(chunk);
+        if (chunk->meshData.empty())
+        {
+            recycleChunkGPU(*chunk);
+            chunk->meshReady.store(false, std::memory_order_release);
+            chunk->indexCount.store(0, std::memory_order_release);
+            return;
+        }
+
+        if (chunk->state.load(std::memory_order_acquire) == ChunkState::Ready)
+        {
+            queueChunkForUpload(chunk);
+        }
     }
 }
 
@@ -4707,7 +4733,7 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
             continue;
         }
 
-        chunk->queuedForUpload = false;
+        chunk->queuedForUpload.store(false, std::memory_order_release);
         return chunk;
     }
     return nullptr;
@@ -4721,13 +4747,13 @@ void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk
     }
 
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    if (chunk->queuedForUpload)
+    if (chunk->queuedForUpload.load(std::memory_order_acquire))
     {
         return;
     }
 
     uploadQueue_.emplace_back(chunk);
-    chunk->queuedForUpload = true;
+    chunk->queuedForUpload.store(true, std::memory_order_release);
 }
 
 void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront)
@@ -4738,7 +4764,7 @@ void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chu
     }
 
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    if (chunk->queuedForUpload)
+    if (chunk->queuedForUpload.load(std::memory_order_acquire))
     {
         return;
     }
@@ -4751,7 +4777,7 @@ void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chu
     {
         uploadQueue_.emplace_back(chunk);
     }
-    chunk->queuedForUpload = true;
+    chunk->queuedForUpload.store(true, std::memory_order_release);
 }
 
 std::size_t ChunkManager::Impl::nextPowerOfTwo(std::size_t value) noexcept
@@ -4930,26 +4956,26 @@ ChunkManager::Impl::ChunkAllocation ChunkManager::Impl::acquireChunkAllocation(s
 
 void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
 {
-    const std::uint32_t pageIndex = chunk.bufferPageIndex;
+    const std::uint32_t pageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
     if (pageIndex == kInvalidChunkBufferPage)
     {
-        chunk.vertexCount = 0;
-        chunk.indexCount = 0;
-        chunk.vertexOffset = 0;
-        chunk.indexOffset = 0;
+        chunk.vertexCount.store(0, std::memory_order_relaxed);
+        chunk.indexCount.store(0, std::memory_order_relaxed);
+        chunk.vertexOffset.store(0, std::memory_order_relaxed);
+        chunk.indexOffset.store(0, std::memory_order_relaxed);
         return;
     }
 
-    const std::size_t vertexCount = chunk.vertexCount;
-    const std::size_t indexCount = static_cast<std::size_t>(chunk.indexCount);
-    const std::size_t vertexOffset = chunk.vertexOffset;
-    const std::size_t indexOffset = chunk.indexOffset;
+    const std::size_t vertexCount = chunk.vertexCount.load(std::memory_order_acquire);
+    const std::size_t indexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
+    const std::size_t vertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
+    const std::size_t indexOffset = chunk.indexOffset.load(std::memory_order_acquire);
 
-    chunk.bufferPageIndex = kInvalidChunkBufferPage;
-    chunk.vertexCount = 0;
-    chunk.indexCount = 0;
-    chunk.vertexOffset = 0;
-    chunk.indexOffset = 0;
+    chunk.bufferPageIndex.store(kInvalidChunkBufferPage, std::memory_order_release);
+    chunk.vertexCount.store(0, std::memory_order_release);
+    chunk.indexCount.store(0, std::memory_order_release);
+    chunk.vertexOffset.store(0, std::memory_order_release);
+    chunk.indexOffset.store(0, std::memory_order_release);
 
     auto mergeRange = [](std::vector<ChunkBufferPage::Range>& ranges,
                          std::size_t offset,
@@ -5007,8 +5033,8 @@ void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
     releaseChunkAllocation(chunk);
     chunk.meshData.clear();
-    chunk.meshReady = false;
-    chunk.queuedForUpload = false;
+    chunk.meshReady.store(false, std::memory_order_release);
+    chunk.queuedForUpload.store(false, std::memory_order_release);
 }
 
 void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
@@ -5660,7 +5686,8 @@ void ChunkManager::Impl::uploadReadyMeshes()
             break;
         }
 
-        if (!chunk->meshReady || chunk->state.load() != ChunkState::Ready)
+        if (!chunk->meshReady.load(std::memory_order_acquire) ||
+            chunk->state.load(std::memory_order_acquire) != ChunkState::Ready)
         {
             continue;
         }
@@ -5692,7 +5719,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
 
         uploadChunkMesh(*chunk);
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
-        chunk->meshReady = false;
+        chunk->meshReady.store(false, std::memory_order_release);
         uploadedAnything = true;
         ++columnUploads;
 
@@ -5754,10 +5781,10 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
         return;
     }
 
-    chunk.bufferPageIndex = allocation.pageIndex;
-    chunk.vertexOffset = allocation.vertexOffset;
-    chunk.indexOffset = allocation.indexOffset;
-    chunk.vertexCount = vertexCount;
+    chunk.bufferPageIndex.store(allocation.pageIndex, std::memory_order_release);
+    chunk.vertexOffset.store(allocation.vertexOffset, std::memory_order_release);
+    chunk.indexOffset.store(allocation.indexOffset, std::memory_order_release);
+    chunk.vertexCount.store(vertexCount, std::memory_order_release);
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         if (allocation.pageIndex < bufferPages_.size())
@@ -5765,7 +5792,8 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
             ChunkBufferPage& page = bufferPages_[allocation.pageIndex];
             if (page.mappedVertexData != nullptr && vertexCount > 0)
             {
-                std::memcpy(page.mappedVertexData + chunk.vertexOffset * sizeof(Vertex),
+                const std::size_t chunkVertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
+                std::memcpy(page.mappedVertexData + chunkVertexOffset * sizeof(Vertex),
                             chunk.meshData.vertices.data(),
                             vertexCount * sizeof(Vertex));
                 if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
@@ -5775,9 +5803,9 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                                               D3D12_RESOURCE_STATE_COPY_DEST);
                     page.vertexState = D3D12_RESOURCE_STATE_COPY_DEST;
                     uploadContext_.copyBuffer(page.vertexBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunk.vertexOffset * sizeof(Vertex)),
+                                              static_cast<std::uint64_t>(chunkVertexOffset * sizeof(Vertex)),
                                               page.vertexUploadBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunk.vertexOffset * sizeof(Vertex)),
+                                              static_cast<std::uint64_t>(chunkVertexOffset * sizeof(Vertex)),
                                               static_cast<std::uint64_t>(vertexCount * sizeof(Vertex)));
                     uploadContext_.transition(page.vertexBuffer.Get(),
                                               page.vertexState,
@@ -5787,7 +5815,8 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
             }
             if (page.mappedIndexData != nullptr && indexCount > 0)
             {
-                std::memcpy(page.mappedIndexData + chunk.indexOffset * sizeof(std::uint32_t),
+                const std::size_t chunkIndexOffset = chunk.indexOffset.load(std::memory_order_acquire);
+                std::memcpy(page.mappedIndexData + chunkIndexOffset * sizeof(std::uint32_t),
                             chunk.meshData.indices.data(),
                             indexCount * sizeof(std::uint32_t));
                 if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
@@ -5797,9 +5826,9 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                                               D3D12_RESOURCE_STATE_COPY_DEST);
                     page.indexState = D3D12_RESOURCE_STATE_COPY_DEST;
                     uploadContext_.copyBuffer(page.indexBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunk.indexOffset * sizeof(std::uint32_t)),
+                                              static_cast<std::uint64_t>(chunkIndexOffset * sizeof(std::uint32_t)),
                                               page.indexUploadBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunk.indexOffset * sizeof(std::uint32_t)),
+                                              static_cast<std::uint64_t>(chunkIndexOffset * sizeof(std::uint32_t)),
                                               static_cast<std::uint64_t>(indexCount * sizeof(std::uint32_t)));
                     uploadContext_.transition(page.indexBuffer.Get(),
                                               page.indexState,
@@ -5810,7 +5839,7 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
         }
     }
 
-    chunk.indexCount = static_cast<std::uint32_t>(indexCount);
+    chunk.indexCount.store(static_cast<std::uint32_t>(indexCount), std::memory_order_release);
 
     chunk.meshData.clear();
 }
@@ -5872,14 +5901,23 @@ void ChunkManager::Impl::buildSurfaceOnlyMesh(Chunk& chunk)
 
 void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 {
-    std::lock_guard<std::mutex> lock(chunk.meshMutex);
-    chunk.meshData.clear();
-
-    if (!chunk.hasBlocks)
+    std::vector<BlockId> chunkBlocks;
+    std::vector<std::uint8_t> chunkLightLevels;
     {
-        chunk.meshReady = true;
-        return;
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        chunk.meshData.clear();
+
+        if (!chunk.hasBlocks.load(std::memory_order_acquire))
+        {
+            chunk.meshReady.store(true, std::memory_order_release);
+            return;
+        }
+
+        chunkBlocks = chunk.blocks;
+        chunkLightLevels = chunk.lightLevels;
     }
+
+    MeshData meshData;
 
     const int baseWorldX = chunk.coord.x * kChunkSizeX;
     const int baseWorldY = chunk.minWorldY;
@@ -5902,10 +5940,59 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     {
         if (lx >= 0 && lx < kChunkSizeX && ly >= 0 && ly < kChunkSizeY && lz >= 0 && lz < kChunkSizeZ)
         {
-            return chunk.blocks[blockIndex(lx, ly, lz)];
+            return chunkBlocks[blockIndex(lx, ly, lz)];
         }
 
-        return blockAt(localToWorld(lx, ly, lz));
+        const glm::ivec3 worldPos = localToWorld(lx, ly, lz);
+        const glm::ivec3 sampleChunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+        auto sampleChunk = getChunkShared(sampleChunkCoord);
+        if (!sampleChunk || worldPos.y < sampleChunk->minWorldY || worldPos.y > sampleChunk->maxWorldY)
+        {
+            return BlockId::Air;
+        }
+
+        const glm::ivec3 local = localBlockCoords(worldPos, sampleChunkCoord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.z < 0 || local.z >= kChunkSizeZ)
+        {
+            return BlockId::Air;
+        }
+
+        std::lock_guard<std::mutex> sampleLock(sampleChunk->meshMutex);
+        const int localY = worldPos.y - sampleChunk->minWorldY;
+        return sampleChunk->blocks[blockIndex(local.x, localY, local.z)];
+    };
+
+    auto samplePackedLight = [&](int lx, int ly, int lz) -> std::uint8_t
+    {
+        if (lx >= 0 && lx < kChunkSizeX && ly >= 0 && ly < kChunkSizeY && lz >= 0 && lz < kChunkSizeZ)
+        {
+            return chunkLightLevels[blockIndex(lx, ly, lz)];
+        }
+
+        const glm::ivec3 worldPos = localToWorld(lx, ly, lz);
+        if (worldPos.y < 0)
+        {
+            return packLightLevels(0, 0);
+        }
+
+        const glm::ivec3 sampleChunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+        auto sampleChunk = getChunkShared(sampleChunkCoord);
+        if (!sampleChunk || worldPos.y < sampleChunk->minWorldY || worldPos.y > sampleChunk->maxWorldY)
+        {
+            return packLightLevels(kMaxLightLevel, 0);
+        }
+
+        const glm::ivec3 local = localBlockCoords(worldPos, sampleChunkCoord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.z < 0 || local.z >= kChunkSizeZ)
+        {
+            return packLightLevels(kMaxLightLevel, 0);
+        }
+
+        std::lock_guard<std::mutex> sampleLock(sampleChunk->meshMutex);
+        const int localY = worldPos.y - sampleChunk->minWorldY;
+        return sampleChunk->lightLevels[blockIndex(local.x, localY, local.z)];
     };
 
     enum class Axis : int { X = 0, Y = 1, Z = 2 };
@@ -5945,11 +6032,12 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::vec3{0.0f, 0.0f, 1.0f}
     };
 
-    auto makeMaterial = [&](BlockId block, const glm::vec3& normal, const glm::ivec3& lightSampleWorld) -> FaceMaterial
+    auto makeMaterial = [&](BlockId block, const glm::vec3& normal, const glm::ivec3& lightSampleLocal) -> FaceMaterial
     {
         FaceMaterial material{};
         material.mergeable = !isAlphaCutoutBlock(block);
-        material.lightingData = packVertexLighting(packedLightAtWorld(lightSampleWorld));
+        material.lightingData =
+            packVertexLighting(samplePackedLight(lightSampleLocal.x, lightSampleLocal.y, lightSampleLocal.z));
 
         const BlockFace face = [&]() -> BlockFace
         {
@@ -6046,7 +6134,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         const glm::vec3 uAxisVec = glm::vec3(material.uAxis);
         const glm::vec3 vAxisVec = glm::vec3(material.vAxis);
 
-        const std::size_t vertexStart = chunk.meshData.vertices.size();
+        const std::size_t vertexStart = meshData.vertices.size();
         for (int i = 0; i < 4; ++i)
         {
             const glm::vec3& pos = positions[i];
@@ -6058,15 +6146,15 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
             vertex.atlasBase = material.uvBase;
             vertex.atlasSize = material.uvSize;
             vertex.lightingData = material.lightingData;
-            chunk.meshData.vertices.push_back(vertex);
+            meshData.vertices.push_back(vertex);
         }
 
-        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
-        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
-        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
-        chunk.meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
+        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
+        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
     };
 
     auto greedyMeshAxis = [&](Axis axis)
@@ -6142,12 +6230,13 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                             const glm::vec3 normal = axisNormals[a] * ((dir == FaceDir::Positive) ? 1.0f : -1.0f);
                             cell.exists = true;
                             const std::size_t blockIdx = blockIndex(owningLocal.x, owningLocal.y, owningLocal.z);
-                            const BlockId owningBlock = chunk.blocks[blockIdx];
-                            const glm::ivec3 lightSampleWorld =
-                                localToWorld(owningLocal.x + static_cast<int>(normal.x),
-                                             owningLocal.y + static_cast<int>(normal.y),
-                                             owningLocal.z + static_cast<int>(normal.z));
-                            cell.material = makeMaterial(owningBlock, normal, lightSampleWorld);
+                            const BlockId owningBlock = chunkBlocks[blockIdx];
+                            cell.material = makeMaterial(
+                                owningBlock,
+                                normal,
+                                owningLocal + glm::ivec3(static_cast<int>(normal.x),
+                                                         static_cast<int>(normal.y),
+                                                         static_cast<int>(normal.z)));
                         }
 
                         mask[maskIdx] = cell;
@@ -6223,7 +6312,11 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     greedyMeshAxis(Axis::Y);
     greedyMeshAxis(Axis::Z);
 
-    chunk.meshReady = true;
+    {
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        chunk.meshData = std::move(meshData);
+    }
+    chunk.meshReady.store(true, std::memory_order_release);
 }
 
 glm::ivec3 ChunkManager::Impl::worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept
@@ -6291,22 +6384,7 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
             return;
         }
 
-        ChunkState neighborState = neighbor->state.load();
-        if (neighborState != ChunkState::Uploaded && neighborState != ChunkState::Remeshing)
-        {
-            return;
-        }
-
-        neighbor->state.store(ChunkState::Remeshing, std::memory_order_release);
-        try
-        {
-            enqueueJob(neighbor, JobType::Mesh, neighborCoord);
-        }
-        catch (const std::exception& ex)
-        {
-            std::cerr << "Failed to queue remesh for neighbor (" << neighborCoord.x << ", " << neighborCoord.y
-                      << ", " << neighborCoord.z << "): " << ex.what() << std::endl;
-        }
+        requestChunkRemesh(neighbor);
     };
 
     if (localX == 0)
@@ -6341,14 +6419,15 @@ void ChunkManager::Impl::markNeighborsForRemeshingIfNeeded(const glm::ivec3& coo
     }
 }
 
-void ChunkManager::Impl::queueChunkForLightingRemesh(const std::shared_ptr<Chunk>& chunk)
+void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk)
 {
     if (!chunk)
     {
         return;
     }
 
-    if (!chunk->hasBlocks && chunk->indexCount == 0)
+    if (!chunk->hasBlocks.load(std::memory_order_acquire) &&
+        chunk->indexCount.load(std::memory_order_acquire) == 0)
     {
         return;
     }
@@ -6356,7 +6435,17 @@ void ChunkManager::Impl::queueChunkForLightingRemesh(const std::shared_ptr<Chunk
     const ChunkState state = chunk->state.load(std::memory_order_acquire);
     if (state == ChunkState::Generating || state == ChunkState::Meshing)
     {
+        chunk->pendingMeshRefresh.store(true, std::memory_order_release);
         return;
+    }
+
+    if (state == ChunkState::Remeshing)
+    {
+        if (chunk->inFlight.load(std::memory_order_acquire) > 0)
+        {
+            chunk->pendingMeshRefresh.store(true, std::memory_order_release);
+            return;
+        }
     }
 
     if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
@@ -6364,6 +6453,11 @@ void ChunkManager::Impl::queueChunkForLightingRemesh(const std::shared_ptr<Chunk
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
         enqueueJob(chunk, JobType::Mesh, chunk->coord);
     }
+}
+
+void ChunkManager::Impl::queueChunkForLightingRemesh(const std::shared_ptr<Chunk>& chunk)
+{
+    requestChunkRemesh(chunk);
 }
 
 std::uint8_t ChunkManager::Impl::packedLightAtWorld(const glm::ivec3& worldPos) const noexcept
@@ -6526,6 +6620,68 @@ void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
         }
     };
 
+    auto computeSkyLightFromAbove = [&](int worldX, int worldY, int worldZ) -> std::uint8_t
+    {
+        if (worldY < 0)
+        {
+            return 0;
+        }
+
+        int accumulatedAttenuation = 0;
+        int scanWorldY = worldY;
+
+        while (scanWorldY >= 0)
+        {
+            const glm::ivec3 scanPos(worldX, scanWorldY, worldZ);
+            const glm::ivec3 chunkCoord = worldToChunkCoords(scanPos.x, scanPos.y, scanPos.z);
+
+            std::shared_ptr<Chunk> chunk;
+            auto regionIt = regionLookup.find(chunkCoord);
+            if (regionIt != regionLookup.end())
+            {
+                chunk = regionIt->second;
+            }
+            else
+            {
+                chunk = getChunkShared(chunkCoord);
+            }
+
+            if (!chunk)
+            {
+                break;
+            }
+
+            const glm::ivec3 local = localBlockCoords(scanPos, chunkCoord);
+            const int localX = local.x;
+            const int localZ = local.z;
+            if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
+            {
+                break;
+            }
+
+            int localY = scanWorldY - chunk->minWorldY;
+            for (; localY < kChunkSizeY; ++localY)
+            {
+                const BlockId block = chunk->blocks[blockIndex(localX, localY, localZ)];
+                if (isOpaqueForLighting(block))
+                {
+                    return 0;
+                }
+
+                accumulatedAttenuation += static_cast<int>(blockLightingProperties(block).skyAttenuation);
+                if (accumulatedAttenuation >= static_cast<int>(kMaxLightLevel))
+                {
+                    return 0;
+                }
+            }
+
+            scanWorldY = chunk->maxWorldY + 1;
+        }
+
+        return static_cast<std::uint8_t>(
+            std::max(0, static_cast<int>(kMaxLightLevel) - accumulatedAttenuation));
+    };
+
     std::vector<std::shared_ptr<Chunk>> verticalOrder = regionChunks;
     std::sort(verticalOrder.begin(),
               verticalOrder.end(),
@@ -6553,8 +6709,7 @@ void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
             {
                 const int worldX = baseWorldX + localX;
                 const int worldZ = baseWorldZ + localZ;
-                std::uint8_t incomingSky =
-                    skyLightFromPacked(packedLightAtWorld(glm::ivec3(worldX, chunk->maxWorldY + 1, worldZ)));
+                std::uint8_t incomingSky = computeSkyLightFromAbove(worldX, chunk->maxWorldY + 1, worldZ);
 
                 for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
                 {
@@ -6947,7 +7102,7 @@ void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
         }
     }
 
-    chunk.hasBlocks = anySolid;
+    chunk.hasBlocks.store(anySolid, std::memory_order_release);
     if (anySolid)
     {
         columnManager_.updateChunk(chunk);
@@ -7376,7 +7531,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             anySolid = true;
         }
 
-        chunk.hasBlocks = anySolid;
+        chunk.hasBlocks.store(anySolid, std::memory_order_release);
         columnManager_.updateChunk(chunk);
     }
 
@@ -7469,7 +7624,7 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
             wroteSolid = applyPendingStructureEditsLocked(*chunk);
             if (wroteSolid)
             {
-                chunk->hasBlocks = true;
+                chunk->hasBlocks.store(true, std::memory_order_release);
                 columnManager_.updateChunk(*chunk);
                 invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             }

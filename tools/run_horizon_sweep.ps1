@@ -1,5 +1,5 @@
 param(
-    [string]$BuildDir = "build-release",
+    [string]$BuildDir = "build",
     [string]$Config = "Release",
     [string]$OutputDir = "$(Join-Path $PSScriptRoot '..\\artifacts\\horizon_sweep')",
     [switch]$SkipBuild
@@ -29,12 +29,40 @@ if ([System.IO.Path]::IsPathRooted($OutputDir)) {
 } else {
     $resolvedOutputDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
 }
-$exePath = Join-Path $resolvedBuildDir "$Config\blockgame.exe"
+
+function Resolve-ExePath {
+    param(
+        [string]$ResolvedBuildDir,
+        [string]$ConfigName
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($ConfigName)) {
+        $candidates.Add((Join-Path $ResolvedBuildDir "$ConfigName\\blockgame.exe"))
+    }
+    $candidates.Add((Join-Path $ResolvedBuildDir "blockgame.exe"))
+    $candidates.Add((Join-Path $ResolvedBuildDir "Release\\blockgame.exe"))
+    $candidates.Add((Join-Path $ResolvedBuildDir "release\\blockgame.exe"))
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    return $candidates[0]
+}
+
+$exePath = Resolve-ExePath -ResolvedBuildDir $resolvedBuildDir -ConfigName $Config
 $exeDir = Split-Path -Parent $exePath
 
 if (-not $SkipBuild) {
     $cmakePath = Resolve-CMakePath
-    & $cmakePath --build $resolvedBuildDir --config $Config
+    if ([string]::IsNullOrWhiteSpace($Config)) {
+        & $cmakePath --build $resolvedBuildDir
+    } else {
+        & $cmakePath --build $resolvedBuildDir --config $Config
+    }
 }
 
 if (-not (Test-Path $exePath)) {

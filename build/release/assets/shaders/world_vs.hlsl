@@ -1,0 +1,49 @@
+cbuffer WorldConstants : register(b0)
+{
+    float4x4 uViewProj;
+    float4x4 uShadowViewProj;
+    float4 uLightDirection;
+    float4 uCameraPos;
+    float4 uHighlightedBlock;
+    float4 uParams0;
+    float4 uParams1;
+    float4 uSunColor;
+    float4 uSkyAmbient;
+    float4 uGroundAmbient;
+    float4 uShadowParams;
+    float4 uTerrainDebug;
+};
+
+struct VSInput
+{
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float2 tileCoord : TEXCOORD0;
+    float2 atlasBase : TEXCOORD1;
+    float2 atlasSize : TEXCOORD2;
+    uint lighting : COLOR0;
+};
+
+struct VSOutput
+{
+    float4 position : SV_POSITION;
+    float3 worldPos : POSITION0;
+    float3 normal : NORMAL0;
+    float2 tileCoord : TEXCOORD0;
+    float2 atlasBase : TEXCOORD1;
+    float2 atlasSize : TEXCOORD2;
+    uint lighting : COLOR0;
+};
+
+VSOutput main(VSInput input)
+{
+    VSOutput output;
+    output.worldPos = input.position;
+    output.normal = input.normal;
+    output.tileCoord = input.tileCoord;
+    output.atlasBase = input.atlasBase;
+    output.atlasSize = input.atlasSize;
+    output.lighting = input.lighting;
+    output.position = mul(uViewProj, float4(input.position, 1.0f));
+    return output;
+}

@@ -634,6 +634,20 @@ constexpr int kTaigaSpruceMaxTrunkHeight = 31;
 constexpr int kTaigaSpruceMinBareTrunkHeight = 5;
 constexpr int kTaigaSpruceMaxBareTrunkHeight = 9;
 constexpr int kTaigaSpruceMaxLeafRadius = 4;
+constexpr float kTreeBiomeWeightThreshold = 0.55f;
+constexpr int kDefaultTreeMinHeight = 6;
+constexpr int kDefaultTreeMaxHeight = 8;
+constexpr int kDefaultTreeMaxRadius = 2;
+constexpr int kDefaultTreeConflictSearchRadius = (kDefaultTreeMaxRadius * 2) + 1;
+
+struct DefaultTreeCandidate
+{
+    int originX{0};
+    int originZ{0};
+    int groundWorldY{0};
+    int trunkHeight{0};
+    float priority{0.0f};
+};
 
 inline glm::ivec2 taigaSpruceOriginForCell(int cellX, int cellZ) noexcept
 {
@@ -758,6 +772,251 @@ inline bool taigaSpruceLeafOccupiesCell(int originX,
     }
 
     return (dx + dz) <= manhattanAllowance;
+}
+
+inline int defaultTreeTrunkHeight(int worldX, int groundWorldY, int worldZ) noexcept
+{
+    int height = kDefaultTreeMinHeight +
+                 static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 1, worldZ) *
+                                  static_cast<float>(kDefaultTreeMaxHeight - kDefaultTreeMinHeight + 1));
+    return std::clamp(height, kDefaultTreeMinHeight, kDefaultTreeMaxHeight);
+}
+
+inline float defaultTreeSpawnThreshold(const BiomeDefinition& biome, float normalizedDensity) noexcept
+{
+    const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
+    return std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
+}
+
+inline float defaultTreePriority(int worldX, int groundWorldY, int worldZ) noexcept
+{
+    return hashToUnitFloat(worldX, groundWorldY + 211, worldZ);
+}
+
+inline bool shouldDefaultTreeWinTie(const DefaultTreeCandidate& candidate,
+                                    const DefaultTreeCandidate& other) noexcept
+{
+    if (candidate.priority != other.priority)
+    {
+        return candidate.priority > other.priority;
+    }
+
+    if (candidate.originX != other.originX)
+    {
+        return candidate.originX < other.originX;
+    }
+
+    return candidate.originZ < other.originZ;
+}
+
+template <typename Callback>
+inline bool forEachDefaultTreeBlock(int originX,
+                                    int originZ,
+                                    int groundWorldY,
+                                    int trunkHeight,
+                                    Callback&& callback)
+{
+    for (int dy = 0; dy < trunkHeight; ++dy)
+    {
+        if (callback(originX, groundWorldY + dy, originZ, BlockId::Wood))
+        {
+            return true;
+        }
+    }
+
+    const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
+    const int canopyTopWorld = groundWorldY + trunkHeight;
+    for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+    {
+        const int layer = worldY - canopyBaseWorld;
+        int radius = kDefaultTreeMaxRadius;
+        if (worldY >= canopyTopWorld - 1)
+        {
+            radius = 1;
+        }
+
+        for (int dx = -radius; dx <= radius; ++dx)
+        {
+            for (int dz = -radius; dz <= radius; ++dz)
+            {
+                if (std::abs(dx) == radius && std::abs(dz) == radius && radius > 1)
+                {
+                    continue;
+                }
+
+                if (dx == 0 && dz == 0 && worldY <= groundWorldY + trunkHeight - 1)
+                {
+                    continue;
+                }
+
+                if (layer == 0 && std::abs(dx) + std::abs(dz) > 3)
+                {
+                    continue;
+                }
+
+                if (callback(originX + dx, worldY, originZ + dz, BlockId::Leaves))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+inline bool rangesTouchWithinMargin(int minA, int maxA, int minB, int maxB, int margin) noexcept
+{
+    return maxA + margin >= minB && maxB + margin >= minA;
+}
+
+inline bool defaultTreesTouchOrOverlap(const DefaultTreeCandidate& a,
+                                       const DefaultTreeCandidate& b) noexcept
+{
+    const int minAX = a.originX - kDefaultTreeMaxRadius;
+    const int maxAX = a.originX + kDefaultTreeMaxRadius;
+    const int minAZ = a.originZ - kDefaultTreeMaxRadius;
+    const int maxAZ = a.originZ + kDefaultTreeMaxRadius;
+    const int minAY = a.groundWorldY;
+    const int maxAY = a.groundWorldY + a.trunkHeight;
+
+    const int minBX = b.originX - kDefaultTreeMaxRadius;
+    const int maxBX = b.originX + kDefaultTreeMaxRadius;
+    const int minBZ = b.originZ - kDefaultTreeMaxRadius;
+    const int maxBZ = b.originZ + kDefaultTreeMaxRadius;
+    const int minBY = b.groundWorldY;
+    const int maxBY = b.groundWorldY + b.trunkHeight;
+
+    if (!rangesTouchWithinMargin(minAX, maxAX, minBX, maxBX, 1) ||
+        !rangesTouchWithinMargin(minAY, maxAY, minBY, maxBY, 1) ||
+        !rangesTouchWithinMargin(minAZ, maxAZ, minBZ, maxBZ, 1))
+    {
+        return false;
+    }
+
+    return forEachDefaultTreeBlock(a.originX,
+                                   a.originZ,
+                                   a.groundWorldY,
+                                   a.trunkHeight,
+                                   [&](int ax, int ay, int az, BlockId) {
+                                       return forEachDefaultTreeBlock(b.originX,
+                                                                      b.originZ,
+                                                                      b.groundWorldY,
+                                                                      b.trunkHeight,
+                                                                      [&](int bx, int by, int bz, BlockId) {
+                                                                          const int dx = std::abs(ax - bx);
+                                                                          const int dy = std::abs(ay - by);
+                                                                          const int dz = std::abs(az - bz);
+                                                                          return (dx + dy + dz) <= 1;
+                                                                      });
+                                   });
+}
+
+template <typename SampleColumnFn, typename DensityFn>
+inline bool tryBuildDefaultTreeCandidate(int originX,
+                                         int originZ,
+                                         const ColumnSample& columnSample,
+                                         SampleColumnFn&& sampleColumn,
+                                         DensityFn&& densityAt,
+                                         DefaultTreeCandidate& outCandidate)
+{
+    if (!columnSample.dominantBiome || !columnSample.dominantBiome->generatesTrees)
+    {
+        return false;
+    }
+
+    if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
+    {
+        return false;
+    }
+
+    const BiomeDefinition& biome = *columnSample.dominantBiome;
+    if (terrain::isTaigaBiome(biome))
+    {
+        return false;
+    }
+
+    const int groundWorldY = columnSample.surfaceY;
+    if (groundWorldY <= 2)
+    {
+        return false;
+    }
+
+    const float density = densityAt(originX, originZ);
+    const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
+    const float randomValue = hashToUnitFloat(originX, groundWorldY, originZ);
+    if (randomValue > defaultTreeSpawnThreshold(biome, normalizedDensity))
+    {
+        return false;
+    }
+
+    for (int dx = -1; dx <= 1; ++dx)
+    {
+        for (int dz = -1; dz <= 1; ++dz)
+        {
+            if (dx == 0 && dz == 0)
+            {
+                continue;
+            }
+
+            const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
+            if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
+            {
+                return false;
+            }
+        }
+    }
+
+    outCandidate.originX = originX;
+    outCandidate.originZ = originZ;
+    outCandidate.groundWorldY = groundWorldY;
+    outCandidate.trunkHeight = defaultTreeTrunkHeight(originX, groundWorldY, originZ);
+    outCandidate.priority = defaultTreePriority(originX, groundWorldY, originZ);
+    return true;
+}
+
+template <typename SampleColumnFn, typename DensityFn>
+inline bool defaultTreeHasSpacingConflict(const DefaultTreeCandidate& candidate,
+                                          SampleColumnFn&& sampleColumn,
+                                          DensityFn&& densityAt)
+{
+    for (int dx = -kDefaultTreeConflictSearchRadius; dx <= kDefaultTreeConflictSearchRadius; ++dx)
+    {
+        for (int dz = -kDefaultTreeConflictSearchRadius; dz <= kDefaultTreeConflictSearchRadius; ++dz)
+        {
+            if (dx == 0 && dz == 0)
+            {
+                continue;
+            }
+
+            const int neighborX = candidate.originX + dx;
+            const int neighborZ = candidate.originZ + dz;
+            const ColumnSample neighborSample = sampleColumn(neighborX, neighborZ);
+
+            DefaultTreeCandidate neighborCandidate{};
+            if (!tryBuildDefaultTreeCandidate(neighborX,
+                                              neighborZ,
+                                              neighborSample,
+                                              sampleColumn,
+                                              densityAt,
+                                              neighborCandidate))
+            {
+                continue;
+            }
+
+            if (!defaultTreesTouchOrOverlap(candidate, neighborCandidate))
+            {
+                continue;
+            }
+
+            if (!shouldDefaultTreeWinTie(candidate, neighborCandidate))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 struct MeshData
@@ -4100,6 +4359,18 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
     };
 
     const ColumnSample baseSample = sampleColumn(baseX, baseZ);
+    auto sampleColumnAt = [&](int worldX, int worldZ) -> ColumnSample
+    {
+        return sampleColumn(worldX, worldZ);
+    };
+    auto computeDefaultTreeDensity = [&](int worldX, int worldZ) noexcept
+    {
+        return noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                          static_cast<float>(worldZ) * 0.05f,
+                          4,
+                          0.55f,
+                          2.0f);
+    };
 
     auto predictTreeCanopyTop = [&](int originX, int originZ, const ColumnSample& columnSample, int targetX, int targetZ) -> int
     {
@@ -4108,7 +4379,6 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
             return ColumnManager::kNoHeight;
         }
 
-        constexpr float kTreeBiomeWeightThreshold = 0.55f;
         if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
         {
             return ColumnManager::kNoHeight;
@@ -4214,65 +4484,34 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
             return highestCover;
         }
 
-        const float density = noise_.fbm(static_cast<float>(originX) * 0.05f,
-                                         static_cast<float>(originZ) * 0.05f,
-                                         4,
-                                         0.55f,
-                                         2.0f);
-        const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float randomValue = hashToUnitFloat(originX, groundWorldY, originZ);
-        const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
-        const float spawnThreshold =
-            std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
-        if (randomValue > spawnThreshold)
+        DefaultTreeCandidate candidate{};
+        if (!tryBuildDefaultTreeCandidate(originX,
+                                          originZ,
+                                          columnSample,
+                                          sampleColumnAt,
+                                          computeDefaultTreeDensity,
+                                          candidate))
         {
             return ColumnManager::kNoHeight;
         }
 
-        bool terrainSuitable = true;
-        for (int dx = -1; dx <= 1 && terrainSuitable; ++dx)
-        {
-            for (int dz = -1; dz <= 1; ++dz)
-            {
-                if (dx == 0 && dz == 0)
-                {
-                    continue;
-                }
-
-                const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
-                if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
-                {
-                    terrainSuitable = false;
-                    break;
-                }
-            }
-        }
-
-        if (!terrainSuitable)
+        if (defaultTreeHasSpacingConflict(candidate, sampleColumnAt, computeDefaultTreeDensity))
         {
             return ColumnManager::kNoHeight;
         }
-
-        constexpr int kTreeMinHeight = 6;
-        constexpr int kTreeMaxHeight = 8;
-
-        int trunkHeight = kTreeMinHeight +
-                          static_cast<int>(hashToUnitFloat(originX, groundWorldY + 1, originZ) *
-                                           static_cast<float>(kTreeMaxHeight - kTreeMinHeight + 1));
-        trunkHeight = std::clamp(trunkHeight, kTreeMinHeight, kTreeMaxHeight);
 
         int highestCover = ColumnManager::kNoHeight;
         if (targetX == originX && targetZ == originZ)
         {
-            highestCover = groundWorldY + trunkHeight;
+            highestCover = candidate.groundWorldY + candidate.trunkHeight;
         }
 
-        const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
-        const int canopyTopWorld = groundWorldY + trunkHeight;
+        const int canopyBaseWorld = candidate.groundWorldY + candidate.trunkHeight - 3;
+        const int canopyTopWorld = candidate.groundWorldY + candidate.trunkHeight;
         for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
         {
             const int layer = worldY - canopyBaseWorld;
-            int radius = 2;
+            int radius = kDefaultTreeMaxRadius;
             if (worldY >= canopyTopWorld - 1)
             {
                 radius = 1;
@@ -4287,7 +4526,7 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
                         continue;
                     }
 
-                    if (dx == 0 && dz == 0 && worldY <= groundWorldY + trunkHeight - 1)
+                    if (dx == 0 && dz == 0 && worldY <= candidate.groundWorldY + candidate.trunkHeight - 1)
                     {
                         continue;
                     }
@@ -7376,16 +7615,19 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         if (slabContainsTerrain)
         {
-            constexpr float kTreeBiomeWeightThreshold = 0.55f;
-            constexpr int kDefaultTreeMinHeight = 6;
-            constexpr int kDefaultTreeMaxHeight = 8;
-            constexpr int kDefaultTreeMaxRadius = 2;
-
             const int treePadding = std::max(kDefaultTreeMaxRadius, kTaigaSpruceMaxLeafRadius);
             const int minWorldX = baseWorldX - treePadding;
             const int maxWorldX = baseWorldX + kChunkSizeX + treePadding - 1;
             const int minWorldZ = baseWorldZ - treePadding;
             const int maxWorldZ = baseWorldZ + kChunkSizeZ + treePadding - 1;
+            auto computeDefaultTreeDensity = [&](int worldX, int worldZ) noexcept
+            {
+                return noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                                  static_cast<float>(worldZ) * 0.05f,
+                                  4,
+                                  0.55f,
+                                  2.0f);
+            };
 
             auto resolvedSurfaceBlockAt = [&](int worldX, int worldZ, const ColumnSample& sample) -> BlockId
             {
@@ -7566,7 +7808,23 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         continue;
                     }
 
-                    const int groundLocalY = groundWorldY - chunk.minWorldY;
+                    DefaultTreeCandidate candidate{};
+                    if (!tryBuildDefaultTreeCandidate(worldX,
+                                                      worldZ,
+                                                      columnSample,
+                                                      getLocalColumnSample,
+                                                      computeDefaultTreeDensity,
+                                                      candidate))
+                    {
+                        continue;
+                    }
+
+                    if (defaultTreeHasSpacingConflict(candidate, getLocalColumnSample, computeDefaultTreeDensity))
+                    {
+                        continue;
+                    }
+
+                    const int groundLocalY = candidate.groundWorldY - chunk.minWorldY;
                     if (groundLocalY < 0 || groundLocalY >= kChunkSizeY)
                     {
                         continue;
@@ -7584,90 +7842,15 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
                         }
                     }
 
-                    const float density = noise_.fbm(static_cast<float>(worldX) * 0.05f,
-                                                     static_cast<float>(worldZ) * 0.05f,
-                                                     4,
-                                                     0.55f,
-                                                     2.0f);
-                    const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
-                    const float randomValue = hashToUnitFloat(worldX, groundWorldY, worldZ);
-                    const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
-                    const float spawnThreshold =
-                        std::clamp(spawnThresholdBase * std::max(biome.treeDensityMultiplier, 0.0f), 0.0f, 1.0f);
-                    if (randomValue > spawnThreshold)
-                    {
-                        continue;
-                    }
-
-                    bool terrainSuitable = true;
-                    for (int dx = -1; dx <= 1 && terrainSuitable; ++dx)
-                    {
-                        for (int dz = -1; dz <= 1; ++dz)
-                        {
-                            if (dx == 0 && dz == 0)
-                            {
-                                continue;
-                            }
-
-                            const ColumnSample neighborSample = getLocalColumnSample(worldX + dx, worldZ + dz);
-                            const int neighborHeight = neighborSample.surfaceY;
-                            if (std::abs(neighborHeight - groundWorldY) > 1)
-                            {
-                                terrainSuitable = false;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!terrainSuitable)
-                    {
-                        continue;
-                    }
-
-                    int trunkHeight = kDefaultTreeMinHeight +
-                                      static_cast<int>(hashToUnitFloat(worldX, groundWorldY + 1, worldZ) *
-                                                       static_cast<float>(kDefaultTreeMaxHeight - kDefaultTreeMinHeight + 1));
-                    trunkHeight = std::clamp(trunkHeight, kDefaultTreeMinHeight, kDefaultTreeMaxHeight);
-
-                    for (int dy = 0; dy < trunkHeight; ++dy)
-                    {
-                        setOrQueueBlock(worldX, groundWorldY + dy, worldZ, BlockId::Wood, true);
-                    }
-
-                    const int canopyBaseWorld = groundWorldY + trunkHeight - 3;
-                    const int canopyTopWorld = groundWorldY + trunkHeight;
-                    for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
-                    {
-                        const int layer = worldY - canopyBaseWorld;
-                        int radius = 2;
-                        if (worldY >= canopyTopWorld - 1)
-                        {
-                            radius = 1;
-                        }
-
-                        for (int dx = -radius; dx <= radius; ++dx)
-                        {
-                            for (int dz = -radius; dz <= radius; ++dz)
-                            {
-                                if (std::abs(dx) == radius && std::abs(dz) == radius && radius > 1)
-                                {
-                                    continue;
-                                }
-
-                                if (dx == 0 && dz == 0 && worldY <= groundWorldY + trunkHeight - 1)
-                                {
-                                    continue;
-                                }
-
-                                if (layer == 0 && std::abs(dx) + std::abs(dz) > 3)
-                                {
-                                    continue;
-                                }
-
-                                setOrQueueBlock(worldX + dx, worldY, worldZ + dz, BlockId::Leaves, false);
-                            }
-                        }
-                    }
+                    forEachDefaultTreeBlock(candidate.originX,
+                                            candidate.originZ,
+                                            candidate.groundWorldY,
+                                            candidate.trunkHeight,
+                                            [&](int blockX, int blockY, int blockZ, BlockId block) {
+                                                const bool replaceSolid = block == BlockId::Wood;
+                                                setOrQueueBlock(blockX, blockY, blockZ, block, replaceSolid);
+                                                return false;
+                                            });
                 }
             }
         }

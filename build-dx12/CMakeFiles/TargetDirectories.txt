@@ -1,3 +1,0 @@
-C:/Users/Jacob/Documents/code/BlockGame/build-dx12/CMakeFiles/blockgame.dir
-C:/Users/Jacob/Documents/code/BlockGame/build-dx12/CMakeFiles/ALL_BUILD.dir
-C:/Users/Jacob/Documents/code/BlockGame/build-dx12/CMakeFiles/ZERO_CHECK.dir

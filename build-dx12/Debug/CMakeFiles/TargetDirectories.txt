@@ -1,3 +1,0 @@
-C:/Users/Jacob/Documents/code/BlockGame/build-dx12/Debug/CMakeFiles/blockgame.dir
-C:/Users/Jacob/Documents/code/BlockGame/build-dx12/Debug/CMakeFiles/edit_cache.dir
-C:/Users/Jacob/Documents/code/BlockGame/build-dx12/Debug/CMakeFiles/rebuild_cache.dir

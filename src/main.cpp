@@ -1838,7 +1838,10 @@ int runGame()
         const bool nearHorizonView = std::abs(viewDirection.y) <= 0.08f;
         const bool lookingBelowHorizon = viewDirection.y < 0.0f;
 
-        renderer.beginFrame(glm::vec4(0.10f, 0.16f, 0.26f, 1.0f));
+        renderer.beginFrame(glm::vec4(120.0f / 255.0f,
+                                      167.0f / 255.0f,
+                                      255.0f / 255.0f,
+                                      1.0f));
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
         {
             const WorldRenderData renderData = chunkManager.buildRenderData(frustum);

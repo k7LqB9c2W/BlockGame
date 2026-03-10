@@ -454,7 +454,7 @@ struct CaptureOverridesConfig
     case TerrainDebugView::MipLevel:
         return "Mip Level";
     case TerrainDebugView::AmbientOcclusion:
-        return "AO (Phase 3)";
+        return "AO";
     case TerrainDebugView::None:
     default:
         return "None";
@@ -2198,7 +2198,7 @@ int runGame()
             int terrainDebugView = static_cast<int>(environment.debug.terrainDebugView);
             if (ImGui::Combo("Terrain Debug",
                              &terrainDebugView,
-                             "None\0Sky Light\0Block Light\0Mip Level\0AO (Phase 3)\0"))
+                             "None\0Sky Light\0Block Light\0Mip Level\0AO\0"))
             {
                 environment.debug.terrainDebugView =
                     static_cast<TerrainDebugView>(terrainDebugView);

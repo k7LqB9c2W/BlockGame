@@ -560,9 +560,32 @@ inline std::uint8_t propagationLossFor(BlockId block) noexcept
     return static_cast<std::uint8_t>(1 + blockLightingProperties(block).skyAttenuation);
 }
 
-inline std::uint32_t packVertexLighting(std::uint8_t packedLight) noexcept
+inline bool isAoSolid(BlockId block) noexcept
 {
-    return static_cast<std::uint32_t>(packedLight);
+    return blockLightingProperties(block).aoSolid;
+}
+
+inline std::uint32_t packVertexLighting(std::uint8_t packedLight,
+                                        std::uint8_t aoLevel = 0,
+                                        std::uint8_t flags = 0) noexcept
+{
+    return static_cast<std::uint32_t>(packedLight) |
+           (static_cast<std::uint32_t>(aoLevel & 0x03u) << 8) |
+           (static_cast<std::uint32_t>(flags) << 10);
+}
+
+inline std::uint8_t aoLevelFromPackedVertexLighting(std::uint32_t packed) noexcept
+{
+    return static_cast<std::uint8_t>((packed >> 8) & 0x03u);
+}
+
+inline int lightingMetricFromPackedVertex(std::uint32_t packed) noexcept
+{
+    const std::uint8_t packedLight = static_cast<std::uint8_t>(packed & 0xFFu);
+    const int sky = static_cast<int>(skyLightFromPacked(packedLight));
+    const int block = static_cast<int>(blockLightFromPacked(packedLight));
+    const int ao = static_cast<int>(aoLevelFromPackedVertexLighting(packed));
+    return sky * 24 + block * 18 + (3 - ao) * 20;
 }
 
 inline bool isAlphaCutoutBlock(BlockId block) noexcept
@@ -6005,7 +6028,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::ivec3 uAxis{1, 0, 0};
         glm::ivec3 vAxis{0, 1, 0};
         BlockFace face{BlockFace::Top};
-        std::uint32_t lightingData{0};
+        std::array<std::uint32_t, 4> lightingData{};
         bool mergeable{true};
 
         bool operator==(const FaceMaterial& other) const noexcept
@@ -6026,35 +6049,139 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         FaceMaterial material{};
     };
 
-    const std::array<glm::vec3, 3> axisNormals{
-        glm::vec3{1.0f, 0.0f, 0.0f},
-        glm::vec3{0.0f, 1.0f, 0.0f},
-        glm::vec3{0.0f, 0.0f, 1.0f}
-    };
+	    const std::array<glm::vec3, 3> axisNormals{
+	        glm::vec3{1.0f, 0.0f, 0.0f},
+	        glm::vec3{0.0f, 1.0f, 0.0f},
+	        glm::vec3{0.0f, 0.0f, 1.0f}
+	    };
 
-    auto makeMaterial = [&](BlockId block, const glm::vec3& normal, const glm::ivec3& lightSampleLocal) -> FaceMaterial
-    {
-        FaceMaterial material{};
-        material.mergeable = !isAlphaCutoutBlock(block);
-        material.lightingData =
-            packVertexLighting(samplePackedLight(lightSampleLocal.x, lightSampleLocal.y, lightSampleLocal.z));
+        constexpr std::array<int, 4> kCornerUSigns{-1, 1, 1, -1};
+        constexpr std::array<int, 4> kCornerVSigns{-1, -1, 1, 1};
 
-        const BlockFace face = [&]() -> BlockFace
-        {
-            if (normal.y > 0.5f) return BlockFace::Top;
-            if (normal.y < -0.5f) return BlockFace::Bottom;
-            if (normal.x > 0.5f) return BlockFace::East;
-            if (normal.x < -0.5f) return BlockFace::West;
-            if (normal.z > 0.5f) return BlockFace::South;
-            return BlockFace::North;
-        }();
+	    auto faceFromNormal = [](const glm::vec3& normal) noexcept -> BlockFace
+	    {
+	        if (normal.y > 0.5f) return BlockFace::Top;
+	        if (normal.y < -0.5f) return BlockFace::Bottom;
+	        if (normal.x > 0.5f) return BlockFace::East;
+	        if (normal.x < -0.5f) return BlockFace::West;
+	        if (normal.z > 0.5f) return BlockFace::South;
+	        return BlockFace::North;
+	    };
 
-        material.face = face;
+	    auto faceSampleAxes = [](BlockFace face, glm::ivec3& uAxis, glm::ivec3& vAxis) noexcept
+	    {
+	        switch (face)
+	        {
+	        case BlockFace::Top:
+	        case BlockFace::Bottom:
+	            uAxis = glm::ivec3(1, 0, 0);
+	            vAxis = glm::ivec3(0, 0, 1);
+	            break;
+	        case BlockFace::East:
+	        case BlockFace::West:
+	            uAxis = glm::ivec3(0, 1, 0);
+	            vAxis = glm::ivec3(0, 0, 1);
+	            break;
+	        case BlockFace::South:
+	        case BlockFace::North:
+	        default:
+	            uAxis = glm::ivec3(1, 0, 0);
+	            vAxis = glm::ivec3(0, 1, 0);
+	            break;
+	        }
+	    };
 
-        if (blockAtlasConfigured_)
-        {
-            const BlockUVSet& uvSet = blockUVTable_[toIndex(block)];
-            const FaceUV& faceUV = uvSet.faces[toIndex(face)];
+	    auto buildCornerLighting = [&](BlockFace face, const glm::ivec3& owningLocal) -> std::array<std::uint32_t, 4>
+	    {
+	        std::array<std::uint32_t, 4> cornerLighting{};
+	        const glm::ivec3 outward = faceOffset(face);
+	        glm::ivec3 sideU{0};
+	        glm::ivec3 sideV{0};
+	        faceSampleAxes(face, sideU, sideV);
+
+	        for (std::size_t cornerIndex = 0; cornerIndex < cornerLighting.size(); ++cornerIndex)
+	        {
+	            const int uSign = kCornerUSigns[cornerIndex];
+	            const int vSign = kCornerVSigns[cornerIndex];
+	            const glm::ivec3 fallbackSample = owningLocal + outward;
+	            const std::array<glm::ivec3, 4> lightSamples{
+	                fallbackSample,
+	                fallbackSample + sideU * uSign,
+	                fallbackSample + sideV * vSign,
+	                fallbackSample + sideU * uSign + sideV * vSign
+	            };
+
+	            int skySum = 0;
+	            int blockSum = 0;
+	            int validSamples = 0;
+	            for (const glm::ivec3& samplePos : lightSamples)
+	            {
+	                const BlockId sampleLightBlock = sampleBlock(samplePos.x, samplePos.y, samplePos.z);
+	                if (isOpaqueForLighting(sampleLightBlock))
+	                {
+	                    continue;
+	                }
+
+	                const std::uint8_t packedLight = samplePackedLight(samplePos.x, samplePos.y, samplePos.z);
+	                skySum += static_cast<int>(skyLightFromPacked(packedLight));
+	                blockSum += static_cast<int>(blockLightFromPacked(packedLight));
+	                ++validSamples;
+	            }
+
+	            std::uint8_t averagedSky = 0;
+	            std::uint8_t averagedBlock = 0;
+	            if (validSamples > 0)
+	            {
+	                averagedSky = static_cast<std::uint8_t>((skySum + validSamples / 2) / validSamples);
+	                averagedBlock = static_cast<std::uint8_t>((blockSum + validSamples / 2) / validSamples);
+	            }
+	            else
+	            {
+	                const std::uint8_t fallbackPacked =
+	                    samplePackedLight(fallbackSample.x, fallbackSample.y, fallbackSample.z);
+	                averagedSky = skyLightFromPacked(fallbackPacked);
+	                averagedBlock = blockLightFromPacked(fallbackPacked);
+	            }
+
+	            const bool side1Solid =
+	                isAoSolid(sampleBlock(owningLocal.x + sideU.x * uSign,
+	                                      owningLocal.y + sideU.y * uSign,
+	                                      owningLocal.z + sideU.z * uSign));
+	            const bool side2Solid =
+	                isAoSolid(sampleBlock(owningLocal.x + sideV.x * vSign,
+	                                      owningLocal.y + sideV.y * vSign,
+	                                      owningLocal.z + sideV.z * vSign));
+	            const bool cornerSolid =
+	                isAoSolid(sampleBlock(owningLocal.x + sideU.x * uSign + sideV.x * vSign,
+	                                      owningLocal.y + sideU.y * uSign + sideV.y * vSign,
+	                                      owningLocal.z + sideU.z * uSign + sideV.z * vSign));
+	            const std::uint8_t aoLevel =
+	                (side1Solid && side2Solid)
+	                    ? static_cast<std::uint8_t>(3)
+	                    : static_cast<std::uint8_t>(static_cast<int>(side1Solid) +
+	                                                static_cast<int>(side2Solid) +
+	                                                static_cast<int>(cornerSolid));
+
+	            cornerLighting[cornerIndex] =
+	                packVertexLighting(packLightLevels(averagedSky, averagedBlock), aoLevel);
+	        }
+
+	        return cornerLighting;
+	    };
+
+	    auto makeMaterial = [&](BlockId block, const glm::vec3& normal, const glm::ivec3& owningLocal) -> FaceMaterial
+	    {
+	        FaceMaterial material{};
+	        material.mergeable = !isAlphaCutoutBlock(block);
+	        const BlockFace face = faceFromNormal(normal);
+
+	        material.face = face;
+            material.lightingData = buildCornerLighting(face, owningLocal);
+
+	        if (blockAtlasConfigured_)
+	        {
+	            const BlockUVSet& uvSet = blockUVTable_[toIndex(block)];
+	            const FaceUV& faceUV = uvSet.faces[toIndex(face)];
             material.uvBase = faceUV.base;
             material.uvSize = faceUV.size;
         }
@@ -6126,36 +6253,58 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
             chunkOrigin + base + dv
         };
 
-        if (dir == FaceDir::Negative)
-        {
-            std::swap(positions[1], positions[3]);
-        }
+            std::array<std::uint32_t, 4> cornerLighting = material.lightingData;
+	        if (dir == FaceDir::Negative)
+	        {
+	            std::swap(positions[1], positions[3]);
+                std::swap(cornerLighting[1], cornerLighting[3]);
+	        }
 
-        const glm::vec3 uAxisVec = glm::vec3(material.uAxis);
-        const glm::vec3 vAxisVec = glm::vec3(material.vAxis);
+            const int diagonal02 =
+                lightingMetricFromPackedVertex(cornerLighting[0]) +
+                lightingMetricFromPackedVertex(cornerLighting[2]);
+            const int diagonal13 =
+                lightingMetricFromPackedVertex(cornerLighting[1]) +
+                lightingMetricFromPackedVertex(cornerLighting[3]);
+            const bool flipDiagonal = diagonal13 > diagonal02;
 
-        const std::size_t vertexStart = meshData.vertices.size();
+	        const glm::vec3 uAxisVec = glm::vec3(material.uAxis);
+	        const glm::vec3 vAxisVec = glm::vec3(material.vAxis);
+
+	        const std::size_t vertexStart = meshData.vertices.size();
         for (int i = 0; i < 4; ++i)
         {
             const glm::vec3& pos = positions[i];
 
             Vertex vertex{};
             vertex.position = pos;
-            vertex.normal = normal;
-            vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
-            vertex.atlasBase = material.uvBase;
-            vertex.atlasSize = material.uvSize;
-            vertex.lightingData = material.lightingData;
-            meshData.vertices.push_back(vertex);
-        }
+	            vertex.normal = normal;
+	            vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
+	            vertex.atlasBase = material.uvBase;
+	            vertex.atlasSize = material.uvSize;
+	            vertex.lightingData = cornerLighting[i];
+	            meshData.vertices.push_back(vertex);
+	        }
 
-        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
-        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
-        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
-        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
-        meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
-    };
+            if (flipDiagonal)
+            {
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
+            }
+            else
+            {
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 1));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 2));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 3));
+	            meshData.indices.push_back(static_cast<std::uint32_t>(vertexStart + 0));
+            }
+	    };
 
     auto greedyMeshAxis = [&](Axis axis)
     {
@@ -6225,19 +6374,17 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                             }
                         }
 
-                        if (createFace)
-                        {
-                            const glm::vec3 normal = axisNormals[a] * ((dir == FaceDir::Positive) ? 1.0f : -1.0f);
-                            cell.exists = true;
-                            const std::size_t blockIdx = blockIndex(owningLocal.x, owningLocal.y, owningLocal.z);
-                            const BlockId owningBlock = chunkBlocks[blockIdx];
-                            cell.material = makeMaterial(
-                                owningBlock,
-                                normal,
-                                owningLocal + glm::ivec3(static_cast<int>(normal.x),
-                                                         static_cast<int>(normal.y),
-                                                         static_cast<int>(normal.z)));
-                        }
+	                        if (createFace)
+	                        {
+	                            const glm::vec3 normal = axisNormals[a] * ((dir == FaceDir::Positive) ? 1.0f : -1.0f);
+	                            cell.exists = true;
+	                            const std::size_t blockIdx = blockIndex(owningLocal.x, owningLocal.y, owningLocal.z);
+	                            const BlockId owningBlock = chunkBlocks[blockIdx];
+	                            cell.material = makeMaterial(
+	                                owningBlock,
+	                                normal,
+	                                owningLocal);
+	                        }
 
                         mask[maskIdx] = cell;
                     }

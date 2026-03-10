@@ -1,3 +1,5 @@
+#include "world_lighting_common.hlsli"
+
 cbuffer WorldConstants : register(b0)
 {
     float4x4 uViewProj;
@@ -32,18 +34,22 @@ struct VSOutput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
-    uint lighting : COLOR0;
+    float2 lightChannels : TEXCOORD3;
+    float ao : TEXCOORD4;
 };
 
 VSOutput main(VSInput input)
 {
+    const DecodedVertexLighting decodedLighting = decodeVertexLighting(input.lighting);
+
     VSOutput output;
     output.worldPos = input.position;
     output.normal = input.normal;
     output.tileCoord = input.tileCoord;
     output.atlasBase = input.atlasBase;
     output.atlasSize = input.atlasSize;
-    output.lighting = input.lighting;
+    output.lightChannels = float2(decodedLighting.sky, decodedLighting.block);
+    output.ao = decodedLighting.ao;
     output.position = mul(uViewProj, float4(input.position, 1.0f));
     return output;
 }

@@ -1,6 +1,6 @@
 param(
     [string]$ManifestPath = "tools\\visual_suite.json",
-    [string]$PhaseName = "phase1_phase2",
+    [string]$PhaseName = "phase3_phase4",
     [string]$BuildDir = "build",
     [string]$Config = "Release",
     [string]$OutputRoot = "artifacts\\visual_suite",

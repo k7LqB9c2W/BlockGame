@@ -157,8 +157,8 @@
       ]
     },
     {
-      "name": "horizon_vista",
-      "description": "High-elevation horizon shot for fog/sky integration while far terrain stays disabled.",
+      "name": "horizon_vista_exact",
+      "description": "High-elevation exact-chunk horizon shot for terrain/fog tuning without far-LOD contamination.",
       "position": { "x": 0.0, "y": 53.7, "z": 5.0 },
       "lookAt": { "x": 70.0, "y": 38.0, "z": 70.0 },
       "timeOfDay": 12.0,
@@ -170,6 +170,21 @@
       "directSun": true,
       "debugView": 0,
       "exactChunksOnly": true
+    },
+    {
+      "name": "horizon_vista_far",
+      "description": "Same horizon pose with far terrain enabled to judge haze and horizon continuity.",
+      "position": { "x": 0.0, "y": 53.7, "z": 5.0 },
+      "lookAt": { "x": 70.0, "y": 38.0, "z": 70.0 },
+      "timeOfDay": 12.0,
+      "nearChunks": 10,
+      "farBlocks": 2400,
+      "fogStartBlocks": 1200,
+      "farTerrainEnabled": true,
+      "settleFrames": 120,
+      "directSun": true,
+      "debugView": 0,
+      "exactChunksOnly": false
     }
   ]
 }

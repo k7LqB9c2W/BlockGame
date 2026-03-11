@@ -53,6 +53,11 @@ enum class TerrainDebugView : int
     AmbientOcclusion = 4
 };
 
+// The base-game terrain look is the canonical lighting target for BlockGame.
+// Keep the physically-inspired atmosphere path available as an optional enhancement,
+// but do not make it the default when future render work lands.
+inline constexpr bool kDefaultEnhancedAtmosphereEnabled = false;
+
 struct AtmosphereSettings
 {
     float groundRadiusKm{6360.0f};
@@ -92,7 +97,8 @@ struct EnvironmentState
     glm::vec3 sunDirection{-0.35f, 0.9f, -0.2f};
     glm::vec3 sunIlluminance{4.5f, 4.8f, 5.5f};
     float timeOfDay{12.0f};
-    bool atmosphereEnabled{true};
+    // Non-default visual mode. Base-game readability tuning should assume this starts off.
+    bool atmosphereEnabled{kDefaultEnhancedAtmosphereEnabled};
     float fogStartBlocks{1400.0f};
     float farDistanceBlocks{4800.0f};
     AtmosphereSettings atmosphere{};

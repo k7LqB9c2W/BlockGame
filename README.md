@@ -4,6 +4,8 @@
 
 BlockGame is a Windows voxel sandbox prototype written in C++20. It features procedural terrain generation, chunk streaming, block interaction, far-terrain rendering, and an in-game Dear ImGui debug UI.
 
+The visual baseline for the project is the plain "base game" terrain look. The more cinematic atmosphere path is kept as an optional enhancement and is intentionally disabled by default at startup.
+
 The renderer is now **Direct3D 12 only**. There is no OpenGL backend toggle anymore. Any normal build of this repository produces the D3D12 version of the game.
 
 ## Current Status
@@ -237,6 +239,9 @@ The debug/config panels intentionally capture input while they are open. Close t
 - The project is currently Windows-only because the renderer is Direct3D 12.
 - The build no longer depends on GLAD or the old OpenGL text/texture pipeline.
 - Dear ImGui is used for the debug overlay, loading/status windows, render-distance controls, and teleport tools.
+- Lighting and terrain readability work should target the base-game look first.
+- The Lighting Lab's `Enhanced Atmosphere` toggle is a non-default visual mode, closer to an optional shader-pack style enhancement than the canonical shipping look.
+- If you reset renderer defaults or add new lighting presets, preserve `Base Game` as the startup/default presentation unless there is an explicit project-wide decision to change that.
 
 ## Verification Snapshot
 

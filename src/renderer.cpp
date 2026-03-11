@@ -1892,6 +1892,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const glm::mat4 viewProj = proj * view;
     const glm::vec3 lightDir = glm::normalize(environment.sunDirection);
     const float daylight = std::clamp(lightDir.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    // The enhanced atmosphere path is intentionally optional. The default visual target
+    // for terrain work is the base-game look with this path disabled at startup.
     const bool skyPassEnabled = environment.atmosphereEnabled && environment.debug.skyPassEnabled;
     const bool aerialPerspectiveEnabled =
         environment.atmosphereEnabled && environment.debug.aerialPerspectiveEnabled;

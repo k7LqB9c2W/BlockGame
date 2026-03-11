@@ -2009,7 +2009,7 @@ int runGame()
                            << " fog=" << (environment.debug.fogFallbackEnabled ? "on" : "off")
                            << " shadows=" << (environment.debug.shadowsEnabled ? "on" : "off")
                            << " sun=" << (environment.debug.directSunEnabled ? "on" : "off") << '\n';
-            snapshotStream << "Atmosphere: " << (environment.atmosphereEnabled ? "on" : "off")
+            snapshotStream << "Enhanced Atmosphere: " << (environment.atmosphereEnabled ? "on" : "off")
                            << " mieG=" << environment.atmosphere.mieAnisotropy
                            << " aerialKm=" << environment.atmosphere.aerialPerspectiveDistanceKm << '\n';
             snapshotStream << "View/Sun: viewY=" << viewDirection.y
@@ -2047,7 +2047,7 @@ int runGame()
                 "Right Mouse: Place block\n"
                 "L: Toggle Grass / DebugLamp placement\n"
                 ". : Release or recapture mouse\n"
-                "F1: Debug overlay and lighting lab\n"
+                "F1: Debug overlay and lighting lab (base game default)\n"
                 "F2: Teleport dialog\n"
                 "F3: Toggle far terrain\n"
                 "N: Render distance dialog\n"
@@ -2087,6 +2087,7 @@ int runGame()
 
             const auto applyBeautyPreset = [&]()
             {
+                // Optional cinematic-style path. Keep terrain tuning anchored to Base Game first.
                 environment.atmosphereEnabled = true;
                 environment.debug.worldPassEnabled = true;
                 environment.debug.skyPassEnabled = true;
@@ -2098,11 +2099,12 @@ int runGame()
             };
             const auto applyWorldOnlyPreset = [&]()
             {
+                // This is the canonical/default BlockGame look used for lighting evaluation.
                 environment.atmosphereEnabled = false;
                 environment.debug.worldPassEnabled = true;
                 environment.debug.skyPassEnabled = false;
                 environment.debug.aerialPerspectiveEnabled = false;
-                environment.debug.fogFallbackEnabled = false;
+                environment.debug.fogFallbackEnabled = true;
                 environment.debug.shadowsEnabled = true;
                 environment.debug.directSunEnabled = true;
                 environment.debug.terrainDebugView = TerrainDebugView::None;
@@ -2115,7 +2117,8 @@ int runGame()
             };
             const auto applyDefaultsPreset = [&]()
             {
-                applyBeautyPreset();
+                // Reset to the shipping/default presentation, not the enhanced atmosphere mode.
+                applyWorldOnlyPreset();
                 environment.timeOfDay = 12.0f;
                 environment.tonemap.exposure = 0.62f;
                 environment.tonemap.whitePoint = 9.0f;
@@ -2128,12 +2131,12 @@ int runGame()
                 inputContext.lodEnabled = false;
             };
 
-            if (ImGui::Button("Beauty"))
+            if (ImGui::Button("Enhanced Atmo"))
             {
                 applyBeautyPreset();
             }
             ImGui::SameLine();
-            if (ImGui::Button("World Only"))
+            if (ImGui::Button("Base Game"))
             {
                 applyWorldOnlyPreset();
             }
@@ -2176,7 +2179,8 @@ int runGame()
 
             ImGui::Separator();
             ImGui::TextUnformatted("Environment");
-            ImGui::Checkbox("Atmosphere", &environment.atmosphereEnabled);
+            ImGui::TextWrapped("Base Game is the default lighting target. Enhanced Atmosphere is optional and should stay non-default when tuning terrain readability.");
+            ImGui::Checkbox("Enhanced Atmosphere (Non-default)", &environment.atmosphereEnabled);
             ImGui::SliderFloat("Time of Day", &environment.timeOfDay, 0.0f, 24.0f, "%.2f");
             ImGui::SliderFloat("Exposure", &environment.tonemap.exposure, 0.10f, 3.0f, "%.2f");
             ImGui::SliderFloat("White Point", &environment.tonemap.whitePoint, 2.0f, 16.0f, "%.2f");
@@ -2193,8 +2197,8 @@ int runGame()
             ImGui::Separator();
             ImGui::TextUnformatted("Pass Isolation");
             ImGui::Checkbox("World Pass", &environment.debug.worldPassEnabled);
-            ImGui::Checkbox("Sky Pass", &environment.debug.skyPassEnabled);
-            ImGui::Checkbox("Aerial Perspective", &environment.debug.aerialPerspectiveEnabled);
+            ImGui::Checkbox("Sky Pass (Enhanced Atmo)", &environment.debug.skyPassEnabled);
+            ImGui::Checkbox("Aerial Perspective (Enhanced Atmo)", &environment.debug.aerialPerspectiveEnabled);
             ImGui::Checkbox("Fog Fallback", &environment.debug.fogFallbackEnabled);
             ImGui::Checkbox("Shadows", &environment.debug.shadowsEnabled);
             ImGui::Checkbox("Direct Sun", &environment.debug.directSunEnabled);

@@ -41,3 +41,9 @@
 - Single-view repro captures: run `powershell -ExecutionPolicy Bypass -File tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -Yaw <yaw> -Pitch <pitch>` to teleport to an exact camera pose, capture one screenshot, and delete old repro screenshots in `artifacts/repro_capture`.
 - Single-view repro also supports a look target instead of yaw/pitch: `tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -LookX <x> -LookY <y> -LookZ <z>`.
 - The in-game debug overlay now includes `Yaw/Pitch`, `Front`, and `Hit Block` so a screenshot contains enough information to recreate the exact view later.
+
+## Visual Default Policy
+- The canonical BlockGame lighting target is the plain `Base Game` look, not the enhanced atmosphere mode.
+- The Lighting Lab `Enhanced Atmosphere` toggle is intentionally non-default at startup and should stay that way unless the user explicitly asks for a project-wide default change.
+- When tuning terrain lighting, AO, fog, mip behavior, chunk shading, or screenshot regressions, evaluate the base-game look first before using enhanced atmosphere as an optional comparison.
+- If you add presets, comments, or UI labels in this area, make it obvious that `Base Game` is the default shipping/editing baseline and `Enhanced Atmosphere` is an optional cinematic layer.

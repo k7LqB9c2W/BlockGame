@@ -6382,18 +6382,19 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	                averagedBlock = blockLightFromPacked(fallbackPacked);
 	            }
 
-	            const bool side1Solid =
-	                isAoSolid(sampleBlock(owningLocal.x + sideU.x * uSign,
-	                                      owningLocal.y + sideU.y * uSign,
-	                                      owningLocal.z + sideU.z * uSign));
-	            const bool side2Solid =
-	                isAoSolid(sampleBlock(owningLocal.x + sideV.x * vSign,
-	                                      owningLocal.y + sideV.y * vSign,
-	                                      owningLocal.z + sideV.z * vSign));
-	            const bool cornerSolid =
-	                isAoSolid(sampleBlock(owningLocal.x + sideU.x * uSign + sideV.x * vSign,
-	                                      owningLocal.y + sideU.y * uSign + sideV.y * vSign,
-	                                      owningLocal.z + sideU.z * uSign + sideV.z * vSign));
+            const glm::ivec3 aoBase = owningLocal + outward;
+            const bool side1Solid =
+                isAoSolid(sampleBlock(aoBase.x + sideU.x * uSign,
+                                      aoBase.y + sideU.y * uSign,
+                                      aoBase.z + sideU.z * uSign));
+            const bool side2Solid =
+                isAoSolid(sampleBlock(aoBase.x + sideV.x * vSign,
+                                      aoBase.y + sideV.y * vSign,
+                                      aoBase.z + sideV.z * vSign));
+            const bool cornerSolid =
+                isAoSolid(sampleBlock(aoBase.x + sideU.x * uSign + sideV.x * vSign,
+                                      aoBase.y + sideU.y * uSign + sideV.y * vSign,
+                                      aoBase.z + sideU.z * uSign + sideV.z * vSign));
 	            const std::uint8_t aoLevel =
 	                (side1Solid && side2Solid)
 	                    ? static_cast<std::uint8_t>(3)

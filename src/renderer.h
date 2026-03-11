@@ -166,6 +166,14 @@ private:
         glm::vec4 terrainDebug{0.0f, 0.0f, 0.0f, 0.0f};
     };
 
+    struct BaseSkyConstants
+    {
+        glm::vec4 topSkyColor{0.0f};
+        glm::vec4 horizonSkyColor{0.0f};
+        glm::vec4 params{0.0f};
+        glm::vec4 sunColor{0.0f};
+    };
+
     struct ToneMapConstants
     {
         glm::vec4 exposureWhitePoint{1.0f, 8.0f, 0.0f, 0.0f};
@@ -271,6 +279,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;

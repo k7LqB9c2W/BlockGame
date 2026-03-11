@@ -190,12 +190,28 @@ float4 main(PSInput input) : SV_TARGET
         const float4 aerial = sampleAerialPerspective(screenUv, distanceBlocks * 0.001f, uParams1.y);
         const float transmittance = saturate(max(aerial.a, 0.18f));
         color = color * transmittance + aerial.rgb;
+
+        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
+                                                          viewDir,
+                                                          input.worldPos.y,
+                                                          uCameraPos.y,
+                                                          uParams1.z,
+                                                          uParams1.w,
+                                                          0.85f,
+                                                          0.55f);
+        color = color * fogBlend.transmittance + fogColor * fogBlend.inscatter;
     }
     else if (uParams1.w > uParams1.z)
     {
-        float fogFactor = saturate((distanceBlocks - uParams1.z) / (uParams1.w - uParams1.z));
-        fogFactor = fogFactor * fogFactor * (3.0f - 2.0f * fogFactor);
-        color = lerp(color, fogColor, fogFactor);
+        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
+                                                          viewDir,
+                                                          input.worldPos.y,
+                                                          uCameraPos.y,
+                                                          uParams1.z,
+                                                          uParams1.w,
+                                                          1.20f,
+                                                          0.92f);
+        color = color * fogBlend.transmittance + fogColor * fogBlend.inscatter;
     }
 
     return float4(color, 1.0f);

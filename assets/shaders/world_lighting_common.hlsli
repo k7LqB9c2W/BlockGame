@@ -6,6 +6,15 @@ struct DecodedVertexLighting
     float aoDebug;
 };
 
+struct FogBlendResult
+{
+    float transmittance;
+    float inscatter;
+};
+
+static const float3 kBaseGameSkyColor = float3(120.0f / 255.0f, 167.0f / 255.0f, 255.0f / 255.0f);
+static const float3 kBaseGameHorizonColor = float3(187.0f / 255.0f, 212.0f / 255.0f, 255.0f / 255.0f);
+
 static const float kVanillaLightLut[16] = {
     0.000f, 0.018f, 0.025f, 0.035f,
     0.048f, 0.065f, 0.088f, 0.118f,
@@ -59,15 +68,15 @@ float3 computeTerrainFogColor(float3 viewDir,
                               float3 skyAmbient,
                               float3 groundAmbient)
 {
-    const float horizon = saturate(1.0f - abs(viewDir.y) * 3.2f);
+    const float horizon = pow(saturate(1.0f - abs(viewDir.y) * 2.2f), 0.60f);
     const float upness = saturate(viewDir.y * 0.5f + 0.5f);
-    const float sunFacing = pow(saturate(dot(normalize(float3(viewDir.x, max(viewDir.y, -0.12f), viewDir.z)), lightDir)), 4.0f);
-    const float3 zenithTint = skyAmbient * 1.10f;
-    const float3 horizonBase = skyAmbient * 1.45f + groundAmbient * 0.30f;
-    const float3 horizonSunTint = horizonBase + sunColor * 0.10f;
+    const float sunFacing = pow(saturate(dot(normalize(float3(viewDir.x, max(viewDir.y, -0.12f), viewDir.z)), lightDir)), 5.0f);
+    const float3 zenithTint = kBaseGameSkyColor * 0.98f + skyAmbient * 0.92f;
+    const float3 horizonBase = kBaseGameHorizonColor * 0.92f + skyAmbient * 0.55f + groundAmbient * 0.06f;
+    const float3 horizonSunTint = horizonBase + sunColor * 0.035f;
     const float3 horizonTint = lerp(horizonBase, horizonSunTint, sunFacing);
-    const float3 lowerTint = lerp(groundAmbient * 1.08f, horizonTint * 0.94f, horizon);
-    return lerp(lowerTint, lerp(horizonTint, zenithTint, upness), saturate(viewDir.y * 1.4f + 0.5f));
+    const float3 lowerTint = lerp(kBaseGameHorizonColor * 0.96f, horizonTint * 0.995f, horizon);
+    return lerp(lowerTint, lerp(horizonTint, zenithTint, upness), saturate(viewDir.y * 1.35f + 0.52f));
 }
 
 float computeFarLodHaze(float distanceBlocks, float fogStartBlocks, float farDistanceBlocks)
@@ -76,4 +85,37 @@ float computeFarLodHaze(float distanceBlocks, float fogStartBlocks, float farDis
     const float hazeRange = max(farDistanceBlocks - hazeStart, 1.0f);
     const float haze = saturate((distanceBlocks - hazeStart) / hazeRange);
     return haze * haze * (3.0f - 2.0f * haze);
+}
+
+FogBlendResult computeRoundedFog(float distanceBlocks,
+                                 float3 viewDir,
+                                 float worldY,
+                                 float cameraY,
+                                 float fogStartBlocks,
+                                 float farDistanceBlocks,
+                                 float horizonBoostScale,
+                                 float maxFog)
+{
+    FogBlendResult result;
+    result.transmittance = 1.0f;
+    result.inscatter = 0.0f;
+
+    if (farDistanceBlocks <= 1.0f)
+    {
+        return result;
+    }
+
+    const float clampedFogStart = min(fogStartBlocks, farDistanceBlocks - 1.0f);
+    const float fogSpan = max(farDistanceBlocks - clampedFogStart, 1.0f);
+    const float distance01 = saturate((distanceBlocks - clampedFogStart) / fogSpan);
+    const float curvedDistance = 1.0f - exp(-pow(distance01, 1.35f) * 4.0f);
+    const float horizon = pow(saturate(1.0f - abs(viewDir.y)), 1.65f);
+    const float horizonBoost = 1.0f + horizon * horizonBoostScale;
+    const float lowerTerrain = saturate((cameraY - worldY + 20.0f) / max(farDistanceBlocks * 0.18f, 48.0f));
+    const float altitudeBoost = lerp(0.94f, 1.18f, lowerTerrain);
+    const float fog = min(saturate(curvedDistance * horizonBoost * altitudeBoost), maxFog);
+
+    result.transmittance = saturate(1.0f - fog * 0.88f);
+    result.inscatter = fog;
+    return result;
 }

@@ -134,14 +134,27 @@ float4 main(PSInput input) : SV_TARGET
         const float transmittance = saturate(max(aerial.a, 0.16f));
         color = color * transmittance + aerial.rgb;
 
-        const float farHaze = computeFarLodHaze(distanceBlocks, uParams1.z, uParams1.w);
-        color = lerp(color, fogColor, farHaze * 0.55f);
+        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
+                                                          normalize(input.worldPos - uCameraPos.xyz),
+                                                          input.worldPos.y,
+                                                          uCameraPos.y,
+                                                          uParams1.z,
+                                                          uParams1.w,
+                                                          1.10f,
+                                                          0.68f);
+        color = color * fogBlend.transmittance + fogColor * fogBlend.inscatter;
     }
     else if (uParams1.w > uParams1.z)
     {
-        float fogFactor = computeFarLodHaze(distanceBlocks, uParams1.z, uParams1.w);
-        fogFactor = saturate(fogFactor * 1.15f);
-        color = lerp(color, fogColor, fogFactor);
+        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
+                                                          normalize(input.worldPos - uCameraPos.xyz),
+                                                          input.worldPos.y,
+                                                          uCameraPos.y,
+                                                          uParams1.z,
+                                                          uParams1.w,
+                                                          1.35f,
+                                                          0.97f);
+        color = color * fogBlend.transmittance + fogColor * fogBlend.inscatter;
     }
 
     return float4(color, 1.0f);

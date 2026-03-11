@@ -709,12 +709,13 @@ void Renderer::shutdown()
         atmosphere_.reset();
     }
 
-    destroySceneColor();
-    destroyFrameResources();
-    toneMapPipelineState_.Reset();
-    shadowPipelineState_.Reset();
-    nearPipelineState_.Reset();
-    farPipelineState_.Reset();
+      destroySceneColor();
+      destroyFrameResources();
+      toneMapPipelineState_.Reset();
+      baseSkyPipelineState_.Reset();
+      shadowPipelineState_.Reset();
+      nearPipelineState_.Reset();
+      farPipelineState_.Reset();
     fullscreenRootSignature_.Reset();
     shadowRootSignature_.Reset();
     worldRootSignature_.Reset();
@@ -1226,12 +1227,14 @@ void Renderer::createPipelines()
         compileShaderFromFile(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
         compileShaderFromFile(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
-    Microsoft::WRL::ComPtr<ID3DBlob> farPs =
-        compileShaderFromFile(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
-    Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
-        compileShaderFromFile(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
-    Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
-        compileShaderFromFile(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> farPs =
+          compileShaderFromFile(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
+          compileShaderFromFile(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> baseSkyPs =
+          compileShaderFromFile(shaderPath("base_sky_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
+          compileShaderFromFile(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 6> inputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -1291,12 +1294,31 @@ void Renderer::createPipelines()
                   "failed to create near pipeline");
 
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
-    throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
-                  "failed to create far pipeline");
+      throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
+                    "failed to create far pipeline");
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC tonePso{};
-    tonePso.pRootSignature = fullscreenRootSignature_.Get();
-    tonePso.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC baseSkyPso{};
+      baseSkyPso.pRootSignature = fullscreenRootSignature_.Get();
+      baseSkyPso.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
+      baseSkyPso.PS = {baseSkyPs->GetBufferPointer(), baseSkyPs->GetBufferSize()};
+      baseSkyPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+      baseSkyPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+      baseSkyPso.RasterizerState.DepthClipEnable = TRUE;
+      baseSkyPso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+      baseSkyPso.SampleMask = UINT_MAX;
+      baseSkyPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+      baseSkyPso.NumRenderTargets = 1;
+      baseSkyPso.RTVFormats[0] = kSceneColorFormat;
+      baseSkyPso.SampleDesc.Count = 1;
+      baseSkyPso.DepthStencilState.DepthEnable = FALSE;
+      baseSkyPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+      baseSkyPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+      throwIfFailed(device_->CreateGraphicsPipelineState(&baseSkyPso, IID_PPV_ARGS(&baseSkyPipelineState_)),
+                    "failed to create base sky pipeline");
+
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC tonePso{};
+      tonePso.pRootSignature = fullscreenRootSignature_.Get();
+      tonePso.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
     tonePso.PS = {tonePs->GetBufferPointer(), tonePs->GetBufferSize()};
     tonePso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     tonePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -1892,6 +1914,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const glm::mat4 viewProj = proj * view;
     const glm::vec3 lightDir = glm::normalize(environment.sunDirection);
     const float daylight = std::clamp(lightDir.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    const glm::vec3 baseSkyTopColor = glm::vec3(0x78 / 255.0f, 0xA7 / 255.0f, 1.0f);
+    const glm::vec3 baseSkyHorizonColor = glm::vec3(0xBB / 255.0f, 0xD4 / 255.0f, 1.0f);
     // The enhanced atmosphere path is intentionally optional. The default visual target
     // for terrain work is the base-game look with this path disabled at startup.
     const bool skyPassEnabled = environment.atmosphereEnabled && environment.debug.skyPassEnabled;
@@ -1900,8 +1924,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const float fogStartBlocks =
         environment.debug.fogFallbackEnabled ? environment.fogStartBlocks : environment.farDistanceBlocks;
     const glm::vec3 sunColor = environment.sunIlluminance * 0.18f;
-    const glm::vec3 skyAmbient = glm::mix(glm::vec3(0.03f, 0.04f, 0.06f),
-                                          glm::vec3(0.20f, 0.24f, 0.30f),
+    const glm::vec3 skyAmbient = glm::mix(baseSkyTopColor * 0.16f,
+                                          baseSkyTopColor * 1.05f,
                                           std::pow(daylight, 0.55f));
     const glm::vec3 groundAmbient = glm::mix(glm::vec3(0.025f, 0.022f, 0.020f),
                                              glm::vec3(0.08f, 0.075f, 0.065f),
@@ -1942,6 +1966,29 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     if (skyPassEnabled && atmosphere_)
     {
         atmosphere_->renderSky(*this, environment, view, proj, cameraPos);
+    }
+    else
+    {
+        void* skyCpu = nullptr;
+        const std::uint64_t skyCb = allocateFrameConstantBytes(sizeof(BaseSkyConstants), &skyCpu);
+        auto* skyConstants = static_cast<BaseSkyConstants*>(skyCpu);
+        skyConstants->topSkyColor = glm::vec4(baseSkyTopColor, 0.0f);
+        skyConstants->horizonSkyColor = glm::vec4(baseSkyHorizonColor, 0.0f);
+        skyConstants->params = glm::vec4(daylight, 0.0f, 0.0f, 0.0f);
+        skyConstants->sunColor = glm::vec4(sunColor, 0.0f);
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
+        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
+        commandList_->SetPipelineState(baseSkyPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, skyCb);
+        commandList_->SetGraphicsRootDescriptorTable(1, sceneColorSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(2, sceneColorSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(3, sceneColorSrvGpu_);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        commandList_->DrawInstanced(3, 1, 0, 0);
     }
 
     const auto worldStart = std::chrono::steady_clock::now();

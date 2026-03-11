@@ -1799,8 +1799,25 @@ int runGame()
 
         const auto updateEnvironment = [&]()
         {
-            environment.fogStartBlocks = static_cast<float>(chunkManager.renderDistanceSettings().fogStartBlocks);
-            environment.farDistanceBlocks = static_cast<float>(chunkManager.farRenderDistanceBlocks());
+            const RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
+            const float exactVisibleDistanceBlocks =
+                static_cast<float>(std::max(renderSettings.nearChunks, 1) * kChunkSizeX);
+            const float effectiveVisibleDistanceBlocks = renderSettings.farTerrainEnabled
+                ? static_cast<float>(std::max(renderSettings.farBlocks, 256))
+                : exactVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2);
+            const float configuredFogStartBlocks =
+                static_cast<float>(std::max(renderSettings.fogStartBlocks, 0));
+            const float minFogStartBlocks =
+                std::max(24.0f, effectiveVisibleDistanceBlocks * 0.42f);
+            const float maxFogStartBlocks =
+                std::max(minFogStartBlocks + 16.0f, effectiveVisibleDistanceBlocks * 0.82f);
+
+            // Base-game fog should track the currently visible chunk span so chunk loading
+            // fades into haze instead of exposing a square cutoff when far terrain is off.
+            environment.farDistanceBlocks = effectiveVisibleDistanceBlocks;
+            environment.fogStartBlocks = std::min(
+                std::clamp(configuredFogStartBlocks, minFogStartBlocks, maxFogStartBlocks),
+                effectiveVisibleDistanceBlocks - 8.0f);
 
             const float dayAngle = ((environment.timeOfDay - 6.0f) / 24.0f) * glm::two_pi<float>();
             const float elevation = std::sin(dayAngle);

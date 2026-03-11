@@ -174,6 +174,17 @@ private:
         glm::vec4 sunColor{0.0f};
     };
 
+    struct CloudConstants
+    {
+        glm::mat4 viewProj{1.0f};
+        // Decorative cloud layer only. This is intentionally render-only and never part of gameplay collision.
+        glm::vec4 cameraPosTime{0.0f};
+        glm::vec4 layerParams{0.0f};
+        glm::vec4 shapeParams{0.0f};
+        glm::vec4 topColor{0.0f};
+        glm::vec4 bottomColor{0.0f};
+    };
+
     struct ToneMapConstants
     {
         glm::vec4 exposureWhitePoint{1.0f, 8.0f, 0.0f, 0.0f};
@@ -280,6 +291,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;

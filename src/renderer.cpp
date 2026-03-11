@@ -712,6 +712,7 @@ void Renderer::shutdown()
       destroySceneColor();
       destroyFrameResources();
       toneMapPipelineState_.Reset();
+      cloudPipelineState_.Reset();
       baseSkyPipelineState_.Reset();
       shadowPipelineState_.Reset();
       nearPipelineState_.Reset();
@@ -1233,6 +1234,10 @@ void Renderer::createPipelines()
           compileShaderFromFile(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> baseSkyPs =
           compileShaderFromFile(shaderPath("base_sky_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> cloudsVs =
+          compileShaderFromFile(shaderPath("clouds_vs.hlsl"), "main", "vs_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> cloudsPs =
+          compileShaderFromFile(shaderPath("clouds_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
           compileShaderFromFile(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
 
@@ -1315,6 +1320,35 @@ void Renderer::createPipelines()
       baseSkyPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
       throwIfFailed(device_->CreateGraphicsPipelineState(&baseSkyPso, IID_PPV_ARGS(&baseSkyPipelineState_)),
                     "failed to create base sky pipeline");
+
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC cloudPso{};
+      cloudPso.pRootSignature = fullscreenRootSignature_.Get();
+      cloudPso.VS = {cloudsVs->GetBufferPointer(), cloudsVs->GetBufferSize()};
+      cloudPso.PS = {cloudsPs->GetBufferPointer(), cloudsPs->GetBufferSize()};
+      cloudPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+      cloudPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+      cloudPso.RasterizerState.DepthClipEnable = TRUE;
+      cloudPso.BlendState.AlphaToCoverageEnable = FALSE;
+      cloudPso.BlendState.IndependentBlendEnable = FALSE;
+      cloudPso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+      cloudPso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+      cloudPso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+      cloudPso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+      cloudPso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+      cloudPso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+      cloudPso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+      cloudPso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+      cloudPso.SampleMask = UINT_MAX;
+      cloudPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+      cloudPso.NumRenderTargets = 1;
+      cloudPso.RTVFormats[0] = kSceneColorFormat;
+      cloudPso.DSVFormat = kDepthBufferFormat;
+      cloudPso.SampleDesc.Count = 1;
+      cloudPso.DepthStencilState.DepthEnable = TRUE;
+      cloudPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+      cloudPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+      throwIfFailed(device_->CreateGraphicsPipelineState(&cloudPso, IID_PPV_ARGS(&cloudPipelineState_)),
+                    "failed to create cloud pipeline");
 
       D3D12_GRAPHICS_PIPELINE_STATE_DESC tonePso{};
       tonePso.pRootSignature = fullscreenRootSignature_.Get();
@@ -1916,6 +1950,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const float daylight = std::clamp(lightDir.y * 0.5f + 0.5f, 0.0f, 1.0f);
     const glm::vec3 baseSkyTopColor = glm::vec3(0x78 / 255.0f, 0xA7 / 255.0f, 1.0f);
     const glm::vec3 baseSkyHorizonColor = glm::vec3(0xBB / 255.0f, 0xD4 / 255.0f, 1.0f);
+    const glm::vec3 cloudTopColor = glm::vec3(0.96f, 0.97f, 1.0f);
+    const glm::vec3 cloudBottomColor = glm::vec3(0.82f, 0.87f, 0.96f);
     // The enhanced atmosphere path is intentionally optional. The default visual target
     // for terrain work is the base-game look with this path disabled at startup.
     const bool skyPassEnabled = environment.atmosphereEnabled && environment.debug.skyPassEnabled;
@@ -2045,6 +2081,29 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     }
     profilingSnapshot_.worldDrawMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldStart).count();
+
+    if (environment.debug.skyPassEnabled)
+    {
+        void* cloudCpu = nullptr;
+        const std::uint64_t cloudCb = allocateFrameConstantBytes(sizeof(CloudConstants), &cloudCpu);
+        auto* cloudConstants = static_cast<CloudConstants*>(cloudCpu);
+        cloudConstants->viewProj = viewProj;
+        cloudConstants->cameraPosTime = glm::vec4(cameraPos, static_cast<float>(glfwGetTime()));
+        cloudConstants->layerParams = glm::vec4(300.0f, 4.0f, 56.0f, 8.0f);
+        cloudConstants->shapeParams = glm::vec4(0.57f, 1.55f, 0.0f, 0.0f);
+        cloudConstants->topColor = glm::vec4(cloudTopColor, 0.82f);
+        cloudConstants->bottomColor = glm::vec4(cloudBottomColor, 0.72f);
+
+        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
+        commandList_->SetPipelineState(cloudPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, cloudCb);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        constexpr UINT kCloudPrismCount = 17u * 17u * 3u;
+        commandList_->DrawInstanced(36, kCloudPrismCount, 0, 0);
+    }
 
     if (sceneColorState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
     {

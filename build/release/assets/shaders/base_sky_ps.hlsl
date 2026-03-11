@@ -1,3 +1,5 @@
+#include "base_game_sky_common.hlsli"
+
 cbuffer BaseSkyConstants : register(b0)
 {
     float4 uTopSkyColor;
@@ -12,18 +14,7 @@ struct PSInput
     float2 uv : TEXCOORD0;
 };
 
-float3 srgbToLinear(float3 color)
-{
-    return pow(color, 2.2f);
-}
-
 float4 main(PSInput input) : SV_TARGET
 {
-    const float horizonBlend = pow(saturate(input.uv.y), 1.75f);
-    const float horizonBand = pow(saturate(input.uv.y), 3.8f);
-    const float3 topSky = srgbToLinear(uTopSkyColor.rgb) * 1.10f;
-    const float3 horizonSky = srgbToLinear(uHorizonSkyColor.rgb) * 1.05f;
-    float3 skyColor = lerp(topSky, horizonSky, horizonBlend);
-    skyColor = lerp(skyColor, horizonSky, horizonBand * 0.30f);
-    return float4(skyColor, 1.0f);
+    return float4(computeBaseGameSkyGradientFromScreenUv(input.uv.y), 1.0f);
 }

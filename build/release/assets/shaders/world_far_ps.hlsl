@@ -121,11 +121,7 @@ float4 main(PSInput input) : SV_TARGET
     float3 color = textureSample.rgb * (indirect + baseBounce + directLight);
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
-    const float3 fogColor = computeTerrainFogColor(normalize(input.worldPos - uCameraPos.xyz),
-                                                   lightDir,
-                                                   uSunColor.rgb,
-                                                   uSkyAmbient.rgb,
-                                                   uGroundAmbient.rgb);
+    const float3 fogColor = computeTerrainFogColor(normalize(input.worldPos - uCameraPos.xyz));
 
     if (uParams0.x > 0.5f)
     {

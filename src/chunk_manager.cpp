@@ -3802,7 +3802,12 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
 
         ChunkState state = chunkPtr->state.load();
         const std::uint32_t indexCount = chunkPtr->indexCount.load(std::memory_order_acquire);
-        if ((state != ChunkState::Uploaded && state != ChunkState::Remeshing) || indexCount == 0)
+        // A remeshed chunk keeps its previous uploaded allocation until the new mesh is copied to GPU.
+        // Keep drawing that old allocation while the chunk sits in Ready awaiting upload, otherwise
+        // edits can briefly punch holes in the world for a frame or two.
+        if ((state != ChunkState::Uploaded &&
+             state != ChunkState::Remeshing &&
+             state != ChunkState::Ready) || indexCount == 0)
         {
             continue;
         }

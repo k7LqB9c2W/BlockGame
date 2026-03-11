@@ -1336,6 +1336,7 @@ int runGame()
     if (std::getenv("BLOCKGAME_STREAMING_TEST"))
     {
         runStreamingValidationScenarios(chunkManager, camera.position);
+        chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         chunkManager.update(camera.position, camera.front());
     }
 
@@ -1777,6 +1778,7 @@ int runGame()
             }
         }
 
+        chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         chunkManager.update(camera.position, camera.front());
 
         int framebufferWidth = 0;
@@ -1871,6 +1873,7 @@ int runGame()
                                               : fpsValue;
         std::string debugOverlayText;
         std::string lightingSnapshotText;
+        std::string holeDebugSnapshotText;
         std::string hitBlockSummary{"none"};
         std::string hitBlockType{"none"};
         glm::vec3 samplePosition = camera.position;
@@ -2038,6 +2041,78 @@ int runGame()
                            << " farReady=" << streamingStatus.farReadyTiles
                            << " farQueued=" << streamingStatus.farQueuedTiles;
             lightingSnapshotText = snapshotStream.str();
+
+            const RecentEditHoleDebugSnapshot holeDebugSnapshot =
+                chunkManager.recentEditHoleDebugSnapshot(camera.position);
+            std::ostringstream holeStream;
+            holeStream.setf(std::ios::fixed, std::ios::floatfield);
+            holeStream << std::setprecision(2);
+            if (!holeDebugSnapshot.hasRecentEdit)
+            {
+                holeStream << "No recent block edit tracked.\n";
+                holeStream << "Break or place a block, wait for the flicker, then copy this panel.\n";
+                holeStream << "The capture keeps a short event history for a few seconds after each edit.";
+            }
+            else
+            {
+                holeStream << "Recent Edit: " << holeDebugSnapshot.editKind
+                           << " at " << holeDebugSnapshot.editWorldPos.x << ", "
+                           << holeDebugSnapshot.editWorldPos.y << ", "
+                           << holeDebugSnapshot.editWorldPos.z
+                           << " chunk " << holeDebugSnapshot.editChunkCoord.x << ", "
+                           << holeDebugSnapshot.editChunkCoord.y << ", "
+                           << holeDebugSnapshot.editChunkCoord.z
+                           << " age=" << holeDebugSnapshot.ageSeconds << "s\n";
+                holeStream << "CameraChunkY: " << holeDebugSnapshot.cameraChunkY
+                           << " verticalRadius=" << holeDebugSnapshot.verticalRadius << '\n';
+                holeStream << "Events:\n";
+                if (holeDebugSnapshot.recentEvents.empty())
+                {
+                    holeStream << "  (none)\n";
+                }
+                else
+                {
+                    for (const std::string& event : holeDebugSnapshot.recentEvents)
+                    {
+                        holeStream << "  " << event << '\n';
+                    }
+                }
+
+                holeStream << "Tracked Chunks:\n";
+                for (const RecentEditHoleChunkInfo& chunkInfo : holeDebugSnapshot.chunks)
+                {
+                    holeStream << "  [" << chunkInfo.coord.x << ", " << chunkInfo.coord.y << ", " << chunkInfo.coord.z << "] "
+                               << (chunkInfo.present ? chunkInfo.stateLabel : "Missing")
+                               << " idx=" << chunkInfo.indexCount
+                               << " page=";
+                    if (chunkInfo.bufferPageIndex == (std::numeric_limits<std::uint32_t>::max)())
+                    {
+                        holeStream << "none";
+                    }
+                    else
+                    {
+                        holeStream << chunkInfo.bufferPageIndex;
+                    }
+                    holeStream << " has=" << (chunkInfo.hasBlocks ? "y" : "n")
+                               << " mesh=" << (chunkInfo.meshReady ? "y" : "n")
+                               << " queued=" << (chunkInfo.queuedForUpload ? "y" : "n")
+                               << " flight=" << chunkInfo.inFlight
+                               << " span=[" << chunkInfo.columnMinChunkY << ", " << chunkInfo.columnMaxChunkY << "]"
+                               << " h=";
+                    if (chunkInfo.columnHeight == (std::numeric_limits<int>::min)())
+                    {
+                        holeStream << "none";
+                    }
+                    else
+                    {
+                        holeStream << chunkInfo.columnHeight;
+                    }
+                    holeStream << " src=" << chunkInfo.heightSource
+                               << " evict=" << (chunkInfo.wouldEvict ? "yes" : "no")
+                               << '\n';
+                }
+            }
+            holeDebugSnapshotText = holeStream.str();
         }
 
         if (inputContext.showDebugOverlay && !debugOverlayText.empty())
@@ -2290,6 +2365,13 @@ int runGame()
             }
             ImGui::BeginChild("LightingSnapshot", ImVec2(430.0f, 145.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::TextUnformatted(lightingSnapshotText.c_str());
+            ImGui::EndChild();
+            if (ImGui::Button("Copy Hole Snapshot"))
+            {
+                ImGui::SetClipboardText(holeDebugSnapshotText.c_str());
+            }
+            ImGui::BeginChild("HoleDebugSnapshot", ImVec2(430.0f, 200.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::TextUnformatted(holeDebugSnapshotText.c_str());
             ImGui::EndChild();
             ImGui::Separator();
             ImGui::TextUnformatted("How To Isolate");

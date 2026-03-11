@@ -19,6 +19,7 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -272,8 +273,16 @@ public:
         queue_.Reset();
         fence_.Reset();
         device_.Reset();
+        graphicsFence_ = nullptr;
+        graphicsFenceValue_ = 0;
         open_ = false;
         hasCommands_ = false;
+    }
+
+    void setGraphicsFenceDependency(ID3D12Fence* graphicsFence, UINT64 graphicsFenceValue) noexcept
+    {
+        graphicsFence_ = graphicsFence;
+        graphicsFenceValue_ = graphicsFenceValue;
     }
 
     void begin()
@@ -332,6 +341,14 @@ public:
         throwIfFailedDx(commandList_->Close(), "failed to close upload command list");
         if (hasCommands_)
         {
+            // Chunk buffers are shared with the render path. Do not transition/copy them
+            // until the last submitted graphics work that referenced them has completed.
+            if (graphicsFence_ != nullptr && graphicsFenceValue_ > 0)
+            {
+                throwIfFailedDx(queue_->Wait(graphicsFence_, graphicsFenceValue_),
+                                "failed to wait for graphics fence before upload");
+            }
+
             ID3D12CommandList* lists[] = {commandList_.Get()};
             queue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
 
@@ -362,6 +379,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
+    ID3D12Fence* graphicsFence_{nullptr};
+    UINT64 graphicsFenceValue_{0};
     bool open_{false};
     bool hasCommands_{false};
 };
@@ -1052,6 +1071,26 @@ enum class ChunkState : std::uint8_t
     Remeshing
 };
 
+const char* chunkStateLabel(ChunkState state) noexcept
+{
+    switch (state)
+    {
+    case ChunkState::Empty:
+        return "Empty";
+    case ChunkState::Generating:
+        return "Generating";
+    case ChunkState::Meshing:
+        return "Meshing";
+    case ChunkState::Ready:
+        return "Ready";
+    case ChunkState::Uploaded:
+        return "Uploaded";
+    case ChunkState::Remeshing:
+        return "Remeshing";
+    }
+    return "Unknown";
+}
+
 enum class JobType : std::uint8_t
 {
     Generate = 0,
@@ -1374,6 +1413,11 @@ public:
         device_ = device;
         uploadContext_.initialize(device_.Get());
         clear();
+    }
+
+    void setRenderSynchronization(ID3D12Fence* graphicsFence, UINT64 graphicsFenceValue)
+    {
+        uploadContext_.setGraphicsFenceDependency(graphicsFence, graphicsFenceValue);
     }
 
     void update(const glm::ivec3& cameraChunk,
@@ -2668,6 +2712,7 @@ struct ChunkManager::Impl
     ~Impl();
 
     void initializeRendering(ID3D12Device* device);
+    void setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue);
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -2709,6 +2754,7 @@ struct ChunkManager::Impl
     void setStartupEnabled(bool enabled) noexcept;
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
+    RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
     ChunkProfilingSnapshot sampleProfilingSnapshot();
     std::string biomeNameAt(const glm::vec3& worldPos) const;
 
@@ -2906,6 +2952,9 @@ private:
     void generateSurfaceOnlyChunk(Chunk& chunk);
     bool shouldUseSurfaceOnly(const glm::ivec3& center, const glm::ivec3& coord) const noexcept;
     std::pair<glm::vec2, glm::vec2> atlasUvFor(BlockId block, BlockFace face) const;
+    void noteRecentEdit(const char* kind, const glm::ivec3& worldPos, const glm::ivec3& chunkCoord);
+    void appendRecentEditDebugEvent(const std::string& event);
+    bool shouldTrackRecentEditChunk(const glm::ivec3& coord) const;
 
     glm::ivec2 atlasTextureSizePixels_{1, 1};
     int atlasTileSizePixels_{kAtlasTileSizePixels};
@@ -2996,6 +3045,19 @@ private:
     int lastLoggedGenerationBudget_{-1};
     int lastLoggedRingBudget_{-1};
     int lastLoggedColumnCap_{-1};
+
+    struct RecentEditDebugState
+    {
+        bool valid{false};
+        std::string kind{};
+        glm::ivec3 worldPos{0};
+        glm::ivec3 chunkCoord{0};
+        std::chrono::steady_clock::time_point timestamp{};
+    };
+
+    mutable std::mutex recentEditDebugMutex_;
+    RecentEditDebugState recentEditDebug_{};
+    std::deque<std::string> recentEditDebugEvents_{};
 };
 
 // JobQueue implementations
@@ -3320,6 +3382,12 @@ void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
     uploadContext_.initialize(device_.Get());
     farTerrainManager_.setDevice(device_.Get());
     destroyBufferPages();
+}
+
+void ChunkManager::Impl::setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue)
+{
+    uploadContext_.setGraphicsFenceDependency(graphicsFence, static_cast<UINT64>(graphicsFenceValue));
+    farTerrainManager_.setRenderSynchronization(graphicsFence, static_cast<UINT64>(graphicsFenceValue));
 }
 
 void ChunkManager::Impl::setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config)
@@ -4014,6 +4082,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
     relightAroundChunk(chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(worldPos);
+    noteRecentEdit("destroy", worldPos, chunkCoord);
 
     return true;
 }
@@ -4062,6 +4131,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
     relightAroundChunk(chunkCoord);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(placePos);
+    noteRecentEdit("place", placePos, chunkCoord);
 
     return true;
 }
@@ -4938,12 +5008,24 @@ void ChunkManager::Impl::processJob(const Job& job)
             chunk->pendingMeshRefresh.store(false, std::memory_order_release);
             chunk->state.store(ChunkState::Meshing, std::memory_order_release);
             enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
+            if (shouldTrackRecentEditChunk(chunk->coord))
+            {
+                std::ostringstream stream;
+                stream << "generate -> mesh chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z << ")";
+                appendRecentEditDebugEvent(stream.str());
+            }
         }
         else
         {
             chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
             chunk->meshReady.store(false, std::memory_order_release);
             chunk->indexCount.store(0, std::memory_order_release);
+            if (shouldTrackRecentEditChunk(chunk->coord))
+            {
+                std::ostringstream stream;
+                stream << "generate empty chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z << ")";
+                appendRecentEditDebugEvent(stream.str());
+            }
         }
     }
     else if (job.type == JobType::Mesh)
@@ -4966,10 +5048,25 @@ void ChunkManager::Impl::processJob(const Job& job)
             chunk->state.store(ChunkState::Ready, std::memory_order_release);
         }
 
+        if (shouldTrackRecentEditChunk(chunk->coord))
+        {
+            std::ostringstream stream;
+            stream << "mesh done chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
+                   << ") empty=" << (meshEmpty ? "yes" : "no")
+                   << " pendingRefresh=" << (chunk->pendingMeshRefresh.load(std::memory_order_acquire) ? "yes" : "no");
+            appendRecentEditDebugEvent(stream.str());
+        }
+
         if (chunk->pendingMeshRefresh.exchange(false, std::memory_order_acq_rel))
         {
             chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
             enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
+            if (shouldTrackRecentEditChunk(chunk->coord))
+            {
+                std::ostringstream stream;
+                stream << "mesh result superseded chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z << ")";
+                appendRecentEditDebugEvent(stream.str());
+            }
             return;
         }
 
@@ -4978,6 +5075,12 @@ void ChunkManager::Impl::processJob(const Job& job)
             recycleChunkGPU(*chunk);
             chunk->meshReady.store(false, std::memory_order_release);
             chunk->indexCount.store(0, std::memory_order_release);
+            if (shouldTrackRecentEditChunk(chunk->coord))
+            {
+                std::ostringstream stream;
+                stream << "mesh empty -> recycle GPU chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z << ")";
+                appendRecentEditDebugEvent(stream.str());
+            }
             return;
         }
 
@@ -5021,6 +5124,14 @@ void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk
 
     uploadQueue_.emplace_back(chunk);
     chunk->queuedForUpload.store(true, std::memory_order_release);
+
+    if (shouldTrackRecentEditChunk(chunk->coord))
+    {
+        std::ostringstream stream;
+        stream << "queue upload chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
+               << ") idx=" << chunk->indexCount.load(std::memory_order_acquire);
+        appendRecentEditDebugEvent(stream.str());
+    }
 }
 
 void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront)
@@ -5621,6 +5732,208 @@ void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) con
     predictedColumnHeights_.erase(column);
 }
 
+void ChunkManager::Impl::noteRecentEdit(const char* kind,
+                                        const glm::ivec3& worldPos,
+                                        const glm::ivec3& chunkCoord)
+{
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(recentEditDebugMutex_);
+        recentEditDebug_.valid = true;
+        recentEditDebug_.kind = kind ? kind : "edit";
+        recentEditDebug_.worldPos = worldPos;
+        recentEditDebug_.chunkCoord = chunkCoord;
+        recentEditDebug_.timestamp = now;
+        recentEditDebugEvents_.clear();
+    }
+
+    std::ostringstream stream;
+    stream << "edit " << (kind ? kind : "edit")
+           << " world=(" << worldPos.x << ", " << worldPos.y << ", " << worldPos.z << ")"
+           << " chunk=(" << chunkCoord.x << ", " << chunkCoord.y << ", " << chunkCoord.z << ")";
+    appendRecentEditDebugEvent(stream.str());
+}
+
+void ChunkManager::Impl::appendRecentEditDebugEvent(const std::string& event)
+{
+    std::lock_guard<std::mutex> lock(recentEditDebugMutex_);
+    if (!recentEditDebug_.valid)
+    {
+        return;
+    }
+
+    const double ageMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - recentEditDebug_.timestamp).count();
+
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed, std::ios::floatfield);
+    stream << '[' << std::setprecision(1) << ageMs << " ms] " << event;
+    recentEditDebugEvents_.push_back(stream.str());
+    while (recentEditDebugEvents_.size() > 48)
+    {
+        recentEditDebugEvents_.pop_front();
+    }
+}
+
+bool ChunkManager::Impl::shouldTrackRecentEditChunk(const glm::ivec3& coord) const
+{
+    std::lock_guard<std::mutex> lock(recentEditDebugMutex_);
+    if (!recentEditDebug_.valid)
+    {
+        return false;
+    }
+
+    const double ageSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - recentEditDebug_.timestamp).count();
+    if (ageSeconds > 6.0)
+    {
+        return false;
+    }
+
+    return std::abs(coord.x - recentEditDebug_.chunkCoord.x) <= 1 &&
+           std::abs(coord.z - recentEditDebug_.chunkCoord.z) <= 1 &&
+           std::abs(coord.y - recentEditDebug_.chunkCoord.y) <= 6;
+}
+
+RecentEditHoleDebugSnapshot ChunkManager::Impl::recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const
+{
+    RecentEditHoleDebugSnapshot snapshot{};
+    RecentEditDebugState recentEdit{};
+    {
+        std::lock_guard<std::mutex> lock(recentEditDebugMutex_);
+        recentEdit = recentEditDebug_;
+        snapshot.recentEvents.assign(recentEditDebugEvents_.begin(), recentEditDebugEvents_.end());
+    }
+
+    if (!recentEdit.valid)
+    {
+        return snapshot;
+    }
+
+    snapshot.editKind = recentEdit.kind;
+    snapshot.editWorldPos = recentEdit.worldPos;
+    snapshot.editChunkCoord = recentEdit.chunkCoord;
+    snapshot.ageSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - recentEdit.timestamp).count();
+    snapshot.hasRecentEdit = snapshot.ageSeconds <= 6.0;
+
+    const glm::ivec3 cameraChunk = worldToChunkCoords(static_cast<int>(std::floor(cameraPos.x)),
+                                                      static_cast<int>(std::floor(cameraPos.y)),
+                                                      static_cast<int>(std::floor(cameraPos.z)));
+    const glm::ivec3 centerChunk = lastCenterChunk_;
+    const glm::ivec2 cameraColumn{centerChunk.x, centerChunk.z};
+    const int cameraChunkY = centerChunk.y;
+    snapshot.cameraChunkY = cameraChunkY;
+    snapshot.verticalRadius = lastVerticalRadius_;
+
+    const int minY = std::max(0, std::min(recentEdit.chunkCoord.y, cameraChunk.y) - 4);
+    const int maxY = std::max(recentEdit.chunkCoord.y + 2, cameraChunk.y + 1);
+    std::vector<glm::ivec3> coords;
+    coords.reserve(static_cast<std::size_t>((maxY - minY + 1) * 9));
+    for (int x = recentEdit.chunkCoord.x - 1; x <= recentEdit.chunkCoord.x + 1; ++x)
+    {
+        for (int z = recentEdit.chunkCoord.z - 1; z <= recentEdit.chunkCoord.z + 1; ++z)
+        {
+            for (int y = minY; y <= maxY; ++y)
+            {
+                coords.push_back(glm::ivec3{x, y, z});
+            }
+        }
+    }
+
+    std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> localChunks;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        for (const glm::ivec3& coord : coords)
+        {
+            auto it = chunks_.find(coord);
+            if (it != chunks_.end())
+            {
+                localChunks.emplace(coord, it->second);
+            }
+        }
+    }
+
+    std::sort(coords.begin(),
+              coords.end(),
+              [](const glm::ivec3& lhs, const glm::ivec3& rhs)
+              {
+                  if (lhs.y != rhs.y)
+                  {
+                      return lhs.y > rhs.y;
+                  }
+                  if (lhs.x != rhs.x)
+                  {
+                      return lhs.x < rhs.x;
+                  }
+                  return lhs.z < rhs.z;
+              });
+
+    const int horizontalThreshold = targetViewDistance_ + kVerticalStreamingConfig.horizontalEvictionSlack;
+
+    for (const glm::ivec3& coord : coords)
+    {
+        RecentEditHoleChunkInfo info{};
+        info.coord = coord;
+
+        const glm::ivec2 column{coord.x, coord.z};
+        const int worldX = coord.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = coord.z * kChunkSizeZ + kChunkSizeZ / 2;
+
+        int columnHeight = columnManager_.highestSolidBlock(worldX, worldZ);
+        if (columnHeight != ColumnManager::kNoHeight)
+        {
+            info.heightSource = "column";
+        }
+        else
+        {
+            int predictedHeight = ColumnManager::kNoHeight;
+            if (tryGetPredictedColumnHeight(column, predictedHeight))
+            {
+                columnHeight = predictedHeight;
+                info.heightSource = "predicted";
+            }
+            else
+            {
+                columnHeight = sampleColumn(worldX, worldZ).surfaceY;
+                info.heightSource = "sample";
+            }
+        }
+        info.columnHeight = columnHeight;
+
+        const auto [minChunkY, maxChunkY] =
+            columnSpanForHeight(column, cameraColumn, cameraChunkY, lastVerticalRadius_, columnHeight);
+        info.columnMinChunkY = minChunkY;
+        info.columnMaxChunkY = maxChunkY;
+
+        const int horizontalDistance = std::max(std::abs(coord.x - centerChunk.x), std::abs(coord.z - centerChunk.z));
+        info.wouldEvict = coord.y < 0 ||
+                          horizontalDistance > horizontalThreshold ||
+                          coord.y < (minChunkY - kVerticalStreamingConfig.columnSlackChunks) ||
+                          coord.y > (maxChunkY + kVerticalStreamingConfig.columnSlackChunks);
+
+        auto it = localChunks.find(coord);
+        if (it == localChunks.end())
+        {
+            snapshot.chunks.push_back(std::move(info));
+            continue;
+        }
+
+        const std::shared_ptr<Chunk>& chunk = it->second;
+        info.present = true;
+        info.stateLabel = chunkStateLabel(chunk->state.load(std::memory_order_acquire));
+        info.hasBlocks = chunk->hasBlocks.load(std::memory_order_acquire);
+        info.meshReady = chunk->meshReady.load(std::memory_order_acquire);
+        info.queuedForUpload = chunk->queuedForUpload.load(std::memory_order_acquire);
+        info.inFlight = chunk->inFlight.load(std::memory_order_acquire);
+        info.indexCount = chunk->indexCount.load(std::memory_order_acquire);
+        info.bufferPageIndex = chunk->bufferPageIndex.load(std::memory_order_acquire);
+        snapshot.chunks.push_back(std::move(info));
+    }
+
+    return snapshot;
+}
+
 int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
                                         const glm::ivec2& cameraColumn,
                                         int cameraChunkY,
@@ -5871,6 +6184,40 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
 
         if (chunk)
         {
+            if (shouldTrackRecentEditChunk(chunk->coord))
+            {
+                const glm::ivec2 evictionCameraColumn{center.x, center.z};
+                const glm::ivec2 column{chunk->coord.x, chunk->coord.z};
+                const int worldX = chunk->coord.x * kChunkSizeX + kChunkSizeX / 2;
+                const int worldZ = chunk->coord.z * kChunkSizeZ + kChunkSizeZ / 2;
+                int columnHeight = columnManager_.highestSolidBlock(worldX, worldZ);
+                if (columnHeight == ColumnManager::kNoHeight)
+                {
+                    int predictedHeight = ColumnManager::kNoHeight;
+                    if (tryGetPredictedColumnHeight(column, predictedHeight))
+                    {
+                        columnHeight = predictedHeight;
+                    }
+                    else
+                    {
+                        columnHeight = sampleColumn(worldX, worldZ).surfaceY;
+                    }
+                }
+
+                const auto [minChunkY, maxChunkY] =
+                    columnSpanForHeight(column, evictionCameraColumn, center.y, lastVerticalRadius_, columnHeight);
+                const int horizontalDistance =
+                    std::max(std::abs(chunk->coord.x - center.x), std::abs(chunk->coord.z - center.z));
+
+                std::ostringstream stream;
+                stream << "evict chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
+                       << ") hDist=" << horizontalDistance
+                       << " hThreshold=" << horizontalThreshold
+                       << " spanY=[" << minChunkY << ", " << maxChunkY << "]"
+                       << " idx=" << chunk->indexCount.load(std::memory_order_acquire);
+                appendRecentEditDebugEvent(stream.str());
+            }
+
             columnManager_.removeChunk(*chunk);
             invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             recycleChunkGPU(*chunk);
@@ -6029,11 +6376,21 @@ void ChunkManager::Impl::uploadReadyMeshes()
 void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
 {
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
+    const std::uint32_t oldPageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
+    const std::uint32_t oldIndexCount = chunk.indexCount.load(std::memory_order_acquire);
 
     if (chunk.meshData.empty())
     {
         releaseChunkAllocation(chunk);
         chunk.meshData.clear();
+        if (shouldTrackRecentEditChunk(chunk.coord))
+        {
+            std::ostringstream stream;
+            stream << "upload skipped empty chunk=(" << chunk.coord.x << ", " << chunk.coord.y << ", " << chunk.coord.z
+                   << ") oldPage=" << oldPageIndex
+                   << " oldIdx=" << oldIndexCount;
+            appendRecentEditDebugEvent(stream.str());
+        }
         return;
     }
 
@@ -6045,6 +6402,15 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
     if (allocation.pageIndex == kInvalidChunkBufferPage)
     {
         chunk.meshData.clear();
+        if (shouldTrackRecentEditChunk(chunk.coord))
+        {
+            std::ostringstream stream;
+            stream << "upload alloc failed chunk=(" << chunk.coord.x << ", " << chunk.coord.y << ", " << chunk.coord.z
+                   << ") oldPage=" << oldPageIndex
+                   << " verts=" << vertexCount
+                   << " idx=" << indexCount;
+            appendRecentEditDebugEvent(stream.str());
+        }
         return;
     }
 
@@ -6109,6 +6475,16 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
     chunk.indexCount.store(static_cast<std::uint32_t>(indexCount), std::memory_order_release);
 
     chunk.meshData.clear();
+
+    if (shouldTrackRecentEditChunk(chunk.coord))
+    {
+        std::ostringstream stream;
+        stream << "upload complete chunk=(" << chunk.coord.x << ", " << chunk.coord.y << ", " << chunk.coord.z
+               << ") oldPage=" << oldPageIndex
+               << " newPage=" << allocation.pageIndex
+               << " idx=" << indexCount;
+        appendRecentEditDebugEvent(stream.str());
+    }
 }
 
 void ChunkManager::Impl::buildSurfaceOnlyMesh(Chunk& chunk)
@@ -6828,6 +7204,14 @@ void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk)
     if (state == ChunkState::Generating || state == ChunkState::Meshing)
     {
         chunk->pendingMeshRefresh.store(true, std::memory_order_release);
+        if (shouldTrackRecentEditChunk(chunk->coord))
+        {
+            std::ostringstream stream;
+            stream << "remesh defer chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
+                   << ") state=" << chunkStateLabel(state)
+                   << " inFlight=" << chunk->inFlight.load(std::memory_order_acquire);
+            appendRecentEditDebugEvent(stream.str());
+        }
         return;
     }
 
@@ -6836,6 +7220,13 @@ void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk)
         if (chunk->inFlight.load(std::memory_order_acquire) > 0)
         {
             chunk->pendingMeshRefresh.store(true, std::memory_order_release);
+            if (shouldTrackRecentEditChunk(chunk->coord))
+            {
+                std::ostringstream stream;
+                stream << "remesh refresh-pending chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
+                       << ") inFlight=" << chunk->inFlight.load(std::memory_order_acquire);
+                appendRecentEditDebugEvent(stream.str());
+            }
             return;
         }
     }
@@ -6844,6 +7235,14 @@ void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk)
     {
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
         enqueueJob(chunk, JobType::Mesh, chunk->coord);
+        if (shouldTrackRecentEditChunk(chunk->coord))
+        {
+            std::ostringstream stream;
+            stream << "remesh enqueue chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
+                   << ") prevState=" << chunkStateLabel(state)
+                   << " idx=" << chunk->indexCount.load(std::memory_order_acquire);
+            appendRecentEditDebugEvent(stream.str());
+        }
     }
 }
 
@@ -7995,6 +8394,11 @@ void ChunkManager::initializeRendering(ID3D12Device* device)
     impl_->initializeRendering(device);
 }
 
+void ChunkManager::setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue)
+{
+    impl_->setRenderSynchronization(graphicsFence, graphicsFenceValue);
+}
+
 void ChunkManager::setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config)
 {
     impl_->setBlockTextureAtlasConfig(config);
@@ -8167,6 +8571,11 @@ bool ChunkManager::startupEnabled() const noexcept
 StreamingStatusSnapshot ChunkManager::streamingStatusSnapshot() const noexcept
 {
     return impl_->streamingStatusSnapshot();
+}
+
+RecentEditHoleDebugSnapshot ChunkManager::recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const
+{
+    return impl_->recentEditHoleDebugSnapshot(cameraPos);
 }
 
 ChunkProfilingSnapshot ChunkManager::sampleProfilingSnapshot()

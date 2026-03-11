@@ -132,6 +132,8 @@ public:
     void resize(int width, int height);
 
     [[nodiscard]] ID3D12Device* device() const noexcept;
+    [[nodiscard]] ID3D12Fence* frameFence() const noexcept;
+    [[nodiscard]] UINT64 lastSubmittedFrameFenceValue() const noexcept;
     [[nodiscard]] LoadedTexture loadTexture(const char* path);
 
     void beginFrame(const glm::vec4& clearColor);

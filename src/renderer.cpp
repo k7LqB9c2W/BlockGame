@@ -750,6 +750,16 @@ ID3D12Device* Renderer::device() const noexcept
     return device_.Get();
 }
 
+ID3D12Fence* Renderer::frameFence() const noexcept
+{
+    return fence_.Get();
+}
+
+UINT64 Renderer::lastSubmittedFrameFenceValue() const noexcept
+{
+    return fenceValue_;
+}
+
 int Renderer::width() const noexcept
 {
     return width_;

@@ -237,6 +237,37 @@ struct StreamingStatusSnapshot
     const char* blockingReason{"ready"};
 };
 
+struct RecentEditHoleChunkInfo
+{
+    glm::ivec3 coord{0};
+    bool present{false};
+    std::string stateLabel{"Missing"};
+    bool hasBlocks{false};
+    bool meshReady{false};
+    bool queuedForUpload{false};
+    int inFlight{0};
+    std::uint32_t indexCount{0};
+    std::uint32_t bufferPageIndex{(std::numeric_limits<std::uint32_t>::max)()};
+    int columnMinChunkY{0};
+    int columnMaxChunkY{0};
+    int columnHeight{(std::numeric_limits<int>::min)()};
+    std::string heightSource{"none"};
+    bool wouldEvict{false};
+};
+
+struct RecentEditHoleDebugSnapshot
+{
+    bool hasRecentEdit{false};
+    std::string editKind{};
+    glm::ivec3 editWorldPos{0};
+    glm::ivec3 editChunkCoord{0};
+    double ageSeconds{0.0};
+    int cameraChunkY{0};
+    int verticalRadius{0};
+    std::vector<std::string> recentEvents;
+    std::vector<RecentEditHoleChunkInfo> chunks;
+};
+
 struct Frustum
 {
     std::array<glm::vec4, 6> planes{};
@@ -257,6 +288,7 @@ public:
     ChunkManager& operator=(ChunkManager&&) = delete;
 
     void initializeRendering(ID3D12Device* device);
+    void setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue);
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -300,6 +332,7 @@ public:
     void setStartupEnabled(bool enabled) noexcept;
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
+    RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
 
     ChunkProfilingSnapshot sampleProfilingSnapshot();
     std::string biomeNameAt(const glm::vec3& worldPos) const;

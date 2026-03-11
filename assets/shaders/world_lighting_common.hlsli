@@ -12,8 +12,13 @@ struct FogBlendResult
     float inscatter;
 };
 
-static const float3 kBaseGameSkyColor = float3(120.0f / 255.0f, 167.0f / 255.0f, 255.0f / 255.0f);
-static const float3 kBaseGameHorizonColor = float3(187.0f / 255.0f, 212.0f / 255.0f, 255.0f / 255.0f);
+static const float3 kBaseGameSkyColorSrgb = float3(120.0f / 255.0f, 167.0f / 255.0f, 255.0f / 255.0f);
+static const float3 kBaseGameHorizonColorSrgb = float3(187.0f / 255.0f, 212.0f / 255.0f, 255.0f / 255.0f);
+
+float3 srgbToLinearApprox(float3 color)
+{
+    return pow(color, 2.2f);
+}
 
 static const float kVanillaLightLut[16] = {
     0.000f, 0.018f, 0.025f, 0.035f,
@@ -68,14 +73,16 @@ float3 computeTerrainFogColor(float3 viewDir,
                               float3 skyAmbient,
                               float3 groundAmbient)
 {
+    const float3 skyBase = srgbToLinearApprox(kBaseGameSkyColorSrgb);
+    const float3 horizonBaseColor = srgbToLinearApprox(kBaseGameHorizonColorSrgb);
     const float horizon = pow(saturate(1.0f - abs(viewDir.y) * 2.2f), 0.60f);
     const float upness = saturate(viewDir.y * 0.5f + 0.5f);
     const float sunFacing = pow(saturate(dot(normalize(float3(viewDir.x, max(viewDir.y, -0.12f), viewDir.z)), lightDir)), 5.0f);
-    const float3 zenithTint = kBaseGameSkyColor * 0.98f + skyAmbient * 0.92f;
-    const float3 horizonBase = kBaseGameHorizonColor * 0.92f + skyAmbient * 0.55f + groundAmbient * 0.06f;
+    const float3 zenithTint = skyBase * 1.12f + skyAmbient * 0.45f;
+    const float3 horizonBase = horizonBaseColor * 1.02f + skyAmbient * 0.22f + groundAmbient * 0.03f;
     const float3 horizonSunTint = horizonBase + sunColor * 0.035f;
     const float3 horizonTint = lerp(horizonBase, horizonSunTint, sunFacing);
-    const float3 lowerTint = lerp(kBaseGameHorizonColor * 0.96f, horizonTint * 0.995f, horizon);
+    const float3 lowerTint = lerp(horizonBaseColor * 1.00f, horizonTint * 0.995f, horizon);
     return lerp(lowerTint, lerp(horizonTint, zenithTint, upness), saturate(viewDir.y * 1.35f + 0.52f));
 }
 

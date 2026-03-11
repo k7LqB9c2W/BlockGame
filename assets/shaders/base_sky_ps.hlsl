@@ -12,11 +12,18 @@ struct PSInput
     float2 uv : TEXCOORD0;
 };
 
+float3 srgbToLinear(float3 color)
+{
+    return pow(color, 2.2f);
+}
+
 float4 main(PSInput input) : SV_TARGET
 {
-    const float horizonMask = pow(saturate(1.0f - abs(input.uv.y * 2.0f - 1.0f) * 1.15f), 2.0f);
-    const float horizonBlend = saturate(1.0f - pow(input.uv.y, 1.85f));
-    const float3 skyColor = lerp(uTopSkyColor.rgb, uHorizonSkyColor.rgb, horizonBlend);
-    const float3 softenedSky = lerp(skyColor, uHorizonSkyColor.rgb, horizonMask * 0.22f);
-    return float4(softenedSky, 1.0f);
+    const float horizonBlend = pow(saturate(input.uv.y), 1.75f);
+    const float horizonBand = pow(saturate(input.uv.y), 3.8f);
+    const float3 topSky = srgbToLinear(uTopSkyColor.rgb) * 1.10f;
+    const float3 horizonSky = srgbToLinear(uHorizonSkyColor.rgb) * 1.05f;
+    float3 skyColor = lerp(topSky, horizonSky, horizonBlend);
+    skyColor = lerp(skyColor, horizonSky, horizonBand * 0.30f);
+    return float4(skyColor, 1.0f);
 }

@@ -209,7 +209,8 @@ $envKeys = @(
     "BLOCKGAME_BENCHMARK",
     "BLOCKGAME_BENCHMARK_SCENARIO",
     "BLOCKGAME_BENCHMARK_OUTPUT",
-    "BLOCKGAME_BENCHMARK_BUILD_CONFIG"
+    "BLOCKGAME_BENCHMARK_BUILD_CONFIG",
+    "BLOCKGAME_BENCHMARK_FAR_TERRAIN"
 )
 $previousEnv = @{}
 foreach ($key in $envKeys) {
@@ -226,6 +227,7 @@ try {
         $env:BLOCKGAME_BENCHMARK_SCENARIO = $scenario
         $env:BLOCKGAME_BENCHMARK_OUTPUT = $scenarioPath
         $env:BLOCKGAME_BENCHMARK_BUILD_CONFIG = $Config
+        $env:BLOCKGAME_BENCHMARK_FAR_TERRAIN = "0"
 
         Write-Host "Running chunk benchmark scenario $scenario ..."
         $result = Invoke-BenchmarkScenario `

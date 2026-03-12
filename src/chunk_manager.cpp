@@ -1582,6 +1582,118 @@ struct Job
         : type(t), chunkCoord(coord), chunk(std::move(c)) {}
 };
 
+constexpr std::size_t kJobTypeCount = 2;
+
+[[nodiscard]] constexpr std::size_t jobTypeIndex(JobType type) noexcept
+{
+    return static_cast<std::size_t>(type);
+}
+
+struct ChunkPriorityKey
+{
+    int supportBucket{3};
+    int horizontalDistance{0};
+    int forwardBucket{2};
+    int verticalDistance{0};
+    int axisDistance{0};
+};
+
+[[nodiscard]] glm::vec2 normalizePriorityForwardXZ(const glm::vec3& forward) noexcept
+{
+    glm::vec2 forwardXZ(forward.x, forward.z);
+    if (glm::dot(forwardXZ, forwardXZ) <= kEpsilon)
+    {
+        return {0.0f, -1.0f};
+    }
+
+    return glm::normalize(forwardXZ);
+}
+
+[[nodiscard]] ChunkPriorityKey buildChunkPriorityKey(const glm::ivec3& coord,
+                                                     const glm::ivec3& origin,
+                                                     const glm::vec2& forwardXZ) noexcept
+{
+    const int dx = coord.x - origin.x;
+    const int dy = coord.y - origin.y;
+    const int dz = coord.z - origin.z;
+    const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
+    const int verticalDistance = std::abs(dy);
+
+    int supportBucket = 3;
+    if (horizontalDistance == 0 && verticalDistance <= 8)
+    {
+        supportBucket = 0;
+    }
+    else if (horizontalDistance <= 1 && coord.y >= origin.y - 2 && coord.y <= origin.y + 2)
+    {
+        supportBucket = 1;
+    }
+    else if (horizontalDistance <= 2 && verticalDistance <= 2)
+    {
+        supportBucket = 2;
+    }
+
+    float facingDot = 1.0f;
+    const glm::vec2 delta(static_cast<float>(dx), static_cast<float>(dz));
+    if (glm::dot(delta, delta) > kEpsilon)
+    {
+        facingDot = glm::dot(glm::normalize(delta), forwardXZ);
+    }
+
+    int forwardBucket = 2;
+    if (facingDot >= 0.5f)
+    {
+        forwardBucket = 0;
+    }
+    else if (facingDot >= -0.2f)
+    {
+        forwardBucket = 1;
+    }
+
+    return ChunkPriorityKey{
+        supportBucket,
+        horizontalDistance,
+        forwardBucket,
+        verticalDistance,
+        std::abs(dx) + verticalDistance + std::abs(dz)};
+}
+
+[[nodiscard]] int compareChunkPriorityKeys(const ChunkPriorityKey& lhs,
+                                           const ChunkPriorityKey& rhs) noexcept
+{
+    if (lhs.supportBucket != rhs.supportBucket)
+    {
+        return lhs.supportBucket < rhs.supportBucket ? -1 : 1;
+    }
+    if (lhs.horizontalDistance != rhs.horizontalDistance)
+    {
+        return lhs.horizontalDistance < rhs.horizontalDistance ? -1 : 1;
+    }
+    if (lhs.forwardBucket != rhs.forwardBucket)
+    {
+        return lhs.forwardBucket < rhs.forwardBucket ? -1 : 1;
+    }
+    if (lhs.verticalDistance != rhs.verticalDistance)
+    {
+        return lhs.verticalDistance < rhs.verticalDistance ? -1 : 1;
+    }
+    if (lhs.axisDistance != rhs.axisDistance)
+    {
+        return lhs.axisDistance < rhs.axisDistance ? -1 : 1;
+    }
+    return 0;
+}
+
+[[nodiscard]] bool isChunkCoordHigherPriority(const glm::ivec3& lhs,
+                                              const glm::ivec3& rhs,
+                                              const glm::ivec3& origin,
+                                              const glm::vec3& forward) noexcept
+{
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    return compareChunkPriorityKeys(buildChunkPriorityKey(lhs, origin, forwardXZ),
+                                    buildChunkPriorityKey(rhs, origin, forwardXZ)) < 0;
+}
+
 class JobQueue
 {
 public:
@@ -1591,14 +1703,16 @@ public:
     std::vector<Job> stop();
     bool empty() const;
     std::size_t size() const;
-    void updatePriorityOrigin(const glm::ivec3& origin);
+    void updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
+    void setWorkerConcurrency(std::size_t workerCount) noexcept;
+    void jobCompleted(JobType type) noexcept;
 
 private:
     struct PrioritizedJob
     {
         Job job;
-        int distance{0};
-        int priorityBias{0};
+        ChunkPriorityKey priority{};
+        int stageBias{0};
         std::uint64_t sequence{0};
     };
 
@@ -1608,14 +1722,21 @@ private:
     };
 
     PrioritizedJob wrap(const Job& job);
-    static int manhattanDistance(const glm::ivec3& a, const glm::ivec3& b) noexcept;
+    [[nodiscard]] static int comparePrioritizedJobs(const PrioritizedJob& lhs,
+                                                    const PrioritizedJob& rhs) noexcept;
+    [[nodiscard]] bool hasQueuedJobsLocked() const noexcept;
+    [[nodiscard]] std::array<std::size_t, kJobTypeCount> computeStageTargetsLocked() const noexcept;
+    [[nodiscard]] std::size_t pickNextQueueIndexLocked() const noexcept;
     void rebuildLocked();
 
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::atomic<bool> shouldStop_{false};
     glm::ivec3 priorityOrigin_{0, 0, 0};
-    std::priority_queue<PrioritizedJob, std::vector<PrioritizedJob>, JobComparer> priorityQueue_;
+    glm::vec2 priorityForwardXZ_{0.0f, -1.0f};
+    std::array<std::priority_queue<PrioritizedJob, std::vector<PrioritizedJob>, JobComparer>, kJobTypeCount> queues_{};
+    std::array<std::size_t, kJobTypeCount> activeCounts_{};
+    std::size_t workerConcurrency_{1};
     std::uint64_t nextSequence_{0};
 };
 
@@ -3516,6 +3637,9 @@ private:
     int lastBacklogSteps_{0};
     bool startupEnabled_{true};
     StartupStreamingState startupState_{};
+    mutable std::mutex schedulingPriorityMutex_;
+    glm::ivec3 schedulingPriorityOrigin_{0};
+    glm::vec3 schedulingPriorityForward_{0.0f, 0.0f, -1.0f};
     glm::vec3 lastCameraForward_{0.0f, 0.0f, -1.0f};
     glm::ivec3 lastCenterChunk_{0};
     std::chrono::steady_clock::time_point lastUpdateTime_{};
@@ -3549,7 +3673,8 @@ bool JobQueue::push(const Job& job)
     {
         return false;
     }
-    priorityQueue_.push(wrap(job));
+
+    queues_[jobTypeIndex(job.type)].push(wrap(job));
     condition_.notify_one();
     return true;
 }
@@ -3557,28 +3682,57 @@ bool JobQueue::push(const Job& job)
 bool JobQueue::tryPop(Job& job)
 {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (priorityQueue_.empty())
+    if (!hasQueuedJobsLocked())
     {
         return false;
     }
-    job = priorityQueue_.top().job;
-    priorityQueue_.pop();
+
+    const std::size_t queueIndex = pickNextQueueIndexLocked();
+    job = queues_[queueIndex].top().job;
+    queues_[queueIndex].pop();
+    ++activeCounts_[queueIndex];
     return true;
 }
 
 Job JobQueue::waitAndPop()
 {
     std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this] { return !priorityQueue_.empty() || shouldStop_.load(std::memory_order_acquire); });
-
-    if (shouldStop_.load(std::memory_order_acquire) && priorityQueue_.empty())
+    condition_.wait(lock, [this]
     {
-        throw std::runtime_error("Job queue stopped");
-    }
+        return hasQueuedJobsLocked() || shouldStop_.load(std::memory_order_acquire);
+    });
 
-    Job job = priorityQueue_.top().job;
-    priorityQueue_.pop();
-    return job;
+    while (true)
+    {
+        if (shouldStop_.load(std::memory_order_acquire) && !hasQueuedJobsLocked())
+        {
+            throw std::runtime_error("Job queue stopped");
+        }
+
+        if (!hasQueuedJobsLocked())
+        {
+            condition_.wait(lock, [this]
+            {
+                return hasQueuedJobsLocked() || shouldStop_.load(std::memory_order_acquire);
+            });
+            continue;
+        }
+
+        const std::size_t queueIndex = pickNextQueueIndexLocked();
+        if (queues_[queueIndex].empty())
+        {
+            condition_.wait(lock, [this]
+            {
+                return hasQueuedJobsLocked() || shouldStop_.load(std::memory_order_acquire);
+            });
+            continue;
+        }
+
+        Job job = queues_[queueIndex].top().job;
+        queues_[queueIndex].pop();
+        ++activeCounts_[queueIndex];
+        return job;
+    }
 }
 
 std::vector<Job> JobQueue::stop()
@@ -3586,11 +3740,19 @@ std::vector<Job> JobQueue::stop()
     std::vector<Job> cancelledJobs;
     std::lock_guard<std::mutex> lock(mutex_);
     shouldStop_.store(true, std::memory_order_release);
-    cancelledJobs.reserve(priorityQueue_.size());
-    while (!priorityQueue_.empty())
+    std::size_t pendingCount = 0;
+    for (const auto& queue : queues_)
     {
-        cancelledJobs.push_back(priorityQueue_.top().job);
-        priorityQueue_.pop();
+        pendingCount += queue.size();
+    }
+    cancelledJobs.reserve(pendingCount);
+    for (auto& queue : queues_)
+    {
+        while (!queue.empty())
+        {
+            cancelledJobs.push_back(queue.top().job);
+            queue.pop();
+        }
     }
     condition_.notify_all();
     return cancelledJobs;
@@ -3599,73 +3761,201 @@ std::vector<Job> JobQueue::stop()
 bool JobQueue::empty() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return priorityQueue_.empty();
+    return !hasQueuedJobsLocked();
 }
 
 std::size_t JobQueue::size() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return priorityQueue_.size();
+    std::size_t total = 0;
+    for (const auto& queue : queues_)
+    {
+        total += queue.size();
+    }
+    return total;
 }
 
-void JobQueue::updatePriorityOrigin(const glm::ivec3& origin)
+void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (origin == priorityOrigin_)
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    const float facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    if (origin == priorityOrigin_ && facingDot >= 0.995f)
     {
         return;
     }
 
     priorityOrigin_ = origin;
+    priorityForwardXZ_ = forwardXZ;
     rebuildLocked();
 }
 
 bool JobQueue::JobComparer::operator()(const PrioritizedJob& lhs, const PrioritizedJob& rhs) const
 {
-    if (lhs.distance != rhs.distance)
-    {
-        return lhs.distance > rhs.distance;
-    }
-    if (lhs.priorityBias != rhs.priorityBias)
-    {
-        return lhs.priorityBias > rhs.priorityBias;
-    }
-    return lhs.sequence > rhs.sequence;
+    return JobQueue::comparePrioritizedJobs(lhs, rhs) > 0;
 }
 
 JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
 {
-    const int distance = manhattanDistance(job.chunkCoord, priorityOrigin_);
+    const ChunkPriorityKey priority = buildChunkPriorityKey(job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
     const int bias = (job.type == JobType::Mesh) ? 0 : 1;
     const std::uint64_t sequence = nextSequence_++;
-    return PrioritizedJob{job, distance, bias, sequence};
+    return PrioritizedJob{job, priority, bias, sequence};
 }
 
-int JobQueue::manhattanDistance(const glm::ivec3& a, const glm::ivec3& b) noexcept
+int JobQueue::comparePrioritizedJobs(const PrioritizedJob& lhs,
+                                     const PrioritizedJob& rhs) noexcept
 {
-    return std::abs(a.x - b.x) + std::abs(a.y - b.y) + std::abs(a.z - b.z);
+    const int priorityComparison = compareChunkPriorityKeys(lhs.priority, rhs.priority);
+    if (priorityComparison != 0)
+    {
+        return priorityComparison;
+    }
+    if (lhs.stageBias != rhs.stageBias)
+    {
+        return lhs.stageBias < rhs.stageBias ? -1 : 1;
+    }
+    if (lhs.sequence != rhs.sequence)
+    {
+        return lhs.sequence < rhs.sequence ? -1 : 1;
+    }
+    return 0;
+}
+
+bool JobQueue::hasQueuedJobsLocked() const noexcept
+{
+    for (const auto& queue : queues_)
+    {
+        if (!queue.empty())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() const noexcept
+{
+    std::array<std::size_t, kJobTypeCount> targets{1, 1};
+    const std::size_t totalWorkers = std::max<std::size_t>(workerConcurrency_, 1);
+    if (totalWorkers <= 1)
+    {
+        return targets;
+    }
+
+    const std::size_t generateBacklog = queues_[jobTypeIndex(JobType::Generate)].size();
+    const std::size_t meshBacklog = queues_[jobTypeIndex(JobType::Mesh)].size();
+
+    double meshShare = 0.5;
+    if (meshBacklog == 0 && generateBacklog > 0)
+    {
+        meshShare = 0.4;
+    }
+    else if (generateBacklog == 0 && meshBacklog > 0)
+    {
+        meshShare = 0.8;
+    }
+    else if (meshBacklog > generateBacklog * 2)
+    {
+        meshShare = 0.8;
+    }
+    else if (generateBacklog > meshBacklog * 2)
+    {
+        meshShare = 0.45;
+    }
+    else if (meshBacklog > generateBacklog)
+    {
+        meshShare = 0.65;
+    }
+    else if (generateBacklog > meshBacklog)
+    {
+        meshShare = 0.5;
+    }
+
+    std::size_t meshTarget = static_cast<std::size_t>(std::llround(static_cast<double>(totalWorkers) * meshShare));
+    meshTarget = std::clamp<std::size_t>(meshTarget, 1, totalWorkers - 1);
+    const std::size_t generateTarget = std::max<std::size_t>(1, totalWorkers - meshTarget);
+    targets[jobTypeIndex(JobType::Generate)] = generateTarget;
+    targets[jobTypeIndex(JobType::Mesh)] = meshTarget;
+    return targets;
+}
+
+std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
+{
+    const std::size_t generateIndex = jobTypeIndex(JobType::Generate);
+    const std::size_t meshIndex = jobTypeIndex(JobType::Mesh);
+    const bool generateReady = !queues_[generateIndex].empty();
+    const bool meshReady = !queues_[meshIndex].empty();
+
+    if (!meshReady)
+    {
+        return generateIndex;
+    }
+    if (!generateReady)
+    {
+        return meshIndex;
+    }
+
+    const std::array<std::size_t, kJobTypeCount> targets = computeStageTargetsLocked();
+    const bool generateUnderTarget = activeCounts_[generateIndex] < targets[generateIndex];
+    const bool meshUnderTarget = activeCounts_[meshIndex] < targets[meshIndex];
+
+    if (meshUnderTarget != generateUnderTarget)
+    {
+        return meshUnderTarget ? meshIndex : generateIndex;
+    }
+
+    const PrioritizedJob& generateTop = queues_[generateIndex].top();
+    const PrioritizedJob& meshTop = queues_[meshIndex].top();
+    return comparePrioritizedJobs(meshTop, generateTop) <= 0 ? meshIndex : generateIndex;
 }
 
 void JobQueue::rebuildLocked()
 {
-    if (priorityQueue_.empty())
+    if (!hasQueuedJobsLocked())
     {
         return;
     }
 
-    std::vector<PrioritizedJob> jobs;
-    jobs.reserve(priorityQueue_.size());
-    while (!priorityQueue_.empty())
+    for (auto& queue : queues_)
     {
-        jobs.push_back(priorityQueue_.top());
-        priorityQueue_.pop();
-    }
+        if (queue.empty())
+        {
+            continue;
+        }
 
-    for (auto& prioritized : jobs)
-    {
-        prioritized.distance = manhattanDistance(prioritized.job.chunkCoord, priorityOrigin_);
-        priorityQueue_.push(std::move(prioritized));
+        std::vector<PrioritizedJob> jobs;
+        jobs.reserve(queue.size());
+        while (!queue.empty())
+        {
+            jobs.push_back(queue.top());
+            queue.pop();
+        }
+
+        for (auto& prioritized : jobs)
+        {
+            prioritized.priority = buildChunkPriorityKey(prioritized.job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
+            queue.push(std::move(prioritized));
+        }
     }
+}
+
+void JobQueue::setWorkerConcurrency(std::size_t workerCount) noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    workerConcurrency_ = std::max<std::size_t>(workerCount, 1);
+    condition_.notify_all();
+}
+
+void JobQueue::jobCompleted(JobType type) noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t index = jobTypeIndex(type);
+    if (activeCounts_[index] > 0)
+    {
+        --activeCounts_[index];
+    }
+    condition_.notify_one();
 }
 
 glm::ivec2 ColumnManager::columnKey(const glm::ivec3& chunkCoord, int localX, int localZ) noexcept
@@ -3849,7 +4139,8 @@ ChunkManager::Impl::Impl(unsigned seed)
         });
 
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
-    farTerrainManager_.setEnabled(renderSettings_.farTerrainEnabled);
+    renderSettings_.farTerrainEnabled = false;
+    farTerrainManager_.setEnabled(false);
     farTerrainManager_.setDistanceBlocks(renderSettings_.farBlocks);
     farTerrainManager_.setFogStartBlocks(renderSettings_.fogStartBlocks);
     farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
@@ -4069,12 +4360,17 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const int clampedWorldY = std::max(worldY, 0);
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
     lastCenterChunk_ = centerChunk;
+    {
+        std::lock_guard<std::mutex> lock(schedulingPriorityMutex_);
+        schedulingPriorityOrigin_ = centerChunk;
+        schedulingPriorityForward_ = lastCameraForward_;
+    }
 
     if (!startupEnabled_ || !startupState_.preloadStarted)
     {
         startupState_.phase = StreamingPhase::SteadyState;
         startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
-        startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+        startupState_.farCurrentBlocks = renderSettings_.farTerrainEnabled ? renderSettings_.farBlocks : 0;
         startupState_.playerReleaseReady = true;
     }
     else
@@ -4101,7 +4397,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     uploadBudgetMsThisFrame_ = uploadBudgets.timeBudgetMs;
     pendingUploadsLastFrame_ = uploadBudgets.queueSize;
 
-    jobQueue_.updatePriorityOrigin(centerChunk);
+    jobQueue_.updatePriorityState(centerChunk, lastCameraForward_);
 
     if (viewDistance_ > targetViewDistance_)
     {
@@ -4248,6 +4544,12 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                 {
                     startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 8);
                 }
+                else if (!renderSettings_.farTerrainEnabled)
+                {
+                    startupState_.phase = StreamingPhase::SteadyState;
+                    startupState_.phaseTimeSeconds = 0.0;
+                    startupState_.farCurrentBlocks = 0;
+                }
                 else
                 {
                     startupState_.phase = StreamingPhase::FarRamp;
@@ -4321,7 +4623,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         case StreamingPhase::SteadyState:
             startupState_.playerReleaseReady = true;
             startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
-            startupState_.farCurrentBlocks = renderSettings_.farBlocks;
+            startupState_.farCurrentBlocks = renderSettings_.farTerrainEnabled ? renderSettings_.farBlocks : 0;
             break;
         case StreamingPhase::SpawnResolve:
             startupState_.phase = StreamingPhase::ExactPreload;
@@ -4862,7 +5164,11 @@ void ChunkManager::Impl::setFarRenderDistanceBlocks(int blocks) noexcept
     try
     {
         renderSettings_.farBlocks = std::max(blocks, 256);
-        if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
+        if (!renderSettings_.farTerrainEnabled)
+        {
+            startupState_.farCurrentBlocks = 0;
+        }
+        else if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
         {
             startupState_.farCurrentBlocks = renderSettings_.farBlocks;
         }
@@ -4874,7 +5180,7 @@ void ChunkManager::Impl::setFarRenderDistanceBlocks(int blocks) noexcept
         {
             startupState_.farCurrentBlocks = 0;
         }
-        farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+        farTerrainManager_.setDistanceBlocks(renderSettings_.farTerrainEnabled ? startupState_.farCurrentBlocks : 0);
         kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
         trimChunkPoolToBudget();
     }
@@ -4892,17 +5198,20 @@ void ChunkManager::Impl::setFogStartBlocks(int blocks) noexcept
 
 void ChunkManager::Impl::setFarTerrainEnabled(bool enabled)
 {
-    renderSettings_.farTerrainEnabled = enabled;
-    farTerrainManager_.setEnabled(enabled);
-    farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+    (void)enabled;
+    // Far terrain is obsolete for current builds. Keep the path hard-disabled until it is redesigned.
+    renderSettings_.farTerrainEnabled = false;
+    startupState_.farCurrentBlocks = 0;
+    farTerrainManager_.setEnabled(false);
+    farTerrainManager_.setDistanceBlocks(0);
+    farTerrainManager_.clear();
     trimChunkPoolToBudget();
-    std::cout << "[ChunkManager] Far terrain " << (enabled ? "enabled" : "disabled")
-              << " via F3 toggle" << std::endl;
+    std::cout << "[ChunkManager] Far terrain is disabled in current builds" << std::endl;
 }
 
 bool ChunkManager::Impl::farTerrainEnabled() const noexcept
 {
-    return renderSettings_.farTerrainEnabled;
+    return false;
 }
 
 void ChunkManager::Impl::setLodEnabled(bool enabled)
@@ -5512,6 +5821,7 @@ void ChunkManager::Impl::startWorkerThreads()
     }
 
     workerThreadCount_ = static_cast<std::size_t>(desired);
+    jobQueue_.setWorkerConcurrency(workerThreadCount_);
     workerThreads_.reserve(workerThreadCount_);
 
     for (std::size_t i = 0; i < workerThreadCount_; ++i)
@@ -5550,6 +5860,16 @@ void ChunkManager::Impl::workerThreadFunction()
         try
         {
             Job job = jobQueue_.waitAndPop();
+            struct QueueCompletionGuard
+            {
+                JobQueue& queue;
+                JobType type;
+
+                ~QueueCompletionGuard()
+                {
+                    queue.jobCompleted(type);
+                }
+            } queueCompletionGuard{jobQueue_, job.type};
             processJob(job);
             processPendingRelightRequests(1);
         }
@@ -5718,20 +6038,49 @@ void ChunkManager::Impl::processJob(const Job& job)
 
 std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
 {
-    std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    while (!uploadQueue_.empty())
+    glm::ivec3 priorityOrigin{0};
+    glm::vec3 priorityForward{0.0f, 0.0f, -1.0f};
     {
-        std::shared_ptr<Chunk> chunk = uploadQueue_.front().lock();
-        uploadQueue_.pop_front();
+        std::lock_guard<std::mutex> priorityLock(schedulingPriorityMutex_);
+        priorityOrigin = schedulingPriorityOrigin_;
+        priorityForward = schedulingPriorityForward_;
+    }
+
+    std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+    if (uploadQueue_.empty())
+    {
+        return nullptr;
+    }
+
+    auto bestIt = uploadQueue_.end();
+    std::shared_ptr<Chunk> bestChunk;
+    for (auto it = uploadQueue_.begin(); it != uploadQueue_.end();)
+    {
+        std::shared_ptr<Chunk> chunk = it->lock();
         if (!chunk)
         {
+            it = uploadQueue_.erase(it);
             continue;
         }
 
-        chunk->queuedForUpload.store(false, std::memory_order_release);
-        return chunk;
+        if (!bestChunk ||
+            isChunkCoordHigherPriority(chunk->coord, bestChunk->coord, priorityOrigin, priorityForward))
+        {
+            bestIt = it;
+            bestChunk = chunk;
+        }
+
+        ++it;
     }
-    return nullptr;
+
+    if (!bestChunk || bestIt == uploadQueue_.end())
+    {
+        return nullptr;
+    }
+
+    uploadQueue_.erase(bestIt);
+    bestChunk->queuedForUpload.store(false, std::memory_order_release);
+    return bestChunk;
 }
 
 void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk)
@@ -8073,12 +8422,35 @@ bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
     constexpr int kMaxCenterSpan = 2;
     constexpr std::size_t kMaxMergedCenters = 8;
 
+    glm::ivec3 priorityOrigin{0};
+    glm::vec3 priorityForward{0.0f, 0.0f, -1.0f};
+    {
+        std::lock_guard<std::mutex> priorityLock(schedulingPriorityMutex_);
+        priorityOrigin = schedulingPriorityOrigin_;
+        priorityForward = schedulingPriorityForward_;
+    }
+
     std::lock_guard<std::mutex> lock(pendingRelightMutex_);
 
     while (!pendingRelightQueue_.empty())
     {
-        const glm::ivec3 seedCoord = pendingRelightQueue_.front();
-        pendingRelightQueue_.pop_front();
+        auto seedItInQueue = pendingRelightQueue_.begin();
+        for (auto it = pendingRelightQueue_.begin(); it != pendingRelightQueue_.end(); ++it)
+        {
+            if (seedItInQueue == pendingRelightQueue_.end() ||
+                isChunkCoordHigherPriority(*it, *seedItInQueue, priorityOrigin, priorityForward))
+            {
+                seedItInQueue = it;
+            }
+        }
+
+        if (seedItInQueue == pendingRelightQueue_.end())
+        {
+            break;
+        }
+
+        const glm::ivec3 seedCoord = *seedItInQueue;
+        pendingRelightQueue_.erase(seedItInQueue);
 
         auto seedIt = pendingRelightRequests_.find(seedCoord);
         if (seedIt == pendingRelightRequests_.end())

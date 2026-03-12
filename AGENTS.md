@@ -43,6 +43,7 @@
 - The in-game debug overlay now includes `Yaw/Pitch`, `Front`, and `Hit Block` so a screenshot contains enough information to recreate the exact view later.
 - Chunk benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release` to execute `spawn_preload`, `straight_line_sprint`, `turn_heavy_traversal`, and `vertical_travel` in sequence. Add `-SkipBuild` if `build\Release\blockgame.exe` is already current.
 - Chunk benchmarks must be killed quickly when the game window becomes `Not Responding`; use the watchdog in `tools\run_chunk_benchmark.ps1` so hung runs are terminated early, a watchdog reason file is written, and CPU/GPU time plus RAM are not wasted during unattended benchmarking.
+- Far terrain mode is obsolete, not needed for current BlockGame work, and is being phased out. Do not re-enable it in gameplay, UI, captures, or benchmarks unless the user explicitly asks for temporary restoration work.
 - Chunk benchmark artifacts land in `artifacts\chunk_benchmark\<timestamp>\`. Read `benchmark_summary.json` first for Codex or scripts, and `benchmark_summary.txt` for a quick human summary.
 - Benchmark interpretation:
   `throughput.generated_chunks_per_sec` / `throughput.uploaded_chunks_per_sec` show chunk streaming throughput.

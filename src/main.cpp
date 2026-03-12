@@ -328,7 +328,7 @@ struct BenchmarkConfig
     int nearChunks{kDefaultNearRenderDistance};
     int farBlocks{kDefaultFarRenderDistanceBlocks};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
-    bool farTerrainEnabled{true};
+    bool farTerrainEnabled{false};
     float altitudeOffsetBlocks{24.0f};
     double movementDurationSeconds{0.0};
     double cooldownDurationSeconds{0.0};
@@ -471,11 +471,7 @@ struct BenchmarkFrameSummary
     (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_NEAR_CHUNKS", config.nearChunks);
     (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FAR_BLOCKS", config.farBlocks);
     (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FOG_START_BLOCKS", config.fogStartBlocks);
-    if (const char* farTerrainValue = std::getenv("BLOCKGAME_BENCHMARK_FAR_TERRAIN"))
-    {
-        config.farTerrainEnabled = envFlagEnabled("BLOCKGAME_BENCHMARK_FAR_TERRAIN");
-        (void)farTerrainValue;
-    }
+    config.farTerrainEnabled = false;
     config.altitudeOffsetBlocks =
         envFloatOrDefault("BLOCKGAME_BENCHMARK_ALTITUDE_OFFSET", config.altitudeOffsetBlocks);
 
@@ -1878,8 +1874,8 @@ int runGame()
     }
     if (captureOverrides.hasFarTerrainEnabled)
     {
-        chunkManager.setFarTerrainEnabled(captureOverrides.farTerrainEnabled);
-        inputContext.lodEnabled = captureOverrides.farTerrainEnabled;
+        chunkManager.setFarTerrainEnabled(false);
+        inputContext.lodEnabled = false;
     }
     if (captureOverrides.hasTimeOfDay)
     {
@@ -1898,8 +1894,8 @@ int runGame()
         chunkManager.setNearRenderDistance(benchmarkConfig.nearChunks);
         chunkManager.setFarRenderDistanceBlocks(benchmarkConfig.farBlocks);
         chunkManager.setFogStartBlocks(benchmarkConfig.fogStartBlocks);
-        chunkManager.setFarTerrainEnabled(benchmarkConfig.farTerrainEnabled);
-        inputContext.lodEnabled = benchmarkConfig.farTerrainEnabled;
+        chunkManager.setFarTerrainEnabled(false);
+        inputContext.lodEnabled = false;
 
         environment.atmosphereEnabled = false;
         environment.debug.worldPassEnabled = true;
@@ -1953,7 +1949,7 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set near/far render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -2107,15 +2103,8 @@ int runGame()
         inputContext.f1JustPressed = f1JustPressed;
         inputContext.f1Pressed = f1CurrentlyPressed;
 
-        bool f3CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
-        bool f3JustPressed = f3CurrentlyPressed && !inputContext.f3Pressed;
-        if (f3JustPressed)
-        {
-            inputContext.lodEnabled = !chunkManager.farTerrainEnabled();
-            chunkManager.setFarTerrainEnabled(inputContext.lodEnabled);
-        }
-        inputContext.f3JustPressed = f3JustPressed;
-        inputContext.f3Pressed = f3CurrentlyPressed;
+        inputContext.f3JustPressed = false;
+        inputContext.f3Pressed = false;
 
         const StreamingStatusSnapshot streamingStatus = chunkManager.streamingStatusSnapshot();
         const bool playerReleased = streamingStatus.playerReleaseReady;
@@ -2137,7 +2126,7 @@ int runGame()
                     phaseName = "Stabilizing near world";
                     break;
                 case StreamingPhase::FarRamp:
-                    phaseName = "Streaming far terrain";
+                    phaseName = "Streaming";
                     break;
                 case StreamingPhase::SteadyState:
                 default:
@@ -2677,10 +2666,9 @@ int runGame()
             snapshotStream << "Time/Exposure/WP: " << environment.timeOfDay << " / "
                            << environment.tonemap.exposure << " / "
                            << environment.tonemap.whitePoint << '\n';
-            snapshotStream << "Near/Far/Fog/FarTerrain: " << renderSettings.nearChunks << " / "
+            snapshotStream << "Near/Far/Fog: " << renderSettings.nearChunks << " / "
                            << renderSettings.farBlocks << " / "
-                           << renderSettings.fogStartBlocks << " / "
-                           << (renderSettings.farTerrainEnabled ? "on" : "off") << '\n';
+                           << renderSettings.fogStartBlocks << '\n';
             snapshotStream << "Terrain Debug: " << terrainDebugViewLabel(environment.debug.terrainDebugView) << '\n';
             snapshotStream << "Passes: world=" << (environment.debug.worldPassEnabled ? "on" : "off")
                            << " sky=" << (environment.debug.skyPassEnabled ? "on" : "off")
@@ -2800,7 +2788,6 @@ int runGame()
                 ". : Release or recapture mouse\n"
                 "F1: Debug overlay and lighting lab (base game default)\n"
                 "F2: Teleport dialog\n"
-                "F3: Toggle far terrain\n"
                 "N: Render distance dialog\n"
                 "H: Toggle this help\n"
                 "Esc: Quit while mouse is captured\n"
@@ -2964,13 +2951,6 @@ int runGame()
             ImGui::Separator();
             ImGui::TextUnformatted("Render Distance");
             RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
-            bool farTerrainEnabled = renderSettings.farTerrainEnabled;
-            if (ImGui::Checkbox("Far Terrain", &farTerrainEnabled))
-            {
-                chunkManager.setFarTerrainEnabled(farTerrainEnabled);
-                inputContext.lodEnabled = farTerrainEnabled;
-                renderSettings.farTerrainEnabled = farTerrainEnabled;
-            }
             int nearChunks = renderSettings.nearChunks;
             if (ImGui::SliderInt("Near Chunks", &nearChunks, 1, kMaxUserRenderDistance))
             {
@@ -3036,7 +3016,7 @@ int runGame()
             ImGui::TextUnformatted("How To Isolate");
             ImGui::TextWrapped("1. Disable Sky Pass. If the band stays, it is not the sky dome.");
             ImGui::TextWrapped("2. Disable Aerial Perspective. If the band disappears, the aerial LUT is the source.");
-            ImGui::TextWrapped("3. Use Exact Only. If the artifact disappears, the far terrain path is involved.");
+            ImGui::TextWrapped("3. Use Exact Only to isolate near-chunk streaming behavior.");
             ImGui::TextWrapped("4. Use Sky Light or Block Light terrain debug to confirm whether the bad region is actually carrying broken light data.");
             ImGui::TextWrapped("5. Disable Fog Fallback with Aerial Perspective off. If the band still stays, it is world-side shading or geometry.");
             ImGui::End();

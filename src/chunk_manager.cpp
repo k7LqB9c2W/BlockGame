@@ -362,7 +362,7 @@ float computeFarPlaneForDistanceBlocks(int farDistanceBlocks) noexcept
     return static_cast<float>(farPlane);
 }
 
-float kFarPlane = computeFarPlaneForDistanceBlocks(kDefaultFarRenderDistanceBlocks);
+float kFarPlane = computeFarPlaneForViewDistance(kDefaultNearRenderDistance);
 
 Frustum Frustum::fromMatrix(const glm::mat4& matrix)
 {
@@ -410,6 +410,16 @@ bool Frustum::intersectsAABB(const glm::vec3& minCorner, const glm::vec3& maxCor
 
 namespace
 {
+constexpr int chunksToBlocks(int chunks) noexcept
+{
+    return std::max(chunks, 1) * kChunkSizeX;
+}
+
+constexpr int blocksToChunkRadiusCeil(int blocks) noexcept
+{
+    return std::max(1, (std::max(blocks, 1) + kChunkSizeX - 1) / kChunkSizeX);
+}
+
 using Vertex = WorldVertex;
 inline constexpr std::size_t kChunkPoolMinBudgetBytes = 16ull * 1024ull * 1024ull;
 inline constexpr std::size_t kChunkPoolBaseBudgetBytes = 96ull * 1024ull * 1024ull;
@@ -533,13 +543,13 @@ public:
         device_ = device;
 
         D3D12_COMMAND_QUEUE_DESC queueDesc{};
-        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
         throwIfFailedDx(device_->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue_)),
                         "failed to create upload command queue");
-        throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_)),
+        throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&allocator_)),
                         "failed to create upload command allocator");
         throwIfFailedDx(device_->CreateCommandList(0,
-                                                   D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                   D3D12_COMMAND_LIST_TYPE_COPY,
                                                    allocator_.Get(),
                                                    nullptr,
                                                    IID_PPV_ARGS(&commandList_)),
@@ -556,6 +566,7 @@ public:
 
     void shutdown()
     {
+        waitForIdle();
         if (fenceEvent_ != nullptr)
         {
             CloseHandle(fenceEvent_);
@@ -568,6 +579,7 @@ public:
         device_.Reset();
         graphicsFence_ = nullptr;
         graphicsFenceValue_ = 0;
+        lastSubmittedFenceValue_ = 0;
         open_ = false;
         hasCommands_ = false;
     }
@@ -578,21 +590,26 @@ public:
         graphicsFenceValue_ = graphicsFenceValue;
     }
 
-    void begin()
+    [[nodiscard]] bool begin()
     {
         if (device_ == nullptr)
         {
-            return;
+            return false;
         }
         if (open_)
         {
-            return;
+            return true;
+        }
+        if (fence_ != nullptr && fenceValue_ > 0 && fence_->GetCompletedValue() < fenceValue_)
+        {
+            return false;
         }
 
         throwIfFailedDx(allocator_->Reset(), "failed to reset upload command allocator");
         throwIfFailedDx(commandList_->Reset(allocator_.Get(), nullptr), "failed to reset upload command list");
         open_ = true;
         hasCommands_ = false;
+        return true;
     }
 
     void transition(ID3D12Resource* resource,
@@ -647,12 +664,7 @@ public:
 
             ++fenceValue_;
             throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal upload fence");
-            if (fence_->GetCompletedValue() < fenceValue_)
-            {
-                throwIfFailedDx(fence_->SetEventOnCompletion(fenceValue_, fenceEvent_),
-                                "failed to wait for upload fence");
-                WaitForSingleObject(fenceEvent_, INFINITE);
-            }
+            lastSubmittedFenceValue_ = fenceValue_;
         }
 
         open_ = false;
@@ -664,6 +676,31 @@ public:
         return device_ != nullptr && queue_ != nullptr && allocator_ != nullptr && commandList_ != nullptr;
     }
 
+    [[nodiscard]] ID3D12Fence* fence() const noexcept
+    {
+        return fence_.Get();
+    }
+
+    [[nodiscard]] UINT64 lastSubmittedFenceValue() const noexcept
+    {
+        return lastSubmittedFenceValue_;
+    }
+
+    void waitForIdle()
+    {
+        if (fence_ == nullptr || lastSubmittedFenceValue_ == 0)
+        {
+            return;
+        }
+        if (fence_->GetCompletedValue() >= lastSubmittedFenceValue_)
+        {
+            return;
+        }
+        throwIfFailedDx(fence_->SetEventOnCompletion(lastSubmittedFenceValue_, fenceEvent_),
+                        "failed to wait for upload fence");
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+
 private:
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
@@ -672,6 +709,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
+    UINT64 lastSubmittedFenceValue_{0};
     ID3D12Fence* graphicsFence_{nullptr};
     UINT64 graphicsFenceValue_{0};
     bool open_{false};
@@ -2150,8 +2188,8 @@ private:
         D3D12_INDEX_BUFFER_VIEW indexView{};
         std::byte* mappedVertexData{nullptr};
         std::byte* mappedIndexData{nullptr};
-        D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
-        D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_INDEX_BUFFER};
+        D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_COMMON};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
@@ -2337,10 +2375,10 @@ private:
         page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
         page.vertexBuffer = createDefaultBuffer(device_.Get(),
                                                 static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
-                                                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                                                D3D12_RESOURCE_STATE_COMMON);
         page.indexBuffer = createDefaultBuffer(device_.Get(),
                                                static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
-                                               D3D12_RESOURCE_STATE_INDEX_BUFFER);
+                                               D3D12_RESOURCE_STATE_COMMON);
         page.vertexUploadBuffer = createUploadBuffer(device_.Get(),
                                                      static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
                                                      page.mappedVertexData);
@@ -2831,9 +2869,12 @@ private:
     {
         const auto collectStart = std::chrono::steady_clock::now();
         const auto uploadStart = std::chrono::steady_clock::now();
-        if (uploadContext_.ready())
+        if (uploadContext_.ready() && !uploadContext_.begin())
         {
-            uploadContext_.begin();
+            lastCollectMs_ =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - collectStart).count();
+            lastUploadMs_ = 0.0;
+            return;
         }
         while (true)
         {
@@ -2928,19 +2969,11 @@ private:
                         mesh.vertices.size() * sizeof(Vertex));
             if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
             {
-                uploadContext_.transition(page.vertexBuffer.Get(),
-                                          page.vertexState,
-                                          D3D12_RESOURCE_STATE_COPY_DEST);
-                page.vertexState = D3D12_RESOURCE_STATE_COPY_DEST;
                 uploadContext_.copyBuffer(page.vertexBuffer.Get(),
                                           static_cast<std::uint64_t>(tile.vertexOffset * sizeof(Vertex)),
                                           page.vertexUploadBuffer.Get(),
                                           static_cast<std::uint64_t>(tile.vertexOffset * sizeof(Vertex)),
                                           static_cast<std::uint64_t>(mesh.vertices.size() * sizeof(Vertex)));
-                uploadContext_.transition(page.vertexBuffer.Get(),
-                                          page.vertexState,
-                                          D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-                page.vertexState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
             }
         }
         if (page.mappedIndexData != nullptr && !mesh.indices.empty())
@@ -2950,19 +2983,11 @@ private:
                         mesh.indices.size() * sizeof(std::uint32_t));
             if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
             {
-                uploadContext_.transition(page.indexBuffer.Get(),
-                                          page.indexState,
-                                          D3D12_RESOURCE_STATE_COPY_DEST);
-                page.indexState = D3D12_RESOURCE_STATE_COPY_DEST;
                 uploadContext_.copyBuffer(page.indexBuffer.Get(),
                                           static_cast<std::uint64_t>(tile.indexOffset * sizeof(std::uint32_t)),
                                           page.indexUploadBuffer.Get(),
                                           static_cast<std::uint64_t>(tile.indexOffset * sizeof(std::uint32_t)),
                                           static_cast<std::uint64_t>(mesh.indices.size() * sizeof(std::uint32_t)));
-                uploadContext_.transition(page.indexBuffer.Get(),
-                                          page.indexState,
-                                          D3D12_RESOURCE_STATE_INDEX_BUFFER);
-                page.indexState = D3D12_RESOURCE_STATE_INDEX_BUFFER;
             }
         }
     }
@@ -3149,7 +3174,7 @@ private:
     }
 
     bool enabled_{true};
-    int farDistanceBlocks_{kDefaultFarRenderDistanceBlocks};
+    int farDistanceBlocks_{chunksToBlocks(kDefaultTotalRenderDistanceChunks)};
     int fogStartBlocks_{kDefaultFarFogStartBlocks};
     glm::ivec3 cameraChunk_{0};
     glm::vec3 cameraForward_{0.0f, 0.0f, -1.0f};
@@ -3189,6 +3214,8 @@ struct ChunkManager::Impl
 
     void initializeRendering(ID3D12Device* device);
     void setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue);
+    [[nodiscard]] ID3D12Fence* uploadFence() const noexcept;
+    [[nodiscard]] std::uint64_t lastSubmittedUploadFenceValue() const noexcept;
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -3208,10 +3235,14 @@ struct ChunkManager::Impl
 
     void toggleViewDistance();
     int viewDistance() const noexcept;
+    int exactRenderDistanceChunks() const noexcept;
+    int totalRenderDistanceChunks() const noexcept;
     int nearRenderDistance() const noexcept;
     int farRenderDistanceBlocks() const noexcept;
     RenderDistanceSettings renderDistanceSettings() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setExactRenderDistanceChunks(int chunks) noexcept;
+    void setTotalRenderDistanceChunks(int chunks) noexcept;
     void setNearRenderDistance(int chunks) noexcept;
     void setFarRenderDistanceBlocks(int blocks) noexcept;
     void setFogStartBlocks(int blocks) noexcept;
@@ -3329,8 +3360,8 @@ private:
         D3D12_INDEX_BUFFER_VIEW indexView{};
         std::byte* mappedVertexData{nullptr};
         std::byte* mappedIndexData{nullptr};
-        D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
-        D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_INDEX_BUFFER};
+        D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_COMMON};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
@@ -4207,8 +4238,8 @@ ChunkManager::Impl::Impl(unsigned seed)
       globalSeaLevel_(worldgenProfile_.seaLevel),
       noise_(worldgenProfile_.effectiveSeed(seed)),
       shouldStop_(false),
-      viewDistance_(renderSettings_.nearChunks),
-      targetViewDistance_(renderSettings_.nearChunks)
+      viewDistance_(renderSettings_.exactChunks),
+      targetViewDistance_(renderSettings_.exactChunks)
 {
     const unsigned effectiveSeed = worldgenProfile_.effectiveSeed(seed);
 
@@ -4249,9 +4280,8 @@ ChunkManager::Impl::Impl(unsigned seed)
         });
 
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
-    renderSettings_.farTerrainEnabled = false;
     farTerrainManager_.setEnabled(false);
-    farTerrainManager_.setDistanceBlocks(renderSettings_.farBlocks);
+    farTerrainManager_.setDistanceBlocks(0);
     farTerrainManager_.setFogStartBlocks(renderSettings_.fogStartBlocks);
     farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
     unsigned concurrency = std::thread::hardware_concurrency();
@@ -4264,7 +4294,7 @@ ChunkManager::Impl::Impl(unsigned seed)
         farWorkerCount_ = 1;
     }
     farTerrainManager_.setWorkerCount(static_cast<std::size_t>(farWorkerCount_));
-    kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+    kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
     startWorkerThreads();
 }
 
@@ -4289,6 +4319,16 @@ void ChunkManager::Impl::setRenderSynchronization(ID3D12Fence* graphicsFence, st
 {
     uploadContext_.setGraphicsFenceDependency(graphicsFence, static_cast<UINT64>(graphicsFenceValue));
     farTerrainManager_.setRenderSynchronization(graphicsFence, static_cast<UINT64>(graphicsFenceValue));
+}
+
+ID3D12Fence* ChunkManager::Impl::uploadFence() const noexcept
+{
+    return uploadContext_.fence();
+}
+
+std::uint64_t ChunkManager::Impl::lastSubmittedUploadFenceValue() const noexcept
+{
+    return static_cast<std::uint64_t>(uploadContext_.lastSubmittedFenceValue());
 }
 
 void ChunkManager::Impl::setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config)
@@ -4479,8 +4519,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (!startupEnabled_ || !startupState_.preloadStarted)
     {
         startupState_.phase = StreamingPhase::SteadyState;
-        startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
-        startupState_.farCurrentBlocks = renderSettings_.farTerrainEnabled ? renderSettings_.farBlocks : 0;
+        startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+        startupState_.farCurrentBlocks = 0;
         startupState_.playerReleaseReady = true;
     }
     else
@@ -4493,7 +4533,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         startupState_.totalTimeSeconds += frameSeconds;
     }
 
-    targetViewDistance_ = std::clamp(startupState_.exactNearCurrentChunks, 1, renderSettings_.nearChunks);
+    targetViewDistance_ = std::clamp(startupState_.exactNearCurrentChunks, 1, renderSettings_.exactChunks);
 
     resetColumnBudgets();
     const auto verticalRadiusStart = std::chrono::steady_clock::now();
@@ -4502,7 +4542,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verticalRadiusStart).count();
     lastVerticalRadius_ = verticalRadius;
     gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
-    kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+    kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
 
     const auto uploadBudgetStart = std::chrono::steady_clock::now();
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
@@ -4644,31 +4684,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     poolTrimMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poolTrimStart).count();
 
-    const bool farStreamingActive =
-        renderSettings_.farTerrainEnabled &&
-        (!startupEnabled_ || !startupState_.preloadStarted ||
-         startupState_.phase == StreamingPhase::FarRamp ||
-         startupState_.phase == StreamingPhase::SteadyState);
-    if (farStreamingActive && startupState_.farCurrentBlocks > 0)
-    {
-        farTerrainManager_.update(centerChunk,
-                                  lastCameraForward_,
-                                  targetViewDistance_,
-                                  startupState_.farCurrentBlocks,
-                                  std::max(0.5, uploadBudgets.timeBudgetMs * 0.75),
-                                  [this](int sampleWorldX, int sampleWorldZ, int lodLevel)
-                                  {
-                                      return this->sampleFarTerrainSurfaceLod(sampleWorldX, sampleWorldZ, lodLevel);
-                                  },
-                                  [this](BlockId block, BlockFace face)
-                                  {
-                                      return this->atlasUvFor(block, face);
-                                  });
-    }
-    else
-    {
-        farTerrainManager_.clear();
-    }
+    farTerrainManager_.clear();
 
     const auto startupStateStart = std::chrono::steady_clock::now();
     if (startupEnabled_ && startupState_.preloadStarted)
@@ -4676,12 +4692,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         const bool nearReady = missingChunks == 0;
         const bool uploadReady = pendingUploadsLastFrame_ <= 8;
         const bool exactReady = nearReady && uploadReady;
-        const bool farHealthy = smoothedFrameMs_ <= 20.0 &&
-                                pendingUploadsLastFrame_ <= 16 &&
-                                farTerrainManager_.queuedTileCount() <= std::max(4, farWorkerCount_ * 3) &&
-                                farTerrainManager_.pendingUploadTileCount() <= 6;
-        const bool farRegressed = smoothedFrameMs_ > 28.0;
-
         switch (startupState_.phase)
         {
         case StreamingPhase::ExactPreload:
@@ -4692,7 +4702,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                 startupState_.phase = StreamingPhase::InteractiveNearOnly;
                 startupState_.phaseTimeSeconds = 0.0;
                 startupState_.healthyTimeSeconds = 0.0;
-                startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 6);
+                startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks, 6);
                 startupState_.playerReleaseReady = true;
             }
             else if (startupState_.phaseTimeSeconds >= 2.0 && startupState_.exactNearCurrentChunks > 4)
@@ -4716,90 +4726,39 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             if (startupState_.healthyTimeSeconds >= 0.75)
             {
                 startupState_.healthyTimeSeconds = 0.0;
-                if (startupState_.exactNearCurrentChunks < std::min(renderSettings_.nearChunks, 8))
+                if (startupState_.exactNearCurrentChunks < std::min(renderSettings_.exactChunks, 8))
                 {
-                    startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 8);
+                    startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks, 8);
                 }
-                else if (!renderSettings_.farTerrainEnabled)
+                else
                 {
                     startupState_.phase = StreamingPhase::SteadyState;
                     startupState_.phaseTimeSeconds = 0.0;
                     startupState_.farCurrentBlocks = 0;
                 }
-                else
-                {
-                    startupState_.phase = StreamingPhase::FarRamp;
-                    startupState_.phaseTimeSeconds = 0.0;
-                    startupState_.farCurrentBlocks = std::min(renderSettings_.farBlocks, 768);
-                }
             }
             break;
         case StreamingPhase::FarRamp:
             startupState_.playerReleaseReady = true;
-            if (startupState_.exactNearCurrentChunks < renderSettings_.nearChunks && exactReady)
+            if (startupState_.exactNearCurrentChunks < renderSettings_.exactChunks && exactReady)
             {
                 startupState_.healthyTimeSeconds += frameSeconds;
                 if (startupState_.healthyTimeSeconds >= 0.75)
                 {
-                    startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
+                    startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
                     startupState_.healthyTimeSeconds = 0.0;
                 }
             }
             else
             {
-                if (farHealthy)
-                {
-                    startupState_.healthyTimeSeconds += frameSeconds;
-                }
-                else if (farRegressed)
-                {
-                    startupState_.healthyTimeSeconds = 0.0;
-                    if (startupState_.farCurrentBlocks > 3072)
-                    {
-                        startupState_.farCurrentBlocks = 3072;
-                    }
-                    else if (startupState_.farCurrentBlocks > 1536)
-                    {
-                        startupState_.farCurrentBlocks = 1536;
-                    }
-                    else if (startupState_.farCurrentBlocks > 768)
-                    {
-                        startupState_.farCurrentBlocks = 768;
-                    }
-                }
-                else
-                {
-                    startupState_.healthyTimeSeconds =
-                        std::max(0.0, startupState_.healthyTimeSeconds - frameSeconds * 0.5);
-                }
-
-                if (startupState_.healthyTimeSeconds >= 1.5)
-                {
-                    startupState_.healthyTimeSeconds = 0.0;
-                    if (startupState_.farCurrentBlocks < std::min(renderSettings_.farBlocks, 1536))
-                    {
-                        startupState_.farCurrentBlocks = std::min(renderSettings_.farBlocks, 1536);
-                    }
-                    else if (startupState_.farCurrentBlocks < std::min(renderSettings_.farBlocks, 3072))
-                    {
-                        startupState_.farCurrentBlocks = std::min(renderSettings_.farBlocks, 3072);
-                    }
-                    else if (startupState_.farCurrentBlocks < renderSettings_.farBlocks)
-                    {
-                        startupState_.farCurrentBlocks = renderSettings_.farBlocks;
-                    }
-                    else
-                    {
-                        startupState_.phase = StreamingPhase::SteadyState;
-                        startupState_.phaseTimeSeconds = 0.0;
-                    }
-                }
+                startupState_.phase = StreamingPhase::SteadyState;
+                startupState_.phaseTimeSeconds = 0.0;
             }
             break;
         case StreamingPhase::SteadyState:
             startupState_.playerReleaseReady = true;
-            startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
-            startupState_.farCurrentBlocks = renderSettings_.farTerrainEnabled ? renderSettings_.farBlocks : 0;
+            startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+            startupState_.farCurrentBlocks = 0;
             break;
         case StreamingPhase::SpawnResolve:
             startupState_.phase = StreamingPhase::ExactPreload;
@@ -5089,10 +5048,12 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         }
 
         columnManager_.updateColumn(*chunk, local.x, local.z);
-        chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
     }
 
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+    // Player edits must always enqueue a geometry refresh immediately; relying on the
+    // deferred relight pass alone can leave the old uploaded mesh visible as a ghost block.
+    requestChunkRemesh(chunk);
     queueRelightRequest(chunkCoord, true);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(worldPos);
@@ -5138,10 +5099,11 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         chunk->hasBlocks.store(true, std::memory_order_relaxed);
 
         columnManager_.updateColumn(*chunk, local.x, local.z);
-        chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
     }
 
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+    // Keep edit feedback immediate even if lighting catches up on a later relight batch.
+    requestChunkRemesh(chunk);
     queueRelightRequest(chunkCoord, true);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(placePos);
@@ -5278,8 +5240,12 @@ void ChunkManager::Impl::toggleViewDistance()
         std::cerr << "Error toggling view distance: " << ex.what() << std::endl;
         targetViewDistance_ = kDefaultNearRenderDistance;
         viewDistance_ = std::min(viewDistance_, targetViewDistance_);
-        renderSettings_.nearChunks = targetViewDistance_;
-        kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+        renderSettings_.exactChunks = targetViewDistance_;
+        if (renderSettings_.totalChunks < renderSettings_.exactChunks)
+        {
+            renderSettings_.totalChunks = renderSettings_.exactChunks;
+        }
+        kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
     }
 }
 
@@ -5288,14 +5254,24 @@ int ChunkManager::Impl::viewDistance() const noexcept
     return targetViewDistance_;
 }
 
+int ChunkManager::Impl::exactRenderDistanceChunks() const noexcept
+{
+    return renderSettings_.exactChunks;
+}
+
+int ChunkManager::Impl::totalRenderDistanceChunks() const noexcept
+{
+    return renderSettings_.totalChunks;
+}
+
 int ChunkManager::Impl::nearRenderDistance() const noexcept
 {
-    return renderSettings_.nearChunks;
+    return exactRenderDistanceChunks();
 }
 
 int ChunkManager::Impl::farRenderDistanceBlocks() const noexcept
 {
-    return renderSettings_.farBlocks;
+    return chunksToBlocks(renderSettings_.totalChunks);
 }
 
 RenderDistanceSettings ChunkManager::Impl::renderDistanceSettings() const noexcept
@@ -5305,15 +5281,15 @@ RenderDistanceSettings ChunkManager::Impl::renderDistanceSettings() const noexce
 
 void ChunkManager::Impl::setRenderDistance(int distance) noexcept
 {
-    setNearRenderDistance(distance);
+    setExactRenderDistanceChunks(distance);
 }
 
-void ChunkManager::Impl::setNearRenderDistance(int chunks) noexcept
+void ChunkManager::Impl::setExactRenderDistanceChunks(int chunks) noexcept
 {
     try
     {
-        const int clampedDistance = std::clamp(chunks, 1, kMaxUserRenderDistance);
-        renderSettings_.nearChunks = clampedDistance;
+        const int clampedDistance = std::clamp(chunks, 1, kMaxExactRenderDistanceChunks);
+        renderSettings_.exactChunks = clampedDistance;
         if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
         {
             targetViewDistance_ = clampedDistance;
@@ -5324,10 +5300,10 @@ void ChunkManager::Impl::setNearRenderDistance(int chunks) noexcept
             startupState_.exactNearCurrentChunks = std::min(startupState_.exactNearCurrentChunks, clampedDistance);
             targetViewDistance_ = std::min(startupState_.exactNearCurrentChunks, clampedDistance);
         }
-        kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+        kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
         if (chunks != clampedDistance)
         {
-            std::cout << "Near render distance request " << chunks << " clamped to " << clampedDistance << " chunks"
+            std::cout << "Exact render distance request " << chunks << " clamped to " << clampedDistance << " chunks"
                       << std::endl;
         }
 
@@ -5338,45 +5314,44 @@ void ChunkManager::Impl::setNearRenderDistance(int chunks) noexcept
 
         const long long width = static_cast<long long>(targetViewDistance_) * 2ll + 1ll;
         const long long totalColumns = width * width;
-        std::cout << "Near render distance set to: " << targetViewDistance_ << " chunks (total: "
-                  << totalColumns << " chunks)" << std::endl;
+        std::cout << "Exact render distance set to: " << targetViewDistance_ << " chunks (total exact columns: "
+                  << totalColumns << ")" << std::endl;
         trimChunkPoolToBudget();
     }
     catch (const std::exception& ex)
     {
-        std::cerr << "Error setting near render distance: " << ex.what() << std::endl;
+        std::cerr << "Error setting exact render distance: " << ex.what() << std::endl;
     }
+}
+
+void ChunkManager::Impl::setTotalRenderDistanceChunks(int chunks) noexcept
+{
+    try
+    {
+        renderSettings_.totalChunks = std::clamp(chunks, 1, kMaxTotalRenderDistanceChunks);
+        startupState_.farCurrentBlocks = 0;
+        farTerrainManager_.setDistanceBlocks(0);
+        if (renderSettings_.totalChunks > renderSettings_.exactChunks)
+        {
+            std::cout << "Total render distance stored at " << renderSettings_.totalChunks
+                      << " chunks. LOD rendering is not implemented yet, so exact rendering remains capped at "
+                      << renderSettings_.exactChunks << " chunks." << std::endl;
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Error setting total render distance: " << ex.what() << std::endl;
+    }
+}
+
+void ChunkManager::Impl::setNearRenderDistance(int chunks) noexcept
+{
+    setExactRenderDistanceChunks(chunks);
 }
 
 void ChunkManager::Impl::setFarRenderDistanceBlocks(int blocks) noexcept
 {
-    try
-    {
-        renderSettings_.farBlocks = std::max(blocks, 256);
-        if (!renderSettings_.farTerrainEnabled)
-        {
-            startupState_.farCurrentBlocks = 0;
-        }
-        else if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
-        {
-            startupState_.farCurrentBlocks = renderSettings_.farBlocks;
-        }
-        else if (startupState_.phase == StreamingPhase::FarRamp)
-        {
-            startupState_.farCurrentBlocks = std::min(startupState_.farCurrentBlocks, renderSettings_.farBlocks);
-        }
-        else
-        {
-            startupState_.farCurrentBlocks = 0;
-        }
-        farTerrainManager_.setDistanceBlocks(renderSettings_.farTerrainEnabled ? startupState_.farCurrentBlocks : 0);
-        kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
-        trimChunkPoolToBudget();
-    }
-    catch (const std::exception& ex)
-    {
-        std::cerr << "Error setting far render distance: " << ex.what() << std::endl;
-    }
+    setTotalRenderDistanceChunks(blocksToChunkRadiusCeil(blocks));
 }
 
 void ChunkManager::Impl::setFogStartBlocks(int blocks) noexcept
@@ -5389,7 +5364,6 @@ void ChunkManager::Impl::setFarTerrainEnabled(bool enabled)
 {
     (void)enabled;
     // Far terrain is obsolete for current builds. Keep the path hard-disabled until it is redesigned.
-    renderSettings_.farTerrainEnabled = false;
     startupState_.farCurrentBlocks = 0;
     farTerrainManager_.setEnabled(false);
     farTerrainManager_.setDistanceBlocks(0);
@@ -5685,7 +5659,7 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     startupState_.spawnChunk = worldToChunkCoords(static_cast<int>(std::floor(spawnPos.x)),
                                                   std::max(static_cast<int>(std::floor(spawnPos.y)), 0),
                                                   static_cast<int>(std::floor(spawnPos.z)));
-    startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 6);
+    startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks, 6);
     startupState_.farCurrentBlocks = 0;
     lastMissingChunks_ = 0;
     cachedExactReadyChunks_ = 0;
@@ -5729,10 +5703,10 @@ void ChunkManager::Impl::setStartupEnabled(bool enabled) noexcept
     {
         startupState_.phase = StreamingPhase::SteadyState;
         startupState_.playerReleaseReady = true;
-        startupState_.exactNearCurrentChunks = renderSettings_.nearChunks;
-        startupState_.farCurrentBlocks = renderSettings_.farBlocks;
-        targetViewDistance_ = renderSettings_.nearChunks;
-        farTerrainManager_.setDistanceBlocks(renderSettings_.farBlocks);
+        startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+        startupState_.farCurrentBlocks = 0;
+        targetViewDistance_ = renderSettings_.exactChunks;
+        farTerrainManager_.setDistanceBlocks(0);
     }
 }
 
@@ -6216,7 +6190,7 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
         return nullptr;
     }
 
-    constexpr std::size_t kUploadPriorityScanLimit = 24;
+    constexpr std::size_t kUploadPriorityScanLimit = 48;
     auto bestIt = uploadQueue_.end();
     std::shared_ptr<Chunk> bestChunk;
     std::size_t liveEntriesScanned = 0;
@@ -6329,10 +6303,10 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
     page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
     page.vertexBuffer = createDefaultBuffer(device_.Get(),
                                             static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
-                                            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                                            D3D12_RESOURCE_STATE_COMMON);
     page.indexBuffer = createDefaultBuffer(device_.Get(),
                                            static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
-                                           D3D12_RESOURCE_STATE_INDEX_BUFFER);
+                                           D3D12_RESOURCE_STATE_COMMON);
     page.vertexUploadBuffer = createUploadBuffer(device_.Get(),
                                                  static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
                                                  page.mappedVertexData);
@@ -6579,11 +6553,6 @@ std::size_t ChunkManager::Impl::chunkPoolBudgetBytes() const noexcept
                        static_cast<double>(pendingUploadsLastFrame_) / kChunkPoolUploadPressureDivisor);
 
     double pressure = horizontalPressure * std::sqrt(verticalPressure) * uploadPressure;
-    if (renderSettings_.farTerrainEnabled)
-    {
-        pressure *= 1.25;
-    }
-
     const std::size_t budget = static_cast<std::size_t>(
         static_cast<double>(kChunkPoolBaseBudgetBytes) / std::max(pressure, 1.0));
     return std::clamp(budget, kChunkPoolMinBudgetBytes, kChunkPoolBaseBudgetBytes);
@@ -6672,37 +6641,74 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
 {
     UploadBudgets budgets{};
     budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
-    budgets.chunkLimit = 2;
+    budgets.chunkLimit = 3;
     budgets.queueSize = estimateUploadQueueSize();
+    const int uploadDebtSteps = computeBacklogSteps(static_cast<int>(std::min<std::size_t>(
+                                                        budgets.queueSize,
+                                                        static_cast<std::size_t>(std::numeric_limits<int>::max()))),
+                                                    12,
+                                                    8);
+    const bool exactPreload = startupEnabled_ &&
+                              startupState_.preloadStarted &&
+                              startupState_.phase == StreamingPhase::ExactPreload;
+    const bool interactiveUploadWindow = startupEnabled_ &&
+                                         startupState_.preloadStarted &&
+                                         (startupState_.phase == StreamingPhase::InteractiveNearOnly ||
+                                          startupState_.phase == StreamingPhase::FarRamp);
     if (startupEnabled_ && startupState_.preloadStarted)
     {
-        if (startupState_.phase == StreamingPhase::ExactPreload)
+        if (exactPreload)
         {
-            budgets.byteBudget = 4ull * 1024ull * 1024ull;
-            budgets.columnLimit = std::min(budgets.columnLimit, 4);
-            budgets.chunkLimit = 1;
-            budgets.timeBudgetMs = 1.5;
+            budgets.byteBudget = 16ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit + 2, 8);
+            budgets.chunkLimit = 4;
+            budgets.timeBudgetMs = 2.0;
         }
-        else if (startupState_.phase == StreamingPhase::InteractiveNearOnly ||
-                 startupState_.phase == StreamingPhase::FarRamp)
+        else if (interactiveUploadWindow)
         {
-            budgets.byteBudget = 4ull * 1024ull * 1024ull;
-            budgets.columnLimit = std::min(budgets.columnLimit + 1, 6);
-            budgets.chunkLimit = 1;
+            budgets.byteBudget = 16ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, 7);
+            budgets.chunkLimit = 3;
             budgets.timeBudgetMs = 1.5;
         }
         else
         {
-            budgets.byteBudget = 8ull * 1024ull * 1024ull;
-            budgets.chunkLimit = 2;
-            budgets.timeBudgetMs = 2.5;
+            budgets.byteBudget = 20ull * 1024ull * 1024ull;
+            budgets.chunkLimit = 3;
+            budgets.timeBudgetMs = 2.0;
         }
     }
     else
     {
-        budgets.byteBudget = 8ull * 1024ull * 1024ull;
-        budgets.chunkLimit = 2;
-        budgets.timeBudgetMs = 2.5;
+        budgets.byteBudget = 20ull * 1024ull * 1024ull;
+        budgets.chunkLimit = 3;
+        budgets.timeBudgetMs = 2.0;
+    }
+
+    if (uploadDebtSteps > 0)
+    {
+        if (exactPreload)
+        {
+            const int clampedSteps = std::min(uploadDebtSteps, 2);
+            budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(clampedSteps);
+            budgets.chunkLimit += clampedSteps;
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
+            budgets.timeBudgetMs = std::min(2.5, budgets.timeBudgetMs + 0.25 * static_cast<double>(clampedSteps));
+        }
+        else if (interactiveUploadWindow)
+        {
+            budgets.byteBudget += 4ull * 1024ull * 1024ull;
+            budgets.chunkLimit = std::min(budgets.chunkLimit + 1, 4);
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, 8);
+        }
+        else
+        {
+            const int clampedSteps = std::min(uploadDebtSteps, 2);
+            budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(clampedSteps);
+            budgets.chunkLimit += clampedSteps;
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
+            budgets.timeBudgetMs = std::min(2.5, budgets.timeBudgetMs + 0.25 * static_cast<double>(clampedSteps));
+        }
     }
 
     return budgets;
@@ -7525,9 +7531,12 @@ void ChunkManager::Impl::uploadReadyMeshes()
     const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
     const int chunkUploadLimit = std::max(1, uploadChunkLimitThisFrame_);
     const auto uploadStart = std::chrono::steady_clock::now();
-    if (uploadContext_.ready())
+    if (uploadContext_.ready() && !uploadContext_.begin())
     {
-        uploadContext_.begin();
+        lastUploadBytesUsed_ = 0;
+        lastUploadMsUsed_ = 0.0;
+        pendingUploadsLastFrame_ = estimateUploadQueueSize();
+        return;
     }
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
@@ -7692,19 +7701,11 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                             vertexCount * sizeof(Vertex));
                 if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
                 {
-                    uploadContext_.transition(page.vertexBuffer.Get(),
-                                              page.vertexState,
-                                              D3D12_RESOURCE_STATE_COPY_DEST);
-                    page.vertexState = D3D12_RESOURCE_STATE_COPY_DEST;
                     uploadContext_.copyBuffer(page.vertexBuffer.Get(),
                                               static_cast<std::uint64_t>(chunkVertexOffset * sizeof(Vertex)),
                                               page.vertexUploadBuffer.Get(),
                                               static_cast<std::uint64_t>(chunkVertexOffset * sizeof(Vertex)),
                                               static_cast<std::uint64_t>(vertexCount * sizeof(Vertex)));
-                    uploadContext_.transition(page.vertexBuffer.Get(),
-                                              page.vertexState,
-                                              D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-                    page.vertexState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
                 }
             }
             if (page.mappedIndexData != nullptr && indexCount > 0)
@@ -7715,19 +7716,11 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                             indexCount * sizeof(std::uint32_t));
                 if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
                 {
-                    uploadContext_.transition(page.indexBuffer.Get(),
-                                              page.indexState,
-                                              D3D12_RESOURCE_STATE_COPY_DEST);
-                    page.indexState = D3D12_RESOURCE_STATE_COPY_DEST;
                     uploadContext_.copyBuffer(page.indexBuffer.Get(),
                                               static_cast<std::uint64_t>(chunkIndexOffset * sizeof(std::uint32_t)),
                                               page.indexUploadBuffer.Get(),
                                               static_cast<std::uint64_t>(chunkIndexOffset * sizeof(std::uint32_t)),
                                               static_cast<std::uint64_t>(indexCount * sizeof(std::uint32_t)));
-                    uploadContext_.transition(page.indexBuffer.Get(),
-                                              page.indexState,
-                                              D3D12_RESOURCE_STATE_INDEX_BUFFER);
-                    page.indexState = D3D12_RESOURCE_STATE_INDEX_BUFFER;
                 }
             }
         }
@@ -7941,10 +7934,9 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     std::vector<std::uint8_t> chunkLightLevels;
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
-        chunk.meshData.clear();
-
         if (!chunk.hasBlocks.load(std::memory_order_acquire))
         {
+            chunk.meshData.clear();
             chunk.meshReady.store(true, std::memory_order_release);
             return;
         }
@@ -8424,6 +8416,9 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        // Keep the previously uploaded mesh alive until the replacement mesh is fully built.
+        // Clearing meshData at the start of remeshing lets stale queued uploads observe an
+        // empty mesh and momentarily punch holes in the world.
         chunk.meshData = std::move(meshData);
     }
     chunk.meshReady.store(true, std::memory_order_release);
@@ -10070,6 +10065,16 @@ void ChunkManager::setRenderSynchronization(ID3D12Fence* graphicsFence, std::uin
     impl_->setRenderSynchronization(graphicsFence, graphicsFenceValue);
 }
 
+ID3D12Fence* ChunkManager::uploadFence() const noexcept
+{
+    return impl_->uploadFence();
+}
+
+std::uint64_t ChunkManager::lastSubmittedUploadFenceValue() const noexcept
+{
+    return impl_->lastSubmittedUploadFenceValue();
+}
+
 void ChunkManager::setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config)
 {
     impl_->setBlockTextureAtlasConfig(config);
@@ -10139,6 +10144,16 @@ int ChunkManager::viewDistance() const noexcept
     return impl_->viewDistance();
 }
 
+int ChunkManager::exactRenderDistanceChunks() const noexcept
+{
+    return impl_->exactRenderDistanceChunks();
+}
+
+int ChunkManager::totalRenderDistanceChunks() const noexcept
+{
+    return impl_->totalRenderDistanceChunks();
+}
+
 int ChunkManager::nearRenderDistance() const noexcept
 {
     return impl_->nearRenderDistance();
@@ -10157,6 +10172,16 @@ RenderDistanceSettings ChunkManager::renderDistanceSettings() const noexcept
 void ChunkManager::setRenderDistance(int distance) noexcept
 {
     impl_->setRenderDistance(distance);
+}
+
+void ChunkManager::setExactRenderDistanceChunks(int chunks) noexcept
+{
+    impl_->setExactRenderDistanceChunks(chunks);
+}
+
+void ChunkManager::setTotalRenderDistanceChunks(int chunks) noexcept
+{
+    impl_->setTotalRenderDistanceChunks(chunks);
 }
 
 void ChunkManager::setNearRenderDistance(int chunks) noexcept

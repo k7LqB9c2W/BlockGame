@@ -45,9 +45,11 @@ inline constexpr int kChunkBlockCount = kChunkEdgeLength * kChunkEdgeLength * kC
 inline constexpr int kAtlasTileSizePixels = 16;
 inline constexpr int kDefaultNearRenderDistance = 12;
 inline constexpr int kDefaultViewDistance = kDefaultNearRenderDistance;
-inline constexpr int kMaxUserRenderDistance = 48;
+inline constexpr int kMaxExactRenderDistanceChunks = 48;
+inline constexpr int kMaxUserRenderDistance = kMaxExactRenderDistanceChunks;
+inline constexpr int kDefaultTotalRenderDistanceChunks = kDefaultNearRenderDistance;
+inline constexpr int kMaxTotalRenderDistanceChunks = 500;
 inline constexpr int kExtendedViewDistance = 320;
-inline constexpr int kDefaultFarRenderDistanceBlocks = 4800;
 inline constexpr int kDefaultFarFogStartBlocks = 1400;
 
 enum class StreamingPhase : std::uint8_t
@@ -95,7 +97,7 @@ inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 64ull * 1024ull * 1024ull;
 
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
-inline constexpr std::size_t kUploadQueueScanLimit = 24ull;
+inline constexpr std::size_t kUploadQueueScanLimit = 64ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept;
@@ -179,10 +181,9 @@ struct WorldRenderData
 
 struct RenderDistanceSettings
 {
-    int nearChunks{kDefaultNearRenderDistance};
-    int farBlocks{kDefaultFarRenderDistanceBlocks};
+    int exactChunks{kDefaultNearRenderDistance};
+    int totalChunks{kDefaultTotalRenderDistanceChunks};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
-    bool farTerrainEnabled{false};
 };
 
 struct ChunkProfilingSnapshot
@@ -356,6 +357,8 @@ public:
 
     void initializeRendering(ID3D12Device* device);
     void setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue);
+    [[nodiscard]] ID3D12Fence* uploadFence() const noexcept;
+    [[nodiscard]] std::uint64_t lastSubmittedUploadFenceValue() const noexcept;
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -377,10 +380,14 @@ public:
 
     void toggleViewDistance();
     int viewDistance() const noexcept;
+    int exactRenderDistanceChunks() const noexcept;
+    int totalRenderDistanceChunks() const noexcept;
     int nearRenderDistance() const noexcept;
     int farRenderDistanceBlocks() const noexcept;
     RenderDistanceSettings renderDistanceSettings() const noexcept;
     void setRenderDistance(int distance) noexcept;
+    void setExactRenderDistanceChunks(int chunks) noexcept;
+    void setTotalRenderDistanceChunks(int chunks) noexcept;
     void setNearRenderDistance(int chunks) noexcept;
     void setFarRenderDistanceBlocks(int blocks) noexcept;
     void setFogStartBlocks(int blocks) noexcept;

@@ -157,14 +157,6 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
         inputContext.rightMouseJustPressed = false;
     }
 
-    bool f3CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
-    inputContext.f3JustPressed = f3CurrentlyPressed && !inputContext.f3Pressed;
-    inputContext.f3Pressed = f3CurrentlyPressed;
-    if (inputContext.f3JustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
-    {
-        // F3 is handled by the main loop as a far-terrain toggle.
-    }
-
     bool hKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS);
     inputContext.hKeyJustPressed = hKeyCurrentlyPressed && !inputContext.hKeyPressed;
     inputContext.hKeyPressed = hKeyCurrentlyPressed;

@@ -306,6 +306,16 @@ int __cdecl crtReportHook(int reportType, char* message, int*)
     return true;
 }
 
+[[nodiscard]] constexpr int blocksToChunkRadiusCeil(int blocks) noexcept
+{
+    return std::max(1, (std::max(blocks, 1) + kChunkSizeX - 1) / kChunkSizeX);
+}
+
+[[nodiscard]] constexpr int chunkRadiusToBlocks(int chunks) noexcept
+{
+    return std::max(chunks, 1) * kChunkSizeX;
+}
+
 void applyCameraPose(Camera& camera,
                      const glm::vec3& position,
                      float yawDegrees,
@@ -325,10 +335,9 @@ struct BenchmarkConfig
     BenchmarkScenarioKind scenario{BenchmarkScenarioKind::SpawnPreload};
     std::filesystem::path outputPath{};
     std::string buildConfig{"Unknown"};
-    int nearChunks{kDefaultNearRenderDistance};
-    int farBlocks{kDefaultFarRenderDistanceBlocks};
+    int exactChunks{kDefaultNearRenderDistance};
+    int totalChunks{kDefaultTotalRenderDistanceChunks};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
-    bool farTerrainEnabled{false};
     float altitudeOffsetBlocks{24.0f};
     double movementDurationSeconds{0.0};
     double cooldownDurationSeconds{0.0};
@@ -523,10 +532,16 @@ struct BenchmarkFrameSummary
         config.buildConfig = buildConfigValue;
     }
 
-    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_NEAR_CHUNKS", config.nearChunks);
-    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FAR_BLOCKS", config.farBlocks);
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_EXACT_CHUNKS", config.exactChunks);
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_NEAR_CHUNKS", config.exactChunks);
+    config.totalChunks = config.exactChunks;
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_TOTAL_CHUNKS", config.totalChunks);
+    int legacyFarBlocks = 0;
+    if (tryGetEnvInt("BLOCKGAME_BENCHMARK_FAR_BLOCKS", legacyFarBlocks))
+    {
+        config.totalChunks = blocksToChunkRadiusCeil(legacyFarBlocks);
+    }
     (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FOG_START_BLOCKS", config.fogStartBlocks);
-    config.farTerrainEnabled = false;
     config.altitudeOffsetBlocks =
         envFloatOrDefault("BLOCKGAME_BENCHMARK_ALTITUDE_OFFSET", config.altitudeOffsetBlocks);
 
@@ -1134,10 +1149,10 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"movement_seconds\":" << config.movementDurationSeconds;
     out << ",\"cooldown_seconds\":" << config.cooldownDurationSeconds;
     out << ",\"render_settings\":{"
-        << "\"near_chunks\":" << renderSettings.nearChunks
-        << ",\"far_blocks\":" << renderSettings.farBlocks
+        << "\"exact_chunks\":" << renderSettings.exactChunks
+        << ",\"total_chunks\":" << renderSettings.totalChunks
         << ",\"fog_start_blocks\":" << renderSettings.fogStartBlocks
-        << ",\"far_terrain_enabled\":" << (renderSettings.farTerrainEnabled ? "true" : "false")
+        << ",\"lod_mode\":\"store_only\""
         << "}";
     out << ",\"camera\":{"
         << "\"spawn\":";
@@ -1276,14 +1291,12 @@ struct CaptureOverridesConfig
 {
     bool hasTimeOfDay{false};
     float timeOfDay{12.0f};
-    bool hasNearChunks{false};
-    int nearChunks{kDefaultNearRenderDistance};
-    bool hasFarBlocks{false};
-    int farBlocks{kDefaultFarRenderDistanceBlocks};
+    bool hasExactChunks{false};
+    int exactChunks{kDefaultNearRenderDistance};
+    bool hasTotalChunks{false};
+    int totalChunks{kDefaultTotalRenderDistanceChunks};
     bool hasFogStartBlocks{false};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
-    bool hasFarTerrainEnabled{false};
-    bool farTerrainEnabled{false};
     bool hasDebugView{false};
     TerrainDebugView terrainDebugView{TerrainDebugView::None};
     bool hasDirectSunEnabled{false};
@@ -1470,8 +1483,16 @@ struct CaptureOverridesConfig
     config.placements = loadCapturePlacements();
 
     config.hasTimeOfDay = tryGetEnvFloat("BLOCKGAME_CAPTURE_TIME_OF_DAY", config.timeOfDay);
-    config.hasNearChunks = tryGetEnvInt("BLOCKGAME_CAPTURE_NEAR_CHUNKS", config.nearChunks);
-    config.hasFarBlocks = tryGetEnvInt("BLOCKGAME_CAPTURE_FAR_BLOCKS", config.farBlocks);
+    config.hasExactChunks = tryGetEnvInt("BLOCKGAME_CAPTURE_EXACT_CHUNKS", config.exactChunks);
+    config.hasExactChunks = tryGetEnvInt("BLOCKGAME_CAPTURE_NEAR_CHUNKS", config.exactChunks) || config.hasExactChunks;
+    config.totalChunks = config.exactChunks;
+    config.hasTotalChunks = tryGetEnvInt("BLOCKGAME_CAPTURE_TOTAL_CHUNKS", config.totalChunks);
+    int legacyFarBlocks = 0;
+    if (tryGetEnvInt("BLOCKGAME_CAPTURE_FAR_BLOCKS", legacyFarBlocks))
+    {
+        config.totalChunks = blocksToChunkRadiusCeil(legacyFarBlocks);
+        config.hasTotalChunks = true;
+    }
     config.hasFogStartBlocks = tryGetEnvInt("BLOCKGAME_CAPTURE_FOG_START_BLOCKS", config.fogStartBlocks);
     if (const char* debugViewValue = std::getenv("BLOCKGAME_CAPTURE_DEBUG_VIEW"))
     {
@@ -1489,13 +1510,6 @@ struct CaptureOverridesConfig
         config.directSunEnabled = envFlagEnabled("BLOCKGAME_CAPTURE_DIRECT_SUN");
         (void)directSunValue;
     }
-    if (const char* farTerrainValue = std::getenv("BLOCKGAME_CAPTURE_FAR_TERRAIN"))
-    {
-        config.hasFarTerrainEnabled = true;
-        config.farTerrainEnabled = envFlagEnabled("BLOCKGAME_CAPTURE_FAR_TERRAIN");
-        (void)farTerrainValue;
-    }
-
     return config;
 }
 
@@ -1730,18 +1744,18 @@ bool applyRenderDistanceInput(ChunkManager& chunkManager, const std::string& inp
     std::string normalized = input;
     std::replace(normalized.begin(), normalized.end(), ',', ' ');
     std::istringstream stream(normalized);
-    int nearDistance = 0;
-    int farDistance = chunkManager.farRenderDistanceBlocks();
-    if (!(stream >> nearDistance))
+    int exactDistance = 0;
+    int totalDistance = chunkManager.totalRenderDistanceChunks();
+    if (!(stream >> exactDistance))
     {
         return false;
     }
 
-    if (stream >> farDistance)
+    if (stream >> totalDistance)
     {
-        chunkManager.setFarRenderDistanceBlocks(farDistance);
+        chunkManager.setTotalRenderDistanceChunks(totalDistance);
     }
-    chunkManager.setNearRenderDistance(nearDistance);
+    chunkManager.setExactRenderDistanceChunks(exactDistance);
     return true;
 }
 
@@ -2234,24 +2248,17 @@ int runGame()
         blockAtlas.tileSizePixels > 0 ? blockAtlas.tileSizePixels : kAtlasTileSizePixels,
         blockAtlas.tileStridePixels > 0 ? blockAtlas.tileStridePixels : kAtlasTileSizePixels,
         blockAtlas.tilePaddingPixels});
-    inputContext.lodEnabled = chunkManager.farTerrainEnabled();
-
-    if (captureOverrides.hasNearChunks)
+    if (captureOverrides.hasExactChunks)
     {
-        chunkManager.setNearRenderDistance(captureOverrides.nearChunks);
+        chunkManager.setExactRenderDistanceChunks(captureOverrides.exactChunks);
     }
-    if (captureOverrides.hasFarBlocks)
+    if (captureOverrides.hasTotalChunks)
     {
-        chunkManager.setFarRenderDistanceBlocks(captureOverrides.farBlocks);
+        chunkManager.setTotalRenderDistanceChunks(captureOverrides.totalChunks);
     }
     if (captureOverrides.hasFogStartBlocks)
     {
         chunkManager.setFogStartBlocks(captureOverrides.fogStartBlocks);
-    }
-    if (captureOverrides.hasFarTerrainEnabled)
-    {
-        chunkManager.setFarTerrainEnabled(false);
-        inputContext.lodEnabled = false;
     }
     if (captureOverrides.hasTimeOfDay)
     {
@@ -2267,11 +2274,9 @@ int runGame()
     }
     if (benchmarkConfig.enabled)
     {
-        chunkManager.setNearRenderDistance(benchmarkConfig.nearChunks);
-        chunkManager.setFarRenderDistanceBlocks(benchmarkConfig.farBlocks);
+        chunkManager.setExactRenderDistanceChunks(benchmarkConfig.exactChunks);
+        chunkManager.setTotalRenderDistanceChunks(benchmarkConfig.totalChunks);
         chunkManager.setFogStartBlocks(benchmarkConfig.fogStartBlocks);
-        chunkManager.setFarTerrainEnabled(false);
-        inputContext.lodEnabled = false;
 
         environment.atmosphereEnabled = false;
         environment.debug.worldPassEnabled = true;
@@ -2315,6 +2320,7 @@ int runGame()
         runStreamingValidationScenarios(chunkManager, camera.position);
         chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         chunkManager.update(camera.position, camera.front());
+        renderer.setUploadSynchronization(chunkManager.uploadFence(), chunkManager.lastSubmittedUploadFenceValue());
     }
 
     constexpr double kFixedTimeStep = 1.0 / 60.0;
@@ -2327,7 +2333,7 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set near/far render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set exact/total render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -2416,9 +2422,9 @@ int runGame()
 
             const int verticalSpan = (snapshot.verticalRadius * 2 + 1) * kChunkSizeY;
             profilingStream << " | " << phaseName
-                            << " Near " << chunkManager.nearRenderDistance()
+                            << " Exact " << chunkManager.exactRenderDistanceChunks()
                             << "x" << snapshot.verticalRadius
-                            << " Far " << chunkManager.farRenderDistanceBlocks()
+                            << " Total " << chunkManager.totalRenderDistanceChunks() << "c"
                             << " (" << verticalSpan << "h)";
             if (snapshot.exactChunksPending > 0 || snapshot.exactChunksReady > 0)
             {
@@ -2489,9 +2495,6 @@ int runGame()
         inputContext.f1JustPressed = f1JustPressed;
         inputContext.f1Pressed = f1CurrentlyPressed;
 
-        inputContext.f3JustPressed = false;
-        inputContext.f3Pressed = false;
-
         const StreamingStatusSnapshot streamingStatus = chunkManager.streamingStatusSnapshot();
         const bool playerReleased = streamingStatus.playerReleaseReady;
         if (!playerReleased)
@@ -2526,8 +2529,8 @@ int runGame()
                 loadingStream << "Exact bubble: " << streamingStatus.exactReadyChunks
                               << " / " << streamingStatus.exactRequiredChunks << '\n';
                 loadingStream << "Pending uploads: " << streamingStatus.exactPendingUploads << '\n';
-                loadingStream << "Far tiles: " << streamingStatus.farReadyTiles
-                              << " ready, " << streamingStatus.farQueuedTiles << " queued\n";
+                loadingStream << "Total radius target: " << chunkManager.totalRenderDistanceChunks()
+                              << " chunks (stored only until LOD lands)\n";
                 loadingStream << streamingStatus.blockingReason;
                 loadingOverlayText = loadingStream.str();
                 loadingOverlayTimer = 0.0;
@@ -2815,6 +2818,7 @@ int runGame()
 
         chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         chunkManager.update(camera.position, camera.front());
+        renderer.setUploadSynchronization(chunkManager.uploadFence(), chunkManager.lastSubmittedUploadFenceValue());
 
         int framebufferWidth = 0;
         int framebufferHeight = 0;
@@ -2827,7 +2831,7 @@ int runGame()
         }
         const float aspect = static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight);
 
-        const float currentFarPlane = computeFarPlaneForDistanceBlocks(chunkManager.farRenderDistanceBlocks());
+        const float currentFarPlane = computeFarPlaneForViewDistance(chunkManager.exactRenderDistanceChunks());
         kFarPlane = currentFarPlane;
         const glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(60.0f), aspect, kNearPlane, currentFarPlane);
         const glm::mat4 view = glm::lookAt(camera.position, camera.position + camera.front(), camera.up());
@@ -2838,10 +2842,9 @@ int runGame()
         {
             const RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
             const float exactVisibleDistanceBlocks =
-                static_cast<float>(std::max(renderSettings.nearChunks, 1) * kChunkSizeX);
-            const float effectiveVisibleDistanceBlocks = renderSettings.farTerrainEnabled
-                ? static_cast<float>(std::max(renderSettings.farBlocks, 256))
-                : exactVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2);
+                static_cast<float>(chunkRadiusToBlocks(renderSettings.exactChunks));
+            const float effectiveVisibleDistanceBlocks =
+                exactVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2);
             const float configuredFogStartBlocks =
                 static_cast<float>(std::max(renderSettings.fogStartBlocks, 0));
             const float minFogStartBlocks =
@@ -2849,8 +2852,7 @@ int runGame()
             const float maxFogStartBlocks =
                 std::max(minFogStartBlocks + 16.0f, effectiveVisibleDistanceBlocks * 0.82f);
 
-            // Base-game fog should track the currently visible chunk span so chunk loading
-            // fades into haze instead of exposing a square cutoff when far terrain is off.
+            // Base-game fog should track the current exact chunk span until the new LOD renderer lands.
             environment.farDistanceBlocks = effectiveVisibleDistanceBlocks;
             environment.fogStartBlocks = std::min(
                 std::clamp(configuredFogStartBlocks, minFogStartBlocks, maxFogStartBlocks),
@@ -3059,8 +3061,8 @@ int runGame()
             snapshotStream << "Time/Exposure/WP: " << environment.timeOfDay << " / "
                            << environment.tonemap.exposure << " / "
                            << environment.tonemap.whitePoint << '\n';
-            snapshotStream << "Near/Far/Fog: " << renderSettings.nearChunks << " / "
-                           << renderSettings.farBlocks << " / "
+            snapshotStream << "Exact/Total/Fog: " << renderSettings.exactChunks << " / "
+                           << renderSettings.totalChunks << " / "
                            << renderSettings.fogStartBlocks << '\n';
             snapshotStream << "Terrain Debug: " << terrainDebugViewLabel(environment.debug.terrainDebugView) << '\n';
             snapshotStream << "Passes: world=" << (environment.debug.worldPassEnabled ? "on" : "off")
@@ -3078,8 +3080,8 @@ int runGame()
                            << " nearHorizon=" << (nearHorizonView ? "yes" : "no")
                            << " belowHorizon=" << (lookingBelowHorizon ? "yes" : "no") << '\n';
             snapshotStream << "Streaming: exact " << streamingStatus.exactReadyChunks << "/" << streamingStatus.exactRequiredChunks
-                           << " farReady=" << streamingStatus.farReadyTiles
-                           << " farQueued=" << streamingStatus.farQueuedTiles;
+                           << " totalTarget=" << renderSettings.totalChunks
+                           << " lod=store_only";
             lightingSnapshotText = snapshotStream.str();
 
             const RecentEditHoleDebugSnapshot holeDebugSnapshot =
@@ -3255,11 +3257,9 @@ int runGame()
                 environment.tonemap.whitePoint = 9.0f;
                 environment.atmosphere.aerialPerspectiveDistanceKm = 12.0f;
                 environment.atmosphere.mieAnisotropy = 0.76f;
-                chunkManager.setNearRenderDistance(kDefaultNearRenderDistance);
-                chunkManager.setFarRenderDistanceBlocks(kDefaultFarRenderDistanceBlocks);
+                chunkManager.setExactRenderDistanceChunks(kDefaultNearRenderDistance);
+                chunkManager.setTotalRenderDistanceChunks(kDefaultTotalRenderDistanceChunks);
                 chunkManager.setFogStartBlocks(kDefaultFarFogStartBlocks);
-                chunkManager.setFarTerrainEnabled(false);
-                inputContext.lodEnabled = false;
             };
 
             if (ImGui::Button("Enhanced Atmo"))
@@ -3279,8 +3279,7 @@ int runGame()
             ImGui::SameLine();
             if (ImGui::Button("Exact Only"))
             {
-                chunkManager.setFarTerrainEnabled(false);
-                inputContext.lodEnabled = false;
+                chunkManager.setTotalRenderDistanceChunks(chunkManager.exactRenderDistanceChunks());
             }
             ImGui::SameLine();
             if (ImGui::Button("Reset Defaults"))
@@ -3344,31 +3343,34 @@ int runGame()
             ImGui::Separator();
             ImGui::TextUnformatted("Render Distance");
             RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
-            int nearChunks = renderSettings.nearChunks;
-            if (ImGui::SliderInt("Near Chunks", &nearChunks, 1, kMaxUserRenderDistance))
+            int exactChunks = renderSettings.exactChunks;
+            if (ImGui::SliderInt("Exact Chunks", &exactChunks, 1, kMaxExactRenderDistanceChunks))
             {
-                chunkManager.setNearRenderDistance(nearChunks);
-                renderSettings.nearChunks = nearChunks;
+                chunkManager.setExactRenderDistanceChunks(exactChunks);
+                renderSettings.exactChunks = exactChunks;
             }
-            int farBlocks = renderSettings.farBlocks;
-            if (ImGui::SliderInt("Far Blocks", &farBlocks, 256, 12000))
+            int totalChunks = renderSettings.totalChunks;
+            if (ImGui::SliderInt("Total Chunks", &totalChunks, 1, kMaxTotalRenderDistanceChunks))
             {
-                chunkManager.setFarRenderDistanceBlocks(farBlocks);
-                environment.farDistanceBlocks = static_cast<float>(farBlocks);
-                renderSettings.farBlocks = farBlocks;
+                chunkManager.setTotalRenderDistanceChunks(totalChunks);
+                renderSettings.totalChunks = totalChunks;
             }
             int fogStartBlocks = renderSettings.fogStartBlocks;
-            if (ImGui::SliderInt("Fog Start", &fogStartBlocks, 0, (std::max)(renderSettings.farBlocks, 256)))
+            const int fogSliderMax = (std::max)(chunkRadiusToBlocks(renderSettings.exactChunks + 4), 256);
+            if (ImGui::SliderInt("Fog Start", &fogStartBlocks, 0, fogSliderMax))
             {
                 chunkManager.setFogStartBlocks(fogStartBlocks);
                 environment.fogStartBlocks = static_cast<float>(fogStartBlocks);
                 renderSettings.fogStartBlocks = fogStartBlocks;
             }
-            ImGui::Text("Streaming: Exact %d/%d | Far Ready %d | Far Queued %d",
+            ImGui::Text("Streaming: Exact %d/%d | Total Target %d (stored only)",
                         streamingStatus.exactReadyChunks,
                         streamingStatus.exactRequiredChunks,
-                        streamingStatus.farReadyTiles,
-                        streamingStatus.farQueuedTiles);
+                        renderSettings.totalChunks);
+            if (renderSettings.totalChunks > renderSettings.exactChunks)
+            {
+                ImGui::TextWrapped("Total Radius above Exact Radius is currently stored only. The new LOD renderer has not been implemented yet, so visible rendering remains capped at the Exact Radius.");
+            }
             ImGui::Separator();
             ImGui::TextUnformatted("View Diagnostics");
             ImGui::Text("Yaw/Pitch: %.1f / %.1f", camera.yaw, camera.pitch);
@@ -3380,7 +3382,7 @@ int runGame()
             ImGui::Text("Sun Y: %.3f (%.1f deg)", environment.sunDirection.y, sunElevationDeg);
             ImGui::Text("View.Sun: %.3f", sunViewDot);
             ImGui::Text("Above Ground: %.2f blocks", altitudeAboveGround);
-            ImGui::Text("Fog Start/Far: %.0f / %.0f", environment.fogStartBlocks, environment.farDistanceBlocks);
+            ImGui::Text("Fog Start/Visible: %.0f / %.0f", environment.fogStartBlocks, environment.farDistanceBlocks);
             ImGui::Text("Fog Span: %.0f", fogSpanBlocks);
             ImGui::Text("Near Horizon: %s", nearHorizonView ? "yes" : "no");
             ImGui::Text("Looking Below Horizon: %s", lookingBelowHorizon ? "yes" : "no");
@@ -3438,7 +3440,7 @@ int runGame()
             ImGui::Begin("Render Distance",
                          nullptr,
                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
-            ImGui::TextUnformatted("Enter near chunks and optional far blocks (e.g. 12 4800):");
+            ImGui::TextUnformatted("Enter exact chunks and optional total chunks (e.g. 12 96):");
             const bool submit = ImGui::InputText("##render-distance",
                                                  &inputContext.inputBuffer,
                                                  ImGuiInputTextFlags_EnterReturnsTrue);

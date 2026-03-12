@@ -760,6 +760,12 @@ UINT64 Renderer::lastSubmittedFrameFenceValue() const noexcept
     return fenceValue_;
 }
 
+void Renderer::setUploadSynchronization(ID3D12Fence* uploadFence, UINT64 uploadFenceValue) noexcept
+{
+    pendingUploadFence_ = uploadFence;
+    pendingUploadFenceValue_ = uploadFenceValue;
+}
+
 int Renderer::width() const noexcept
 {
     return width_;
@@ -1890,6 +1896,15 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
 
     throwIfFailed(frame.allocator->Reset(), "failed to reset frame allocator");
     throwIfFailed(commandList_->Reset(frame.allocator.Get(), nullptr), "failed to reset command list");
+
+    if (pendingUploadFence_ != nullptr &&
+        pendingUploadFenceValue_ > consumedUploadFenceValue_ &&
+        pendingUploadFence_->GetCompletedValue() < pendingUploadFenceValue_)
+    {
+        throwIfFailed(commandQueue_->Wait(pendingUploadFence_, pendingUploadFenceValue_),
+                      "failed to wait for chunk upload fence");
+    }
+    consumedUploadFenceValue_ = std::max(consumedUploadFenceValue_, pendingUploadFenceValue_);
 
     const D3D12_RESOURCE_BARRIER backbufferBarrier =
         transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);

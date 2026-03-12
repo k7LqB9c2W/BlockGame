@@ -132,6 +132,7 @@ public:
     void shutdown();
     void waitForGpu();
     void resize(int width, int height);
+    void setUploadSynchronization(ID3D12Fence* uploadFence, UINT64 uploadFenceValue) noexcept;
 
     [[nodiscard]] ID3D12Device* device() const noexcept;
     [[nodiscard]] ID3D12Fence* frameFence() const noexcept;
@@ -317,6 +318,9 @@ private:
     std::size_t currentFrameConstantOffset_{0};
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
+    ID3D12Fence* pendingUploadFence_{nullptr};
+    UINT64 pendingUploadFenceValue_{0};
+    UINT64 consumedUploadFenceValue_{0};
     UINT currentBackBufferIndex_{0};
     UINT rtvDescriptorSize_{0};
     UINT dsvDescriptorSize_{0};

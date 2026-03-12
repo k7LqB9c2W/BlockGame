@@ -3,6 +3,9 @@ param(
     [string]$Config = "Release",
     [string]$OutputDir = "$(Join-Path $PSScriptRoot '..\\artifacts\\chunk_benchmark')",
     [switch]$SkipBuild,
+    [int]$ExactChunks = 12,
+    [int]$TotalChunks = 0,
+    [int]$FogStartBlocks = 1400,
     [int]$NotRespondingSeconds = 4,
     [int]$PostWriteGraceSeconds = 5,
     [int]$PollMilliseconds = 500
@@ -205,12 +208,16 @@ $scenarios = @(
     "vertical_travel"
 )
 
+$resolvedTotalChunks = if ($TotalChunks -gt 0) { $TotalChunks } else { $ExactChunks }
+
 $envKeys = @(
     "BLOCKGAME_BENCHMARK",
     "BLOCKGAME_BENCHMARK_SCENARIO",
     "BLOCKGAME_BENCHMARK_OUTPUT",
     "BLOCKGAME_BENCHMARK_BUILD_CONFIG",
-    "BLOCKGAME_BENCHMARK_FAR_TERRAIN"
+    "BLOCKGAME_BENCHMARK_EXACT_CHUNKS",
+    "BLOCKGAME_BENCHMARK_TOTAL_CHUNKS",
+    "BLOCKGAME_BENCHMARK_FOG_START_BLOCKS"
 )
 $previousEnv = @{}
 foreach ($key in $envKeys) {
@@ -227,7 +234,9 @@ try {
         $env:BLOCKGAME_BENCHMARK_SCENARIO = $scenario
         $env:BLOCKGAME_BENCHMARK_OUTPUT = $scenarioPath
         $env:BLOCKGAME_BENCHMARK_BUILD_CONFIG = $Config
-        $env:BLOCKGAME_BENCHMARK_FAR_TERRAIN = "0"
+        $env:BLOCKGAME_BENCHMARK_EXACT_CHUNKS = [string]$ExactChunks
+        $env:BLOCKGAME_BENCHMARK_TOTAL_CHUNKS = [string]$resolvedTotalChunks
+        $env:BLOCKGAME_BENCHMARK_FOG_START_BLOCKS = [string]$FogStartBlocks
 
         Write-Host "Running chunk benchmark scenario $scenario ..."
         $result = Invoke-BenchmarkScenario `
@@ -274,6 +283,10 @@ finally {
 }
 
 $acceptanceView = foreach ($scenario in $scenarioObjects) {
+    $finalProfiling = $scenario.final_profiling
+    $hasLodReadyTiles = $null -ne $finalProfiling -and ($finalProfiling.PSObject.Properties.Name -contains "lod_ready_tiles")
+    $hasLodActiveTiles = $null -ne $finalProfiling -and ($finalProfiling.PSObject.Properties.Name -contains "lod_active_tiles")
+    $hasLodBuiltTiles = $null -ne $finalProfiling -and ($finalProfiling.PSObject.Properties.Name -contains "lod_tiles_built_last_update")
     [pscustomobject]@{
         scenario = $scenario.scenario
         watchdog_reason = $scenario.watchdog_reason
@@ -290,6 +303,12 @@ $acceptanceView = foreach ($scenario in $scenarioObjects) {
         surface_hit_rate = $scenario.cache.surface.hit_rate
         generated_chunks_per_sec = $scenario.throughput.generated_chunks_per_sec
         uploaded_chunks_per_sec = $scenario.throughput.uploaded_chunks_per_sec
+        exact_chunks = $scenario.render_settings.exact_chunks
+        total_chunks = $scenario.render_settings.total_chunks
+        lod_mode = $scenario.render_settings.lod_mode
+        lod_ready_tiles = if ($hasLodReadyTiles) { $finalProfiling.lod_ready_tiles } else { $null }
+        lod_active_tiles = if ($hasLodActiveTiles) { $finalProfiling.lod_active_tiles } else { $null }
+        lod_tiles_built_last_update = if ($hasLodBuiltTiles) { $finalProfiling.lod_tiles_built_last_update } else { $null }
         pooled_chunks = if ($scenario.final_profiling) { $scenario.final_profiling.pooled_chunks } else { $null }
         pooled_chunk_bytes = if ($scenario.final_profiling) { $scenario.final_profiling.pooled_chunk_bytes } else { $null }
         pooled_chunk_budget_bytes = if ($scenario.final_profiling) { $scenario.final_profiling.pooled_chunk_budget_bytes } else { $null }
@@ -314,6 +333,7 @@ $summaryLines = New-Object System.Collections.Generic.List[string]
 $summaryLines.Add("BlockGame chunk benchmark")
 $summaryLines.Add("Build: $Config")
 $summaryLines.Add("Output: $runDir")
+$summaryLines.Add("Exact/Total/Fog: $ExactChunks / $resolvedTotalChunks / $FogStartBlocks")
 $summaryLines.Add(("Watchdog: not_responding={0}s post_write_grace={1}s poll_ms={2}" -f `
     $NotRespondingSeconds,
     $PostWriteGraceSeconds,

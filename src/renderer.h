@@ -295,6 +295,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedCommandSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;

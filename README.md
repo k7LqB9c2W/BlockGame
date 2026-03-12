@@ -275,6 +275,33 @@ The script creates a timestamped output folder under:
 
 Important note: percentile values are collected with low-overhead histograms, so they should be treated as approximate profiling bands rather than exact microsecond-precise measurements.
 
+## LOD Testing
+
+BlockGame now has a visual-only distant terrain path driven by `Exact Chunks` plus `Total Chunks`.
+If `Total Chunks` is greater than `Exact Chunks`, exact voxel chunks still handle gameplay while the distant terrain path fills the horizon outside the exact radius.
+
+Run an LOD benchmark with:
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\run_lod_benchmark.ps1 -BuildDir build -Config Release -ExactChunks 48 -TotalChunks 128
+```
+
+The LOD benchmark writes timestamped runs under `artifacts\lod_benchmark\<timestamp>\`.
+The summary JSON includes:
+
+- `render_settings.lod_mode`
+- `final_profiling.lod_active_tiles`
+- `final_profiling.lod_ready_tiles`
+- `final_profiling.lod_build_avg_ms`
+
+Run a timestamped LOD screenshot sweep with:
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\run_lod_horizon_sweep.ps1 -BuildDir build -Config Release -ExactChunks 48 -TotalChunks 128
+```
+
+Those captures are preserved under `artifacts\lod_horizon_sweep\exact<exact>_total<total>_<timestamp>\` so you can compare progress across LOD iterations instead of overwriting the previous sweep.
+
 ## Development Notes
 
 - The project is currently Windows-only because the renderer is Direct3D 12.

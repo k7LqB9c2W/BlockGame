@@ -1152,7 +1152,9 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << "\"exact_chunks\":" << renderSettings.exactChunks
         << ",\"total_chunks\":" << renderSettings.totalChunks
         << ",\"fog_start_blocks\":" << renderSettings.fogStartBlocks
-        << ",\"lod_mode\":\"store_only\""
+        << ",\"lod_mode\":\""
+        << (renderSettings.totalChunks > renderSettings.exactChunks ? "cpu_lod_active" : "exact_only")
+        << "\""
         << "}";
     out << ",\"camera\":{"
         << "\"spawn\":";
@@ -1223,6 +1225,15 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << "\"pooled_chunks\":" << finalProfiling.pooledChunkCount
         << ",\"pooled_chunk_bytes\":" << finalProfiling.pooledChunkBytes
         << ",\"pooled_chunk_budget_bytes\":" << finalProfiling.pooledChunkBudgetBytes
+        << ",\"lod_active_tiles\":" << finalProfiling.farActiveTiles
+        << ",\"lod_dirty_tiles\":" << finalProfiling.farDirtyTiles
+        << ",\"lod_ready_tiles\":" << finalProfiling.farShellTilesReady
+        << ",\"lod_tiles_built_last_update\":" << finalProfiling.farTilesBuilt
+        << ",\"lod_tiles_queued\":" << finalProfiling.farTilesQueued
+        << ",\"lod_tiles_pending_upload\":" << finalProfiling.farTilesPendingUpload
+        << ",\"lod_build_avg_ms\":" << finalProfiling.farBuildMsAverage
+        << ",\"lod_collect_ms\":" << finalProfiling.farCollectMsLastFrame
+        << ",\"lod_upload_ms\":" << finalProfiling.farUploadMsLastFrame
         << "}";
     out << ",\"final_streaming\":{"
         << "\"phase\":";
@@ -1232,6 +1243,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_pending_uploads\":" << streamingStatus.exactPendingUploads
         << ",\"far_ready_tiles\":" << streamingStatus.farReadyTiles
         << ",\"far_queued_tiles\":" << streamingStatus.farQueuedTiles
+        << ",\"lod_ready_tiles\":" << streamingStatus.farReadyTiles
+        << ",\"lod_queued_tiles\":" << streamingStatus.farQueuedTiles
         << ",\"player_release_ready\":" << (streamingStatus.playerReleaseReady ? "true" : "false")
         << ",\"blocking_reason\":";
     writeJsonEscaped(out, streamingStatus.blockingReason ? streamingStatus.blockingReason : "");
@@ -2463,8 +2476,8 @@ int runGame()
             profilingStream << " | UpdateMs " << snapshot.updateMsLastFrame;
             if (snapshot.farCollectMsLastFrame > 0.0 || snapshot.farUploadMsLastFrame > 0.0)
             {
-                profilingStream << " | FarCollect " << snapshot.farCollectMsLastFrame
-                                << " FarUpload " << snapshot.farUploadMsLastFrame;
+                profilingStream << " | LODCollect " << snapshot.farCollectMsLastFrame
+                                << " LODUpload " << snapshot.farUploadMsLastFrame;
             }
             if (rendererSnapshot.atmosphereLutMs > 0.0 || rendererSnapshot.skyDrawMs > 0.0 ||
                 rendererSnapshot.shadowDrawMs > 0.0 || rendererSnapshot.worldDrawMs > 0.0 ||
@@ -2530,7 +2543,12 @@ int runGame()
                               << " / " << streamingStatus.exactRequiredChunks << '\n';
                 loadingStream << "Pending uploads: " << streamingStatus.exactPendingUploads << '\n';
                 loadingStream << "Total radius target: " << chunkManager.totalRenderDistanceChunks()
-                              << " chunks (stored only until LOD lands)\n";
+                              << " chunks";
+                if (chunkManager.totalRenderDistanceChunks() > chunkManager.exactRenderDistanceChunks())
+                {
+                    loadingStream << " (LOD active beyond exact)";
+                }
+                loadingStream << '\n';
                 loadingStream << streamingStatus.blockingReason;
                 loadingOverlayText = loadingStream.str();
                 loadingOverlayTimer = 0.0;
@@ -2831,7 +2849,10 @@ int runGame()
         }
         const float aspect = static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight);
 
-        const float currentFarPlane = computeFarPlaneForViewDistance(chunkManager.exactRenderDistanceChunks());
+        const RenderDistanceSettings projectionRenderSettings = chunkManager.renderDistanceSettings();
+        const int visibleDistanceBlocks =
+            chunkRadiusToBlocks(std::max(projectionRenderSettings.exactChunks, projectionRenderSettings.totalChunks));
+        const float currentFarPlane = computeFarPlaneForDistanceBlocks(visibleDistanceBlocks);
         kFarPlane = currentFarPlane;
         const glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(60.0f), aspect, kNearPlane, currentFarPlane);
         const glm::mat4 view = glm::lookAt(camera.position, camera.position + camera.front(), camera.up());
@@ -2843,16 +2864,18 @@ int runGame()
             const RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
             const float exactVisibleDistanceBlocks =
                 static_cast<float>(chunkRadiusToBlocks(renderSettings.exactChunks));
+            const float totalVisibleDistanceBlocks =
+                static_cast<float>(chunkRadiusToBlocks(std::max(renderSettings.exactChunks, renderSettings.totalChunks)));
             const float effectiveVisibleDistanceBlocks =
-                exactVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2);
+                totalVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2);
             const float configuredFogStartBlocks =
                 static_cast<float>(std::max(renderSettings.fogStartBlocks, 0));
             const float minFogStartBlocks =
-                std::max(24.0f, effectiveVisibleDistanceBlocks * 0.42f);
+                std::max(std::max(24.0f, exactVisibleDistanceBlocks * 0.35f),
+                         effectiveVisibleDistanceBlocks * 0.42f);
             const float maxFogStartBlocks =
                 std::max(minFogStartBlocks + 16.0f, effectiveVisibleDistanceBlocks * 0.82f);
 
-            // Base-game fog should track the current exact chunk span until the new LOD renderer lands.
             environment.farDistanceBlocks = effectiveVisibleDistanceBlocks;
             environment.fogStartBlocks = std::min(
                 std::clamp(configuredFogStartBlocks, minFogStartBlocks, maxFogStartBlocks),
@@ -3081,7 +3104,8 @@ int runGame()
                            << " belowHorizon=" << (lookingBelowHorizon ? "yes" : "no") << '\n';
             snapshotStream << "Streaming: exact " << streamingStatus.exactReadyChunks << "/" << streamingStatus.exactRequiredChunks
                            << " totalTarget=" << renderSettings.totalChunks
-                           << " lod=store_only";
+                           << " lod="
+                           << (renderSettings.totalChunks > renderSettings.exactChunks ? "cpu_lod_active" : "exact_only");
             lightingSnapshotText = snapshotStream.str();
 
             const RecentEditHoleDebugSnapshot holeDebugSnapshot =
@@ -3356,20 +3380,23 @@ int runGame()
                 renderSettings.totalChunks = totalChunks;
             }
             int fogStartBlocks = renderSettings.fogStartBlocks;
-            const int fogSliderMax = (std::max)(chunkRadiusToBlocks(renderSettings.exactChunks + 4), 256);
+            const int fogSliderMax =
+                (std::max)(chunkRadiusToBlocks(std::max(renderSettings.exactChunks + 4, renderSettings.totalChunks)),
+                           256);
             if (ImGui::SliderInt("Fog Start", &fogStartBlocks, 0, fogSliderMax))
             {
                 chunkManager.setFogStartBlocks(fogStartBlocks);
                 environment.fogStartBlocks = static_cast<float>(fogStartBlocks);
                 renderSettings.fogStartBlocks = fogStartBlocks;
             }
-            ImGui::Text("Streaming: Exact %d/%d | Total Target %d (stored only)",
+            ImGui::Text("Streaming: Exact %d/%d | Total Target %d | LOD %s",
                         streamingStatus.exactReadyChunks,
                         streamingStatus.exactRequiredChunks,
-                        renderSettings.totalChunks);
+                        renderSettings.totalChunks,
+                        renderSettings.totalChunks > renderSettings.exactChunks ? "active" : "off");
             if (renderSettings.totalChunks > renderSettings.exactChunks)
             {
-                ImGui::TextWrapped("Total Radius above Exact Radius is currently stored only. The new LOD renderer has not been implemented yet, so visible rendering remains capped at the Exact Radius.");
+                ImGui::TextWrapped("CPU-backed distant terrain is active beyond the Exact Radius. Exact chunks still own gameplay, collision, and edits.");
             }
             ImGui::Separator();
             ImGui::TextUnformatted("View Diagnostics");

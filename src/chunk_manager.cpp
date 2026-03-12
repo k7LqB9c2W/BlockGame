@@ -1836,8 +1836,11 @@ public:
 
     FarTerrainManager()
         : levels_{
-              LevelConfig{1, kDefaultNearRenderDistance, 64, 8, 8, 3, 32},
-              LevelConfig{2, 64, 300, 32, 32, 5, 96}}
+              LevelConfig{1, kDefaultNearRenderDistance, 80, 8, 4, 2, 8},
+              LevelConfig{2, 80, 128, 16, 8, 3, 16},
+              LevelConfig{3, 128, 192, 32, 16, 4, 32},
+              LevelConfig{4, 192, 320, 64, 32, 5, 64},
+              LevelConfig{5, 320, kMaxTotalRenderDistanceChunks, 128, 64, 6, 128}}
     {
     }
 
@@ -1882,7 +1885,7 @@ public:
 
     void setDistanceBlocks(int blocks)
     {
-        farDistanceBlocks_ = std::max(blocks, 256);
+        farDistanceBlocks_ = blocks <= 0 ? 0 : std::max(blocks, 256);
     }
 
     [[nodiscard]] int distanceBlocks() const noexcept
@@ -1954,11 +1957,7 @@ public:
         const int realRadiusChunks = std::max(nearRadiusChunks + 1,
                                               ceilToIntPositive(
                                                   static_cast<float>(farDistanceBlocks_) / static_cast<float>(kChunkSizeX)));
-
-        levels_[0].innerRadiusChunks = nearRadiusChunks;
-        levels_[0].outerRadiusChunks = std::min(realRadiusChunks, 64);
-        levels_[1].innerRadiusChunks = 64;
-        levels_[1].outerRadiusChunks = realRadiusChunks;
+        refreshLevels(nearRadiusChunks, realRadiusChunks);
 
         auto touchLevel = [&](const LevelConfig& level)
         {
@@ -1991,13 +1990,12 @@ public:
             }
         };
 
-        if (levels_[0].outerRadiusChunks > levels_[0].innerRadiusChunks)
+        for (const LevelConfig& level : levels_)
         {
-            touchLevel(levels_[0]);
-        }
-        if (levels_[1].outerRadiusChunks > levels_[1].innerRadiusChunks)
-        {
-            touchLevel(levels_[1]);
+            if (level.outerRadiusChunks > level.innerRadiusChunks)
+            {
+                touchLevel(level);
+            }
         }
 
         std::vector<FarTileKey> staleKeys;
@@ -2149,6 +2147,53 @@ public:
     }
 
 private:
+    void refreshLevels(int nearRadiusChunks, int totalRadiusChunks)
+    {
+        struct LevelTemplate
+        {
+            int id;
+            int outerRadiusChunks;
+            int tileSizeChunks;
+            int sampleStepBlocks;
+            int lodLevel;
+        };
+
+        static constexpr std::array<LevelTemplate, 5> kLevelTemplates{{
+            {1, 80, 8, 4, 2},
+            {2, 128, 16, 8, 3},
+            {3, 192, 32, 16, 4},
+            {4, 320, 64, 32, 5},
+            {5, kMaxTotalRenderDistanceChunks, 128, 64, 6},
+        }};
+
+        levels_.clear();
+        if (totalRadiusChunks <= nearRadiusChunks)
+        {
+            return;
+        }
+
+        constexpr int kExactOverlapChunks = 4;
+        int innerRadiusChunks = std::max(0, nearRadiusChunks - kExactOverlapChunks);
+        for (const LevelTemplate& levelTemplate : kLevelTemplates)
+        {
+            const int outerRadiusChunks = std::min(totalRadiusChunks, levelTemplate.outerRadiusChunks);
+            if (outerRadiusChunks <= innerRadiusChunks)
+            {
+                continue;
+            }
+
+            levels_.push_back(LevelConfig{
+                levelTemplate.id,
+                innerRadiusChunks,
+                outerRadiusChunks,
+                levelTemplate.tileSizeChunks,
+                levelTemplate.sampleStepBlocks,
+                levelTemplate.lodLevel,
+                std::max(levelTemplate.sampleStepBlocks * 2, 8)});
+            innerRadiusChunks = outerRadiusChunks;
+        }
+    }
+
     struct FarTileKey
     {
         int level{0};
@@ -4294,7 +4339,7 @@ ChunkManager::Impl::Impl(unsigned seed)
         farWorkerCount_ = 1;
     }
     farTerrainManager_.setWorkerCount(static_cast<std::size_t>(farWorkerCount_));
-    kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
+    kFarPlane = computeFarPlaneForDistanceBlocks(chunksToBlocks(renderSettings_.exactChunks));
     startWorkerThreads();
 }
 
@@ -4542,7 +4587,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verticalRadiusStart).count();
     lastVerticalRadius_ = verticalRadius;
     gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
-    kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
+    const bool lodActive = renderSettings_.totalChunks > renderSettings_.exactChunks;
+    const int visibleDistanceBlocks = chunksToBlocks(lodActive ? renderSettings_.totalChunks
+                                                               : renderSettings_.exactChunks);
+    kFarPlane = computeFarPlaneForDistanceBlocks(visibleDistanceBlocks);
 
     const auto uploadBudgetStart = std::chrono::steady_clock::now();
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
@@ -4684,7 +4732,30 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     poolTrimMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poolTrimStart).count();
 
-    farTerrainManager_.clear();
+    if (renderSettings_.totalChunks > renderSettings_.exactChunks)
+    {
+        const double lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.35, 0.35, 1.5);
+        farTerrainManager_.setEnabled(true);
+        farTerrainManager_.setDistanceBlocks(chunksToBlocks(renderSettings_.totalChunks));
+        farTerrainManager_.update(centerChunk,
+                                  lastCameraForward_,
+                                  targetViewDistance_,
+                                  chunksToBlocks(renderSettings_.totalChunks),
+                                  lodUploadBudgetMs,
+                                  [this](int lodWorldX, int lodWorldZ, int lodLevel)
+                                  {
+                                      return sampleFarTerrainSurfaceLod(lodWorldX, lodWorldZ, lodLevel);
+                                  },
+                                  [this](BlockId block, BlockFace face)
+                                  {
+                                      return atlasUvFor(block, face);
+                                  });
+    }
+    else
+    {
+        farTerrainManager_.setDistanceBlocks(0);
+        farTerrainManager_.clear();
+    }
 
     const auto startupStateStart = std::chrono::steady_clock::now();
     if (startupEnabled_ && startupState_.preloadStarted)
@@ -5245,7 +5316,8 @@ void ChunkManager::Impl::toggleViewDistance()
         {
             renderSettings_.totalChunks = renderSettings_.exactChunks;
         }
-        kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
+        kFarPlane = computeFarPlaneForDistanceBlocks(
+            chunksToBlocks(std::max(renderSettings_.exactChunks, renderSettings_.totalChunks)));
     }
 }
 
@@ -5290,6 +5362,10 @@ void ChunkManager::Impl::setExactRenderDistanceChunks(int chunks) noexcept
     {
         const int clampedDistance = std::clamp(chunks, 1, kMaxExactRenderDistanceChunks);
         renderSettings_.exactChunks = clampedDistance;
+        if (renderSettings_.totalChunks < renderSettings_.exactChunks)
+        {
+            renderSettings_.totalChunks = renderSettings_.exactChunks;
+        }
         if (!startupEnabled_ || !startupState_.preloadStarted || startupState_.phase == StreamingPhase::SteadyState)
         {
             targetViewDistance_ = clampedDistance;
@@ -5300,7 +5376,10 @@ void ChunkManager::Impl::setExactRenderDistanceChunks(int chunks) noexcept
             startupState_.exactNearCurrentChunks = std::min(startupState_.exactNearCurrentChunks, clampedDistance);
             targetViewDistance_ = std::min(startupState_.exactNearCurrentChunks, clampedDistance);
         }
-        kFarPlane = computeFarPlaneForViewDistance(renderSettings_.exactChunks);
+        farTerrainManager_.setEnabled(renderSettings_.totalChunks > renderSettings_.exactChunks);
+        farTerrainManager_.setDistanceBlocks(chunksToBlocks(renderSettings_.totalChunks));
+        kFarPlane = computeFarPlaneForDistanceBlocks(
+            chunksToBlocks(std::max(renderSettings_.exactChunks, renderSettings_.totalChunks)));
         if (chunks != clampedDistance)
         {
             std::cout << "Exact render distance request " << chunks << " clamped to " << clampedDistance << " chunks"
@@ -5330,13 +5409,15 @@ void ChunkManager::Impl::setTotalRenderDistanceChunks(int chunks) noexcept
     {
         renderSettings_.totalChunks = std::clamp(chunks, 1, kMaxTotalRenderDistanceChunks);
         startupState_.farCurrentBlocks = 0;
-        farTerrainManager_.setDistanceBlocks(0);
+        farTerrainManager_.setEnabled(renderSettings_.totalChunks > renderSettings_.exactChunks);
+        farTerrainManager_.setDistanceBlocks(chunksToBlocks(renderSettings_.totalChunks));
         if (renderSettings_.totalChunks > renderSettings_.exactChunks)
         {
-            std::cout << "Total render distance stored at " << renderSettings_.totalChunks
-                      << " chunks. LOD rendering is not implemented yet, so exact rendering remains capped at "
-                      << renderSettings_.exactChunks << " chunks." << std::endl;
+            std::cout << "LOD render distance active: exact " << renderSettings_.exactChunks
+                      << " chunks, total " << renderSettings_.totalChunks << " chunks." << std::endl;
         }
+        kFarPlane = computeFarPlaneForDistanceBlocks(
+            chunksToBlocks(std::max(renderSettings_.exactChunks, renderSettings_.totalChunks)));
     }
     catch (const std::exception& ex)
     {
@@ -5363,18 +5444,18 @@ void ChunkManager::Impl::setFogStartBlocks(int blocks) noexcept
 void ChunkManager::Impl::setFarTerrainEnabled(bool enabled)
 {
     (void)enabled;
-    // Far terrain is obsolete for current builds. Keep the path hard-disabled until it is redesigned.
+    // Legacy far-terrain toggles are obsolete. LOD now follows Exact/Total distance settings.
     startupState_.farCurrentBlocks = 0;
-    farTerrainManager_.setEnabled(false);
-    farTerrainManager_.setDistanceBlocks(0);
-    farTerrainManager_.clear();
+    farTerrainManager_.setEnabled(renderSettings_.totalChunks > renderSettings_.exactChunks);
+    farTerrainManager_.setDistanceBlocks(chunksToBlocks(renderSettings_.totalChunks));
     trimChunkPoolToBudget();
-    std::cout << "[ChunkManager] Far terrain is disabled in current builds" << std::endl;
+    std::cout << "[ChunkManager] Legacy far-terrain toggle is obsolete. LOD follows Exact/Total render distance."
+              << std::endl;
 }
 
 bool ChunkManager::Impl::farTerrainEnabled() const noexcept
 {
-    return false;
+    return renderSettings_.totalChunks > renderSettings_.exactChunks;
 }
 
 void ChunkManager::Impl::setLodEnabled(bool enabled)
@@ -5384,7 +5465,7 @@ void ChunkManager::Impl::setLodEnabled(bool enabled)
 
 bool ChunkManager::Impl::lodEnabled() const noexcept
 {
-    return farTerrainEnabled();
+    return renderSettings_.totalChunks > renderSettings_.exactChunks;
 }
 
 BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept

@@ -38,12 +38,14 @@
 ## Debugging / Repro
 - BlockGame supports renderer-driven automated screenshots for visual debugging.
 - Sweep captures: run `powershell -ExecutionPolicy Bypass -File tools\run_horizon_sweep.ps1` to launch the game, rotate through a pose grid, delete old sweep screenshots, save fresh captures under `artifacts/horizon_sweep`, and write `captures.csv` plus `analysis.csv`.
+- LOD sweep captures: run `powershell -ExecutionPolicy Bypass -File tools\run_lod_horizon_sweep.ps1 -BuildDir build -Config Release -ExactChunks 48 -TotalChunks 128` to capture timestamped distant-terrain sweeps without overwriting earlier runs. Artifacts land under `artifacts\lod_horizon_sweep\exact<exact>_total<total>_<timestamp>\`.
 - Single-view repro captures: run `powershell -ExecutionPolicy Bypass -File tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -Yaw <yaw> -Pitch <pitch>` to teleport to an exact camera pose, capture one screenshot, and delete old repro screenshots in `artifacts/repro_capture`.
 - Single-view repro also supports a look target instead of yaw/pitch: `tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -LookX <x> -LookY <y> -LookZ <z>`.
 - The in-game debug overlay now includes `Yaw/Pitch`, `Front`, and `Hit Block` so a screenshot contains enough information to recreate the exact view later.
 - Chunk benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release` to execute `spawn_preload`, `straight_line_sprint`, `turn_heavy_traversal`, and `vertical_travel` in sequence. Add `-SkipBuild` if `build\Release\blockgame.exe` is already current.
+- LOD benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_lod_benchmark.ps1 -BuildDir build -Config Release -ExactChunks 48 -TotalChunks 128` to execute the same scenarios with distant visual terrain active. Change `-TotalChunks` up to `500` for long-range LOD stress.
 - Chunk benchmarks must be killed quickly when the game window becomes `Not Responding`; use the watchdog in `tools\run_chunk_benchmark.ps1` so hung runs are terminated early, a watchdog reason file is written, and CPU/GPU time plus RAM are not wasted during unattended benchmarking.
-- Far terrain mode is obsolete, not needed for current BlockGame work, and is being phased out. Do not re-enable it in gameplay, UI, captures, or benchmarks unless the user explicitly asks for temporary restoration work.
+- Legacy far terrain mode is obsolete. The replacement path is the Exact/Total chunk LOD system; do not revive the old far-terrain toggle or old far-block UI.
 - Chunk benchmark artifacts land in `artifacts\chunk_benchmark\<timestamp>\`. Read `benchmark_summary.json` first for Codex or scripts, and `benchmark_summary.txt` for a quick human summary.
 - Benchmark interpretation:
   `throughput.generated_chunks_per_sec` / `throughput.uploaded_chunks_per_sec` show chunk streaming throughput.

@@ -714,9 +714,10 @@ void Renderer::shutdown()
       toneMapPipelineState_.Reset();
       cloudPipelineState_.Reset();
       baseSkyPipelineState_.Reset();
-      shadowPipelineState_.Reset();
-      nearPipelineState_.Reset();
-      farPipelineState_.Reset();
+    shadowPipelineState_.Reset();
+    nearPipelineState_.Reset();
+    farPipelineState_.Reset();
+    drawIndexedCommandSignature_.Reset();
     fullscreenRootSignature_.Reset();
     shadowRootSignature_.Reset();
     worldRootSignature_.Reset();
@@ -1317,6 +1318,17 @@ void Renderer::createPipelines()
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
       throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
                     "failed to create far pipeline");
+
+      D3D12_INDIRECT_ARGUMENT_DESC drawIndexedArgument{};
+      drawIndexedArgument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+      D3D12_COMMAND_SIGNATURE_DESC drawIndexedSignature{};
+      drawIndexedSignature.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+      drawIndexedSignature.NumArgumentDescs = 1;
+      drawIndexedSignature.pArgumentDescs = &drawIndexedArgument;
+      throwIfFailed(device_->CreateCommandSignature(&drawIndexedSignature,
+                                                    nullptr,
+                                                    IID_PPV_ARGS(&drawIndexedCommandSignature_)),
+                    "failed to create draw indexed command signature");
 
       D3D12_GRAPHICS_PIPELINE_STATE_DESC baseSkyPso{};
       baseSkyPso.pRootSignature = fullscreenRootSignature_.Get();
@@ -2098,10 +2110,29 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
             commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
             commandList_->IASetIndexBuffer(&batch.indexBufferView);
-            for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
+            void* indirectCpu = nullptr;
+            const std::size_t commandCount = batch.indexCounts.size();
+            const std::size_t commandBytes = commandCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+            const std::uint64_t indirectGpuAddress = allocateFrameConstantBytes(commandBytes, &indirectCpu);
+            auto* indirectArgs = static_cast<D3D12_DRAW_INDEXED_ARGUMENTS*>(indirectCpu);
+            for (std::size_t i = 0; i < commandCount; ++i)
             {
-                commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+                indirectArgs[i].IndexCountPerInstance = batch.indexCounts[i];
+                indirectArgs[i].InstanceCount = 1;
+                indirectArgs[i].StartIndexLocation = batch.firstIndexLocations[i];
+                indirectArgs[i].BaseVertexLocation = batch.baseVertices[i];
+                indirectArgs[i].StartInstanceLocation = 0;
             }
+
+            FrameResource& frame = frameResources_[currentBackBufferIndex_];
+            const std::uint64_t indirectBufferOffset =
+                indirectGpuAddress - frame.constantBuffer->GetGPUVirtualAddress();
+            commandList_->ExecuteIndirect(drawIndexedCommandSignature_.Get(),
+                                          static_cast<UINT>(commandCount),
+                                          frame.constantBuffer.Get(),
+                                          indirectBufferOffset,
+                                          nullptr,
+                                          0);
         }
     }
     profilingSnapshot_.worldDrawMs =

@@ -41,6 +41,7 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/noise.hpp>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 
 namespace
@@ -714,6 +715,421 @@ private:
     UINT64 graphicsFenceValue_{0};
     bool open_{false};
     bool hasCommands_{false};
+};
+
+class PageComputeContext
+{
+public:
+    struct Summary
+    {
+        int minSolidY{0};
+        int maxSolidY{1};
+        int maxWaterY{std::numeric_limits<int>::min()};
+        int waterCells{0};
+        int canopyCells{0};
+        int trunkCells{0};
+        int occupiedCells{0};
+    };
+
+    ~PageComputeContext()
+    {
+        shutdown();
+    }
+
+    void initialize(ID3D12Device* device)
+    {
+        shutdown();
+        if (device == nullptr)
+        {
+            return;
+        }
+
+        device_ = device;
+
+        D3D12_COMMAND_QUEUE_DESC queueDesc{};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        throwIfFailedDx(device_->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue_)),
+                        "failed to create page compute queue");
+        throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&allocator_)),
+                        "failed to create page compute allocator");
+        throwIfFailedDx(device_->CreateCommandList(0,
+                                                   D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                                   allocator_.Get(),
+                                                   nullptr,
+                                                   IID_PPV_ARGS(&commandList_)),
+                        "failed to create page compute command list");
+        throwIfFailedDx(commandList_->Close(), "failed to close initial page compute command list");
+        throwIfFailedDx(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)),
+                        "failed to create page compute fence");
+        fenceEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (fenceEvent_ == nullptr)
+        {
+            throw std::runtime_error("failed to create page compute fence event");
+        }
+
+        static constexpr const char* kShaderSource = R"(
+cbuffer Params : register(b0)
+{
+    uint gCellCount;
+};
+
+struct PageCellGpu
+{
+    int solidTopY;
+    uint solidBlock;
+    int waterTopY;
+    uint hasWater;
+    int canopyBaseY;
+    int canopyTopY;
+    uint canopyBlock;
+    uint hasCanopy;
+    int trunkTopY;
+    uint trunkBlock;
+    uint hasTrunk;
+    uint padding;
+};
+
+StructuredBuffer<PageCellGpu> gCells : register(t0);
+RWStructuredBuffer<int4> gSummary : register(u0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint index = dispatchThreadId.x;
+    if (index >= gCellCount)
+    {
+        return;
+    }
+
+    const PageCellGpu cell = gCells[index];
+    if (cell.solidBlock != 0 && cell.solidTopY > -2147480000)
+    {
+        InterlockedMin(gSummary[0].x, cell.solidTopY);
+        InterlockedMax(gSummary[0].y, cell.solidTopY + 1);
+        InterlockedAdd(gSummary[1].z, 1);
+    }
+    if (cell.hasWater != 0 && cell.waterTopY > -2147480000)
+    {
+        InterlockedMax(gSummary[0].z, cell.waterTopY + 1);
+        InterlockedAdd(gSummary[0].w, 1);
+    }
+    if (cell.hasCanopy != 0)
+    {
+        InterlockedAdd(gSummary[1].x, 1);
+    }
+    if (cell.hasTrunk != 0)
+    {
+        InterlockedAdd(gSummary[1].y, 1);
+    }
+}
+)";
+
+        Microsoft::WRL::ComPtr<ID3DBlob> shaderBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+        const UINT compileFlags =
+#if defined(_DEBUG)
+            D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+            D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+        const HRESULT shaderHr = D3DCompile(kShaderSource,
+                                            std::strlen(kShaderSource),
+                                            "lod_page_compute",
+                                            nullptr,
+                                            nullptr,
+                                            "main",
+                                            "cs_5_0",
+                                            compileFlags,
+                                            0,
+                                            &shaderBlob,
+                                            &errorBlob);
+        if (FAILED(shaderHr))
+        {
+            std::string message = "failed to compile page compute shader";
+            if (errorBlob != nullptr && errorBlob->GetBufferPointer() != nullptr)
+            {
+                message += ": ";
+                message.append(static_cast<const char*>(errorBlob->GetBufferPointer()),
+                               errorBlob->GetBufferSize());
+            }
+            throwIfFailedDx(shaderHr, message.c_str());
+        }
+
+        std::array<D3D12_ROOT_PARAMETER, 3> rootParams{};
+        rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParams[0].Constants.Num32BitValues = 1;
+        rootParams[0].Constants.RegisterSpace = 0;
+        rootParams[0].Constants.ShaderRegister = 0;
+        rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        rootParams[1].Descriptor.RegisterSpace = 0;
+        rootParams[1].Descriptor.ShaderRegister = 0;
+        rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        rootParams[2].Descriptor.RegisterSpace = 0;
+        rootParams[2].Descriptor.ShaderRegister = 0;
+        rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+        D3D12_ROOT_SIGNATURE_DESC rootSigDesc{};
+        rootSigDesc.NumParameters = static_cast<UINT>(rootParams.size());
+        rootSigDesc.pParameters = rootParams.data();
+        rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSigBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSigErrorBlob;
+        throwIfFailedDx(D3D12SerializeRootSignature(&rootSigDesc,
+                                                    D3D_ROOT_SIGNATURE_VERSION_1,
+                                                    &rootSigBlob,
+                                                    &rootSigErrorBlob),
+                        "failed to serialize page compute root signature");
+        throwIfFailedDx(device_->CreateRootSignature(0,
+                                                     rootSigBlob->GetBufferPointer(),
+                                                     rootSigBlob->GetBufferSize(),
+                                                     IID_PPV_ARGS(&rootSignature_)),
+                        "failed to create page compute root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc{};
+        psoDesc.pRootSignature = rootSignature_.Get();
+        psoDesc.CS = {shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pipelineState_)),
+                        "failed to create page compute pipeline");
+    }
+
+    void shutdown()
+    {
+        waitForIdle();
+        if (fenceEvent_ != nullptr)
+        {
+            CloseHandle(fenceEvent_);
+            fenceEvent_ = nullptr;
+        }
+        pipelineState_.Reset();
+        rootSignature_.Reset();
+        commandList_.Reset();
+        allocator_.Reset();
+        queue_.Reset();
+        fence_.Reset();
+        device_.Reset();
+        fenceValue_ = 0;
+        lastSubmittedFenceValue_ = 0;
+    }
+
+    [[nodiscard]] bool ready() const noexcept
+    {
+        return device_ != nullptr &&
+               queue_ != nullptr &&
+               allocator_ != nullptr &&
+               commandList_ != nullptr &&
+               pipelineState_ != nullptr &&
+               rootSignature_ != nullptr;
+    }
+
+    template <typename PageType>
+    bool processPage(const PageType& page, Summary& outSummary, double& outMs)
+    {
+        outSummary = {};
+        outMs = 0.0;
+        if (!ready() || page.cells.empty())
+        {
+            return false;
+        }
+
+        struct GpuPageCell
+        {
+            std::int32_t solidTopY;
+            std::uint32_t solidBlock;
+            std::int32_t waterTopY;
+            std::uint32_t hasWater;
+            std::int32_t canopyBaseY;
+            std::int32_t canopyTopY;
+            std::uint32_t canopyBlock;
+            std::uint32_t hasCanopy;
+            std::int32_t trunkTopY;
+            std::uint32_t trunkBlock;
+            std::uint32_t hasTrunk;
+            std::uint32_t padding;
+        };
+
+        const auto start = std::chrono::steady_clock::now();
+        const std::size_t cellCount = page.cells.size();
+        std::vector<GpuPageCell> gpuCells(cellCount);
+        for (std::size_t i = 0; i < cellCount; ++i)
+        {
+            const auto& src = page.cells[i];
+            gpuCells[i] = GpuPageCell{
+                src.solidTopY,
+                static_cast<std::uint32_t>(src.solidBlock),
+                src.waterTopY,
+                src.hasWater ? 1u : 0u,
+                src.canopyBaseY,
+                src.canopyTopY,
+                static_cast<std::uint32_t>(src.canopyBlock),
+                src.hasCanopy ? 1u : 0u,
+                src.trunkTopY,
+                static_cast<std::uint32_t>(src.trunkBlock),
+                src.hasTrunk ? 1u : 0u,
+                0u};
+        }
+
+        struct alignas(16) SummaryBlock
+        {
+            std::int32_t values[8];
+        };
+        SummaryBlock initialSummary{{std::numeric_limits<int>::max(),
+                                     std::numeric_limits<int>::min(),
+                                     std::numeric_limits<int>::min(),
+                                     0,
+                                     0,
+                                     0,
+                                     0,
+                                     0}};
+
+        const std::uint64_t inputBytes = static_cast<std::uint64_t>(gpuCells.size() * sizeof(GpuPageCell));
+        const std::uint64_t summaryBytes = static_cast<std::uint64_t>(sizeof(SummaryBlock));
+
+        auto createBuffer = [this](D3D12_HEAP_TYPE heapType,
+                                   std::uint64_t sizeInBytes,
+                                   D3D12_RESOURCE_STATES initialState,
+                                   D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
+        {
+            D3D12_HEAP_PROPERTIES heapProps{};
+            heapProps.Type = heapType;
+            heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+            heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+            heapProps.CreationNodeMask = 1;
+            heapProps.VisibleNodeMask = 1;
+
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = sizeInBytes;
+            desc.Height = 1;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            desc.Flags = flags;
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            throwIfFailedDx(device_->CreateCommittedResource(&heapProps,
+                                                             D3D12_HEAP_FLAG_NONE,
+                                                             &desc,
+                                                             initialState,
+                                                             nullptr,
+                                                             IID_PPV_ARGS(&resource)),
+                            "failed to create page compute buffer");
+            return resource;
+        };
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> inputDefault =
+            createBuffer(D3D12_HEAP_TYPE_DEFAULT, inputBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+        Microsoft::WRL::ComPtr<ID3D12Resource> inputUpload =
+            createBuffer(D3D12_HEAP_TYPE_UPLOAD, inputBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+        Microsoft::WRL::ComPtr<ID3D12Resource> summaryDefault =
+            createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                         summaryBytes,
+                         D3D12_RESOURCE_STATE_COPY_DEST,
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> summaryUpload =
+            createBuffer(D3D12_HEAP_TYPE_UPLOAD, summaryBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+        Microsoft::WRL::ComPtr<ID3D12Resource> summaryReadback =
+            createBuffer(D3D12_HEAP_TYPE_READBACK, summaryBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+
+        void* mappedInput = nullptr;
+        throwIfFailedDx(inputUpload->Map(0, nullptr, &mappedInput), "failed to map page compute upload");
+        std::memcpy(mappedInput, gpuCells.data(), static_cast<std::size_t>(inputBytes));
+        inputUpload->Unmap(0, nullptr);
+
+        void* mappedSummary = nullptr;
+        throwIfFailedDx(summaryUpload->Map(0, nullptr, &mappedSummary), "failed to map page compute summary upload");
+        std::memcpy(mappedSummary, &initialSummary, sizeof(initialSummary));
+        summaryUpload->Unmap(0, nullptr);
+
+        if (fence_ != nullptr && fenceValue_ > 0 && fence_->GetCompletedValue() < fenceValue_)
+        {
+            waitForIdle();
+        }
+
+        throwIfFailedDx(allocator_->Reset(), "failed to reset page compute allocator");
+        throwIfFailedDx(commandList_->Reset(allocator_.Get(), pipelineState_.Get()), "failed to reset page compute command list");
+
+        commandList_->CopyBufferRegion(inputDefault.Get(), 0, inputUpload.Get(), 0, inputBytes);
+        commandList_->CopyBufferRegion(summaryDefault.Get(), 0, summaryUpload.Get(), 0, summaryBytes);
+
+        const D3D12_RESOURCE_BARRIER barriers[] = {
+            transitionBarrier(inputDefault.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+            transitionBarrier(summaryDefault.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+        commandList_->ResourceBarrier(static_cast<UINT>(std::size(barriers)), barriers);
+
+        commandList_->SetComputeRootSignature(rootSignature_.Get());
+        const UINT cellCount32 = static_cast<UINT>(gpuCells.size());
+        commandList_->SetComputeRoot32BitConstants(0, 1, &cellCount32, 0);
+        commandList_->SetComputeRootShaderResourceView(1, inputDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(2, summaryDefault->GetGPUVirtualAddress());
+        const UINT groups = std::max<UINT>(1u, static_cast<UINT>((gpuCells.size() + 63u) / 64u));
+        commandList_->Dispatch(groups, 1, 1);
+
+        D3D12_RESOURCE_BARRIER uavBarrier{};
+        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier.UAV.pResource = summaryDefault.Get();
+        commandList_->ResourceBarrier(1, &uavBarrier);
+
+        const D3D12_RESOURCE_BARRIER toCopyBarrier =
+            transitionBarrier(summaryDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        commandList_->ResourceBarrier(1, &toCopyBarrier);
+        commandList_->CopyBufferRegion(summaryReadback.Get(), 0, summaryDefault.Get(), 0, summaryBytes);
+
+        throwIfFailedDx(commandList_->Close(), "failed to close page compute command list");
+        ID3D12CommandList* commandLists[] = {commandList_.Get()};
+        queue_->ExecuteCommandLists(static_cast<UINT>(std::size(commandLists)), commandLists);
+        ++fenceValue_;
+        throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal page compute fence");
+        lastSubmittedFenceValue_ = fenceValue_;
+        waitForIdle();
+
+        SummaryBlock summary{};
+        void* mappedReadback = nullptr;
+        D3D12_RANGE readRange{0, static_cast<SIZE_T>(summaryBytes)};
+        throwIfFailedDx(summaryReadback->Map(0, &readRange, &mappedReadback), "failed to map page compute readback");
+        std::memcpy(&summary, mappedReadback, sizeof(summary));
+        summaryReadback->Unmap(0, nullptr);
+
+        outSummary.minSolidY = (summary.values[0] == std::numeric_limits<int>::max()) ? 0 : summary.values[0];
+        outSummary.maxSolidY = (summary.values[1] == std::numeric_limits<int>::min()) ? 1 : summary.values[1];
+        outSummary.maxWaterY = summary.values[2];
+        outSummary.waterCells = summary.values[3];
+        outSummary.canopyCells = summary.values[4];
+        outSummary.trunkCells = summary.values[5];
+        outSummary.occupiedCells = summary.values[6];
+        outMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        return true;
+    }
+
+private:
+    void waitForIdle()
+    {
+        if (fence_ == nullptr || lastSubmittedFenceValue_ == 0)
+        {
+            return;
+        }
+        if (fence_->GetCompletedValue() >= lastSubmittedFenceValue_)
+        {
+            return;
+        }
+        throwIfFailedDx(fence_->SetEventOnCompletion(lastSubmittedFenceValue_, fenceEvent_),
+                        "failed to wait for page compute fence");
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState_;
+    HANDLE fenceEvent_{nullptr};
+    UINT64 fenceValue_{0};
+    UINT64 lastSubmittedFenceValue_{0};
 };
 
 inline int floorDiv(int value, int divisor) noexcept
@@ -1815,6 +2231,15 @@ struct FarTerrainSurfaceSample
     BlockId solidBlock{BlockId::Air};
     int waterTopY{std::numeric_limits<int>::min()};
     bool hasVisibleWater{false};
+    bool allowsTrees{false};
+    bool prefersSpruce{false};
+    int canopyBaseY{std::numeric_limits<int>::min()};
+    int canopyTopY{std::numeric_limits<int>::min()};
+    BlockId canopyBlock{BlockId::Air};
+    bool hasVisibleCanopy{false};
+    int trunkTopY{std::numeric_limits<int>::min()};
+    BlockId trunkBlock{BlockId::Air};
+    bool hasVisibleTrunk{false};
 };
 
 class FarTerrainManager
@@ -1849,6 +2274,7 @@ public:
         stopWorkers();
         clear();
         uploadContext_.shutdown();
+        pageComputeContext_.shutdown();
     }
 
     void setEnabled(bool enabled)
@@ -1907,6 +2333,7 @@ public:
     {
         device_ = device;
         uploadContext_.initialize(device_.Get());
+        pageComputeContext_.initialize(device_.Get());
         clear();
     }
 
@@ -1984,7 +2411,8 @@ public:
                     if (!tile.initialized)
                     {
                         initializeTile(tile, level);
-                        markDirty(tile);
+                        tryRestoreCachedPage(tile);
+                        markDirty(tile, tile.page == nullptr);
                     }
                 }
             }
@@ -2016,6 +2444,7 @@ public:
                 continue;
             }
 
+            cachePageData(it->second);
             releaseTileGpu(it->second);
             tiles_.erase(it);
         }
@@ -2082,7 +2511,7 @@ public:
                 continue;
             }
 
-            markDirty(tile);
+            markDirty(tile, true);
         }
     }
 
@@ -2105,6 +2534,7 @@ public:
             tile.inFlight = false;
         }
         tiles_.clear();
+        pageCache_.clear();
         destroyBufferPages();
         builtTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
@@ -2250,6 +2680,43 @@ private:
         std::size_t indexOffset{0};
     };
 
+    struct PageCell
+    {
+        int solidTopY{std::numeric_limits<int>::min()};
+        BlockId solidBlock{BlockId::Air};
+        int waterTopY{std::numeric_limits<int>::min()};
+        bool hasWater{false};
+        bool allowsTrees{false};
+        bool prefersSpruce{false};
+        int canopyBaseY{std::numeric_limits<int>::min()};
+        int canopyTopY{std::numeric_limits<int>::min()};
+        BlockId canopyBlock{BlockId::Air};
+        bool hasCanopy{false};
+        int trunkTopY{std::numeric_limits<int>::min()};
+        BlockId trunkBlock{BlockId::Air};
+        bool hasTrunk{false};
+    };
+
+    struct PageData
+    {
+        int gridCount{0};
+        int sampleStepBlocks{0};
+        int worldMinX{0};
+        int worldMinZ{0};
+        int tileSpanBlocks{0};
+        int minY{0};
+        int maxY{1};
+        std::vector<PageCell> cells;
+        bool gpuProcessed{false};
+        int gpuMinSolidY{0};
+        int gpuMaxSolidY{1};
+        int gpuMaxWaterY{std::numeric_limits<int>::min()};
+        int gpuCanopyCells{0};
+        int gpuTrunkCells{0};
+        int gpuOccupiedCells{0};
+        double gpuProcessMs{0.0};
+    };
+
     struct FarTile
     {
         FarTileKey key{};
@@ -2267,6 +2734,8 @@ private:
         bool dirty{true};
         bool initialized{false};
         bool inFlight{false};
+        bool pageNeedsResample{true};
+        std::shared_ptr<PageData> page;
     };
 
     struct TileMesh
@@ -2282,6 +2751,7 @@ private:
         FarTileKey key{};
         std::uint32_t buildVersion{0};
         std::uint64_t epoch{0};
+        std::shared_ptr<PageData> page;
         TileMesh mesh{};
         double buildMs{0.0};
     };
@@ -2292,13 +2762,23 @@ private:
         LevelConfig level{};
         std::uint32_t buildVersion{0};
         std::uint64_t epoch{0};
+        std::shared_ptr<PageData> sourcePage;
     };
 
     struct CandidateBuild
     {
         FarTileKey key{};
+        int levelId{0};
+        int ringDistanceChunks{0};
         float distanceSq{0.0f};
         int forwardBucket{0};
+    };
+
+    struct CachedPageEntry
+    {
+        LevelConfig level{};
+        std::shared_ptr<PageData> page;
+        std::uint64_t lastUsedStamp{0};
     };
 
     static glm::vec2 projectTileCoord(const glm::vec3& position, const glm::vec3& normal) noexcept
@@ -2387,6 +2867,28 @@ private:
         return maxDistance > level.innerRadiusChunks && minDistance <= level.outerRadiusChunks;
     }
 
+    [[nodiscard]] static int tileMinRingDistanceChunks(const LevelConfig& level,
+                                                       const glm::ivec3& cameraChunk,
+                                                       int tileX,
+                                                       int tileZ) noexcept
+    {
+        const int minX = tileX * level.tileSizeChunks;
+        const int maxX = minX + level.tileSizeChunks - 1;
+        const int minZ = tileZ * level.tileSizeChunks;
+        const int maxZ = minZ + level.tileSizeChunks - 1;
+
+        const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            if (center < minValue) return minValue - center;
+            if (center > maxValue) return center - maxValue;
+            return 0;
+        };
+
+        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minX, maxX),
+                                         minAxisDistance(cameraChunk.z, minZ, maxZ));
+        return std::max(0, minDistance - level.innerRadiusChunks);
+    }
+
     void initializeTile(FarTile& tile, const LevelConfig& level)
     {
         const int tileSpanBlocks = level.tileSizeChunks * kChunkSizeX;
@@ -2398,10 +2900,79 @@ private:
         tile.boundsMin = glm::vec3(minX, 0.0f, minZ);
         tile.boundsMax = glm::vec3(maxX, 1.0f, maxZ);
         tile.initialized = true;
+        tile.pageNeedsResample = true;
     }
 
-    void markDirty(FarTile& tile)
+    [[nodiscard]] static std::size_t maxCachedPageCount() noexcept
     {
+        return 2048;
+    }
+
+    void trimPageCache()
+    {
+        const std::size_t budget = maxCachedPageCount();
+        while (pageCache_.size() > budget)
+        {
+            auto oldestIt = pageCache_.begin();
+            for (auto it = pageCache_.begin(); it != pageCache_.end(); ++it)
+            {
+                if (it->second.lastUsedStamp < oldestIt->second.lastUsedStamp)
+                {
+                    oldestIt = it;
+                }
+            }
+            pageCache_.erase(oldestIt);
+        }
+    }
+
+    void cachePageData(const FarTile& tile)
+    {
+        if (!tile.page)
+        {
+            return;
+        }
+
+        pageCache_[tile.key] = CachedPageEntry{tile.level, tile.page, updateStamp_};
+        trimPageCache();
+    }
+
+    void tryRestoreCachedPage(FarTile& tile)
+    {
+        auto cacheIt = pageCache_.find(tile.key);
+        if (cacheIt == pageCache_.end())
+        {
+            tile.page.reset();
+            tile.pageNeedsResample = true;
+            return;
+        }
+        if (cacheIt->second.level.tileSizeChunks != tile.level.tileSizeChunks ||
+            cacheIt->second.level.sampleStepBlocks != tile.level.sampleStepBlocks ||
+            cacheIt->second.level.lodLevel != tile.level.lodLevel)
+        {
+            pageCache_.erase(cacheIt);
+            tile.page.reset();
+            tile.pageNeedsResample = true;
+            return;
+        }
+
+        cacheIt->second.lastUsedStamp = updateStamp_;
+        tile.page = cacheIt->second.page;
+        tile.pageNeedsResample = (tile.page == nullptr);
+    }
+
+    void markDirty(FarTile& tile, bool invalidatePage = false)
+    {
+        if (invalidatePage)
+        {
+            tile.page.reset();
+            tile.pageNeedsResample = true;
+            pageCache_.erase(tile.key);
+        }
+        else if (tile.page == nullptr)
+        {
+            tile.pageNeedsResample = true;
+        }
+
         tile.dirty = true;
         ++tile.buildVersion;
         if (tile.buildVersion == 0)
@@ -2601,30 +3172,204 @@ private:
                sample.solidTopY < sample.waterTopY;
     }
 
-    [[nodiscard]] static float sampleTopY(const FarTerrainSurfaceSample& sample, float fallbackY) noexcept
+    [[nodiscard]] static bool hasCanopySurface(const FarTerrainSurfaceSample& sample) noexcept
     {
-        if (hasSolidSurface(sample))
-        {
-            return static_cast<float>(sample.solidTopY + 1);
-        }
-        return fallbackY;
+        return sample.hasVisibleCanopy &&
+               sample.canopyBlock != BlockId::Air &&
+               sample.canopyTopY != std::numeric_limits<int>::min() &&
+               sample.canopyBaseY != std::numeric_limits<int>::min() &&
+               sample.canopyTopY >= sample.canopyBaseY;
     }
 
-    [[nodiscard]] static glm::vec3 computeTerrainNormal(float h00,
-                                                        float h10,
-                                                        float h11,
-                                                        float h01,
-                                                        float step) noexcept
+    [[nodiscard]] static bool hasTrunkSurface(const FarTerrainSurfaceSample& sample) noexcept
     {
-        const float safeStep = std::max(step, 1.0f);
-        const float dHdX = ((h10 - h00) + (h11 - h01)) * 0.5f / safeStep;
-        const float dHdZ = ((h01 - h00) + (h11 - h10)) * 0.5f / safeStep;
-        glm::vec3 normal(-dHdX, 1.0f, -dHdZ);
-        if (glm::dot(normal, normal) <= kEpsilon)
+        return sample.hasVisibleTrunk &&
+               sample.trunkBlock != BlockId::Air &&
+               sample.trunkTopY != std::numeric_limits<int>::min() &&
+               hasSolidSurface(sample) &&
+               sample.trunkTopY > sample.solidTopY;
+    }
+
+    [[nodiscard]] static float blockTopY(int topBlockY) noexcept
+    {
+        return static_cast<float>(topBlockY + 1);
+    }
+
+    [[nodiscard]] static float blockBottomY(int blockY) noexcept
+    {
+        return static_cast<float>(blockY);
+    }
+
+    static void stampPageStructures(PageData& page, const LevelConfig& level)
+    {
+        if (level.lodLevel > 3 || page.gridCount <= 0 || page.sampleStepBlocks <= 0 || page.cells.empty())
         {
-            return glm::vec3(0.0f, 1.0f, 0.0f);
+            return;
         }
-        return glm::normalize(normal);
+
+        auto pageCellAt = [&](int x, int z) -> PageCell& {
+            return page.cells[static_cast<std::size_t>(z * page.gridCount + x)];
+        };
+
+        auto tryStampTree = [&](int originX, int originZ, bool spruce)
+        {
+            const int localX = floorDiv(originX - page.worldMinX, page.sampleStepBlocks);
+            const int localZ = floorDiv(originZ - page.worldMinZ, page.sampleStepBlocks);
+            if (localX < 0 || localZ < 0 || localX >= page.gridCount || localZ >= page.gridCount)
+            {
+                return;
+            }
+
+            PageCell& anchor = pageCellAt(localX, localZ);
+            if (!anchor.allowsTrees ||
+                anchor.solidTopY == std::numeric_limits<int>::min() ||
+                anchor.hasWater ||
+                anchor.solidBlock == BlockId::Sand ||
+                anchor.solidBlock == BlockId::Stone)
+            {
+                return;
+            }
+
+            const bool useSpruce = spruce || anchor.prefersSpruce || anchor.solidBlock == BlockId::Podzol;
+            const int trunkHeight = useSpruce
+                                        ? 8 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 37, originZ) * 8.0f)
+                                        : 5 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 19, originZ) * 4.0f);
+            const int bareTrunkHeight = useSpruce
+                                            ? 3 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 83, originZ) * 3.0f)
+                                            : std::max(2, trunkHeight - 2);
+            const int canopyRadiusCells = (level.lodLevel == 1)
+                                              ? (useSpruce ? 1 : 1)
+                                              : (useSpruce ? 1 : 0);
+            const int canopyTopY = anchor.solidTopY + trunkHeight;
+            const int canopyBaseY = anchor.solidTopY + bareTrunkHeight + 1;
+
+            if (level.lodLevel <= 2)
+            {
+                anchor.hasTrunk = true;
+                anchor.trunkTopY = std::max(anchor.trunkTopY, anchor.solidTopY + std::max(bareTrunkHeight, 1));
+                anchor.trunkBlock = useSpruce ? BlockId::SpruceLog : BlockId::Wood;
+            }
+
+            for (int z = localZ - canopyRadiusCells; z <= localZ + canopyRadiusCells; ++z)
+            {
+                for (int x = localX - canopyRadiusCells; x <= localX + canopyRadiusCells; ++x)
+                {
+                    if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount)
+                    {
+                        continue;
+                    }
+
+                    PageCell& cell = pageCellAt(x, z);
+                    if (cell.solidTopY == std::numeric_limits<int>::min())
+                    {
+                        continue;
+                    }
+                    if (std::max(std::abs(x - localX), std::abs(z - localZ)) > canopyRadiusCells)
+                    {
+                        continue;
+                    }
+
+                    cell.hasCanopy = true;
+                    cell.canopyBaseY = std::max(cell.canopyBaseY, canopyBaseY);
+                    cell.canopyTopY = std::max(cell.canopyTopY, canopyTopY);
+                    cell.canopyBlock = useSpruce ? BlockId::SpruceLeaves : BlockId::Leaves;
+                    page.maxY = std::max(page.maxY, canopyTopY + 1);
+                }
+            }
+        };
+
+        auto stampGrid = [&](int cellSize, bool spruce)
+        {
+            const int minCellX = floorDiv(page.worldMinX - cellSize, cellSize);
+            const int maxCellX = floorDiv(page.worldMinX + page.tileSpanBlocks + cellSize, cellSize);
+            const int minCellZ = floorDiv(page.worldMinZ - cellSize, cellSize);
+            const int maxCellZ = floorDiv(page.worldMinZ + page.tileSpanBlocks + cellSize, cellSize);
+            const float lodDensityScale = (level.lodLevel == 1) ? 1.0f : (level.lodLevel == 2 ? 0.70f : 0.45f);
+
+            for (int cellZ = minCellZ; cellZ <= maxCellZ; ++cellZ)
+            {
+                for (int cellX = minCellX; cellX <= maxCellX; ++cellX)
+                {
+                    const int usableExtent = std::max(cellSize - 4, 1);
+                    const int originX = cellX * cellSize + 2 +
+                                        static_cast<int>(hashToUnitFloat(cellX, spruce ? 911 : 431, cellZ) *
+                                                         static_cast<float>(usableExtent));
+                    const int originZ = cellZ * cellSize + 2 +
+                                        static_cast<int>(hashToUnitFloat(cellX, spruce ? 977 : 577, cellZ) *
+                                                         static_cast<float>(usableExtent));
+                    const float densityRoll = hashToUnitFloat(originX, spruce ? 151 : 211, originZ);
+                    const float densityBias = hashToUnitFloat(originX >> 1, spruce ? 281 : 337, originZ >> 1);
+                    const float baseChance = spruce ? 0.28f : 0.18f;
+                    const float spawnChance = std::clamp(baseChance * lodDensityScale * (0.5f + densityBias), 0.0f, 0.35f);
+                    if (densityRoll <= spawnChance)
+                    {
+                        tryStampTree(originX, originZ, spruce);
+                    }
+                }
+            }
+        };
+
+        stampGrid(kTaigaSpruceCellSize, true);
+        stampGrid(12, false);
+    }
+
+    static void appendAxisAlignedBox(std::vector<Vertex>& vertices,
+                                     std::vector<std::uint32_t>& indices,
+                                     float minX,
+                                     float minY,
+                                     float minZ,
+                                     float maxX,
+                                     float maxY,
+                                     float maxZ,
+                                     const std::pair<glm::vec2, glm::vec2>& topUv,
+                                     const std::pair<glm::vec2, glm::vec2>& sideUv)
+    {
+        if (maxX <= minX || maxY <= minY || maxZ <= minZ)
+        {
+            return;
+        }
+
+        appendQuad(vertices,
+                   indices,
+                   glm::vec3(minX, maxY, minZ),
+                   glm::vec3(maxX, maxY, minZ),
+                   glm::vec3(maxX, maxY, maxZ),
+                   glm::vec3(minX, maxY, maxZ),
+                   glm::vec3(0.0f, 1.0f, 0.0f),
+                   topUv);
+
+        appendQuad(vertices,
+                   indices,
+                   glm::vec3(maxX, minY, minZ),
+                   glm::vec3(minX, minY, minZ),
+                   glm::vec3(minX, maxY, minZ),
+                   glm::vec3(maxX, maxY, minZ),
+                   glm::vec3(0.0f, 0.0f, -1.0f),
+                   sideUv);
+        appendQuad(vertices,
+                   indices,
+                   glm::vec3(minX, minY, maxZ),
+                   glm::vec3(maxX, minY, maxZ),
+                   glm::vec3(maxX, maxY, maxZ),
+                   glm::vec3(minX, maxY, maxZ),
+                   glm::vec3(0.0f, 0.0f, 1.0f),
+                   sideUv);
+        appendQuad(vertices,
+                   indices,
+                   glm::vec3(minX, minY, minZ),
+                   glm::vec3(minX, minY, maxZ),
+                   glm::vec3(minX, maxY, maxZ),
+                   glm::vec3(minX, maxY, minZ),
+                   glm::vec3(-1.0f, 0.0f, 0.0f),
+                   sideUv);
+        appendQuad(vertices,
+                   indices,
+                   glm::vec3(maxX, minY, maxZ),
+                   glm::vec3(maxX, minY, minZ),
+                   glm::vec3(maxX, maxY, minZ),
+                   glm::vec3(maxX, maxY, maxZ),
+                   glm::vec3(1.0f, 0.0f, 0.0f),
+                   sideUv);
     }
 
     [[nodiscard]] static BlockId dominantBlockForCell(const std::array<FarTerrainSurfaceSample, 4>& corners) noexcept
@@ -2743,6 +3488,7 @@ private:
 
     void workerThreadLoop()
     {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         while (true)
         {
             BuildJob job{};
@@ -2776,7 +3522,25 @@ private:
                 continue;
             }
 
-            BuildResult result = buildTileMesh(job.key, job.level, sampleFn, uvLookup);
+            BuildResult result = buildTileMesh(job.key, job.level, sampleFn, uvLookup, job.sourcePage);
+            if (result.page && pageComputeContext_.ready())
+            {
+                std::lock_guard<std::mutex> computeLock(pageComputeMutex_);
+                PageComputeContext::Summary summary{};
+                double computeMs = 0.0;
+                if (pageComputeContext_.processPage(*result.page, summary, computeMs))
+                {
+                    result.page->gpuProcessed = true;
+                    result.page->gpuMinSolidY = summary.minSolidY;
+                    result.page->gpuMaxSolidY = summary.maxSolidY;
+                    result.page->gpuMaxWaterY = summary.maxWaterY;
+                    result.page->gpuCanopyCells = summary.canopyCells;
+                    result.page->gpuTrunkCells = summary.trunkCells;
+                    result.page->gpuOccupiedCells = summary.occupiedCells;
+                    result.page->gpuProcessMs = computeMs;
+                    result.buildMs += computeMs;
+                }
+            }
             result.buildVersion = job.buildVersion;
             result.epoch = job.epoch;
 
@@ -2798,7 +3562,7 @@ private:
 
     void scheduleDirtyBuilds()
     {
-        const std::size_t maxQueued = std::max<std::size_t>(4, std::max<std::size_t>(workerCount_, 1) * 3);
+        const std::size_t maxQueued = std::max<std::size_t>(12, std::max<std::size_t>(workerCount_, 1) * 12);
         std::size_t inFlightCount = 0;
         std::vector<CandidateBuild> candidates;
         candidates.reserve(tiles_.size());
@@ -2852,7 +3616,11 @@ private:
                 forwardBucket = 1;
             }
 
-            candidates.push_back(CandidateBuild{key, distanceSq, forwardBucket});
+            candidates.push_back(CandidateBuild{key,
+                                                tile.level.id,
+                                                tileMinRingDistanceChunks(tile.level, cameraChunk_, key.tileX, key.tileZ),
+                                                distanceSq,
+                                                forwardBucket});
         }
 
         if (inFlightCount >= maxQueued || candidates.empty())
@@ -2864,6 +3632,14 @@ private:
                   candidates.end(),
                   [](const CandidateBuild& lhs, const CandidateBuild& rhs)
                   {
+                      if (lhs.levelId != rhs.levelId)
+                      {
+                          return lhs.levelId < rhs.levelId;
+                      }
+                      if (lhs.ringDistanceChunks != rhs.ringDistanceChunks)
+                      {
+                          return lhs.ringDistanceChunks < rhs.ringDistanceChunks;
+                      }
                       if (lhs.forwardBucket != rhs.forwardBucket)
                       {
                           return lhs.forwardBucket < rhs.forwardBucket;
@@ -2894,7 +3670,8 @@ private:
                         candidate.key,
                         tileIt->second.level,
                         tileIt->second.buildVersion,
-                        buildEpoch_.load(std::memory_order_acquire)});
+                        buildEpoch_.load(std::memory_order_acquire),
+                        (!tileIt->second.pageNeedsResample) ? tileIt->second.page : nullptr});
                     queued = true;
                 }
             }
@@ -2954,7 +3731,10 @@ private:
             }
 
             uploadBuiltTile(tile, result.mesh);
+            tile.page = std::move(result.page);
+            tile.pageNeedsResample = false;
             tile.dirty = false;
+            cachePageData(tile);
             ++builtTilesLastUpdate_;
             if (benchmarkMetrics_ != nullptr && benchmarkMetrics_->isEnabled())
             {
@@ -3040,7 +3820,8 @@ private:
     static BuildResult buildTileMesh(const FarTileKey& key,
                                      const LevelConfig& level,
                                      const SampleFn& sampleFn,
-                                     const UvLookupFn& uvLookup)
+                                     const UvLookupFn& uvLookup,
+                                     std::shared_ptr<PageData> sourcePage = {})
     {
         BuildResult result{};
         result.key = key;
@@ -3052,167 +3833,315 @@ private:
         const int worldMinZ = key.tileZ * tileSpanBlocks;
         const float step = static_cast<float>(level.sampleStepBlocks);
 
-        std::vector<FarTerrainSurfaceSample> vertexSamples(
-            static_cast<std::size_t>((gridCount + 1) * (gridCount + 1)));
-        auto sampleAt = [&](int x, int z) -> FarTerrainSurfaceSample& {
-            return vertexSamples[static_cast<std::size_t>(z * (gridCount + 1) + x)];
-        };
-
-        int minY = std::numeric_limits<int>::max();
-        int maxY = std::numeric_limits<int>::min();
-        for (int z = 0; z <= gridCount; ++z)
+        std::shared_ptr<PageData> page = std::move(sourcePage);
+        if (!page)
         {
-            for (int x = 0; x <= gridCount; ++x)
+            page = std::make_shared<PageData>();
+            page->gridCount = gridCount;
+            page->sampleStepBlocks = level.sampleStepBlocks;
+            page->worldMinX = worldMinX;
+            page->worldMinZ = worldMinZ;
+            page->tileSpanBlocks = tileSpanBlocks;
+            page->minY = std::numeric_limits<int>::max();
+            page->maxY = std::numeric_limits<int>::min();
+            page->cells.resize(static_cast<std::size_t>(gridCount * gridCount));
+
+            const int sampleOffset = std::max(level.sampleStepBlocks / 2, 0);
+            auto sampledPageCellAt = [&](int x, int z) -> PageCell& {
+                return page->cells[static_cast<std::size_t>(z * gridCount + x)];
+            };
+
+            for (int z = 0; z < gridCount; ++z)
             {
-                const int worldX = worldMinX + x * level.sampleStepBlocks;
-                const int worldZ = worldMinZ + z * level.sampleStepBlocks;
-                FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
-                sampleAt(x, z) = sample;
-                if (hasSolidSurface(sample))
+                for (int x = 0; x < gridCount; ++x)
                 {
-                    minY = std::min(minY, sample.solidTopY);
-                    maxY = std::max(maxY, sample.solidTopY + 1);
-                }
-                if (sample.hasVisibleWater)
-                {
-                    minY = std::min(minY, sample.waterTopY);
-                    maxY = std::max(maxY, sample.waterTopY + 1);
+                    const int worldX = worldMinX + x * level.sampleStepBlocks + sampleOffset;
+                    const int worldZ = worldMinZ + z * level.sampleStepBlocks + sampleOffset;
+                    const FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
+                    PageCell& cell = sampledPageCellAt(x, z);
+                    cell.solidTopY = sample.solidTopY;
+                    cell.solidBlock = sample.solidBlock;
+                    cell.waterTopY = sample.waterTopY;
+                    cell.hasWater = sample.hasVisibleWater;
+                    cell.allowsTrees = sample.allowsTrees;
+                    cell.prefersSpruce = sample.prefersSpruce;
+                    cell.canopyBaseY = sample.canopyBaseY;
+                    cell.canopyTopY = sample.canopyTopY;
+                    cell.canopyBlock = sample.canopyBlock;
+                    cell.hasCanopy = sample.hasVisibleCanopy;
+                    cell.trunkTopY = sample.trunkTopY;
+                    cell.trunkBlock = sample.trunkBlock;
+                    cell.hasTrunk = sample.hasVisibleTrunk;
+
+                    if (hasSolidSurface(sample))
+                    {
+                        page->minY = std::min(page->minY, sample.solidTopY);
+                        page->maxY = std::max(page->maxY, sample.solidTopY + 1);
+                    }
+                    if (sample.hasVisibleWater)
+                    {
+                        page->minY = std::min(page->minY, sample.waterTopY);
+                        page->maxY = std::max(page->maxY, sample.waterTopY + 1);
+                    }
+                    if (sample.hasVisibleCanopy)
+                    {
+                        page->minY = std::min(page->minY, sample.canopyBaseY);
+                        page->maxY = std::max(page->maxY, sample.canopyTopY + 1);
+                    }
+                    if (sample.hasVisibleTrunk)
+                    {
+                        page->minY = std::min(page->minY, sample.solidTopY + 1);
+                        page->maxY = std::max(page->maxY, sample.trunkTopY + 1);
+                    }
                 }
             }
         }
+        else
+        {
+            page->gridCount = gridCount;
+            page->sampleStepBlocks = level.sampleStepBlocks;
+            page->worldMinX = worldMinX;
+            page->worldMinZ = worldMinZ;
+            page->tileSpanBlocks = tileSpanBlocks;
+            if (page->cells.size() != static_cast<std::size_t>(gridCount * gridCount))
+            {
+                page->cells.resize(static_cast<std::size_t>(gridCount * gridCount));
+                page->minY = 0;
+                page->maxY = 1;
+            }
+        }
+
+        if (page->minY == std::numeric_limits<int>::max())
+        {
+            page->minY = 0;
+            page->maxY = 1;
+        }
+
+        stampPageStructures(*page, level);
+
+        result.page = page;
+
+        auto pageCellAt = [&](int x, int z) -> PageCell& {
+            return page->cells[static_cast<std::size_t>(z * gridCount + x)];
+        };
 
         auto& vertices = result.mesh.vertices;
         auto& indices = result.mesh.indices;
-        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * 24));
-        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * 36));
+        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * 48));
+        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * 72));
+
+        const float baseFloorY = static_cast<float>(page->minY - level.skirtDepthBlocks);
+        auto terrainTopAt = [&](int x, int z) -> float
+        {
+            if (x < 0 || z < 0 || x >= gridCount || z >= gridCount)
+            {
+                return baseFloorY;
+            }
+            const PageCell& neighbor = pageCellAt(x, z);
+            if (neighbor.solidBlock == BlockId::Air || neighbor.solidTopY == std::numeric_limits<int>::min())
+            {
+                return baseFloorY;
+            }
+            return blockTopY(neighbor.solidTopY);
+        };
+
+        auto waterTopAt = [&](int x, int z, float fallback) -> float
+        {
+            if (x < 0 || z < 0 || x >= gridCount || z >= gridCount)
+            {
+                return fallback;
+            }
+            const PageCell& neighbor = pageCellAt(x, z);
+            if (!neighbor.hasWater || neighbor.waterTopY == std::numeric_limits<int>::min())
+            {
+                return fallback;
+            }
+            return blockTopY(neighbor.waterTopY);
+        };
 
         for (int z = 0; z < gridCount; ++z)
         {
             for (int x = 0; x < gridCount; ++x)
             {
+                const PageCell& cell = pageCellAt(x, z);
                 const float minX = static_cast<float>(worldMinX) + static_cast<float>(x) * step;
                 const float maxX = minX + step;
                 const float minZ = static_cast<float>(worldMinZ) + static_cast<float>(z) * step;
                 const float maxZ = minZ + step;
-                const FarTerrainSurfaceSample& s00 = sampleAt(x, z);
-                const FarTerrainSurfaceSample& s10 = sampleAt(x + 1, z);
-                const FarTerrainSurfaceSample& s11 = sampleAt(x + 1, z + 1);
-                const FarTerrainSurfaceSample& s01 = sampleAt(x, z + 1);
-                const std::array<FarTerrainSurfaceSample, 4> corners{s00, s10, s11, s01};
 
-                bool hasVisibleTerrain = false;
-                bool allSubmerged = true;
-                float fallbackHeight = 0.0f;
-                for (const FarTerrainSurfaceSample& sample : corners)
+                if (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
                 {
-                    if (hasSolidSurface(sample))
-                    {
-                        hasVisibleTerrain = true;
-                        fallbackHeight = static_cast<float>(sample.solidTopY + 1);
-                    }
-                    if (!isSubmergedSurface(sample))
-                    {
-                        allSubmerged = false;
-                    }
-                }
-
-                if (hasVisibleTerrain && !allSubmerged)
-                {
-                    const float h00 = sampleTopY(s00, fallbackHeight);
-                    const float h10 = sampleTopY(s10, fallbackHeight);
-                    const float h11 = sampleTopY(s11, fallbackHeight);
-                    const float h01 = sampleTopY(s01, fallbackHeight);
-                    const glm::vec3 normal = computeTerrainNormal(h00, h10, h11, h01, step);
-                    const BlockId surfaceBlock = dominantBlockForCell(corners);
-
+                    const float topY = blockTopY(cell.solidTopY);
                     appendQuad(vertices,
                                indices,
-                               glm::vec3(minX, h00, minZ),
-                               glm::vec3(maxX, h10, minZ),
-                               glm::vec3(maxX, h11, maxZ),
-                               glm::vec3(minX, h01, maxZ),
-                               normal,
-                               uvLookup(surfaceBlock, BlockFace::Top));
+                               glm::vec3(minX, topY, minZ),
+                               glm::vec3(maxX, topY, minZ),
+                               glm::vec3(maxX, topY, maxZ),
+                               glm::vec3(minX, topY, maxZ),
+                               glm::vec3(0.0f, 1.0f, 0.0f),
+                               uvLookup(cell.solidBlock, BlockFace::Top));
 
-                    const float skirtDepth = static_cast<float>(level.skirtDepthBlocks);
-                    if (x == 0)
+                    const auto westTop = terrainTopAt(x - 1, z);
+                    const auto eastTop = terrainTopAt(x + 1, z);
+                    const auto northTop = terrainTopAt(x, z - 1);
+                    const auto southTop = terrainTopAt(x, z + 1);
+
+                    if (westTop < topY)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(minX, h01 - skirtDepth, maxZ),
-                                   glm::vec3(minX, h00 - skirtDepth, minZ),
-                                   glm::vec3(minX, h00, minZ),
-                                   glm::vec3(minX, h01, maxZ),
+                                   glm::vec3(minX, westTop, maxZ),
+                                   glm::vec3(minX, westTop, minZ),
+                                   glm::vec3(minX, topY, minZ),
+                                   glm::vec3(minX, topY, maxZ),
                                    glm::vec3(-1.0f, 0.0f, 0.0f),
-                                   uvLookup(surfaceBlock, BlockFace::West));
+                                   uvLookup(cell.solidBlock, BlockFace::West));
                     }
-                    if (x == gridCount - 1)
+                    if (eastTop < topY)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(maxX, h10 - skirtDepth, minZ),
-                                   glm::vec3(maxX, h11 - skirtDepth, maxZ),
-                                   glm::vec3(maxX, h11, maxZ),
-                                   glm::vec3(maxX, h10, minZ),
+                                   glm::vec3(maxX, eastTop, minZ),
+                                   glm::vec3(maxX, eastTop, maxZ),
+                                   glm::vec3(maxX, topY, maxZ),
+                                   glm::vec3(maxX, topY, minZ),
                                    glm::vec3(1.0f, 0.0f, 0.0f),
-                                   uvLookup(surfaceBlock, BlockFace::East));
+                                   uvLookup(cell.solidBlock, BlockFace::East));
                     }
-                    if (z == 0)
+                    if (northTop < topY)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(maxX, h10 - skirtDepth, minZ),
-                                   glm::vec3(minX, h00 - skirtDepth, minZ),
-                                   glm::vec3(minX, h00, minZ),
-                                   glm::vec3(maxX, h10, minZ),
+                                   glm::vec3(maxX, northTop, minZ),
+                                   glm::vec3(minX, northTop, minZ),
+                                   glm::vec3(minX, topY, minZ),
+                                   glm::vec3(maxX, topY, minZ),
                                    glm::vec3(0.0f, 0.0f, -1.0f),
-                                   uvLookup(surfaceBlock, BlockFace::North));
+                                   uvLookup(cell.solidBlock, BlockFace::North));
                     }
-                    if (z == gridCount - 1)
+                    if (southTop < topY)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(minX, h01 - skirtDepth, maxZ),
-                                   glm::vec3(maxX, h11 - skirtDepth, maxZ),
-                                   glm::vec3(maxX, h11, maxZ),
-                                   glm::vec3(minX, h01, maxZ),
+                                   glm::vec3(minX, southTop, maxZ),
+                                   glm::vec3(maxX, southTop, maxZ),
+                                   glm::vec3(maxX, topY, maxZ),
+                                   glm::vec3(minX, topY, maxZ),
                                    glm::vec3(0.0f, 0.0f, 1.0f),
-                                   uvLookup(surfaceBlock, BlockFace::South));
+                                   uvLookup(cell.solidBlock, BlockFace::South));
                     }
                 }
 
-                bool hasWater = false;
-                int waterTopY = std::numeric_limits<int>::min();
-                for (const FarTerrainSurfaceSample& sample : corners)
+                if (cell.hasWater && cell.waterTopY != std::numeric_limits<int>::min())
                 {
-                    if (!sample.hasVisibleWater)
-                    {
-                        continue;
-                    }
-                    hasWater = true;
-                    waterTopY = std::max(waterTopY, sample.waterTopY);
-                }
-
-                if (hasWater && waterTopY != std::numeric_limits<int>::min())
-                {
-                    const float waterY = static_cast<float>(waterTopY + 1);
+                    const float waterTop = blockTopY(cell.waterTopY);
                     appendQuad(vertices,
                                indices,
-                               glm::vec3(minX, waterY, minZ),
-                               glm::vec3(maxX, waterY, minZ),
-                               glm::vec3(maxX, waterY, maxZ),
-                               glm::vec3(minX, waterY, maxZ),
+                               glm::vec3(minX, waterTop, minZ),
+                               glm::vec3(maxX, waterTop, minZ),
+                               glm::vec3(maxX, waterTop, maxZ),
+                               glm::vec3(minX, waterTop, maxZ),
                                glm::vec3(0.0f, 1.0f, 0.0f),
                                uvLookup(BlockId::Water, BlockFace::Top));
+
+                    const float terrainTop = (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
+                                                 ? blockTopY(cell.solidTopY)
+                                                 : baseFloorY;
+                    const float westWater = waterTopAt(x - 1, z, terrainTop);
+                    const float eastWater = waterTopAt(x + 1, z, terrainTop);
+                    const float northWater = waterTopAt(x, z - 1, terrainTop);
+                    const float southWater = waterTopAt(x, z + 1, terrainTop);
+
+                    if (westWater < waterTop)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, westWater, maxZ),
+                                   glm::vec3(minX, westWater, minZ),
+                                   glm::vec3(minX, waterTop, minZ),
+                                   glm::vec3(minX, waterTop, maxZ),
+                                   glm::vec3(-1.0f, 0.0f, 0.0f),
+                                   uvLookup(BlockId::Water, BlockFace::West));
+                    }
+                    if (eastWater < waterTop)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(maxX, eastWater, minZ),
+                                   glm::vec3(maxX, eastWater, maxZ),
+                                   glm::vec3(maxX, waterTop, maxZ),
+                                   glm::vec3(maxX, waterTop, minZ),
+                                   glm::vec3(1.0f, 0.0f, 0.0f),
+                                   uvLookup(BlockId::Water, BlockFace::East));
+                    }
+                    if (northWater < waterTop)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(maxX, northWater, minZ),
+                                   glm::vec3(minX, northWater, minZ),
+                                   glm::vec3(minX, waterTop, minZ),
+                                   glm::vec3(maxX, waterTop, minZ),
+                                   glm::vec3(0.0f, 0.0f, -1.0f),
+                                   uvLookup(BlockId::Water, BlockFace::North));
+                    }
+                    if (southWater < waterTop)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, southWater, maxZ),
+                                   glm::vec3(maxX, southWater, maxZ),
+                                   glm::vec3(maxX, waterTop, maxZ),
+                                   glm::vec3(minX, waterTop, maxZ),
+                                   glm::vec3(0.0f, 0.0f, 1.0f),
+                                   uvLookup(BlockId::Water, BlockFace::South));
+                    }
+                }
+
+                if (cell.hasTrunk && cell.trunkTopY != std::numeric_limits<int>::min() && cell.trunkBlock != BlockId::Air)
+                {
+                    const float terrainTop = (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
+                                                 ? blockTopY(cell.solidTopY)
+                                                 : blockBottomY(cell.trunkTopY);
+                    const float trunkTop = blockTopY(cell.trunkTopY);
+                    const float trunkInset = std::clamp(step * 0.35f, 0.35f, step * 0.45f);
+                    appendAxisAlignedBox(vertices,
+                                         indices,
+                                         minX + trunkInset,
+                                         terrainTop,
+                                         minZ + trunkInset,
+                                         maxX - trunkInset,
+                                         trunkTop,
+                                         maxZ - trunkInset,
+                                         uvLookup(cell.trunkBlock, BlockFace::Top),
+                                         uvLookup(cell.trunkBlock, BlockFace::North));
+                }
+
+                if (cell.hasCanopy && cell.canopyTopY != std::numeric_limits<int>::min() &&
+                    cell.canopyBaseY != std::numeric_limits<int>::min() &&
+                    cell.canopyBlock != BlockId::Air)
+                {
+                    const float canopyInset = level.id == 1 ? std::clamp(step * 0.12f, 0.15f, step * 0.30f)
+                                                            : std::clamp(step * 0.20f, 0.25f, step * 0.38f);
+                    appendAxisAlignedBox(vertices,
+                                         indices,
+                                         minX + canopyInset,
+                                         blockBottomY(cell.canopyBaseY),
+                                         minZ + canopyInset,
+                                         maxX - canopyInset,
+                                         blockTopY(cell.canopyTopY),
+                                         maxZ - canopyInset,
+                                         uvLookup(cell.canopyBlock, BlockFace::Top),
+                                         uvLookup(cell.canopyBlock, BlockFace::North));
                 }
             }
         }
 
         result.mesh.boundsMin = glm::vec3(static_cast<float>(worldMinX),
-                                          static_cast<float>((minY == std::numeric_limits<int>::max()) ? 0 : minY - level.skirtDepthBlocks),
+                                          baseFloorY,
                                           static_cast<float>(worldMinZ));
         result.mesh.boundsMax = glm::vec3(static_cast<float>(worldMinX + tileSpanBlocks),
-                                          static_cast<float>((maxY == std::numeric_limits<int>::min()) ? 1 : maxY),
+                                          static_cast<float>(page->maxY),
                                           static_cast<float>(worldMinZ + tileSpanBlocks));
         result.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         return result;
@@ -3232,8 +4161,11 @@ private:
     std::vector<BufferPage> bufferPages_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     UploadContext uploadContext_{};
+    PageComputeContext pageComputeContext_{};
     std::unordered_map<FarTileKey, FarTile, FarTileKeyHasher> tiles_;
+    std::unordered_map<FarTileKey, CachedPageEntry, FarTileKeyHasher> pageCache_;
     std::mutex configMutex_;
+    std::mutex pageComputeMutex_;
     SampleFn sampleFn_{};
     UvLookupFn uvLookupFn_{};
     mutable std::mutex buildQueueMutex_;
@@ -4329,15 +5261,8 @@ ChunkManager::Impl::Impl(unsigned seed)
     farTerrainManager_.setDistanceBlocks(0);
     farTerrainManager_.setFogStartBlocks(renderSettings_.fogStartBlocks);
     farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
-    unsigned concurrency = std::thread::hardware_concurrency();
-    if (concurrency >= 12)
-    {
-        farWorkerCount_ = 2;
-    }
-    else
-    {
-        farWorkerCount_ = 1;
-    }
+    const unsigned concurrency = std::max(2u, std::thread::hardware_concurrency());
+    farWorkerCount_ = static_cast<int>(std::clamp(concurrency / 2u, 2u, 8u));
     farTerrainManager_.setWorkerCount(static_cast<std::size_t>(farWorkerCount_));
     kFarPlane = computeFarPlaneForDistanceBlocks(chunksToBlocks(renderSettings_.exactChunks));
     startWorkerThreads();
@@ -4522,6 +5447,8 @@ FarTerrainSurfaceSample ChunkManager::Impl::sampleFarTerrainSurfaceLod(int world
         visual.waterTopY = globalSeaLevel_;
         visual.hasVisibleWater = true;
     }
+    visual.allowsTrees = biome.generatesTrees && surfaceColumn.surfaceY > 2;
+    visual.prefersSpruce = terrain::isTaigaBiome(biome);
 
     return visual;
 }

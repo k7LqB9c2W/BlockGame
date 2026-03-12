@@ -36,6 +36,7 @@ struct VSOutput
     float2 atlasSize : TEXCOORD2;
     float2 lightChannels : TEXCOORD3;
     float ao : TEXCOORD4;
+    uint materialFlags : TEXCOORD5;
 };
 
 VSOutput main(VSInput input)
@@ -50,6 +51,7 @@ VSOutput main(VSInput input)
     output.atlasSize = input.atlasSize;
     output.lightChannels = float2(decodedLighting.sky, decodedLighting.block);
     output.ao = decodedLighting.ao;
+    output.materialFlags = decodedLighting.flags;
     output.position = mul(uViewProj, float4(input.position, 1.0f));
     return output;
 }

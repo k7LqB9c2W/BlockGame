@@ -1345,6 +1345,11 @@ inline std::uint8_t aoLevelFromPackedVertexLighting(std::uint32_t packed) noexce
     return static_cast<std::uint8_t>((packed >> 8) & 0x03u);
 }
 
+inline std::uint8_t vertexFlagsFromPackedLighting(std::uint32_t packed) noexcept
+{
+    return static_cast<std::uint8_t>((packed >> 10) & 0x3Fu);
+}
+
 inline int lightingMetricFromPackedVertex(std::uint32_t packed) noexcept
 {
     const std::uint8_t packedLight = static_cast<std::uint8_t>(packed & 0xFFu);
@@ -1396,6 +1401,8 @@ inline bool shouldRenderBlockFace(BlockId owningBlock, BlockId neighborBlock) no
 
 constexpr int kTaigaSpruceCellSize = 14;
 constexpr int kTaigaSpruceMinTrunkHeight = 25;
+constexpr std::uint8_t kVertexFlagWater = 0x01u;
+constexpr std::uint8_t kVertexFlagFarLod = 0x02u;
 constexpr int kTaigaSpruceMaxTrunkHeight = 31;
 constexpr int kTaigaSpruceMinBareTrunkHeight = 5;
 constexpr int kTaigaSpruceMaxBareTrunkHeight = 9;
@@ -2261,11 +2268,11 @@ public:
 
     FarTerrainManager()
         : levels_{
-              LevelConfig{1, kDefaultNearRenderDistance, 80, 8, 4, 2, 8},
-              LevelConfig{2, 80, 128, 16, 8, 3, 16},
-              LevelConfig{3, 128, 192, 32, 16, 4, 32},
-              LevelConfig{4, 192, 320, 64, 32, 5, 64},
-              LevelConfig{5, 320, kMaxTotalRenderDistanceChunks, 128, 64, 6, 128}}
+              LevelConfig{1, kDefaultNearRenderDistance, 72, 4, 2, 1, 6},
+              LevelConfig{2, 72, 128, 8, 4, 2, 12},
+              LevelConfig{3, 128, 192, 16, 8, 3, 24},
+              LevelConfig{4, 192, 320, 32, 16, 4, 48},
+              LevelConfig{5, 320, kMaxTotalRenderDistanceChunks, 64, 32, 5, 96}}
     {
     }
 
@@ -2589,11 +2596,11 @@ private:
         };
 
         static constexpr std::array<LevelTemplate, 5> kLevelTemplates{{
-            {1, 80, 8, 4, 2},
-            {2, 128, 16, 8, 3},
-            {3, 192, 32, 16, 4},
-            {4, 320, 64, 32, 5},
-            {5, kMaxTotalRenderDistanceChunks, 128, 64, 6},
+            {1, 72, 4, 2, 1},
+            {2, 128, 8, 4, 2},
+            {3, 192, 16, 8, 3},
+            {4, 320, 32, 16, 4},
+            {5, kMaxTotalRenderDistanceChunks, 64, 32, 5},
         }};
 
         levels_.clear();
@@ -2602,7 +2609,7 @@ private:
             return;
         }
 
-        constexpr int kExactOverlapChunks = 4;
+        constexpr int kExactOverlapChunks = 8;
         int innerRadiusChunks = std::max(0, nearRadiusChunks - kExactOverlapChunks);
         for (const LevelTemplate& levelTemplate : kLevelTemplates)
         {
@@ -2802,10 +2809,11 @@ private:
                            const glm::vec3& p2,
                            const glm::vec3& p3,
                            const glm::vec3& normal,
-                           const std::pair<glm::vec2, glm::vec2>& uv)
+                           const std::pair<glm::vec2, glm::vec2>& uv,
+                           std::uint8_t flags = 0)
     {
         const std::uint32_t baseIndex = static_cast<std::uint32_t>(vertices.size());
-        const std::uint32_t lightingData = packVertexLighting(packLightLevels(kMaxLightLevel, 0));
+        const std::uint32_t lightingData = packVertexLighting(packLightLevels(kMaxLightLevel, 0), 0, flags);
         vertices.push_back(Vertex{p0, normal, projectTileCoord(p0, normal), uv.first, uv.second, lightingData});
         vertices.push_back(Vertex{p1, normal, projectTileCoord(p1, normal), uv.first, uv.second, lightingData});
         vertices.push_back(Vertex{p2, normal, projectTileCoord(p2, normal), uv.first, uv.second, lightingData});
@@ -3200,6 +3208,26 @@ private:
         return static_cast<float>(blockY);
     }
 
+    [[nodiscard]] static int quantizeMacroTopY(int topBlockY, int blockStep) noexcept
+    {
+        if (topBlockY == std::numeric_limits<int>::min() || blockStep <= 1)
+        {
+            return topBlockY;
+        }
+
+        return floorDiv(topBlockY, blockStep) * blockStep + (blockStep - 1);
+    }
+
+    [[nodiscard]] static int quantizeMacroBaseY(int blockY, int blockStep) noexcept
+    {
+        if (blockY == std::numeric_limits<int>::min() || blockStep <= 1)
+        {
+            return blockY;
+        }
+
+        return floorDiv(blockY, blockStep) * blockStep;
+    }
+
     static void stampPageStructures(PageData& page, const LevelConfig& level)
     {
         if (level.lodLevel > 3 || page.gridCount <= 0 || page.sampleStepBlocks <= 0 || page.cells.empty())
@@ -3231,49 +3259,89 @@ private:
             }
 
             const bool useSpruce = spruce || anchor.prefersSpruce || anchor.solidBlock == BlockId::Podzol;
+            const int macroStep = std::max(page.sampleStepBlocks, 1);
             const int trunkHeight = useSpruce
                                         ? 8 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 37, originZ) * 8.0f)
-                                        : 5 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 19, originZ) * 4.0f);
+                                        : 6 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 19, originZ) * 6.0f);
             const int bareTrunkHeight = useSpruce
                                             ? 3 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 83, originZ) * 3.0f)
-                                            : std::max(2, trunkHeight - 2);
-            const int canopyRadiusCells = (level.lodLevel == 1)
-                                              ? (useSpruce ? 1 : 1)
-                                              : (useSpruce ? 1 : 0);
-            const int canopyTopY = anchor.solidTopY + trunkHeight;
-            const int canopyBaseY = anchor.solidTopY + bareTrunkHeight + 1;
+                                            : std::max(2, trunkHeight - 3);
+            const int canopyTopY = quantizeMacroTopY(anchor.solidTopY + trunkHeight, macroStep);
+            const int bareTrunkTopY = quantizeMacroTopY(anchor.solidTopY + std::max(bareTrunkHeight, 1), macroStep);
 
             if (level.lodLevel <= 2)
             {
                 anchor.hasTrunk = true;
-                anchor.trunkTopY = std::max(anchor.trunkTopY, anchor.solidTopY + std::max(bareTrunkHeight, 1));
+                anchor.trunkTopY = std::max(anchor.trunkTopY, bareTrunkTopY);
                 anchor.trunkBlock = useSpruce ? BlockId::SpruceLog : BlockId::Wood;
             }
 
-            for (int z = localZ - canopyRadiusCells; z <= localZ + canopyRadiusCells; ++z)
+            auto stampCanopyCell = [&](int x, int z, int canopyBaseY, int canopyTopCellY)
             {
-                for (int x = localX - canopyRadiusCells; x <= localX + canopyRadiusCells; ++x)
+                if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount)
                 {
-                    if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount)
-                    {
-                        continue;
-                    }
+                    return;
+                }
+                PageCell& cell = pageCellAt(x, z);
+                if (cell.solidTopY == std::numeric_limits<int>::min())
+                {
+                    return;
+                }
+                cell.hasCanopy = true;
+                cell.canopyBaseY = std::max(cell.canopyBaseY, canopyBaseY);
+                cell.canopyTopY = std::max(cell.canopyTopY, canopyTopCellY);
+                cell.canopyBlock = useSpruce ? BlockId::SpruceLeaves : BlockId::Leaves;
+                page.maxY = std::max(page.maxY, canopyTopCellY + 1);
+            };
 
-                    PageCell& cell = pageCellAt(x, z);
-                    if (cell.solidTopY == std::numeric_limits<int>::min())
+            if (useSpruce)
+            {
+                const int tierCount = (level.lodLevel == 1) ? 3 : 2;
+                for (int tier = 0; tier < tierCount; ++tier)
+                {
+                    const int radius = (tier == 0) ? 0 : 1;
+                    const int tierTopY = canopyTopY - tier * macroStep;
+                    const int tierBaseY = std::max(bareTrunkTopY + 1, tierTopY - macroStep + 1);
+                    for (int z = localZ - radius; z <= localZ + radius; ++z)
                     {
-                        continue;
+                        for (int x = localX - radius; x <= localX + radius; ++x)
+                        {
+                            const int chebyshev = std::max(std::abs(x - localX), std::abs(z - localZ));
+                            if (chebyshev > radius)
+                            {
+                                continue;
+                            }
+                            if (tier > 0 && chebyshev == radius &&
+                                (((x - localX) != 0) && ((z - localZ) != 0)))
+                            {
+                                continue;
+                            }
+                            stampCanopyCell(x, z, tierBaseY, tierTopY);
+                        }
                     }
-                    if (std::max(std::abs(x - localX), std::abs(z - localZ)) > canopyRadiusCells)
-                    {
-                        continue;
-                    }
+                }
+            }
+            else
+            {
+                const int lowerTopY = canopyTopY - macroStep;
+                const int lowerBaseY = std::max(bareTrunkTopY + 1, lowerTopY - macroStep + 1);
+                const int upperBaseY = std::max(lowerTopY, canopyTopY - macroStep + 1);
 
-                    cell.hasCanopy = true;
-                    cell.canopyBaseY = std::max(cell.canopyBaseY, canopyBaseY);
-                    cell.canopyTopY = std::max(cell.canopyTopY, canopyTopY);
-                    cell.canopyBlock = useSpruce ? BlockId::SpruceLeaves : BlockId::Leaves;
-                    page.maxY = std::max(page.maxY, canopyTopY + 1);
+                for (int z = localZ - 1; z <= localZ + 1; ++z)
+                {
+                    for (int x = localX - 1; x <= localX + 1; ++x)
+                    {
+                        const int chebyshev = std::max(std::abs(x - localX), std::abs(z - localZ));
+                        if (chebyshev > 1)
+                        {
+                            continue;
+                        }
+                        stampCanopyCell(x, z, lowerBaseY, lowerTopY);
+                        if (chebyshev == 0 || level.lodLevel == 1)
+                        {
+                            stampCanopyCell(x, z, upperBaseY, canopyTopY);
+                        }
+                    }
                 }
             }
         };
@@ -3322,7 +3390,8 @@ private:
                                      float maxY,
                                      float maxZ,
                                      const std::pair<glm::vec2, glm::vec2>& topUv,
-                                     const std::pair<glm::vec2, glm::vec2>& sideUv)
+                                     const std::pair<glm::vec2, glm::vec2>& sideUv,
+                                     std::uint8_t flags = 0)
     {
         if (maxX <= minX || maxY <= minY || maxZ <= minZ)
         {
@@ -3336,7 +3405,8 @@ private:
                    glm::vec3(maxX, maxY, maxZ),
                    glm::vec3(minX, maxY, maxZ),
                    glm::vec3(0.0f, 1.0f, 0.0f),
-                   topUv);
+                   topUv,
+                   flags);
 
         appendQuad(vertices,
                    indices,
@@ -3345,7 +3415,8 @@ private:
                    glm::vec3(minX, maxY, minZ),
                    glm::vec3(maxX, maxY, minZ),
                    glm::vec3(0.0f, 0.0f, -1.0f),
-                   sideUv);
+                   sideUv,
+                   flags);
         appendQuad(vertices,
                    indices,
                    glm::vec3(minX, minY, maxZ),
@@ -3353,7 +3424,8 @@ private:
                    glm::vec3(maxX, maxY, maxZ),
                    glm::vec3(minX, maxY, maxZ),
                    glm::vec3(0.0f, 0.0f, 1.0f),
-                   sideUv);
+                   sideUv,
+                   flags);
         appendQuad(vertices,
                    indices,
                    glm::vec3(minX, minY, minZ),
@@ -3361,7 +3433,8 @@ private:
                    glm::vec3(minX, maxY, maxZ),
                    glm::vec3(minX, maxY, minZ),
                    glm::vec3(-1.0f, 0.0f, 0.0f),
-                   sideUv);
+                   sideUv,
+                   flags);
         appendQuad(vertices,
                    indices,
                    glm::vec3(maxX, minY, maxZ),
@@ -3369,7 +3442,8 @@ private:
                    glm::vec3(maxX, maxY, minZ),
                    glm::vec3(maxX, maxY, maxZ),
                    glm::vec3(1.0f, 0.0f, 0.0f),
-                   sideUv);
+                   sideUv,
+                   flags);
     }
 
     [[nodiscard]] static BlockId dominantBlockForCell(const std::array<FarTerrainSurfaceSample, 4>& corners) noexcept
@@ -3832,6 +3906,8 @@ private:
         const int worldMinX = key.tileX * tileSpanBlocks;
         const int worldMinZ = key.tileZ * tileSpanBlocks;
         const float step = static_cast<float>(level.sampleStepBlocks);
+        const int macroStep = std::max(level.sampleStepBlocks, 1);
+        const int waterMacroStep = (level.lodLevel <= 2) ? 1 : macroStep;
 
         std::shared_ptr<PageData> page = std::move(sourcePage);
         if (!page)
@@ -3857,7 +3933,12 @@ private:
                 {
                     const int worldX = worldMinX + x * level.sampleStepBlocks + sampleOffset;
                     const int worldZ = worldMinZ + z * level.sampleStepBlocks + sampleOffset;
-                    const FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
+                    FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
+                    sample.solidTopY = quantizeMacroTopY(sample.solidTopY, macroStep);
+                    sample.waterTopY = quantizeMacroTopY(sample.waterTopY, waterMacroStep);
+                    sample.canopyBaseY = quantizeMacroBaseY(sample.canopyBaseY, macroStep);
+                    sample.canopyTopY = quantizeMacroTopY(sample.canopyTopY, macroStep);
+                    sample.trunkTopY = quantizeMacroTopY(sample.trunkTopY, macroStep);
                     PageCell& cell = sampledPageCellAt(x, z);
                     cell.solidTopY = sample.solidTopY;
                     cell.solidBlock = sample.solidBlock;
@@ -3930,7 +4011,8 @@ private:
         vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * 48));
         indices.reserve(static_cast<std::size_t>(gridCount * gridCount * 72));
 
-        const float baseFloorY = static_cast<float>(page->minY - level.skirtDepthBlocks);
+        const float baseFloorY =
+            static_cast<float>(quantizeMacroBaseY(page->minY - level.skirtDepthBlocks, macroStep));
         auto terrainTopAt = [&](int x, int z) -> float
         {
             if (x < 0 || z < 0 || x >= gridCount || z >= gridCount)
@@ -3979,7 +4061,8 @@ private:
                                glm::vec3(maxX, topY, maxZ),
                                glm::vec3(minX, topY, maxZ),
                                glm::vec3(0.0f, 1.0f, 0.0f),
-                               uvLookup(cell.solidBlock, BlockFace::Top));
+                               uvLookup(cell.solidBlock, BlockFace::Top),
+                               kVertexFlagFarLod);
 
                     const auto westTop = terrainTopAt(x - 1, z);
                     const auto eastTop = terrainTopAt(x + 1, z);
@@ -3995,7 +4078,8 @@ private:
                                    glm::vec3(minX, topY, minZ),
                                    glm::vec3(minX, topY, maxZ),
                                    glm::vec3(-1.0f, 0.0f, 0.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::West));
+                                   uvLookup(cell.solidBlock, BlockFace::West),
+                                   kVertexFlagFarLod);
                     }
                     if (eastTop < topY)
                     {
@@ -4006,7 +4090,8 @@ private:
                                    glm::vec3(maxX, topY, maxZ),
                                    glm::vec3(maxX, topY, minZ),
                                    glm::vec3(1.0f, 0.0f, 0.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::East));
+                                   uvLookup(cell.solidBlock, BlockFace::East),
+                                   kVertexFlagFarLod);
                     }
                     if (northTop < topY)
                     {
@@ -4017,7 +4102,8 @@ private:
                                    glm::vec3(minX, topY, minZ),
                                    glm::vec3(maxX, topY, minZ),
                                    glm::vec3(0.0f, 0.0f, -1.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::North));
+                                   uvLookup(cell.solidBlock, BlockFace::North),
+                                   kVertexFlagFarLod);
                     }
                     if (southTop < topY)
                     {
@@ -4028,7 +4114,8 @@ private:
                                    glm::vec3(maxX, topY, maxZ),
                                    glm::vec3(minX, topY, maxZ),
                                    glm::vec3(0.0f, 0.0f, 1.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::South));
+                                   uvLookup(cell.solidBlock, BlockFace::South),
+                                   kVertexFlagFarLod);
                     }
                 }
 
@@ -4042,7 +4129,8 @@ private:
                                glm::vec3(maxX, waterTop, maxZ),
                                glm::vec3(minX, waterTop, maxZ),
                                glm::vec3(0.0f, 1.0f, 0.0f),
-                               uvLookup(BlockId::Water, BlockFace::Top));
+                               uvLookup(BlockId::Water, BlockFace::Top),
+                               static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
 
                     const float terrainTop = (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
                                                  ? blockTopY(cell.solidTopY)
@@ -4061,7 +4149,8 @@ private:
                                    glm::vec3(minX, waterTop, minZ),
                                    glm::vec3(minX, waterTop, maxZ),
                                    glm::vec3(-1.0f, 0.0f, 0.0f),
-                                   uvLookup(BlockId::Water, BlockFace::West));
+                                   uvLookup(BlockId::Water, BlockFace::West),
+                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
                     }
                     if (eastWater < waterTop)
                     {
@@ -4072,7 +4161,8 @@ private:
                                    glm::vec3(maxX, waterTop, maxZ),
                                    glm::vec3(maxX, waterTop, minZ),
                                    glm::vec3(1.0f, 0.0f, 0.0f),
-                                   uvLookup(BlockId::Water, BlockFace::East));
+                                   uvLookup(BlockId::Water, BlockFace::East),
+                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
                     }
                     if (northWater < waterTop)
                     {
@@ -4083,7 +4173,8 @@ private:
                                    glm::vec3(minX, waterTop, minZ),
                                    glm::vec3(maxX, waterTop, minZ),
                                    glm::vec3(0.0f, 0.0f, -1.0f),
-                                   uvLookup(BlockId::Water, BlockFace::North));
+                                   uvLookup(BlockId::Water, BlockFace::North),
+                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
                     }
                     if (southWater < waterTop)
                     {
@@ -4094,7 +4185,8 @@ private:
                                    glm::vec3(maxX, waterTop, maxZ),
                                    glm::vec3(minX, waterTop, maxZ),
                                    glm::vec3(0.0f, 0.0f, 1.0f),
-                                   uvLookup(BlockId::Water, BlockFace::South));
+                                   uvLookup(BlockId::Water, BlockFace::South),
+                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
                     }
                 }
 
@@ -4104,7 +4196,9 @@ private:
                                                  ? blockTopY(cell.solidTopY)
                                                  : blockBottomY(cell.trunkTopY);
                     const float trunkTop = blockTopY(cell.trunkTopY);
-                    const float trunkInset = std::clamp(step * 0.35f, 0.35f, step * 0.45f);
+                    const float trunkInset = (level.lodLevel == 1)
+                                                 ? std::clamp(step * 0.18f, 0.15f, step * 0.24f)
+                                                 : std::clamp(step * 0.26f, 0.22f, step * 0.32f);
                     appendAxisAlignedBox(vertices,
                                          indices,
                                          minX + trunkInset,
@@ -4114,15 +4208,16 @@ private:
                                          trunkTop,
                                          maxZ - trunkInset,
                                          uvLookup(cell.trunkBlock, BlockFace::Top),
-                                         uvLookup(cell.trunkBlock, BlockFace::North));
+                                         uvLookup(cell.trunkBlock, BlockFace::North),
+                                         kVertexFlagFarLod);
                 }
 
                 if (cell.hasCanopy && cell.canopyTopY != std::numeric_limits<int>::min() &&
                     cell.canopyBaseY != std::numeric_limits<int>::min() &&
                     cell.canopyBlock != BlockId::Air)
                 {
-                    const float canopyInset = level.id == 1 ? std::clamp(step * 0.12f, 0.15f, step * 0.30f)
-                                                            : std::clamp(step * 0.20f, 0.25f, step * 0.38f);
+                    const float canopyInset = level.id == 1 ? std::clamp(step * 0.06f, 0.08f, step * 0.18f)
+                                                            : std::clamp(step * 0.12f, 0.15f, step * 0.28f);
                     appendAxisAlignedBox(vertices,
                                          indices,
                                          minX + canopyInset,
@@ -4132,7 +4227,8 @@ private:
                                          blockTopY(cell.canopyTopY),
                                          maxZ - canopyInset,
                                          uvLookup(cell.canopyBlock, BlockFace::Top),
-                                         uvLookup(cell.canopyBlock, BlockFace::North));
+                                         uvLookup(cell.canopyBlock, BlockFace::North),
+                                         kVertexFlagFarLod);
                 }
             }
         }

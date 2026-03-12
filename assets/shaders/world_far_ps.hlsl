@@ -34,6 +34,7 @@ struct PSInput
     float2 atlasSize : TEXCOORD2;
     float2 lightChannels : TEXCOORD3;
     float ao : TEXCOORD4;
+    uint materialFlags : TEXCOORD5;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
@@ -76,8 +77,14 @@ float4 main(PSInput input) : SV_TARGET
 {
     const float3 normal = normalize(input.normal);
     const float3 lightDir = normalize(uLightDirection.xyz);
+    const float3 viewDir = normalize(uCameraPos.xyz - input.worldPos);
+    const bool isWater = (input.materialFlags & kMaterialFlagWater) != 0u;
     const float2 wrappedTileUv = frac(input.tileCoord);
-    const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv;
+    const float wavePhase = sin(input.worldPos.x * 0.0125f + input.worldPos.z * 0.0105f + uCameraPos.x * 0.0015f);
+    const float2 waterUvOffset = isWater
+                                     ? float2(wavePhase, wavePhase * 0.55f) * (input.atlasSize * 0.20f)
+                                     : float2(0.0f, 0.0f);
+    const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv + waterUvOffset;
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
@@ -119,6 +126,16 @@ float4 main(PSInput input) : SV_TARGET
     const float3 baseBounce = ambientTint * 0.018f;
 
     float3 color = textureSample.rgb * (indirect + baseBounce + directLight);
+    if (isWater)
+    {
+        const float fresnel = pow(1.0f - saturate(dot(normal, viewDir)), 4.0f);
+        const float shimmer = saturate(0.45f + 0.55f * sin(input.worldPos.x * 0.006f + input.worldPos.z * 0.008f));
+        const float3 waterTint = lerp(textureSample.rgb, float3(0.18f, 0.42f, 0.66f), 0.58f);
+        const float3 skyReflection = computeTerrainFogColor(normalize(float3(viewDir.x, abs(viewDir.y), viewDir.z)));
+        color = waterTint * (indirect * 0.62f + baseBounce * 1.35f + directLight * 0.32f);
+        color += skyReflection * (0.10f + fresnel * 0.28f);
+        color += uSunColor.rgb * (0.02f + 0.05f * shimmer) * fresnel;
+    }
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
     const float3 fogColor = computeTerrainFogColor(normalize(input.worldPos - uCameraPos.xyz));

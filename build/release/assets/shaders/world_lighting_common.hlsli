@@ -6,7 +6,11 @@ struct DecodedVertexLighting
     float block;
     float ao;
     float aoDebug;
+    uint flags;
 };
+
+static const uint kMaterialFlagWater = 0x01u;
+static const uint kMaterialFlagFarLod = 0x02u;
 
 struct FogBlendResult
 {
@@ -44,6 +48,7 @@ DecodedVertexLighting decodeVertexLighting(uint packedLighting)
     decoded.block = decodeNonLinearLightLevel(blockLevel);
     decoded.ao = decodeAoFactor(aoLevel);
     decoded.aoDebug = decoded.ao;
+    decoded.flags = (packedLighting >> 10) & 0x3Fu;
     return decoded;
 }
 

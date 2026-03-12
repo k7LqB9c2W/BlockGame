@@ -34,6 +34,7 @@ struct PSInput
     float2 atlasSize : TEXCOORD2;
     float2 lightChannels : TEXCOORD3;
     float ao : TEXCOORD4;
+    uint materialFlags : TEXCOORD5;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)

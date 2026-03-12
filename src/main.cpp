@@ -1241,10 +1241,16 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"exact_ready_chunks\":" << streamingStatus.exactReadyChunks
         << ",\"exact_required_chunks\":" << streamingStatus.exactRequiredChunks
         << ",\"exact_pending_uploads\":" << streamingStatus.exactPendingUploads
+        << ",\"far_active_tiles\":" << streamingStatus.farActiveTiles
+        << ",\"far_dirty_tiles\":" << streamingStatus.farDirtyTiles
         << ",\"far_ready_tiles\":" << streamingStatus.farReadyTiles
         << ",\"far_queued_tiles\":" << streamingStatus.farQueuedTiles
+        << ",\"far_pending_upload_tiles\":" << streamingStatus.farPendingUploadTiles
+        << ",\"lod_active_tiles\":" << streamingStatus.farActiveTiles
+        << ",\"lod_dirty_tiles\":" << streamingStatus.farDirtyTiles
         << ",\"lod_ready_tiles\":" << streamingStatus.farReadyTiles
         << ",\"lod_queued_tiles\":" << streamingStatus.farQueuedTiles
+        << ",\"lod_pending_upload_tiles\":" << streamingStatus.farPendingUploadTiles
         << ",\"player_release_ready\":" << (streamingStatus.playerReleaseReady ? "true" : "false")
         << ",\"blocking_reason\":";
     writeJsonEscaped(out, streamingStatus.blockingReason ? streamingStatus.blockingReason : "");
@@ -2446,14 +2452,11 @@ int runGame()
             }
             if (snapshot.farActiveTiles > 0 || snapshot.farDirtyTiles > 0)
             {
-                profilingStream << " | FarTiles " << snapshot.farActiveTiles;
+                profilingStream << " | LOD " << snapshot.farShellTilesReady
+                                << "/" << snapshot.farActiveTiles << " ready";
                 if (snapshot.farDirtyTiles > 0)
                 {
                     profilingStream << " dirty " << snapshot.farDirtyTiles;
-                }
-                if (snapshot.farShellTilesReady > 0)
-                {
-                    profilingStream << " ready " << snapshot.farShellTilesReady;
                 }
                 if (snapshot.farTilesBuilt > 0)
                 {
@@ -2462,6 +2465,10 @@ int runGame()
                 if (snapshot.farTilesQueued > 0)
                 {
                     profilingStream << " q " << snapshot.farTilesQueued;
+                }
+                if (snapshot.farTilesPendingUpload > 0)
+                {
+                    profilingStream << " up " << snapshot.farTilesPendingUpload;
                 }
             }
             if (snapshot.pooledChunkBudgetBytes > 0)
@@ -2542,6 +2549,17 @@ int runGame()
                 loadingStream << "Exact bubble: " << streamingStatus.exactReadyChunks
                               << " / " << streamingStatus.exactRequiredChunks << '\n';
                 loadingStream << "Pending uploads: " << streamingStatus.exactPendingUploads << '\n';
+                if (chunkManager.totalRenderDistanceChunks() > chunkManager.exactRenderDistanceChunks())
+                {
+                    loadingStream << "LOD tiles: " << streamingStatus.farReadyTiles
+                                  << " / " << streamingStatus.farActiveTiles
+                                  << " ready, " << streamingStatus.farQueuedTiles << " queued";
+                    if (streamingStatus.farPendingUploadTiles > 0)
+                    {
+                        loadingStream << ", " << streamingStatus.farPendingUploadTiles << " pending upload";
+                    }
+                    loadingStream << '\n';
+                }
                 loadingStream << "Total radius target: " << chunkManager.totalRenderDistanceChunks()
                               << " chunks";
                 if (chunkManager.totalRenderDistanceChunks() > chunkManager.exactRenderDistanceChunks())
@@ -3106,6 +3124,15 @@ int runGame()
                            << " totalTarget=" << renderSettings.totalChunks
                            << " lod="
                            << (renderSettings.totalChunks > renderSettings.exactChunks ? "cpu_lod_active" : "exact_only");
+            if (renderSettings.totalChunks > renderSettings.exactChunks)
+            {
+                snapshotStream << " lodTiles=" << streamingStatus.farReadyTiles << "/" << streamingStatus.farActiveTiles
+                               << " queued=" << streamingStatus.farQueuedTiles;
+                if (streamingStatus.farPendingUploadTiles > 0)
+                {
+                    snapshotStream << " pendingUpload=" << streamingStatus.farPendingUploadTiles;
+                }
+            }
             lightingSnapshotText = snapshotStream.str();
 
             const RecentEditHoleDebugSnapshot holeDebugSnapshot =
@@ -3374,7 +3401,7 @@ int runGame()
                 renderSettings.exactChunks = exactChunks;
             }
             int totalChunks = renderSettings.totalChunks;
-            if (ImGui::SliderInt("Total Chunks", &totalChunks, 1, kMaxTotalRenderDistanceChunks))
+            if (ImGui::SliderInt("Total Chunks (LOD Radius)", &totalChunks, 1, kMaxTotalRenderDistanceChunks))
             {
                 chunkManager.setTotalRenderDistanceChunks(totalChunks);
                 renderSettings.totalChunks = totalChunks;
@@ -3389,13 +3416,36 @@ int runGame()
                 environment.fogStartBlocks = static_cast<float>(fogStartBlocks);
                 renderSettings.fogStartBlocks = fogStartBlocks;
             }
-            ImGui::Text("Streaming: Exact %d/%d | Total Target %d | LOD %s",
+            const bool lodActive = renderSettings.totalChunks > renderSettings.exactChunks;
+            const double exactPercent = streamingStatus.exactRequiredChunks > 0
+                                            ? (100.0 * static_cast<double>(streamingStatus.exactReadyChunks) /
+                                               static_cast<double>(streamingStatus.exactRequiredChunks))
+                                            : 100.0;
+            const double lodPercent = streamingStatus.farActiveTiles > 0
+                                          ? (100.0 * static_cast<double>(streamingStatus.farReadyTiles) /
+                                             static_cast<double>(streamingStatus.farActiveTiles))
+                                          : 100.0;
+            ImGui::Text("Streaming: Exact %d/%d | Total Radius %d | LOD %s",
                         streamingStatus.exactReadyChunks,
                         streamingStatus.exactRequiredChunks,
                         renderSettings.totalChunks,
-                        renderSettings.totalChunks > renderSettings.exactChunks ? "active" : "off");
-            if (renderSettings.totalChunks > renderSettings.exactChunks)
+                        lodActive ? "active" : "off");
+            ImGui::Text("Exact bubble: %d/%d ready (%.0f%%) | pending uploads %d",
+                        streamingStatus.exactReadyChunks,
+                        streamingStatus.exactRequiredChunks,
+                        exactPercent,
+                        streamingStatus.exactPendingUploads);
+            if (lodActive)
             {
+                ImGui::Text("LOD tiles: %d/%d ready (%.0f%%) | queued %d | pending upload %d | dirty %d",
+                            streamingStatus.farReadyTiles,
+                            streamingStatus.farActiveTiles,
+                            lodPercent,
+                            streamingStatus.farQueuedTiles,
+                            streamingStatus.farPendingUploadTiles,
+                            streamingStatus.farDirtyTiles);
+                ImGui::TextWrapped("Only the inner Exact Radius streams real chunks. The outer %d chunks are LOD-only visual terrain until you move closer.",
+                                   std::max(renderSettings.totalChunks - renderSettings.exactChunks, 0));
                 ImGui::TextWrapped("CPU-backed distant terrain is active beyond the Exact Radius. Exact chunks still own gameplay, collision, and edits.");
             }
             ImGui::Separator();
@@ -3467,7 +3517,7 @@ int runGame()
             ImGui::Begin("Render Distance",
                          nullptr,
                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
-            ImGui::TextUnformatted("Enter exact chunks and optional total chunks (e.g. 12 96):");
+            ImGui::TextUnformatted("Enter exact chunks and optional total chunks (LOD beyond exact, e.g. 12 96):");
             const bool submit = ImGui::InputText("##render-distance",
                                                  &inputContext.inputBuffer,
                                                  ImGuiInputTextFlags_EnterReturnsTrue);

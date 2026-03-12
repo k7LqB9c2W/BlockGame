@@ -324,3 +324,4 @@
   [16] 0x7ffaa993cc91
   exception code: 0xc0000005
 2026-03-11 21:09:29 - minidump: written to blockgame_crash.dmp
+2026-03-12 08:47:06 - uncaught exception: Renderer: failed to present swap chain

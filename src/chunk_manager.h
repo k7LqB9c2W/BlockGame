@@ -299,8 +299,11 @@ struct StreamingStatusSnapshot
     int exactReadyChunks{0};
     int exactRequiredChunks{0};
     int exactPendingUploads{0};
+    int farActiveTiles{0};
+    int farDirtyTiles{0};
     int farReadyTiles{0};
     int farQueuedTiles{0};
+    int farPendingUploadTiles{0};
     bool playerReleaseReady{true};
     const char* blockingReason{"ready"};
 };

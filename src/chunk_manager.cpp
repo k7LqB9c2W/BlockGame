@@ -5803,8 +5803,11 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
     snapshot.playerReleaseReady = playerReleaseReady();
     snapshot.exactPendingUploads = static_cast<int>(
         std::min<std::size_t>(pendingUploadsLastFrame_, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    snapshot.farActiveTiles = farTerrainManager_.activeTileCount();
+    snapshot.farDirtyTiles = farTerrainManager_.dirtyTileCount();
     snapshot.farReadyTiles = farTerrainManager_.readyTileCount();
     snapshot.farQueuedTiles = farTerrainManager_.queuedTileCount();
+    snapshot.farPendingUploadTiles = farTerrainManager_.pendingUploadTileCount();
 
     snapshot.exactReadyChunks = cachedExactReadyChunks_;
     snapshot.exactRequiredChunks = cachedExactRequiredChunks_;

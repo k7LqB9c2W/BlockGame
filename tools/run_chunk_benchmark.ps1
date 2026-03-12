@@ -284,6 +284,9 @@ $acceptanceView = foreach ($scenario in $scenarioObjects) {
         surface_hit_rate = $scenario.cache.surface.hit_rate
         generated_chunks_per_sec = $scenario.throughput.generated_chunks_per_sec
         uploaded_chunks_per_sec = $scenario.throughput.uploaded_chunks_per_sec
+        pooled_chunks = if ($scenario.final_profiling) { $scenario.final_profiling.pooled_chunks } else { $null }
+        pooled_chunk_bytes = if ($scenario.final_profiling) { $scenario.final_profiling.pooled_chunk_bytes } else { $null }
+        pooled_chunk_budget_bytes = if ($scenario.final_profiling) { $scenario.final_profiling.pooled_chunk_budget_bytes } else { $null }
     }
 }
 
@@ -329,6 +332,12 @@ foreach ($scenario in $scenarioObjects) {
     $summaryLines.Add(("  climate_hit_rate={0:P2} surface_hit_rate={1:P2}" -f `
         $scenario.cache.climate.hit_rate,
         $scenario.cache.surface.hit_rate))
+    if ($scenario.final_profiling) {
+        $summaryLines.Add(("  pool chunks={0} bytes_mib={1:F2} budget_mib={2:F2}" -f `
+            $scenario.final_profiling.pooled_chunks,
+            ($scenario.final_profiling.pooled_chunk_bytes / 1MB),
+            ($scenario.final_profiling.pooled_chunk_budget_bytes / 1MB)))
+    }
     $summaryLines.Add(("  frame_avg_ms={0:F2} frame_p95_ms={1:F2} avg_fps={2:F2}" -f `
         $scenario.frame.avg_ms,
         $scenario.frame.p95_ms,

@@ -729,6 +729,7 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
                                 const BenchmarkRuntimeState& runtimeState,
                                 const BenchmarkFrameSummary& frameSummary,
                                 const ChunkBenchmarkReport& report,
+                                const ChunkProfilingSnapshot& finalProfiling,
                                 const StreamingStatusSnapshot& streamingStatus,
                                 const RenderDistanceSettings& renderSettings)
 {
@@ -831,6 +832,11 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"surface\":";
     writeCacheStatsJson(out, report.surfaceCache);
     out << "}";
+    out << ",\"final_profiling\":{"
+        << "\"pooled_chunks\":" << finalProfiling.pooledChunkCount
+        << ",\"pooled_chunk_bytes\":" << finalProfiling.pooledChunkBytes
+        << ",\"pooled_chunk_budget_bytes\":" << finalProfiling.pooledChunkBudgetBytes
+        << "}";
     out << ",\"final_streaming\":{"
         << "\"phase\":";
     writeJsonEscaped(out, streamingPhaseName(streamingStatus.phase));
@@ -1746,6 +1752,8 @@ int runGame()
     glfwSetScrollCallback(window, scrollCallback);
     glfwSetKeyCallback(window, keyCallback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    int exitCode = EXIT_SUCCESS;
+    {
     Renderer renderer;
     try
     {
@@ -1945,7 +1953,6 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    int exitCode = EXIT_SUCCESS;
     std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
@@ -2058,6 +2065,14 @@ int runGame()
                 {
                     profilingStream << " q " << snapshot.farTilesQueued;
                 }
+            }
+            if (snapshot.pooledChunkBudgetBytes > 0)
+            {
+                const double pooledMiB = static_cast<double>(snapshot.pooledChunkBytes) / (1024.0 * 1024.0);
+                const double poolBudgetMiB =
+                    static_cast<double>(snapshot.pooledChunkBudgetBytes) / (1024.0 * 1024.0);
+                profilingStream << " | Pool " << snapshot.pooledChunkCount
+                                << " (" << pooledMiB << "/" << poolBudgetMiB << " MiB)";
             }
             profilingStream << " | UploadMs " << snapshot.uploadMsLastFrame;
             profilingStream << " | UpdateMs " << snapshot.updateMsLastFrame;
@@ -3161,12 +3176,14 @@ int runGame()
         {
             const BenchmarkFrameSummary frameSummary = summarizeFrameTimes(benchmarkState.frameTimesMs);
             const ChunkBenchmarkReport benchmarkReport = chunkManager.benchmarkReport();
+            const ChunkProfilingSnapshot finalProfiling = chunkManager.sampleProfilingSnapshot();
             const StreamingStatusSnapshot finalStreamingStatus = chunkManager.streamingStatusSnapshot();
             const RenderDistanceSettings finalRenderSettings = chunkManager.renderDistanceSettings();
             if (!writeBenchmarkScenarioJson(benchmarkConfig,
                                             benchmarkState,
                                             frameSummary,
                                             benchmarkReport,
+                                            finalProfiling,
                                             finalStreamingStatus,
                                             finalRenderSettings))
             {
@@ -3179,10 +3196,14 @@ int runGame()
                 std::cout << "Benchmark scenario written to " << benchmarkConfig.outputPath << std::endl;
             }
         }
+
+        std::cout.flush();
+        std::cerr.flush();
+        std::_Exit(exitCode);
     }
 
-    chunkManager.clear();
     renderer.shutdown();
+    }
     glfwDestroyWindow(window);
     glfwTerminate();
     return exitCode;

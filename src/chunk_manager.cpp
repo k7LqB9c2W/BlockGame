@@ -411,6 +411,10 @@ bool Frustum::intersectsAABB(const glm::vec3& minCorner, const glm::vec3& maxCor
 namespace
 {
 using Vertex = WorldVertex;
+inline constexpr std::size_t kChunkPoolMinBudgetBytes = 16ull * 1024ull * 1024ull;
+inline constexpr std::size_t kChunkPoolBaseBudgetBytes = 96ull * 1024ull * 1024ull;
+inline constexpr double kChunkPoolMaxUploadPressure = 1.5;
+inline constexpr double kChunkPoolUploadPressureDivisor = 32.0;
 
 void throwIfFailedDx(HRESULT hr, const char* message)
 {
@@ -1329,6 +1333,9 @@ inline bool defaultTreeHasSpacingConflict(const DefaultTreeCandidate& candidate,
 
 struct MeshData
 {
+    static constexpr std::size_t kReusableVertexCapacity = 4096;
+    static constexpr std::size_t kReusableIndexCapacity = 6144;
+
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
 
@@ -1344,9 +1351,36 @@ struct MeshData
         indices.clear();
     }
 
+    void trimForReuse()
+    {
+        trimVector(vertices, kReusableVertexCapacity);
+        trimVector(indices, kReusableIndexCapacity);
+    }
+
     bool empty() const
     {
         return vertices.empty() || indices.empty();
+    }
+
+    [[nodiscard]] std::size_t retainedBytes() const noexcept
+    {
+        return vertices.capacity() * sizeof(Vertex) +
+               indices.capacity() * sizeof(std::uint32_t);
+    }
+
+private:
+    template <typename T>
+    static void trimVector(std::vector<T>& values, std::size_t targetCapacity)
+    {
+        if (values.capacity() <= targetCapacity * 2)
+        {
+            values.clear();
+            return;
+        }
+
+        std::vector<T> trimmed;
+        trimmed.reserve(targetCapacity);
+        values.swap(trimmed);
     }
 };
 
@@ -1447,7 +1481,7 @@ struct Chunk
             std::fill(lightLevels.begin(), lightLevels.end(), packLightLevels(kMaxLightLevel, 0));
         }
         state.store(ChunkState::Empty, std::memory_order_relaxed);
-        meshData.clear();
+        meshData.trimForReuse();
         meshReady.store(false, std::memory_order_relaxed);
         hasBlocks.store(false, std::memory_order_relaxed);
         queuedForUpload.store(false, std::memory_order_relaxed);
@@ -1551,10 +1585,10 @@ struct Job
 class JobQueue
 {
 public:
-    void push(const Job& job);
+    bool push(const Job& job);
     bool tryPop(Job& job);
     Job waitAndPop();
-    void stop();
+    std::vector<Job> stop();
     bool empty() const;
     std::size_t size() const;
     void updatePriorityOrigin(const glm::ivec3& origin);
@@ -3245,6 +3279,10 @@ private:
     void uploadChunkMesh(Chunk& chunk);
     void buildChunkMeshAsync(Chunk& chunk);
     static glm::ivec3 worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept;
+    static std::size_t estimateChunkRetainedBytes(const Chunk& chunk) noexcept;
+    std::size_t chunkPoolBudgetBytes() const noexcept;
+    void trimChunkPoolToBudget();
+    void trimChunkPoolToBudgetLocked(std::size_t budgetBytes);
     std::shared_ptr<Chunk> acquireChunk(const glm::ivec3& coord);
 
     std::shared_ptr<Chunk> getChunkShared(const glm::ivec3& coord) noexcept;
@@ -3374,6 +3412,12 @@ private:
         std::array<std::uint8_t, kVoxelCount> lightLevels{};
     };
 
+    struct PooledChunkEntry
+    {
+        std::shared_ptr<Chunk> chunk{};
+        std::size_t retainedBytes{0};
+    };
+
     void queueRelightRequest(const glm::ivec3& centerCoord, bool forceRemesh);
     bool takePendingRelightBatch(PendingRelightBatch& batch);
     void processPendingRelightRequests(int maxBatches);
@@ -3444,7 +3488,9 @@ private:
 
     int viewDistance_;
     int targetViewDistance_;
-    std::vector<std::shared_ptr<Chunk>> chunkPool_;
+    std::deque<PooledChunkEntry> chunkPool_;
+    std::size_t chunkPoolBytes_{0};
+    std::size_t chunkPoolBudgetBytes_{kChunkPoolBaseBudgetBytes};
     std::mutex chunkPoolMutex_;
     ProfilingCounters profilingCounters_{};
     mutable ChunkBenchmarkMetrics benchmarkMetrics_{};
@@ -3496,11 +3542,16 @@ private:
 
 // JobQueue implementations
 
-void JobQueue::push(const Job& job)
+bool JobQueue::push(const Job& job)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return false;
+    }
     priorityQueue_.push(wrap(job));
     condition_.notify_one();
+    return true;
 }
 
 bool JobQueue::tryPop(Job& job)
@@ -3530,11 +3581,19 @@ Job JobQueue::waitAndPop()
     return job;
 }
 
-void JobQueue::stop()
+std::vector<Job> JobQueue::stop()
 {
+    std::vector<Job> cancelledJobs;
     std::lock_guard<std::mutex> lock(mutex_);
     shouldStop_.store(true, std::memory_order_release);
+    cancelledJobs.reserve(priorityQueue_.size());
+    while (!priorityQueue_.empty())
+    {
+        cancelledJobs.push_back(priorityQueue_.top().job);
+        priorityQueue_.pop();
+    }
     condition_.notify_all();
+    return cancelledJobs;
 }
 
 bool JobQueue::empty() const
@@ -4112,6 +4171,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     processPendingRelightRequests(1);
     uploadReadyMeshes();
+    trimChunkPoolToBudget();
 
     const bool farStreamingActive =
         renderSettings_.farTerrainEnabled &&
@@ -4493,6 +4553,11 @@ void ChunkManager::Impl::clear()
         surfaceMap_->clear();
     }
 
+    {
+        std::lock_guard<std::mutex> lock(chunkPoolMutex_);
+        trimChunkPoolToBudgetLocked(kChunkPoolMinBudgetBytes);
+    }
+
 }
 
 bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
@@ -4784,6 +4849,7 @@ void ChunkManager::Impl::setNearRenderDistance(int chunks) noexcept
         const long long totalColumns = width * width;
         std::cout << "Near render distance set to: " << targetViewDistance_ << " chunks (total: "
                   << totalColumns << " chunks)" << std::endl;
+        trimChunkPoolToBudget();
     }
     catch (const std::exception& ex)
     {
@@ -4810,6 +4876,7 @@ void ChunkManager::Impl::setFarRenderDistanceBlocks(int blocks) noexcept
         }
         farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
         kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
+        trimChunkPoolToBudget();
     }
     catch (const std::exception& ex)
     {
@@ -4828,6 +4895,7 @@ void ChunkManager::Impl::setFarTerrainEnabled(bool enabled)
     renderSettings_.farTerrainEnabled = enabled;
     farTerrainManager_.setEnabled(enabled);
     farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+    trimChunkPoolToBudget();
     std::cout << "[ChunkManager] Far terrain " << (enabled ? "enabled" : "disabled")
               << " via F3 toggle" << std::endl;
 }
@@ -5316,6 +5384,12 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     const std::size_t pendingUploads = pendingUploadsLastFrame_;
     snapshot.pendingUploadChunks = static_cast<int>(
         std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    {
+        std::lock_guard<std::mutex> lock(chunkPoolMutex_);
+        snapshot.pooledChunkCount = chunkPool_.size();
+        snapshot.pooledChunkBytes = chunkPoolBytes_;
+        snapshot.pooledChunkBudgetBytes = chunkPoolBudgetBytes_;
+    }
     snapshot.farBuildMsAverage = farTerrainManager_.averageBuildMs();
     snapshot.farCollectMsLastFrame = farTerrainManager_.lastCollectMs();
     snapshot.farUploadMsLastFrame = farTerrainManager_.lastUploadMs();
@@ -5449,7 +5523,14 @@ void ChunkManager::Impl::startWorkerThreads()
 void ChunkManager::Impl::stopWorkerThreads()
 {
     shouldStop_.store(true, std::memory_order_release);
-    jobQueue_.stop();
+    std::vector<Job> cancelledJobs = jobQueue_.stop();
+    for (const Job& job : cancelledJobs)
+    {
+        if (job.chunk)
+        {
+            job.chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
 
     for (auto& thread : workerThreads_)
     {
@@ -5490,15 +5571,15 @@ void ChunkManager::Impl::enqueueJob(const std::shared_ptr<Chunk>& chunk, JobType
         return;
     }
 
-    chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
-    try
+    if (shouldStop_.load(std::memory_order_acquire))
     {
-        jobQueue_.push(Job(type, coord, chunk));
+        return;
     }
-    catch (...)
+
+    chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
+    if (!jobQueue_.push(Job(type, coord, chunk)))
     {
         chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
-        throw;
     }
 }
 
@@ -5959,6 +6040,56 @@ void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
     chunk.queuedForUpload.store(false, std::memory_order_release);
 }
 
+std::size_t ChunkManager::Impl::estimateChunkRetainedBytes(const Chunk& chunk) noexcept
+{
+    return sizeof(Chunk) +
+           chunk.blocks.capacity() * sizeof(BlockId) +
+           chunk.lightLevels.capacity() * sizeof(std::uint8_t) +
+           chunk.meshData.retainedBytes() +
+           (chunk.lodData ? sizeof(FarChunk) : 0ull);
+}
+
+std::size_t ChunkManager::Impl::chunkPoolBudgetBytes() const noexcept
+{
+    const double horizontalPressure =
+        std::max(1.0, static_cast<double>(std::max(targetViewDistance_, 1)) /
+                          static_cast<double>(kDefaultNearRenderDistance));
+    const double verticalPressure =
+        std::max(1.0, static_cast<double>(std::max(lastVerticalRadius_, kVerticalStreamingConfig.minRadiusChunks)) /
+                          static_cast<double>(std::max(kVerticalStreamingConfig.minRadiusChunks, 1)));
+    const double uploadPressure =
+        1.0 + std::min(kChunkPoolMaxUploadPressure,
+                       static_cast<double>(pendingUploadsLastFrame_) / kChunkPoolUploadPressureDivisor);
+
+    double pressure = horizontalPressure * std::sqrt(verticalPressure) * uploadPressure;
+    if (renderSettings_.farTerrainEnabled)
+    {
+        pressure *= 1.25;
+    }
+
+    const std::size_t budget = static_cast<std::size_t>(
+        static_cast<double>(kChunkPoolBaseBudgetBytes) / std::max(pressure, 1.0));
+    return std::clamp(budget, kChunkPoolMinBudgetBytes, kChunkPoolBaseBudgetBytes);
+}
+
+void ChunkManager::Impl::trimChunkPoolToBudgetLocked(std::size_t budgetBytes)
+{
+    chunkPoolBudgetBytes_ = budgetBytes;
+    while (chunkPoolBytes_ > budgetBytes && !chunkPool_.empty())
+    {
+        const std::size_t retainedBytes = chunkPool_.front().retainedBytes;
+        chunkPool_.pop_front();
+        chunkPoolBytes_ = (retainedBytes >= chunkPoolBytes_) ? 0 : (chunkPoolBytes_ - retainedBytes);
+    }
+}
+
+void ChunkManager::Impl::trimChunkPoolToBudget()
+{
+    const std::size_t budgetBytes = chunkPoolBudgetBytes();
+    std::lock_guard<std::mutex> lock(chunkPoolMutex_);
+    trimChunkPoolToBudgetLocked(budgetBytes);
+}
+
 void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
 {
     if (!chunk)
@@ -5966,16 +6097,22 @@ void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
         return;
     }
 
+    std::size_t retainedBytes = 0;
     {
         std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
         chunk->reset(chunk->coord);
+        retainedBytes = estimateChunkRetainedBytes(*chunk);
     }
 
+    const std::size_t budgetBytes = chunkPoolBudgetBytes();
     std::lock_guard<std::mutex> lock(chunkPoolMutex_);
-    if (chunkPool_.size() < kChunkPoolSoftCap)
+    chunkPoolBudgetBytes_ = budgetBytes;
+    if (retainedBytes <= budgetBytes)
     {
-        chunkPool_.push_back(std::move(chunk));
+        chunkPool_.push_back(PooledChunkEntry{std::move(chunk), retainedBytes});
+        chunkPoolBytes_ += retainedBytes;
     }
+    trimChunkPoolToBudgetLocked(budgetBytes);
 }
 
 void ChunkManager::Impl::destroyBufferPages()
@@ -7737,8 +7874,10 @@ std::shared_ptr<Chunk> ChunkManager::Impl::acquireChunk(const glm::ivec3& coord)
         std::lock_guard<std::mutex> lock(chunkPoolMutex_);
         if (!chunkPool_.empty())
         {
-            chunk = std::move(chunkPool_.back());
+            PooledChunkEntry entry = std::move(chunkPool_.back());
             chunkPool_.pop_back();
+            chunkPoolBytes_ = (entry.retainedBytes >= chunkPoolBytes_) ? 0 : (chunkPoolBytes_ - entry.retainedBytes);
+            chunk = std::move(entry.chunk);
         }
     }
 

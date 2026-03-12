@@ -95,7 +95,6 @@ inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 64ull * 1024ull * 1024ull;
 
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
-inline constexpr std::size_t kChunkPoolSoftCap = 1'048'576ull;
 inline constexpr std::size_t kUploadQueueScanLimit = 128ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
@@ -218,6 +217,9 @@ struct ChunkProfilingSnapshot
     int pendingUploadChunks{0};
     int exactChunksReady{0};
     int exactChunksPending{0};
+    std::size_t pooledChunkCount{0};
+    std::size_t pooledChunkBytes{0};
+    std::size_t pooledChunkBudgetBytes{0};
     int farActiveTiles{0};
     int farDirtyTiles{0};
     int farShellTilesReady{0};

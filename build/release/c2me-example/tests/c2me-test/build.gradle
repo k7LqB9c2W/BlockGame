@@ -1,0 +1,60 @@
+import com.ishland.c2me.gradle.RedirectingOutputStream
+
+evaluationDependsOn(":tests")
+evaluationDependsOn(":tests:test-mod")
+
+loom {
+    runs {
+        testC2MEServer {
+            server()
+            runDir project.getProjectDir().toPath().relativize(project.getBuildDir().toPath()).resolve("testServer").toString()
+            vmArgs "-Dc2me.base.config.override.asyncScheduling.enabled=true",
+                    "-Dc2me.base.config.override.ioSystem.replaceImpl=true",
+                    "-Dc2me.base.config.override.ioSystem.gcFreeChunkSerializer=true",
+                    "-Dc2me.base.config.override.vanillaWorldGenOptimizations.useDensityFunctionCompiler=true",
+                    "-Dc2me.base.config.override.vanillaWorldGenOptimizations.nativeAcceleration.enabled=true",
+                    "-Dc2me.gcFreeChunkSerializer.validateNbt=true",
+                    "-Dcom.ishland.c2me.mixin.doAudit=true",
+                    "-Dc2me.base.config.override.openclAccel.allowCPUDevices=true"
+            if (System.getenv("GITHUB_WORKFLOW") != null) {
+                if (System.getenv("RUNNER_OS").equals("macOS")) {
+                    vmArgs "-Xmx11G"
+                } else if (System.getenv("RUNNER_OS").equals("Linux")) {
+                    vmArgs "-Xmx5G"
+                }
+            }
+        }
+    }
+}
+
+afterEvaluate {
+    runTestC2MEServer.configure {
+        doFirst {
+            standardOutput = new RedirectingOutputStream(project, getName())
+        }
+        onlyIf {
+            !getRootProject().getProjectDir().toPath().relativize(project.getBuildDir().toPath()).resolve("testServer").toFile().isDirectory()
+        }
+    }
+
+    migrateMappings.onlyIf { false }
+}
+
+dependencies {
+    runtimeOnly project(":tests:test-mod").sourceSets.main.output
+    runtimeOnly project(":").sourceSets.main.output
+}
+
+dependencies {
+    afterEvaluate {
+        (rootProject.subprojects - project(":tests")).forEach {
+            if (it.parent != project(":")) return
+
+            runtimeOnly project(path: ":${it.name}", configuration: "namedElements")
+        }
+    }
+}
+
+test {
+    useJUnitPlatform()
+}

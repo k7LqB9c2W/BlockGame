@@ -1408,6 +1408,32 @@ const ClimateSample& ClimateMap::sample(int worldX, int worldZ) const
     return fragment.sample(localX, localZ);
 }
 
+void ClimateMap::setProfilingEnabled(bool enabled) noexcept
+{
+    profilingEnabled_.store(enabled, std::memory_order_release);
+}
+
+bool ClimateMap::profilingEnabled() const noexcept
+{
+    return profilingEnabled_.load(std::memory_order_acquire);
+}
+
+ClimateMap::CacheProfilingSnapshot ClimateMap::profilingSnapshot() const noexcept
+{
+    CacheProfilingSnapshot snapshot{};
+    snapshot.hits = cacheHits_.load(std::memory_order_relaxed);
+    snapshot.misses = cacheMisses_.load(std::memory_order_relaxed);
+    snapshot.fills = cacheFills_.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
+void ClimateMap::resetProfiling() noexcept
+{
+    cacheHits_.store(0, std::memory_order_relaxed);
+    cacheMisses_.store(0, std::memory_order_relaxed);
+    cacheFills_.store(0, std::memory_order_relaxed);
+}
+
 void ClimateMap::clear()
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1437,9 +1463,18 @@ const ClimateFragment& ClimateMap::fragmentForColumn(int worldX, int worldZ) con
         auto it = fragments_.find(key);
         if (it != fragments_.end())
         {
+            if (profilingEnabled())
+            {
+                cacheHits_.fetch_add(1, std::memory_order_relaxed);
+            }
             touch(it->second);
             return *it->second.fragment;
         }
+    }
+
+    if (profilingEnabled())
+    {
+        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
     }
 
     auto fragment = std::make_unique<ClimateFragment>(key);
@@ -1465,6 +1500,10 @@ const ClimateFragment& ClimateMap::fragmentForColumn(int worldX, int worldZ) con
 
             auto [it, inserted] = fragments_.emplace(key, std::move(entry));
             (void)inserted;
+            if (profilingEnabled())
+            {
+                cacheFills_.fetch_add(1, std::memory_order_relaxed);
+            }
             evictIfNeeded();
             result = it->second.fragment.get();
         }

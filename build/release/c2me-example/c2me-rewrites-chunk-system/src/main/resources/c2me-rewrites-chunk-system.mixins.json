@@ -1,0 +1,28 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "com.ishland.c2me.rewrites.chunksystem.mixin",
+  "plugin": "com.ishland.c2me.rewrites.chunksystem.MixinPlugin",
+  "mixins": [
+    "MixinChunkGenerator",
+    "MixinChunkHolder",
+    "MixinChunkLevelManager",
+    "MixinChunkTicketManagerTicketDistanceLevelPropagator",
+    "MixinMinecraftServer",
+    "MixinNoiseChunkGenerator",
+    "MixinPointOfInterestStorage",
+    "MixinSerializingRegionBasedStorage",
+    "MixinServerChunkManager",
+    "MixinThreadedAnvilChunkStorage",
+    "MixinWorldChunk",
+    "async_serialization.MixinBlender",
+    "async_serialization.MixinChunkRegion",
+    "async_serialization.MixinChunkSerializer",
+    "async_serialization.MixinProtoChunk",
+    "async_serialization.MixinStorageIoWorker",
+    "async_serialization.MixinThreadedAnvilChunkStorage",
+    "fixes.MixinServerEntityManager",
+    "fluid_postprocessing.MixinWorldChunk",
+    "scalablelux.MixinChunkSystemHooks"
+  ]
+}

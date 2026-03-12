@@ -306,6 +306,547 @@ int __cdecl crtReportHook(int reportType, char* message, int*)
     return true;
 }
 
+void applyCameraPose(Camera& camera,
+                     const glm::vec3& position,
+                     float yawDegrees,
+                     float pitchDegrees);
+
+enum class BenchmarkScenarioKind : std::uint8_t
+{
+    SpawnPreload = 0,
+    StraightLineSprint,
+    TurnHeavyTraversal,
+    VerticalTravel
+};
+
+struct BenchmarkConfig
+{
+    bool enabled{false};
+    BenchmarkScenarioKind scenario{BenchmarkScenarioKind::SpawnPreload};
+    std::filesystem::path outputPath{};
+    std::string buildConfig{"Unknown"};
+    int nearChunks{kDefaultNearRenderDistance};
+    int farBlocks{kDefaultFarRenderDistanceBlocks};
+    int fogStartBlocks{kDefaultFarFogStartBlocks};
+    bool farTerrainEnabled{true};
+    float altitudeOffsetBlocks{24.0f};
+    double movementDurationSeconds{0.0};
+    double cooldownDurationSeconds{0.0};
+    double speedBlocksPerSecond{0.0};
+    double turnSegmentSeconds{2.5};
+    double verticalSpanBlocks{192.0};
+};
+
+struct BenchmarkRuntimeState
+{
+    bool started{false};
+    bool completed{false};
+    double elapsedSeconds{0.0};
+    glm::vec3 spawnPosition{0.0f};
+    glm::vec3 scenarioStartPosition{0.0f};
+    glm::vec3 finalCameraPosition{0.0f};
+    float finalYawDegrees{0.0f};
+    float finalPitchDegrees{0.0f};
+    std::vector<double> frameTimesMs;
+};
+
+struct BenchmarkFrameSummary
+{
+    std::size_t count{0};
+    double averageMs{0.0};
+    double medianMs{0.0};
+    double p95Ms{0.0};
+    double maxMs{0.0};
+    double averageFps{0.0};
+};
+
+[[nodiscard]] const char* benchmarkScenarioName(BenchmarkScenarioKind scenario) noexcept
+{
+    switch (scenario)
+    {
+    case BenchmarkScenarioKind::SpawnPreload:
+        return "spawn_preload";
+    case BenchmarkScenarioKind::StraightLineSprint:
+        return "straight_line_sprint";
+    case BenchmarkScenarioKind::TurnHeavyTraversal:
+        return "turn_heavy_traversal";
+    case BenchmarkScenarioKind::VerticalTravel:
+        return "vertical_travel";
+    default:
+        return "unknown";
+    }
+}
+
+[[nodiscard]] const char* streamingPhaseName(StreamingPhase phase) noexcept
+{
+    switch (phase)
+    {
+    case StreamingPhase::SpawnResolve:
+        return "spawn_resolve";
+    case StreamingPhase::ExactPreload:
+        return "exact_preload";
+    case StreamingPhase::InteractiveNearOnly:
+        return "interactive_near_only";
+    case StreamingPhase::FarRamp:
+        return "far_ramp";
+    case StreamingPhase::SteadyState:
+    default:
+        return "steady_state";
+    }
+}
+
+[[nodiscard]] bool tryParseBenchmarkScenario(const std::string& text, BenchmarkScenarioKind& outScenario) noexcept
+{
+    if (text == "spawn_preload")
+    {
+        outScenario = BenchmarkScenarioKind::SpawnPreload;
+        return true;
+    }
+    if (text == "straight_line" || text == "straight_line_sprint")
+    {
+        outScenario = BenchmarkScenarioKind::StraightLineSprint;
+        return true;
+    }
+    if (text == "turn_heavy" || text == "turn_heavy_traversal")
+    {
+        outScenario = BenchmarkScenarioKind::TurnHeavyTraversal;
+        return true;
+    }
+    if (text == "vertical" || text == "vertical_travel")
+    {
+        outScenario = BenchmarkScenarioKind::VerticalTravel;
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] BenchmarkConfig loadBenchmarkConfig()
+{
+    BenchmarkConfig config;
+    config.enabled = envFlagEnabled("BLOCKGAME_BENCHMARK");
+    if (!config.enabled)
+    {
+        return config;
+    }
+
+    const char* scenarioValue = std::getenv("BLOCKGAME_BENCHMARK_SCENARIO");
+    if (scenarioValue == nullptr || scenarioValue[0] == '\0')
+    {
+        config.enabled = false;
+        return config;
+    }
+
+    std::string normalizedScenario = scenarioValue;
+    std::transform(normalizedScenario.begin(),
+                   normalizedScenario.end(),
+                   normalizedScenario.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (!tryParseBenchmarkScenario(normalizedScenario, config.scenario))
+    {
+        config.enabled = false;
+        return config;
+    }
+
+    if (const char* outputValue = std::getenv("BLOCKGAME_BENCHMARK_OUTPUT"))
+    {
+        config.outputPath = outputValue;
+    }
+    if (config.outputPath.empty())
+    {
+        std::error_code ec;
+        std::filesystem::path cwd = std::filesystem::current_path(ec);
+        if (ec)
+        {
+            cwd = ".";
+        }
+        config.outputPath = cwd / "artifacts" / "chunk_benchmark" /
+            (std::string(benchmarkScenarioName(config.scenario)) + ".json");
+    }
+
+    if (const char* buildConfigValue = std::getenv("BLOCKGAME_BENCHMARK_BUILD_CONFIG"))
+    {
+        config.buildConfig = buildConfigValue;
+    }
+
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_NEAR_CHUNKS", config.nearChunks);
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FAR_BLOCKS", config.farBlocks);
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FOG_START_BLOCKS", config.fogStartBlocks);
+    if (const char* farTerrainValue = std::getenv("BLOCKGAME_BENCHMARK_FAR_TERRAIN"))
+    {
+        config.farTerrainEnabled = envFlagEnabled("BLOCKGAME_BENCHMARK_FAR_TERRAIN");
+        (void)farTerrainValue;
+    }
+    config.altitudeOffsetBlocks =
+        envFloatOrDefault("BLOCKGAME_BENCHMARK_ALTITUDE_OFFSET", config.altitudeOffsetBlocks);
+
+    switch (config.scenario)
+    {
+    case BenchmarkScenarioKind::SpawnPreload:
+        config.movementDurationSeconds = 0.0;
+        config.cooldownDurationSeconds = 0.0;
+        config.speedBlocksPerSecond = 0.0;
+        break;
+    case BenchmarkScenarioKind::StraightLineSprint:
+        config.movementDurationSeconds = 18.0;
+        config.cooldownDurationSeconds = 2.0;
+        config.speedBlocksPerSecond = 96.0;
+        break;
+    case BenchmarkScenarioKind::TurnHeavyTraversal:
+        config.movementDurationSeconds = 18.0;
+        config.cooldownDurationSeconds = 2.0;
+        config.speedBlocksPerSecond = 72.0;
+        break;
+    case BenchmarkScenarioKind::VerticalTravel:
+        config.movementDurationSeconds = 16.0;
+        config.cooldownDurationSeconds = 2.0;
+        config.speedBlocksPerSecond = 0.0;
+        break;
+    }
+
+    config.movementDurationSeconds =
+        std::max(0.0, static_cast<double>(envFloatOrDefault("BLOCKGAME_BENCHMARK_DURATION",
+                                                            static_cast<float>(config.movementDurationSeconds))));
+    config.cooldownDurationSeconds =
+        std::max(0.0, static_cast<double>(envFloatOrDefault("BLOCKGAME_BENCHMARK_COOLDOWN",
+                                                            static_cast<float>(config.cooldownDurationSeconds))));
+    config.speedBlocksPerSecond =
+        std::max(0.0, static_cast<double>(envFloatOrDefault("BLOCKGAME_BENCHMARK_SPEED",
+                                                            static_cast<float>(config.speedBlocksPerSecond))));
+    config.turnSegmentSeconds =
+        std::max(0.25, static_cast<double>(envFloatOrDefault("BLOCKGAME_BENCHMARK_TURN_SEGMENT_SECONDS",
+                                                             static_cast<float>(config.turnSegmentSeconds))));
+    config.verticalSpanBlocks =
+        std::max(32.0, static_cast<double>(envFloatOrDefault("BLOCKGAME_BENCHMARK_VERTICAL_SPAN",
+                                                             static_cast<float>(config.verticalSpanBlocks))));
+
+    return config;
+}
+
+[[nodiscard]] double percentileFromSorted(const std::vector<double>& sortedValues, double percentile)
+{
+    if (sortedValues.empty())
+    {
+        return 0.0;
+    }
+
+    const double clamped = std::clamp(percentile, 0.0, 1.0);
+    const std::size_t index = static_cast<std::size_t>(
+        std::clamp(std::ceil(clamped * static_cast<double>(sortedValues.size())) - 1.0,
+                   0.0,
+                   static_cast<double>(sortedValues.size() - 1)));
+    return sortedValues[index];
+}
+
+[[nodiscard]] BenchmarkFrameSummary summarizeFrameTimes(const std::vector<double>& frameTimesMs)
+{
+    BenchmarkFrameSummary summary{};
+    summary.count = frameTimesMs.size();
+    if (frameTimesMs.empty())
+    {
+        return summary;
+    }
+
+    std::vector<double> sorted = frameTimesMs;
+    std::sort(sorted.begin(), sorted.end());
+    const double totalMs = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+    summary.averageMs = totalMs / static_cast<double>(sorted.size());
+    summary.medianMs = percentileFromSorted(sorted, 0.50);
+    summary.p95Ms = percentileFromSorted(sorted, 0.95);
+    summary.maxMs = sorted.back();
+    if (summary.averageMs > 0.0)
+    {
+        summary.averageFps = 1000.0 / summary.averageMs;
+    }
+    return summary;
+}
+
+[[nodiscard]] glm::vec3 benchmarkDirectionForYaw(float yawDegrees) noexcept
+{
+    const float radians = glm::radians(yawDegrees);
+    return glm::normalize(glm::vec3(std::cos(radians), 0.0f, std::sin(radians)));
+}
+
+void initializeBenchmarkCamera(Camera& camera,
+                               const BenchmarkConfig& config,
+                               BenchmarkRuntimeState& runtimeState)
+{
+    runtimeState.scenarioStartPosition = runtimeState.spawnPosition;
+    runtimeState.scenarioStartPosition.y += config.altitudeOffsetBlocks;
+
+    switch (config.scenario)
+    {
+    case BenchmarkScenarioKind::StraightLineSprint:
+        applyCameraPose(camera, runtimeState.scenarioStartPosition, -35.0f, -8.0f);
+        break;
+    case BenchmarkScenarioKind::TurnHeavyTraversal:
+        applyCameraPose(camera, runtimeState.scenarioStartPosition, 0.0f, -10.0f);
+        break;
+    case BenchmarkScenarioKind::VerticalTravel:
+        applyCameraPose(camera, runtimeState.scenarioStartPosition, -20.0f, -22.0f);
+        break;
+    case BenchmarkScenarioKind::SpawnPreload:
+    default:
+        applyCameraPose(camera, runtimeState.spawnPosition, camera.yaw, camera.pitch);
+        break;
+    }
+}
+
+void applyBenchmarkCameraPose(Camera& camera,
+                              const BenchmarkConfig& config,
+                              const BenchmarkRuntimeState& runtimeState)
+{
+    if (!runtimeState.started)
+    {
+        return;
+    }
+
+    const double movementElapsed = std::min(runtimeState.elapsedSeconds, config.movementDurationSeconds);
+    const glm::vec3 origin = runtimeState.scenarioStartPosition;
+
+    switch (config.scenario)
+    {
+    case BenchmarkScenarioKind::StraightLineSprint:
+    {
+        const glm::vec3 direction = benchmarkDirectionForYaw(-35.0f);
+        const float distance = static_cast<float>(movementElapsed * config.speedBlocksPerSecond);
+        applyCameraPose(camera, origin + direction * distance, -35.0f, -8.0f);
+        break;
+    }
+    case BenchmarkScenarioKind::TurnHeavyTraversal:
+    {
+        static constexpr std::array<float, 4> kYaws{0.0f, 90.0f, 180.0f, 270.0f};
+        glm::vec3 offset(0.0f);
+        const double segmentLength = config.speedBlocksPerSecond * config.turnSegmentSeconds;
+        const int completedSegments = static_cast<int>(movementElapsed / config.turnSegmentSeconds);
+        const double segmentProgressSeconds =
+            movementElapsed - static_cast<double>(completedSegments) * config.turnSegmentSeconds;
+
+        for (int segmentIndex = 0; segmentIndex < completedSegments; ++segmentIndex)
+        {
+            offset += benchmarkDirectionForYaw(kYaws[segmentIndex % kYaws.size()]) *
+                      static_cast<float>(segmentLength);
+        }
+
+        const float currentYaw = kYaws[completedSegments % static_cast<int>(kYaws.size())];
+        offset += benchmarkDirectionForYaw(currentYaw) *
+                  static_cast<float>(segmentProgressSeconds * config.speedBlocksPerSecond);
+        applyCameraPose(camera, origin + offset, currentYaw, -10.0f);
+        break;
+    }
+    case BenchmarkScenarioKind::VerticalTravel:
+    {
+        const double halfDuration = std::max(config.movementDurationSeconds * 0.5, 0.001);
+        float currentY = origin.y;
+        if (movementElapsed <= halfDuration)
+        {
+            const float t = static_cast<float>(movementElapsed / halfDuration);
+            currentY = origin.y + static_cast<float>(config.verticalSpanBlocks * t);
+        }
+        else
+        {
+            const float t = static_cast<float>((movementElapsed - halfDuration) / halfDuration);
+            currentY = origin.y + static_cast<float>(config.verticalSpanBlocks * (1.0 - t));
+        }
+        applyCameraPose(camera, glm::vec3(origin.x, currentY, origin.z), -20.0f, -22.0f);
+        break;
+    }
+    case BenchmarkScenarioKind::SpawnPreload:
+    default:
+        break;
+    }
+}
+
+void writeJsonEscaped(std::ostream& out, const std::string& text)
+{
+    out.put('"');
+    for (char ch : text)
+    {
+        switch (ch)
+        {
+        case '\\':
+            out << "\\\\";
+            break;
+        case '"':
+            out << "\\\"";
+            break;
+        case '\n':
+            out << "\\n";
+            break;
+        case '\r':
+            out << "\\r";
+            break;
+        case '\t':
+            out << "\\t";
+            break;
+        default:
+            out.put(ch);
+            break;
+        }
+    }
+    out.put('"');
+}
+
+void writeVec3Json(std::ostream& out, const glm::vec3& value)
+{
+    out << '[' << value.x << ',' << value.y << ',' << value.z << ']';
+}
+
+void writeStageStatsJson(std::ostream& out, const BenchmarkStageStats& stats)
+{
+    out << "{"
+        << "\"count\":" << stats.count
+        << ",\"total_ms\":" << stats.totalMs
+        << ",\"avg_ms\":" << stats.averageMs
+        << ",\"median_ms\":" << stats.medianMs
+        << ",\"p95_ms\":" << stats.p95Ms
+        << ",\"p99_ms\":" << stats.p99Ms
+        << ",\"max_ms\":" << stats.maxMs
+        << "}";
+}
+
+void writeQueueStatsJson(std::ostream& out, const BenchmarkQueueDepthStats& stats)
+{
+    out << "{"
+        << "\"samples\":" << stats.sampleCount
+        << ",\"avg_depth\":" << stats.averageDepth
+        << ",\"median_depth\":" << stats.medianDepth
+        << ",\"p95_depth\":" << stats.p95Depth
+        << ",\"max_depth\":" << stats.maxDepth
+        << "}";
+}
+
+void writeCacheStatsJson(std::ostream& out, const BenchmarkCacheStats& stats)
+{
+    out << "{"
+        << "\"hits\":" << stats.hits
+        << ",\"misses\":" << stats.misses
+        << ",\"fills\":" << stats.fills
+        << ",\"hit_rate\":" << stats.hitRate
+        << "}";
+}
+
+bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
+                                const BenchmarkRuntimeState& runtimeState,
+                                const BenchmarkFrameSummary& frameSummary,
+                                const ChunkBenchmarkReport& report,
+                                const StreamingStatusSnapshot& streamingStatus,
+                                const RenderDistanceSettings& renderSettings)
+{
+    std::error_code ec;
+    const std::filesystem::path parentPath = config.outputPath.parent_path();
+    if (!parentPath.empty())
+    {
+        std::filesystem::create_directories(parentPath, ec);
+        if (ec)
+        {
+            return false;
+        }
+    }
+
+    std::ofstream out(config.outputPath, std::ios::trunc);
+    if (!out)
+    {
+        return false;
+    }
+
+    out.setf(std::ios::fixed, std::ios::floatfield);
+    out << std::setprecision(4);
+
+    out << "{";
+    out << "\"schema_version\":1";
+    out << ",\"scenario\":";
+    writeJsonEscaped(out, benchmarkScenarioName(config.scenario));
+    out << ",\"build_config\":";
+    writeJsonEscaped(out, config.buildConfig);
+    out << ",\"completed\":" << (runtimeState.completed ? "true" : "false");
+    out << ",\"duration_seconds\":" << runtimeState.elapsedSeconds;
+    out << ",\"movement_seconds\":" << config.movementDurationSeconds;
+    out << ",\"cooldown_seconds\":" << config.cooldownDurationSeconds;
+    out << ",\"render_settings\":{"
+        << "\"near_chunks\":" << renderSettings.nearChunks
+        << ",\"far_blocks\":" << renderSettings.farBlocks
+        << ",\"fog_start_blocks\":" << renderSettings.fogStartBlocks
+        << ",\"far_terrain_enabled\":" << (renderSettings.farTerrainEnabled ? "true" : "false")
+        << "}";
+    out << ",\"camera\":{"
+        << "\"spawn\":";
+    writeVec3Json(out, runtimeState.spawnPosition);
+    out << ",\"scenario_start\":";
+    writeVec3Json(out, runtimeState.scenarioStartPosition);
+    out << ",\"final\":";
+    writeVec3Json(out, runtimeState.finalCameraPosition);
+    out << ",\"final_yaw\":" << runtimeState.finalYawDegrees
+        << ",\"final_pitch\":" << runtimeState.finalPitchDegrees
+        << "}";
+    out << ",\"frame\":{"
+        << "\"count\":" << frameSummary.count
+        << ",\"avg_ms\":" << frameSummary.averageMs
+        << ",\"median_ms\":" << frameSummary.medianMs
+        << ",\"p95_ms\":" << frameSummary.p95Ms
+        << ",\"max_ms\":" << frameSummary.maxMs
+        << ",\"avg_fps\":" << frameSummary.averageFps
+        << "}";
+    out << ",\"throughput\":{"
+        << "\"generated_chunks\":" << report.generatedChunks
+        << ",\"meshed_chunks\":" << report.meshedChunks
+        << ",\"uploaded_chunks\":" << report.uploadedChunks
+        << ",\"far_built_tiles\":" << report.farBuiltTiles
+        << ",\"uploaded_bytes\":" << report.uploadedBytes
+        << ",\"generated_chunks_per_sec\":"
+        << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(report.generatedChunks) / runtimeState.elapsedSeconds : 0.0)
+        << ",\"meshed_chunks_per_sec\":"
+        << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(report.meshedChunks) / runtimeState.elapsedSeconds : 0.0)
+        << ",\"uploaded_chunks_per_sec\":"
+        << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(report.uploadedChunks) / runtimeState.elapsedSeconds : 0.0)
+        << "}";
+    out << ",\"stages\":{"
+        << "\"sample\":";
+    writeStageStatsJson(out, report.sampleStage);
+    out << ",\"generate\":";
+    writeStageStatsJson(out, report.generateStage);
+    out << ",\"relight\":";
+    writeStageStatsJson(out, report.relightStage);
+    out << ",\"mesh\":";
+    writeStageStatsJson(out, report.meshStage);
+    out << ",\"upload\":";
+    writeStageStatsJson(out, report.uploadStage);
+    out << ",\"far_build\":";
+    writeStageStatsJson(out, report.farBuildStage);
+    out << ",\"chunk_ready_latency\":";
+    writeStageStatsJson(out, report.chunkReadyLatency);
+    out << "}";
+    out << ",\"queues\":{"
+        << "\"job_backlog\":";
+    writeQueueStatsJson(out, report.jobQueueDepth);
+    out << ",\"upload_backlog\":";
+    writeQueueStatsJson(out, report.uploadQueueDepth);
+    out << ",\"far_build_backlog\":";
+    writeQueueStatsJson(out, report.farBuildQueueDepth);
+    out << ",\"far_upload_backlog\":";
+    writeQueueStatsJson(out, report.farUploadQueueDepth);
+    out << "}";
+    out << ",\"cache\":{"
+        << "\"climate\":";
+    writeCacheStatsJson(out, report.climateCache);
+    out << ",\"surface\":";
+    writeCacheStatsJson(out, report.surfaceCache);
+    out << "}";
+    out << ",\"final_streaming\":{"
+        << "\"phase\":";
+    writeJsonEscaped(out, streamingPhaseName(streamingStatus.phase));
+    out << ",\"exact_ready_chunks\":" << streamingStatus.exactReadyChunks
+        << ",\"exact_required_chunks\":" << streamingStatus.exactRequiredChunks
+        << ",\"exact_pending_uploads\":" << streamingStatus.exactPendingUploads
+        << ",\"far_ready_tiles\":" << streamingStatus.farReadyTiles
+        << ",\"far_queued_tiles\":" << streamingStatus.farQueuedTiles
+        << ",\"player_release_ready\":" << (streamingStatus.playerReleaseReady ? "true" : "false")
+        << ",\"blocking_reason\":";
+    writeJsonEscaped(out, streamingStatus.blockingReason ? streamingStatus.blockingReason : "");
+    out << "}";
+    out << "}";
+    return true;
+}
+
 struct ScreenshotSweepConfig
 {
     bool enabled{false};
@@ -1219,11 +1760,32 @@ int runGame()
     }
 
     EnvironmentState environment{};
+    const bool benchmarkRequested = envFlagEnabled("BLOCKGAME_BENCHMARK");
+    const BenchmarkConfig benchmarkConfig = loadBenchmarkConfig();
+    if (benchmarkRequested && !benchmarkConfig.enabled)
+    {
+        std::cerr << "Invalid benchmark configuration. Set BLOCKGAME_BENCHMARK_SCENARIO to one of "
+                  << "spawn_preload, straight_line_sprint, turn_heavy_traversal, or vertical_travel."
+                  << std::endl;
+        renderer.shutdown();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
     const ScreenshotReproConfig screenshotReproConfig = loadScreenshotReproConfig();
     const ScreenshotSweepConfig screenshotSweepConfig = loadScreenshotSweepConfig();
     CaptureOverridesConfig captureOverrides = loadCaptureOverridesConfig();
     ScreenshotReproState screenshotReproState{};
     ScreenshotSweepState screenshotSweepState{};
+    BenchmarkRuntimeState benchmarkState{};
+    if (benchmarkConfig.enabled && (screenshotReproConfig.enabled || screenshotSweepConfig.enabled))
+    {
+        std::cerr << "Benchmark mode cannot run together with screenshot automation." << std::endl;
+        renderer.shutdown();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
     if (screenshotReproConfig.enabled)
     {
         std::error_code ec;
@@ -1323,6 +1885,27 @@ int runGame()
     {
         environment.debug.directSunEnabled = captureOverrides.directSunEnabled;
     }
+    if (benchmarkConfig.enabled)
+    {
+        chunkManager.setNearRenderDistance(benchmarkConfig.nearChunks);
+        chunkManager.setFarRenderDistanceBlocks(benchmarkConfig.farBlocks);
+        chunkManager.setFogStartBlocks(benchmarkConfig.fogStartBlocks);
+        chunkManager.setFarTerrainEnabled(benchmarkConfig.farTerrainEnabled);
+        inputContext.lodEnabled = benchmarkConfig.farTerrainEnabled;
+
+        environment.atmosphereEnabled = false;
+        environment.debug.worldPassEnabled = true;
+        environment.debug.skyPassEnabled = false;
+        environment.debug.aerialPerspectiveEnabled = false;
+        environment.debug.fogFallbackEnabled = true;
+        environment.debug.shadowsEnabled = true;
+        environment.debug.directSunEnabled = true;
+        environment.debug.terrainDebugView = TerrainDebugView::None;
+        chunkManager.setBenchmarkMetricsEnabled(true);
+        std::cout << "Chunk benchmark enabled for scenario '"
+                  << benchmarkScenarioName(benchmarkConfig.scenario)
+                  << "'. Output: " << benchmarkConfig.outputPath << std::endl;
+    }
     
     // Find a guaranteed safe spawn position above ground
     std::cout << "Finding safe spawn position..." << std::endl;
@@ -1331,6 +1914,18 @@ int runGame()
     camera.onGround = false;
 
     std::cout << "Player spawned at: (" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")" << std::endl;
+    benchmarkState.spawnPosition = camera.position;
+    benchmarkState.finalCameraPosition = camera.position;
+    benchmarkState.finalYawDegrees = camera.yaw;
+    benchmarkState.finalPitchDegrees = camera.pitch;
+    if (benchmarkConfig.enabled &&
+        benchmarkConfig.scenario == BenchmarkScenarioKind::SpawnPreload)
+    {
+        chunkManager.resetBenchmarkMetrics();
+        benchmarkState.started = true;
+        benchmarkState.scenarioStartPosition = benchmarkState.spawnPosition;
+        benchmarkState.frameTimesMs.clear();
+    }
     chunkManager.beginSpawnPreload(camera.position);
 
     if (std::getenv("BLOCKGAME_STREAMING_TEST"))
@@ -1350,10 +1945,12 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
+    int exitCode = EXIT_SUCCESS;
     std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set near/far render distance, F2 to teleport, F3 to toggle far terrain, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
+        bool benchmarkRequestClose = false;
         const double currentTime = glfwGetTime();
         double frameTime = currentTime - previousTime;
         previousTime = currentTime;
@@ -1552,6 +2149,52 @@ int runGame()
             loadingOverlayText.clear();
         }
 
+        if (benchmarkConfig.enabled)
+        {
+            inputContext.showDebugOverlay = false;
+            inputContext.showControlsOverlay = false;
+            inputContext.showRenderDistanceGUI = false;
+            inputContext.showTeleportGUI = false;
+            inputContext.cameraMouseCaptured = true;
+
+            if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload &&
+                playerReleased &&
+                !benchmarkState.started)
+            {
+                chunkManager.resetBenchmarkMetrics();
+                benchmarkState.started = true;
+                benchmarkState.elapsedSeconds = 0.0;
+                benchmarkState.frameTimesMs.clear();
+                initializeBenchmarkCamera(camera, benchmarkConfig, benchmarkState);
+            }
+
+            if (benchmarkState.started && !benchmarkState.completed)
+            {
+                benchmarkState.elapsedSeconds += frameTime;
+                benchmarkState.frameTimesMs.push_back(frameTime * 1000.0);
+
+                if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload)
+                {
+                    applyBenchmarkCameraPose(camera, benchmarkConfig, benchmarkState);
+                    if (benchmarkState.elapsedSeconds >=
+                        benchmarkConfig.movementDurationSeconds + benchmarkConfig.cooldownDurationSeconds)
+                    {
+                        benchmarkState.completed = true;
+                        benchmarkRequestClose = true;
+                    }
+                }
+                else if (playerReleased)
+                {
+                    benchmarkState.completed = true;
+                    benchmarkRequestClose = true;
+                }
+
+                benchmarkState.finalCameraPosition = camera.position;
+                benchmarkState.finalYawDegrees = camera.yaw;
+                benchmarkState.finalPitchDegrees = camera.pitch;
+            }
+        }
+
         // Only allow ESC to quit while the game has mouse/camera capture.
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS &&
             isGameplayMouseCaptured(inputContext))
@@ -1562,7 +2205,7 @@ int runGame()
         auto* inputContextPtr = static_cast<InputContext*>(glfwGetWindowUserPointer(window));
         if (playerReleased)
         {
-            if (screenshotSweepConfig.enabled || screenshotReproConfig.enabled)
+            if (screenshotSweepConfig.enabled || screenshotReproConfig.enabled || benchmarkConfig.enabled)
             {
                 accumulator = 0.0;
             }
@@ -1592,7 +2235,8 @@ int runGame()
 
         if (playerReleased)
         {
-            const bool scriptedCaptureActive = screenshotSweepConfig.enabled || screenshotReproConfig.enabled;
+            const bool scriptedCaptureActive =
+                screenshotSweepConfig.enabled || screenshotReproConfig.enabled || benchmarkConfig.enabled;
             if (!scriptedCaptureActive)
             {
                 chunkManager.updateHighlight(camera.position, camera.front());
@@ -2383,7 +3027,7 @@ int runGame()
             ImGui::End();
         }
 
-        if (!playerReleased && !loadingOverlayText.empty())
+        if (!benchmarkConfig.enabled && !playerReleased && !loadingOverlayText.empty())
         {
             ImGui::SetNextWindowPos(ImVec2(framebufferWidth * 0.5f, framebufferHeight * 0.5f),
                                     ImGuiCond_Always,
@@ -2458,7 +3102,10 @@ int runGame()
             ImGui::End();
         }
 
-        if (!screenshotSweepConfig.enabled && !screenshotReproConfig.enabled && !profilingOverlayText.empty())
+        if (!benchmarkConfig.enabled &&
+            !screenshotSweepConfig.enabled &&
+            !screenshotReproConfig.enabled &&
+            !profilingOverlayText.empty())
         {
             ImGui::SetNextWindowPos(ImVec2(12.0f, inputContext.showDebugOverlay ? 220.0f : 12.0f), ImGuiCond_Always);
             ImGui::SetNextWindowBgAlpha(0.30f);
@@ -2480,7 +3127,8 @@ int runGame()
             renderer.requestScreenshot(screenshotSweepCapturePath);
         }
 
-        if (!screenshotSweepConfig.enabled &&
+        if (!benchmarkConfig.enabled &&
+            !screenshotSweepConfig.enabled &&
             !screenshotReproConfig.enabled &&
             playerReleased &&
             isGameplayMouseCaptured(inputContext))
@@ -2490,9 +3138,46 @@ int runGame()
 
         renderer.endFrame();
 
+        if (benchmarkRequestClose)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+
         if (screenshotReproConfig.enabled && screenshotReproState.captureRequested)
         {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+    }
+
+    if (benchmarkConfig.enabled)
+    {
+        if (!benchmarkState.completed)
+        {
+            std::cerr << "Benchmark scenario '" << benchmarkScenarioName(benchmarkConfig.scenario)
+                      << "' did not complete." << std::endl;
+            exitCode = EXIT_FAILURE;
+        }
+        else
+        {
+            const BenchmarkFrameSummary frameSummary = summarizeFrameTimes(benchmarkState.frameTimesMs);
+            const ChunkBenchmarkReport benchmarkReport = chunkManager.benchmarkReport();
+            const StreamingStatusSnapshot finalStreamingStatus = chunkManager.streamingStatusSnapshot();
+            const RenderDistanceSettings finalRenderSettings = chunkManager.renderDistanceSettings();
+            if (!writeBenchmarkScenarioJson(benchmarkConfig,
+                                            benchmarkState,
+                                            frameSummary,
+                                            benchmarkReport,
+                                            finalStreamingStatus,
+                                            finalRenderSettings))
+            {
+                std::cerr << "Failed to write benchmark scenario output to "
+                          << benchmarkConfig.outputPath << std::endl;
+                exitCode = EXIT_FAILURE;
+            }
+            else
+            {
+                std::cout << "Benchmark scenario written to " << benchmarkConfig.outputPath << std::endl;
+            }
         }
     }
 
@@ -2500,7 +3185,7 @@ int runGame()
     renderer.shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
-    return EXIT_SUCCESS;
+    return exitCode;
 }
 
 } // namespace

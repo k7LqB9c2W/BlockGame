@@ -1,0 +1,28 @@
+package com.ishland.c2me.notickvd.mixin;
+
+import com.ishland.c2me.base.common.theinterface.IFastChunkHolder;
+import net.minecraft.server.world.ChunkHolder;
+import net.minecraft.server.world.OptionalChunk;
+import net.minecraft.world.chunk.WorldChunk;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
+
+import java.util.concurrent.CompletableFuture;
+
+@Mixin(ChunkHolder.class)
+public abstract class MixinChunkHolder {
+
+    @Shadow public abstract CompletableFuture<OptionalChunk<WorldChunk>> getAccessibleFuture();
+
+    @Redirect(method = {"markForBlockUpdate", "markForLightUpdate", "getPostProcessedChunk"}, at = @At(value = "INVOKE", target = "Lnet/minecraft/server/world/ChunkHolder;getWorldChunk()Lnet/minecraft/world/chunk/WorldChunk;"), require = 3)
+    private WorldChunk redirectWorldChunk(ChunkHolder chunkHolder) {
+        if (this instanceof IFastChunkHolder fastChunkHolder) {
+            return fastChunkHolder.c2me$immediateWorldChunk();
+        } else {
+            return this.getAccessibleFuture().getNow(ChunkHolder.UNLOADED_WORLD_CHUNK).orElse(null);
+        }
+    }
+
+}

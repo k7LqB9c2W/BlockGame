@@ -41,6 +41,15 @@
 - Single-view repro captures: run `powershell -ExecutionPolicy Bypass -File tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -Yaw <yaw> -Pitch <pitch>` to teleport to an exact camera pose, capture one screenshot, and delete old repro screenshots in `artifacts/repro_capture`.
 - Single-view repro also supports a look target instead of yaw/pitch: `tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -LookX <x> -LookY <y> -LookZ <z>`.
 - The in-game debug overlay now includes `Yaw/Pitch`, `Front`, and `Hit Block` so a screenshot contains enough information to recreate the exact view later.
+- Chunk benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release` to execute `spawn_preload`, `straight_line_sprint`, `turn_heavy_traversal`, and `vertical_travel` in sequence. Add `-SkipBuild` if `build\Release\blockgame.exe` is already current.
+- Chunk benchmark artifacts land in `artifacts\chunk_benchmark\<timestamp>\`. Read `benchmark_summary.json` first for Codex or scripts, and `benchmark_summary.txt` for a quick human summary.
+- Benchmark interpretation:
+  `throughput.generated_chunks_per_sec` / `throughput.uploaded_chunks_per_sec` show chunk streaming throughput.
+  `stages.sample|generate|relight|mesh|upload|far_build.avg_ms` are per-work-item averages.
+  `stages.chunk_ready_latency.median_ms` and `p95_ms` measure request-to-first-ready latency for chunks.
+  `queues.*` are backlog depths sampled once per streaming update.
+  `cache.climate.hit_rate` and `cache.surface.hit_rate` are cache efficiency for the terrain fragment caches.
+  Percentiles are low-overhead histogram estimates, so values are best read as approximate bands rather than exact microsecond-precise timings.
 
 ## Visual Default Policy
 - The canonical BlockGame lighting target is the plain `Base Game` look, not the enhanced atmosphere mode.

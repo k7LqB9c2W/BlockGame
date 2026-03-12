@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "c2me-fixes-chunkio-threading-issues",
+  "version": "${version}",
+  "name": "Concurrent Chunk Management Engine (Fixes/Chunk IO/Threading Issues)",
+  "description": "Fixes threading issues related to chunk IO",
+  "environment": "*",
+  "mixins": [
+    "c2me-fixes-chunkio-threading-issues.mixins.json"
+  ],
+  "depends": {
+    "minecraft": "*",
+    "fabricloader": "*",
+    "c2me-base": "*"
+  },
+
+  "authors": [
+    "RelativityMC",
+    "ishland"
+  ],
+  "contact": {
+    "sources": "https://github.com/RelativityMC/C2ME-fabric",
+    "issues": "https://github.com/RelativityMC/C2ME-fabric/issues",
+    "discord": "https://discord.gg/Kdy8NM5HW4",
+    "homepage": "https://modrinth.com/mod/c2me-fabric"
+  },
+  "license": "All-Rights-Reserved",
+  "custom": {
+    "modmenu": {
+      "parent": "c2me"
+    }
+  }
+}

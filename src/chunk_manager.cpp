@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -45,6 +46,294 @@
 namespace
 {
 std::atomic<int> gActiveVerticalRadius{kVerticalStreamingConfig.minRadiusChunks};
+
+using SteadyClock = std::chrono::steady_clock;
+
+[[nodiscard]] std::uint64_t steadyMicrosNow() noexcept
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            SteadyClock::now().time_since_epoch()).count());
+}
+
+[[nodiscard]] std::uint64_t percentileRankCount(std::uint64_t count, double percentile) noexcept
+{
+    if (count == 0)
+    {
+        return 0;
+    }
+
+    const double scaled = std::ceil(static_cast<double>(count) * percentile);
+    return static_cast<std::uint64_t>(std::clamp(scaled, 1.0, static_cast<double>(count)));
+}
+
+inline void updateAtomicMax(std::atomic<std::uint64_t>& current, std::uint64_t value) noexcept
+{
+    std::uint64_t observed = current.load(std::memory_order_relaxed);
+    while (observed < value &&
+           !current.compare_exchange_weak(observed,
+                                          value,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed))
+    {
+    }
+}
+
+class AtomicLatencyHistogram
+{
+public:
+    static constexpr std::size_t kBucketCount = 64;
+
+    void reset() noexcept
+    {
+        count_.store(0, std::memory_order_relaxed);
+        totalMicros_.store(0, std::memory_order_relaxed);
+        maxMicros_.store(0, std::memory_order_relaxed);
+        for (auto& bucket : buckets_)
+        {
+            bucket.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    void recordMicros(std::uint64_t micros) noexcept
+    {
+        count_.fetch_add(1, std::memory_order_relaxed);
+        totalMicros_.fetch_add(micros, std::memory_order_relaxed);
+        updateAtomicMax(maxMicros_, micros);
+        buckets_[bucketIndexForMicros(micros)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] BenchmarkStageStats snapshot() const noexcept
+    {
+        BenchmarkStageStats stats{};
+        stats.count = count_.load(std::memory_order_relaxed);
+        const std::uint64_t totalMicros = totalMicros_.load(std::memory_order_relaxed);
+        const std::uint64_t maxMicros = maxMicros_.load(std::memory_order_relaxed);
+        stats.totalMs = static_cast<double>(totalMicros) / 1000.0;
+        if (stats.count > 0)
+        {
+            stats.averageMs = stats.totalMs / static_cast<double>(stats.count);
+            stats.medianMs = microsToMs(percentileMicros(0.50, maxMicros));
+            stats.p95Ms = microsToMs(percentileMicros(0.95, maxMicros));
+            stats.p99Ms = microsToMs(percentileMicros(0.99, maxMicros));
+            stats.maxMs = microsToMs(maxMicros);
+        }
+        return stats;
+    }
+
+private:
+    [[nodiscard]] static std::size_t bucketIndexForMicros(std::uint64_t micros) noexcept
+    {
+        if (micros == 0)
+        {
+            return 0;
+        }
+
+        const unsigned width = std::bit_width(micros);
+        return static_cast<std::size_t>(std::min<unsigned>(width, static_cast<unsigned>(kBucketCount - 1)));
+    }
+
+    [[nodiscard]] static std::uint64_t bucketUpperBoundMicros(std::size_t bucketIndex,
+                                                              std::uint64_t maxMicros) noexcept
+    {
+        if (bucketIndex == 0)
+        {
+            return 0;
+        }
+        if (bucketIndex + 1 >= kBucketCount)
+        {
+            return maxMicros;
+        }
+
+        return (std::uint64_t{1} << bucketIndex) - 1u;
+    }
+
+    [[nodiscard]] std::uint64_t percentileMicros(double percentile, std::uint64_t maxMicros) const noexcept
+    {
+        const std::uint64_t count = count_.load(std::memory_order_relaxed);
+        const std::uint64_t target = percentileRankCount(count, percentile);
+        if (target == 0)
+        {
+            return 0;
+        }
+
+        std::uint64_t running = 0;
+        for (std::size_t bucketIndex = 0; bucketIndex < buckets_.size(); ++bucketIndex)
+        {
+            running += buckets_[bucketIndex].load(std::memory_order_relaxed);
+            if (running >= target)
+            {
+                return bucketUpperBoundMicros(bucketIndex, maxMicros);
+            }
+        }
+
+        return maxMicros;
+    }
+
+    [[nodiscard]] static double microsToMs(std::uint64_t micros) noexcept
+    {
+        return static_cast<double>(micros) / 1000.0;
+    }
+
+    std::atomic<std::uint64_t> count_{0};
+    std::atomic<std::uint64_t> totalMicros_{0};
+    std::atomic<std::uint64_t> maxMicros_{0};
+    std::array<std::atomic<std::uint64_t>, kBucketCount> buckets_{};
+};
+
+template <std::size_t MaxBucketInclusive>
+class AtomicDepthHistogram
+{
+public:
+    static constexpr std::size_t kBucketCount = MaxBucketInclusive + 1;
+
+    void reset() noexcept
+    {
+        count_.store(0, std::memory_order_relaxed);
+        total_.store(0, std::memory_order_relaxed);
+        max_.store(0, std::memory_order_relaxed);
+        for (auto& bucket : buckets_)
+        {
+            bucket.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    void record(std::uint64_t value) noexcept
+    {
+        count_.fetch_add(1, std::memory_order_relaxed);
+        total_.fetch_add(value, std::memory_order_relaxed);
+        updateAtomicMax(max_, value);
+        buckets_[bucketIndex(value)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] BenchmarkQueueDepthStats snapshot() const noexcept
+    {
+        BenchmarkQueueDepthStats stats{};
+        stats.sampleCount = count_.load(std::memory_order_relaxed);
+        const std::uint64_t total = total_.load(std::memory_order_relaxed);
+        const std::uint64_t maxValue = max_.load(std::memory_order_relaxed);
+        if (stats.sampleCount > 0)
+        {
+            stats.averageDepth = static_cast<double>(total) / static_cast<double>(stats.sampleCount);
+            stats.medianDepth = static_cast<double>(percentileValue(0.50, maxValue));
+            stats.p95Depth = static_cast<double>(percentileValue(0.95, maxValue));
+            stats.maxDepth = static_cast<double>(maxValue);
+        }
+        return stats;
+    }
+
+private:
+    [[nodiscard]] static std::size_t bucketIndex(std::uint64_t value) noexcept
+    {
+        return static_cast<std::size_t>(std::min<std::uint64_t>(value, MaxBucketInclusive));
+    }
+
+    [[nodiscard]] std::uint64_t percentileValue(double percentile, std::uint64_t maxValue) const noexcept
+    {
+        const std::uint64_t count = count_.load(std::memory_order_relaxed);
+        const std::uint64_t target = percentileRankCount(count, percentile);
+        if (target == 0)
+        {
+            return 0;
+        }
+
+        std::uint64_t running = 0;
+        for (std::size_t bucketIndex = 0; bucketIndex < buckets_.size(); ++bucketIndex)
+        {
+            running += buckets_[bucketIndex].load(std::memory_order_relaxed);
+            if (running >= target)
+            {
+                if (bucketIndex + 1 >= buckets_.size())
+                {
+                    return maxValue;
+                }
+                return static_cast<std::uint64_t>(bucketIndex);
+            }
+        }
+
+        return maxValue;
+    }
+
+    std::atomic<std::uint64_t> count_{0};
+    std::atomic<std::uint64_t> total_{0};
+    std::atomic<std::uint64_t> max_{0};
+    std::array<std::atomic<std::uint64_t>, kBucketCount> buckets_{};
+};
+
+struct ChunkBenchmarkMetrics
+{
+    void setEnabled(bool enabled) noexcept
+    {
+        enabled_.store(enabled, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isEnabled() const noexcept
+    {
+        return enabled_.load(std::memory_order_acquire);
+    }
+
+    void reset() noexcept
+    {
+        sampleStage.reset();
+        generateStage.reset();
+        relightStage.reset();
+        meshStage.reset();
+        uploadStage.reset();
+        farBuildStage.reset();
+        chunkReadyLatency.reset();
+        jobQueueDepth.reset();
+        uploadQueueDepth.reset();
+        farBuildQueueDepth.reset();
+        farUploadQueueDepth.reset();
+        generatedChunks.store(0, std::memory_order_relaxed);
+        meshedChunks.store(0, std::memory_order_relaxed);
+        uploadedChunks.store(0, std::memory_order_relaxed);
+        farBuiltTiles.store(0, std::memory_order_relaxed);
+        uploadedBytes.store(0, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] ChunkBenchmarkReport snapshot() const noexcept
+    {
+        ChunkBenchmarkReport report{};
+        report.sampleStage = sampleStage.snapshot();
+        report.generateStage = generateStage.snapshot();
+        report.relightStage = relightStage.snapshot();
+        report.meshStage = meshStage.snapshot();
+        report.uploadStage = uploadStage.snapshot();
+        report.farBuildStage = farBuildStage.snapshot();
+        report.chunkReadyLatency = chunkReadyLatency.snapshot();
+        report.jobQueueDepth = jobQueueDepth.snapshot();
+        report.uploadQueueDepth = uploadQueueDepth.snapshot();
+        report.farBuildQueueDepth = farBuildQueueDepth.snapshot();
+        report.farUploadQueueDepth = farUploadQueueDepth.snapshot();
+        report.generatedChunks = generatedChunks.load(std::memory_order_relaxed);
+        report.meshedChunks = meshedChunks.load(std::memory_order_relaxed);
+        report.uploadedChunks = uploadedChunks.load(std::memory_order_relaxed);
+        report.farBuiltTiles = farBuiltTiles.load(std::memory_order_relaxed);
+        report.uploadedBytes = uploadedBytes.load(std::memory_order_relaxed);
+        return report;
+    }
+
+    AtomicLatencyHistogram sampleStage{};
+    AtomicLatencyHistogram generateStage{};
+    AtomicLatencyHistogram relightStage{};
+    AtomicLatencyHistogram meshStage{};
+    AtomicLatencyHistogram uploadStage{};
+    AtomicLatencyHistogram farBuildStage{};
+    AtomicLatencyHistogram chunkReadyLatency{};
+    AtomicDepthHistogram<4096> jobQueueDepth{};
+    AtomicDepthHistogram<4096> uploadQueueDepth{};
+    AtomicDepthHistogram<1024> farBuildQueueDepth{};
+    AtomicDepthHistogram<1024> farUploadQueueDepth{};
+    std::atomic<std::uint64_t> generatedChunks{0};
+    std::atomic<std::uint64_t> meshedChunks{0};
+    std::atomic<std::uint64_t> uploadedChunks{0};
+    std::atomic<std::uint64_t> farBuiltTiles{0};
+    std::atomic<std::uint64_t> uploadedBytes{0};
+
+private:
+    std::atomic<bool> enabled_{false};
+};
 }
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept
@@ -1168,6 +1457,8 @@ struct Chunk
         vertexOffset.store(0, std::memory_order_relaxed);
         indexOffset.store(0, std::memory_order_relaxed);
         inFlight.store(0, std::memory_order_relaxed);
+        requestTimestampMicros.store(0, std::memory_order_relaxed);
+        initialReadyRecorded.store(false, std::memory_order_relaxed);
         surfaceOnly = false;
         lodData.reset();
         lightBoundaryDirtyMask = 0;
@@ -1194,6 +1485,8 @@ struct Chunk
     std::atomic<bool> meshReady{false};
     std::atomic<bool> hasBlocks{false};
     std::atomic<int> inFlight{0};
+    std::atomic<long long> requestTimestampMicros{0};
+    std::atomic<bool> initialReadyRecorded{false};
     bool surfaceOnly{false};
     std::unique_ptr<FarChunk> lodData;
     std::uint8_t lightBoundaryDirtyMask{0};
@@ -1203,9 +1496,11 @@ struct Chunk
 struct ProfilingCounters
 {
     std::atomic<long long> generationMicros{0};
+    std::atomic<long long> relightMicros{0};
     std::atomic<long long> meshingMicros{0};
     std::atomic<std::size_t> uploadedBytes{0};
     std::atomic<int> generatedChunks{0};
+    std::atomic<int> relitChunks{0};
     std::atomic<int> meshedChunks{0};
     std::atomic<int> uploadedChunks{0};
     std::atomic<int> throttledUploads{0};
@@ -1261,6 +1556,7 @@ public:
     Job waitAndPop();
     void stop();
     bool empty() const;
+    std::size_t size() const;
     void updatePriorityOrigin(const glm::ivec3& origin);
 
 private:
@@ -1418,6 +1714,11 @@ public:
     void setRenderSynchronization(ID3D12Fence* graphicsFence, UINT64 graphicsFenceValue)
     {
         uploadContext_.setGraphicsFenceDependency(graphicsFence, graphicsFenceValue);
+    }
+
+    void setBenchmarkMetrics(ChunkBenchmarkMetrics* metrics) noexcept
+    {
+        benchmarkMetrics_ = metrics;
     }
 
     void update(const glm::ivec3& cameraChunk,
@@ -2153,6 +2454,12 @@ public:
         return static_cast<int>(completedBuilds_.size());
     }
 
+    [[nodiscard]] int buildQueueDepth() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(buildQueueMutex_);
+        return static_cast<int>(buildQueue_.size());
+    }
+
     [[nodiscard]] double averageBuildMs() const noexcept
     {
         return lastAverageBuildMs_;
@@ -2231,6 +2538,12 @@ private:
             BuildResult result = buildTileMesh(job.key, job.level, sampleFn, uvLookup);
             result.buildVersion = job.buildVersion;
             result.epoch = job.epoch;
+
+            if (benchmarkMetrics_ != nullptr && benchmarkMetrics_->isEnabled())
+            {
+                const std::uint64_t buildMicros = static_cast<std::uint64_t>(std::max(result.buildMs, 0.0) * 1000.0);
+                benchmarkMetrics_->farBuildStage.recordMicros(buildMicros);
+            }
 
             if (job.epoch != buildEpoch_.load(std::memory_order_acquire))
             {
@@ -2399,6 +2712,10 @@ private:
             uploadBuiltTile(tile, result.mesh);
             tile.dirty = false;
             ++builtTilesLastUpdate_;
+            if (benchmarkMetrics_ != nullptr && benchmarkMetrics_->isEnabled())
+            {
+                benchmarkMetrics_->farBuiltTiles.fetch_add(1, std::memory_order_relaxed);
+            }
             if (builtTilesLastUpdate_ == 1)
             {
                 lastAverageBuildMs_ = result.buildMs;
@@ -2691,7 +3008,7 @@ private:
     std::mutex configMutex_;
     SampleFn sampleFn_{};
     UvLookupFn uvLookupFn_{};
-    std::mutex buildQueueMutex_;
+    mutable std::mutex buildQueueMutex_;
     std::condition_variable buildQueueCv_;
     std::deque<BuildJob> buildQueue_;
     std::unordered_set<FarTileKey, FarTileKeyHasher> queuedKeys_;
@@ -2701,6 +3018,7 @@ private:
     std::atomic<bool> stopWorkers_{false};
     std::atomic<std::uint64_t> buildEpoch_{1};
     std::size_t workerCount_{1};
+    ChunkBenchmarkMetrics* benchmarkMetrics_{nullptr};
 };
 
 
@@ -2756,6 +3074,10 @@ struct ChunkManager::Impl
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
     ChunkProfilingSnapshot sampleProfilingSnapshot();
+    void setBenchmarkMetricsEnabled(bool enabled) noexcept;
+    bool benchmarkMetricsEnabled() const noexcept;
+    void resetBenchmarkMetrics();
+    ChunkBenchmarkReport benchmarkReport() const;
     std::string biomeNameAt(const glm::vec3& worldPos) const;
 
 private:
@@ -2934,6 +3256,7 @@ private:
     void relightAroundChunk(const glm::ivec3& centerCoord);
     void queueChunkForLightingRemesh(const std::shared_ptr<Chunk>& chunk);
     std::uint8_t packedLightAtWorld(const glm::ivec3& worldPos) const noexcept;
+    void noteChunkReadyLatency(Chunk& chunk);
     void generateChunkBlocks(Chunk& chunk);
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
@@ -3018,6 +3341,7 @@ private:
     std::vector<std::shared_ptr<Chunk>> chunkPool_;
     std::mutex chunkPoolMutex_;
     ProfilingCounters profilingCounters_{};
+    mutable ChunkBenchmarkMetrics benchmarkMetrics_{};
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
@@ -3107,6 +3431,12 @@ bool JobQueue::empty() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return priorityQueue_.empty();
+}
+
+std::size_t JobQueue::size() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return priorityQueue_.size();
 }
 
 void JobQueue::updatePriorityOrigin(const glm::ivec3& origin)
@@ -3353,6 +3683,7 @@ ChunkManager::Impl::Impl(unsigned seed)
     farTerrainManager_.setEnabled(renderSettings_.farTerrainEnabled);
     farTerrainManager_.setDistanceBlocks(renderSettings_.farBlocks);
     farTerrainManager_.setFogStartBlocks(renderSettings_.fogStartBlocks);
+    farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
     unsigned concurrency = std::thread::hardware_concurrency();
     if (concurrency >= 12)
     {
@@ -3828,6 +4159,16 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             startupState_.farCurrentBlocks = 0;
             break;
         }
+    }
+
+    if (benchmarkMetrics_.isEnabled())
+    {
+        benchmarkMetrics_.jobQueueDepth.record(jobQueue_.size());
+        benchmarkMetrics_.uploadQueueDepth.record(estimateUploadQueueSize());
+        benchmarkMetrics_.farBuildQueueDepth.record(
+            static_cast<std::uint64_t>(std::max(farTerrainManager_.buildQueueDepth(), 0)));
+        benchmarkMetrics_.farUploadQueueDepth.record(
+            static_cast<std::uint64_t>(std::max(farTerrainManager_.pendingUploadTileCount(), 0)));
     }
 
     updateMsLastFrame_ =
@@ -4809,6 +5150,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.phase = status.phase;
 
     const int generated = profilingCounters_.generatedChunks.exchange(0, std::memory_order_relaxed);
+    const int relit = profilingCounters_.relitChunks.exchange(0, std::memory_order_relaxed);
     const int meshed = profilingCounters_.meshedChunks.exchange(0, std::memory_order_relaxed);
     const int uploaded = profilingCounters_.uploadedChunks.exchange(0, std::memory_order_relaxed);
 
@@ -4831,6 +5173,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.workerThreads = static_cast<int>(workerThreadCount_);
 
     const long long genMicros = profilingCounters_.generationMicros.exchange(0, std::memory_order_relaxed);
+    const long long relightMicros = profilingCounters_.relightMicros.exchange(0, std::memory_order_relaxed);
     const long long meshMicros = profilingCounters_.meshingMicros.exchange(0, std::memory_order_relaxed);
 
     if (generated > 0)
@@ -4842,6 +5185,11 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     {
         snapshot.averageMeshingMs = static_cast<double>(meshMicros) /
                                     (1000.0 * static_cast<double>(meshed));
+    }
+    if (relit > 0)
+    {
+        snapshot.averageRelightMs = static_cast<double>(relightMicros) /
+                                    (1000.0 * static_cast<double>(relit));
     }
 
     snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
@@ -4864,6 +5212,70 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.exactChunksPending = std::max(status.exactRequiredChunks - status.exactReadyChunks, 0);
 
     return snapshot;
+}
+
+void ChunkManager::Impl::setBenchmarkMetricsEnabled(bool enabled) noexcept
+{
+    benchmarkMetrics_.setEnabled(enabled);
+    if (climateMap_)
+    {
+        climateMap_->setProfilingEnabled(enabled);
+    }
+    if (surfaceMap_)
+    {
+        surfaceMap_->setProfilingEnabled(enabled);
+    }
+}
+
+bool ChunkManager::Impl::benchmarkMetricsEnabled() const noexcept
+{
+    return benchmarkMetrics_.isEnabled();
+}
+
+void ChunkManager::Impl::resetBenchmarkMetrics()
+{
+    benchmarkMetrics_.reset();
+    if (climateMap_)
+    {
+        climateMap_->resetProfiling();
+    }
+    if (surfaceMap_)
+    {
+        surfaceMap_->resetProfiling();
+    }
+}
+
+ChunkBenchmarkReport ChunkManager::Impl::benchmarkReport() const
+{
+    ChunkBenchmarkReport report = benchmarkMetrics_.snapshot();
+
+    if (climateMap_)
+    {
+        const terrain::ClimateMap::CacheProfilingSnapshot climate = climateMap_->profilingSnapshot();
+        report.climateCache.hits = climate.hits;
+        report.climateCache.misses = climate.misses;
+        report.climateCache.fills = climate.fills;
+        const std::uint64_t total = climate.hits + climate.misses;
+        if (total > 0)
+        {
+            report.climateCache.hitRate = static_cast<double>(climate.hits) / static_cast<double>(total);
+        }
+    }
+
+    if (surfaceMap_)
+    {
+        const terrain::SurfaceMap::CacheProfilingSnapshot surface = surfaceMap_->profilingSnapshot();
+        report.surfaceCache.hits = surface.hits;
+        report.surfaceCache.misses = surface.misses;
+        report.surfaceCache.fills = surface.fills;
+        const std::uint64_t total = surface.hits + surface.misses;
+        if (total > 0)
+        {
+            report.surfaceCache.hitRate = static_cast<double>(surface.hits) / static_cast<double>(total);
+        }
+    }
+
+    return report;
 }
 
 std::string ChunkManager::Impl::biomeNameAt(const glm::vec3& worldPos) const
@@ -4995,13 +5407,20 @@ void ChunkManager::Impl::processJob(const Job& job)
 
     if (job.type == JobType::Generate)
     {
-        const auto start = std::chrono::steady_clock::now();
+        const auto generateStart = SteadyClock::now();
         generateChunkBlocks(*chunk);
-        relightAroundChunk(job.chunkCoord);
-        const auto end = std::chrono::steady_clock::now();
-        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        profilingCounters_.generationMicros.fetch_add(micros, std::memory_order_relaxed);
+        const auto generateEnd = SteadyClock::now();
+        const auto generateMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(generateEnd - generateStart).count();
+        profilingCounters_.generationMicros.fetch_add(generateMicros, std::memory_order_relaxed);
         profilingCounters_.generatedChunks.fetch_add(1, std::memory_order_relaxed);
+        if (benchmarkMetrics_.isEnabled())
+        {
+            benchmarkMetrics_.generateStage.recordMicros(static_cast<std::uint64_t>(generateMicros));
+            benchmarkMetrics_.generatedChunks.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        relightAroundChunk(job.chunkCoord);
 
         if (chunk->hasBlocks.load(std::memory_order_acquire))
         {
@@ -5020,6 +5439,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
             chunk->meshReady.store(false, std::memory_order_release);
             chunk->indexCount.store(0, std::memory_order_release);
+            noteChunkReadyLatency(*chunk);
             if (shouldTrackRecentEditChunk(chunk->coord))
             {
                 std::ostringstream stream;
@@ -5030,18 +5450,25 @@ void ChunkManager::Impl::processJob(const Job& job)
     }
     else if (job.type == JobType::Mesh)
     {
-        const auto start = std::chrono::steady_clock::now();
+        const auto meshStart = SteadyClock::now();
         chunk->pendingMeshRefresh.store(false, std::memory_order_release);
         buildChunkMeshAsync(*chunk);
-        const auto end = std::chrono::steady_clock::now();
-        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        profilingCounters_.meshingMicros.fetch_add(micros, std::memory_order_relaxed);
+        const auto meshEnd = SteadyClock::now();
+        const auto meshMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(meshEnd - meshStart).count();
+        profilingCounters_.meshingMicros.fetch_add(meshMicros, std::memory_order_relaxed);
         profilingCounters_.meshedChunks.fetch_add(1, std::memory_order_relaxed);
+        if (benchmarkMetrics_.isEnabled())
+        {
+            benchmarkMetrics_.meshStage.recordMicros(static_cast<std::uint64_t>(meshMicros));
+            benchmarkMetrics_.meshedChunks.fetch_add(1, std::memory_order_relaxed);
+        }
 
         const bool meshEmpty = chunk->meshData.empty();
         if (meshEmpty)
         {
             chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
+            noteChunkReadyLatency(*chunk);
         }
         else
         {
@@ -6262,6 +6689,8 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool surfaceO
             chunk = acquireChunk(coord);
             chunk->state.store(ChunkState::Generating, std::memory_order_release);
             chunk->surfaceOnly = false;
+            chunk->requestTimestampMicros.store(static_cast<long long>(steadyMicrosNow()), std::memory_order_release);
+            chunk->initialReadyRecorded.store(false, std::memory_order_release);
             chunk->lodData.reset();
             chunks_.emplace(coord, chunk);
         }
@@ -6331,14 +6760,25 @@ void ChunkManager::Impl::uploadReadyMeshes()
             break;
         }
 
+        const auto uploadChunkStart = benchmarkMetrics_.isEnabled() ? SteadyClock::now() : SteadyClock::time_point{};
         uploadChunkMesh(*chunk);
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
         chunk->meshReady.store(false, std::memory_order_release);
         uploadedAnything = true;
         ++columnUploads;
+        noteChunkReadyLatency(*chunk);
 
         profilingCounters_.uploadedChunks.fetch_add(1, std::memory_order_relaxed);
         profilingCounters_.uploadedBytes.fetch_add(totalBytes, std::memory_order_relaxed);
+        if (benchmarkMetrics_.isEnabled())
+        {
+            const auto uploadChunkEnd = SteadyClock::now();
+            const auto uploadMicros =
+                std::chrono::duration_cast<std::chrono::microseconds>(uploadChunkEnd - uploadChunkStart).count();
+            benchmarkMetrics_.uploadStage.recordMicros(static_cast<std::uint64_t>(uploadMicros));
+            benchmarkMetrics_.uploadedChunks.fetch_add(1, std::memory_order_relaxed);
+            benchmarkMetrics_.uploadedBytes.fetch_add(totalBytes, std::memory_order_relaxed);
+        }
 
         if (totalBytes >= remainingBudget)
         {
@@ -7283,6 +7723,8 @@ std::uint8_t ChunkManager::Impl::packedLightAtWorld(const glm::ivec3& worldPos) 
 
 void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point relightStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     std::vector<std::shared_ptr<Chunk>> regionChunks;
     regionChunks.reserve(27);
     for (int dx = -1; dx <= 1; ++dx)
@@ -7302,6 +7744,11 @@ void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
 
     if (regionChunks.empty())
     {
+        profilingCounters_.relitChunks.fetch_add(1, std::memory_order_relaxed);
+        if (benchmarkEnabled)
+        {
+            benchmarkMetrics_.relightStage.recordMicros(0);
+        }
         return;
     }
 
@@ -7691,6 +8138,45 @@ void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
     {
         queueChunkForLightingRemesh(chunk);
     }
+
+    const auto relightEnd = SteadyClock::now();
+    const auto relightMicros =
+        std::chrono::duration_cast<std::chrono::microseconds>(relightEnd - relightStart).count();
+    profilingCounters_.relightMicros.fetch_add(relightMicros, std::memory_order_relaxed);
+    profilingCounters_.relitChunks.fetch_add(1, std::memory_order_relaxed);
+    if (benchmarkEnabled)
+    {
+        benchmarkMetrics_.relightStage.recordMicros(static_cast<std::uint64_t>(relightMicros));
+    }
+}
+
+void ChunkManager::Impl::noteChunkReadyLatency(Chunk& chunk)
+{
+    if (!benchmarkMetrics_.isEnabled())
+    {
+        return;
+    }
+
+    if (chunk.initialReadyRecorded.exchange(true, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    const long long requestedMicros = chunk.requestTimestampMicros.load(std::memory_order_acquire);
+    if (requestedMicros <= 0)
+    {
+        return;
+    }
+
+    const std::uint64_t readyMicros = steadyMicrosNow();
+    if (readyMicros <= static_cast<std::uint64_t>(requestedMicros))
+    {
+        benchmarkMetrics_.chunkReadyLatency.recordMicros(0);
+        return;
+    }
+
+    benchmarkMetrics_.chunkReadyLatency.recordMicros(
+        readyMicros - static_cast<std::uint64_t>(requestedMicros));
 }
 
 
@@ -7701,6 +8187,8 @@ void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
 
 ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMinWorldY, int slabMaxWorldY) const
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point sampleStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     const bool usesDefaultSlabBounds =
         slabMinWorldY == std::numeric_limits<int>::min() && slabMaxWorldY == std::numeric_limits<int>::max();
     if (slabMinWorldY > slabMaxWorldY)
@@ -7772,6 +8260,14 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
             sample.distanceToShore = 0.0f;
             sample.distanceToCoast = 0.0f;
         }
+    }
+
+    if (benchmarkEnabled)
+    {
+        const auto sampleEnd = SteadyClock::now();
+        const auto sampleMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(sampleEnd - sampleStart).count();
+        benchmarkMetrics_.sampleStage.recordMicros(static_cast<std::uint64_t>(sampleMicros));
     }
 
     return sample;
@@ -8581,6 +9077,26 @@ RecentEditHoleDebugSnapshot ChunkManager::recentEditHoleDebugSnapshot(const glm:
 ChunkProfilingSnapshot ChunkManager::sampleProfilingSnapshot()
 {
     return impl_->sampleProfilingSnapshot();
+}
+
+void ChunkManager::setBenchmarkMetricsEnabled(bool enabled) noexcept
+{
+    impl_->setBenchmarkMetricsEnabled(enabled);
+}
+
+bool ChunkManager::benchmarkMetricsEnabled() const noexcept
+{
+    return impl_->benchmarkMetricsEnabled();
+}
+
+void ChunkManager::resetBenchmarkMetrics()
+{
+    impl_->resetBenchmarkMetrics();
+}
+
+ChunkBenchmarkReport ChunkManager::benchmarkReport() const
+{
+    return impl_->benchmarkReport();
 }
 
 std::string ChunkManager::biomeNameAt(const glm::vec3& worldPos) const

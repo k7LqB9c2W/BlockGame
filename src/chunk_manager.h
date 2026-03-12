@@ -190,6 +190,7 @@ struct ChunkProfilingSnapshot
 {
     StreamingPhase phase{StreamingPhase::SteadyState};
     double averageGenerationMs{0.0};
+    double averageRelightMs{0.0};
     double averageMeshingMs{0.0};
     double updateMsLastFrame{0.0};
     double uploadMsLastFrame{0.0};
@@ -223,6 +224,56 @@ struct ChunkProfilingSnapshot
     int farTilesBuilt{0};
     int farTilesQueued{0};
     int farTilesPendingUpload{0};
+};
+
+struct BenchmarkStageStats
+{
+    std::uint64_t count{0};
+    double totalMs{0.0};
+    double averageMs{0.0};
+    double medianMs{0.0};
+    double p95Ms{0.0};
+    double p99Ms{0.0};
+    double maxMs{0.0};
+};
+
+struct BenchmarkQueueDepthStats
+{
+    std::uint64_t sampleCount{0};
+    double averageDepth{0.0};
+    double medianDepth{0.0};
+    double p95Depth{0.0};
+    double maxDepth{0.0};
+};
+
+struct BenchmarkCacheStats
+{
+    std::uint64_t hits{0};
+    std::uint64_t misses{0};
+    std::uint64_t fills{0};
+    double hitRate{0.0};
+};
+
+struct ChunkBenchmarkReport
+{
+    BenchmarkStageStats sampleStage{};
+    BenchmarkStageStats generateStage{};
+    BenchmarkStageStats relightStage{};
+    BenchmarkStageStats meshStage{};
+    BenchmarkStageStats uploadStage{};
+    BenchmarkStageStats farBuildStage{};
+    BenchmarkStageStats chunkReadyLatency{};
+    BenchmarkQueueDepthStats jobQueueDepth{};
+    BenchmarkQueueDepthStats uploadQueueDepth{};
+    BenchmarkQueueDepthStats farBuildQueueDepth{};
+    BenchmarkQueueDepthStats farUploadQueueDepth{};
+    BenchmarkCacheStats climateCache{};
+    BenchmarkCacheStats surfaceCache{};
+    std::uint64_t generatedChunks{0};
+    std::uint64_t meshedChunks{0};
+    std::uint64_t uploadedChunks{0};
+    std::uint64_t farBuiltTiles{0};
+    std::uint64_t uploadedBytes{0};
 };
 
 struct StreamingStatusSnapshot
@@ -335,6 +386,10 @@ public:
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
 
     ChunkProfilingSnapshot sampleProfilingSnapshot();
+    void setBenchmarkMetricsEnabled(bool enabled) noexcept;
+    bool benchmarkMetricsEnabled() const noexcept;
+    void resetBenchmarkMetrics();
+    ChunkBenchmarkReport benchmarkReport() const;
     std::string biomeNameAt(const glm::vec3& worldPos) const;
 
 private:

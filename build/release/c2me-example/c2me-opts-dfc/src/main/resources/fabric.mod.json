@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "c2me-opts-dfc",
+  "version": "${version}",
+  "name": "Concurrent Chunk Management Engine (Optimizations/Density Function Compiler)",
+  "description": "Optimizations for density functions used in world generation",
+  "environment": "*",
+  "mixins": [
+    "c2me-opts-dfc.mixins.json"
+  ],
+  "depends": {
+    "minecraft": "*",
+    "fabricloader": "*",
+    "c2me-base": "*",
+    "c2me-opts-natives-math": "*"
+  },
+
+  "authors": [
+    "RelativityMC",
+    "ishland"
+  ],
+  "contact": {
+    "sources": "https://github.com/RelativityMC/C2ME-fabric",
+    "issues": "https://github.com/RelativityMC/C2ME-fabric/issues",
+    "discord": "https://discord.gg/Kdy8NM5HW4",
+    "homepage": "https://modrinth.com/mod/c2me-fabric"
+  },
+  "license": "All-Rights-Reserved",
+  "custom": {
+    "modmenu": {
+      "parent": "c2me"
+    }
+  }
+}

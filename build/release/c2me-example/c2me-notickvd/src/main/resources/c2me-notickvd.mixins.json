@@ -1,0 +1,26 @@
+{
+  "parent": "c2me.mixins.json",
+  "required": true,
+  "package": "com.ishland.c2me.notickvd.mixin",
+  "plugin": "com.ishland.c2me.notickvd.MixinPlugin",
+  "mixins": [
+    "MixinChunkHolder",
+    "MixinChunkLevelManager",
+    "MixinChunkLevelManagerNearbyChunkTicketUpdater",
+    "MixinMinecraftServer",
+    "MixinPlayerManager",
+    "MixinServerAccessibleChunkSending",
+    "MixinServerBlockTicking",
+    "MixinServerChunkManager",
+    "MixinSimulationDistanceLevelPropagator",
+    "MixinThreadedAnvilChunkStorage",
+    "MixinWorld",
+    "MixinWorldChunk",
+    "ext_render_distance.MixinServerConfigurationNetworkHandler",
+    "ext_render_distance.MixinServerPlayNetworkHandler",
+    "smooth_sending_rate.MixinChunkDataSender"
+  ],
+  "client": [
+    "client.MixinIntegratedServer"
+  ]
+}

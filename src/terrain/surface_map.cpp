@@ -388,6 +388,32 @@ SurfaceMap::SurfaceMap(std::unique_ptr<SurfaceGenerator> generator, std::size_t 
     }
 }
 
+void SurfaceMap::setProfilingEnabled(bool enabled) noexcept
+{
+    profilingEnabled_.store(enabled, std::memory_order_release);
+}
+
+bool SurfaceMap::profilingEnabled() const noexcept
+{
+    return profilingEnabled_.load(std::memory_order_acquire);
+}
+
+SurfaceMap::CacheProfilingSnapshot SurfaceMap::profilingSnapshot() const noexcept
+{
+    CacheProfilingSnapshot snapshot{};
+    snapshot.hits = cacheHits_.load(std::memory_order_relaxed);
+    snapshot.misses = cacheMisses_.load(std::memory_order_relaxed);
+    snapshot.fills = cacheFills_.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
+void SurfaceMap::resetProfiling() noexcept
+{
+    cacheHits_.store(0, std::memory_order_relaxed);
+    cacheMisses_.store(0, std::memory_order_relaxed);
+    cacheFills_.store(0, std::memory_order_relaxed);
+}
+
 const SurfaceFragment& SurfaceMap::getFragment(const glm::ivec2& fragmentCoord, int lodLevel) const
 {
     const FragmentKey key{fragmentCoord, lodLevel};
@@ -397,9 +423,18 @@ const SurfaceFragment& SurfaceMap::getFragment(const glm::ivec2& fragmentCoord, 
         auto it = fragments_.find(key);
         if (it != fragments_.end())
         {
+            if (profilingEnabled())
+            {
+                cacheHits_.fetch_add(1, std::memory_order_relaxed);
+            }
             touch(it->second);
             return *it->second.fragment;
         }
+    }
+
+    if (profilingEnabled())
+    {
+        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
     }
 
     auto fragment = std::make_unique<SurfaceFragment>(fragmentCoord, lodLevel);
@@ -424,6 +459,10 @@ const SurfaceFragment& SurfaceMap::getFragment(const glm::ivec2& fragmentCoord, 
 
             auto [it, inserted] = fragments_.emplace(key, std::move(entry));
             (void)inserted;
+            if (profilingEnabled())
+            {
+                cacheFills_.fetch_add(1, std::memory_order_relaxed);
+            }
 
             evictIfNeeded();
             result = it->second.fragment.get();

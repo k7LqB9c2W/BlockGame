@@ -1,0 +1,33 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.ishland.c2me.tests.testmod.mixin",
+  "compatibilityLevel": "JAVA_16",
+  "mixinPriority": 1100,
+  "mixins": [
+    "IChunkGenerator",
+    "IServerChunkManager",
+    "IThreadedAnvilChunkStorage",
+    "MixinWorldView",
+    "fix.MixinFixDevLaunch",
+    "fix.client.MixinEntityModelLayers",
+    "fix.client.MixinMain",
+    "fix.logspam.MixinUniformHeightProvider",
+    "fix.mem_effects.MixinIngredient",
+    "fix.remapper_being_broken.MixinGeneralUtils",
+    "pregen.MixinCrashReport",
+    "pregen.MixinMain",
+    "pregen.MixinMinecraftDedicatedServer",
+    "pregen.MixinMinecraftServer",
+    "pregen.MixinServerChunkManager",
+    "pregen.MixinServerPropertiesHandler",
+    "pregen.MixinServerTask",
+    "pregen.MixinServerWorld",
+    "pregen.MixinStructureFeature"
+  ],
+  "client": [
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -7,6 +7,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -246,9 +247,20 @@ private:
 class ClimateMap
 {
 public:
+    struct CacheProfilingSnapshot
+    {
+        std::uint64_t hits{0};
+        std::uint64_t misses{0};
+        std::uint64_t fills{0};
+    };
+
     ClimateMap(std::unique_ptr<ClimateGenerator> generator, std::size_t maxFragments = 32);
 
     [[nodiscard]] const ClimateSample& sample(int worldX, int worldZ) const;
+    void setProfilingEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool profilingEnabled() const noexcept;
+    [[nodiscard]] CacheProfilingSnapshot profilingSnapshot() const noexcept;
+    void resetProfiling() noexcept;
     void clear();
 
 private:
@@ -279,6 +291,10 @@ private:
     mutable std::mutex mutex_;
     mutable std::unordered_map<glm::ivec2, FragmentCacheEntry, IVec2Hasher> fragments_{};
     mutable std::list<glm::ivec2> lru_{};
+    mutable std::atomic<bool> profilingEnabled_{false};
+    mutable std::atomic<std::uint64_t> cacheHits_{0};
+    mutable std::atomic<std::uint64_t> cacheMisses_{0};
+    mutable std::atomic<std::uint64_t> cacheFills_{0};
 };
 
 } // namespace terrain

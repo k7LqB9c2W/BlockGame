@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <list>
 #include <memory>
@@ -102,10 +103,21 @@ private:
 class SurfaceMap
 {
 public:
+    struct CacheProfilingSnapshot
+    {
+        std::uint64_t hits{0};
+        std::uint64_t misses{0};
+        std::uint64_t fills{0};
+    };
+
     SurfaceMap(std::unique_ptr<SurfaceGenerator> generator, std::size_t maxFragments = 32);
 
     [[nodiscard]] const SurfaceFragment& getFragment(const glm::ivec2& fragmentCoord, int lodLevel = 0) const;
     [[nodiscard]] const SurfaceColumn& column(int worldX, int worldZ, int lodLevel = 0) const;
+    void setProfilingEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool profilingEnabled() const noexcept;
+    [[nodiscard]] CacheProfilingSnapshot profilingSnapshot() const noexcept;
+    void resetProfiling() noexcept;
     void clear();
 
 private:
@@ -141,6 +153,10 @@ private:
     mutable std::mutex mutex_;
     mutable std::unordered_map<FragmentKey, FragmentCacheEntry, FragmentKeyHasher> fragments_{};
     mutable std::list<FragmentKey> lru_{};
+    mutable std::atomic<bool> profilingEnabled_{false};
+    mutable std::atomic<std::uint64_t> cacheHits_{0};
+    mutable std::atomic<std::uint64_t> cacheMisses_{0};
+    mutable std::atomic<std::uint64_t> cacheFills_{0};
 };
 
 } // namespace terrain

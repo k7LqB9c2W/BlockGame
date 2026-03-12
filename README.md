@@ -234,6 +234,47 @@ Check the following first:
 
 The debug/config panels intentionally capture input while they are open. Close the ImGui tool window you opened and mouse-look/gameplay input will resume.
 
+## Benchmarking
+
+BlockGame now includes an automated chunk-streaming benchmark pass with fixed scenarios for:
+
+- `spawn_preload`
+- `straight_line_sprint`
+- `turn_heavy_traversal`
+- `vertical_travel`
+
+Run it with:
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release
+```
+
+If the current `build\Release\blockgame.exe` is already up to date, skip the build step:
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release -SkipBuild
+```
+
+The script creates a timestamped output folder under:
+
+- `artifacts\chunk_benchmark\<timestamp>\benchmark_summary.json`
+- `artifacts\chunk_benchmark\<timestamp>\benchmark_summary.txt`
+- `artifacts\chunk_benchmark\<timestamp>\<scenario>.json`
+
+`benchmark_summary.json` is the primary machine-readable artifact and is intentionally compact so Codex can inspect it without needing a bulky CSV. `benchmark_summary.txt` is the short human summary.
+
+### How To Read The Benchmark Output
+
+- `throughput.generated_chunks_per_sec`: generated chunk throughput over the scenario duration.
+- `throughput.uploaded_chunks_per_sec`: chunks that actually reached the GPU upload stage per second.
+- `stages.sample|generate|relight|mesh|upload|far_build.avg_ms`: average cost per completed work item in that stage.
+- `stages.chunk_ready_latency.median_ms` and `p95_ms`: request-to-first-ready latency for streamed chunks.
+- `queues.job_backlog`, `queues.upload_backlog`, `queues.far_build_backlog`, `queues.far_upload_backlog`: backlog depths sampled once per streaming update.
+- `cache.climate.hit_rate` and `cache.surface.hit_rate`: effectiveness of the climate and surface fragment caches.
+- `frame.avg_ms`, `frame.p95_ms`, `frame.avg_fps`: frame pacing context for the same run.
+
+Important note: percentile values are collected with low-overhead histograms, so they should be treated as approximate profiling bands rather than exact microsecond-precise measurements.
+
 ## Development Notes
 
 - The project is currently Windows-only because the renderer is Direct3D 12.

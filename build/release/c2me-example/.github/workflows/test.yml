@@ -1,0 +1,44 @@
+name: C2ME Test
+
+on:
+  push: {}
+  pull_request: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        testTask: [runTestC2MEServer]
+
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        submodules: true
+
+    - name: Set up JDK 25
+      uses: actions/setup-java@v5
+      with:
+        distribution: 'zulu'
+        java-version: 25
+        java-package: jdk
+
+    - name: Install LLVM
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "20.1.8"
+        force-url: "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz"
+        directory: ${{ runner.temp }}/llvm
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        cache-read-only: false
+        cache-cleanup: never
+        
+    - name: Test C2ME
+      run: |
+        ./gradlew clean ${{ matrix.testTask }}

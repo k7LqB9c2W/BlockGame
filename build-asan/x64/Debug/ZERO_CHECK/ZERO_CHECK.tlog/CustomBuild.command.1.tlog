@@ -1,0 +1,10 @@
+^C:\USERS\JACOB\DOCUMENTS\CODE\BLOCKGAME\BUILD-ASAN\CMAKEFILES\F9CC56A52745F55212B5F87E360C6921\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/Jacob/Documents/code/BlockGame -BC:/Users/Jacob/Documents/code/BlockGame/build-asan --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Jacob/Documents/code/BlockGame/build-asan/BlockGame.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

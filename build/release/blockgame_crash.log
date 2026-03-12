@@ -18,3 +18,108 @@
   [15] 0x7ff9753bcc91
   exception code: 0xc0000005
 2026-03-07 17:42:16 - minidump: written to blockgame_crash.dmp
+2026-03-11 18:34:49 - SEH crash
+2026-03-11 18:34:49 - stack:
+  [0] 0x7ff62d6186f0
+  [1] 0x7ff62d611163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff62d64b353
+  [9] 0x7ff62d653b6c
+  [10] 0x7ff62d63da0a
+  [11] 0x7ff62d64297b
+  [12] 0x7ff62d659aff
+  [13] 0x7ff62d62bdff
+  [14] 0x7ffaa77b1bb2
+  [15] 0x7ffaa8187374
+  [16] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-11 18:34:49 - minidump: written to blockgame_crash.dmp
+2026-03-11 18:37:41 - SEH crash
+2026-03-11 18:37:41 - stack:
+  [0] 0x7ff6ca8586f0
+  [1] 0x7ff6ca851163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff6ca88b353
+  [9] 0x7ff6ca893b6c
+  [10] 0x7ff6ca87da0a
+  [11] 0x7ff6ca88297b
+  [12] 0x7ff6ca899aef
+  [13] 0x7ff6ca86bdff
+  [14] 0x7ffaa77b1bb2
+  [15] 0x7ffaa8187374
+  [16] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-11 18:37:41 - minidump: written to blockgame_crash.dmp
+2026-03-11 18:39:42 - SEH crash
+2026-03-11 18:39:42 - stack:
+  [0] 0x7ff7523186f0
+  [1] 0x7ff752311163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff75234b423
+  [9] 0x7ff752353c3c
+  [10] 0x7ff75233dada
+  [11] 0x7ff752342a4b
+  [12] 0x7ff752359bbf
+  [13] 0x7ff75232bdff
+  [14] 0x7ffaa77b1bb2
+  [15] 0x7ffaa8187374
+  [16] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-11 18:39:42 - minidump: written to blockgame_crash.dmp
+2026-03-11 18:47:37 - SEH crash
+2026-03-11 18:47:37 - stack:
+  [0] 0x7ff7ba7a86f0
+  [1] 0x7ff7ba7a1163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff7ba7db423
+  [9] 0x7ff7ba7e3c3c
+  [10] 0x7ff7ba7cdada
+  [11] 0x7ff7ba7d2a4b
+  [12] 0x7ff7ba7e9bbf
+  [13] 0x7ff7ba7bbdff
+  [14] 0x7ffaa77b1bb2
+  [15] 0x7ffaa8187374
+  [16] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-11 18:47:37 - minidump: written to blockgame_crash.dmp
+2026-03-11 19:13:05 - SEH crash
+2026-03-11 19:13:05 - stack:
+  [0] 0x7ff74dfe86f0
+  [1] 0x7ff74dfe1163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff74e01b353
+  [9] 0x7ff74e023b6c
+  [10] 0x7ff74e00da0a
+  [11] 0x7ff74e01297b
+  [12] 0x7ff74e029aef
+  [13] 0x7ff74dffbdff
+  [14] 0x7ffaa77b1bb2
+  [15] 0x7ffaa8187374
+  [16] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-11 19:13:06 - minidump: written to blockgame_crash.dmp

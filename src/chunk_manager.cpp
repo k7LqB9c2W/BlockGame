@@ -1535,6 +1535,7 @@ struct ProfilingCounters
     std::atomic<std::size_t> uploadedBytes{0};
     std::atomic<int> generatedChunks{0};
     std::atomic<int> relitChunks{0};
+    std::atomic<int> relightBatches{0};
     std::atomic<int> meshedChunks{0};
     std::atomic<int> uploadedChunks{0};
     std::atomic<int> throttledUploads{0};
@@ -1704,6 +1705,7 @@ public:
     bool empty() const;
     std::size_t size() const;
     void updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
+    bool tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     void setWorkerConcurrency(std::size_t workerCount) noexcept;
     void jobCompleted(JobType type) noexcept;
 
@@ -1736,6 +1738,7 @@ private:
     glm::vec2 priorityForwardXZ_{0.0f, -1.0f};
     std::array<std::priority_queue<PrioritizedJob, std::vector<PrioritizedJob>, JobComparer>, kJobTypeCount> queues_{};
     std::array<std::size_t, kJobTypeCount> activeCounts_{};
+    std::atomic<std::size_t> queuedJobCount_{0};
     std::size_t workerConcurrency_{1};
     std::uint64_t nextSequence_{0};
 };
@@ -3376,6 +3379,7 @@ private:
     {
         std::size_t byteBudget{kUploadBudgetBytesPerFrame};
         int columnLimit{kVerticalStreamingConfig.uploadBasePerColumn};
+        int chunkLimit{1};
         std::size_t queueSize{0};
         double timeBudgetMs{4.0};
     };
@@ -3384,6 +3388,15 @@ private:
     int computeGenerationBudget(int horizontalRadius, int verticalRadius, int backlogSteps) const;
     int computeRingExpansionBudget(int backlogChunks) const;
     int computeColumnJobCap(int backlogSteps, int backlogChunks) const;
+    struct VisibleChunkCoverage
+    {
+        int missing{0};
+        int ready{0};
+        int required{0};
+    };
+    VisibleChunkCoverage scanVisibleChunkCoverage(const glm::ivec3& center,
+                                                  int horizontalRadius,
+                                                  int verticalRadius) const;
     int estimateMissingChunks(const glm::ivec3& center, int horizontalRadius, int verticalRadius) const;
     StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
 
@@ -3424,6 +3437,7 @@ private:
                               int slabMaxWorldY = std::numeric_limits<int>::max()) const;
     FarTerrainSurfaceSample sampleFarTerrainSurfaceLod(int worldX, int worldZ, int lodLevel) const;
     int ensureColumnHeightCached(const glm::ivec2& column, int worldX, int worldZ) const;
+    bool tryGetCachedColumnHeight(const glm::ivec2& column, int worldX, int worldZ, int& outHeight) const;
     bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
     int cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const;
     void invalidatePredictedColumn(const glm::ivec2& column) const;
@@ -3622,17 +3636,30 @@ private:
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
+    int uploadChunkLimitThisFrame_{1};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
     double uploadBudgetMsThisFrame_{4.0};
     double updateMsLastFrame_{0.0};
+    double verticalRadiusMsLastFrame_{0.0};
+    double priorityUpdateMsLastFrame_{0.0};
+    double uploadBudgetPrepMsLastFrame_{0.0};
+    double missingScanMsLastFrame_{0.0};
+    double schedulingMsLastFrame_{0.0};
+    double evictionMsLastFrame_{0.0};
+    double relightMsLastFrame_{0.0};
     std::size_t lastUploadBytesUsed_{0};
     std::size_t pendingUploadsLastFrame_{0};
+    double poolTrimMsLastFrame_{0.0};
+    double startupStateMsLastFrame_{0.0};
+    double benchmarkBookkeepingMsLastFrame_{0.0};
     int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
     int lastGenerationBudget_{kVerticalStreamingConfig.generationBudget.baseJobsPerFrame};
     int lastGenerationJobsIssued_{0};
     int lastRingBudget_{kVerticalStreamingConfig.generationBudget.minRingExpansionsPerFrame};
     int lastRingExpansionsUsed_{0};
     int lastMissingChunks_{0};
+    int cachedExactReadyChunks_{0};
+    int cachedExactRequiredChunks_{0};
     int lastColumnCap_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
     int lastBacklogSteps_{0};
     bool startupEnabled_{true};
@@ -3640,6 +3667,9 @@ private:
     mutable std::mutex schedulingPriorityMutex_;
     glm::ivec3 schedulingPriorityOrigin_{0};
     glm::vec3 schedulingPriorityForward_{0.0f, 0.0f, -1.0f};
+    glm::ivec3 lastJobQueuePriorityOrigin_{0};
+    glm::vec2 lastJobQueuePriorityForwardXZ_{0.0f, -1.0f};
+    std::chrono::steady_clock::time_point lastJobQueuePriorityRefreshTime_{};
     glm::vec3 lastCameraForward_{0.0f, 0.0f, -1.0f};
     glm::ivec3 lastCenterChunk_{0};
     std::chrono::steady_clock::time_point lastUpdateTime_{};
@@ -3675,6 +3705,7 @@ bool JobQueue::push(const Job& job)
     }
 
     queues_[jobTypeIndex(job.type)].push(wrap(job));
+    queuedJobCount_.fetch_add(1, std::memory_order_relaxed);
     condition_.notify_one();
     return true;
 }
@@ -3690,6 +3721,7 @@ bool JobQueue::tryPop(Job& job)
     const std::size_t queueIndex = pickNextQueueIndexLocked();
     job = queues_[queueIndex].top().job;
     queues_[queueIndex].pop();
+    queuedJobCount_.fetch_sub(1, std::memory_order_relaxed);
     ++activeCounts_[queueIndex];
     return true;
 }
@@ -3730,6 +3762,7 @@ Job JobQueue::waitAndPop()
 
         Job job = queues_[queueIndex].top().job;
         queues_[queueIndex].pop();
+        queuedJobCount_.fetch_sub(1, std::memory_order_relaxed);
         ++activeCounts_[queueIndex];
         return job;
     }
@@ -3754,25 +3787,19 @@ std::vector<Job> JobQueue::stop()
             queue.pop();
         }
     }
+    queuedJobCount_.store(0, std::memory_order_relaxed);
     condition_.notify_all();
     return cancelledJobs;
 }
 
 bool JobQueue::empty() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return !hasQueuedJobsLocked();
+    return queuedJobCount_.load(std::memory_order_relaxed) == 0;
 }
 
 std::size_t JobQueue::size() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::size_t total = 0;
-    for (const auto& queue : queues_)
-    {
-        total += queue.size();
-    }
-    return total;
+    return queuedJobCount_.load(std::memory_order_relaxed);
 }
 
 void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
@@ -3785,9 +3812,92 @@ void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& fo
         return;
     }
 
+    const glm::ivec3 delta = origin - priorityOrigin_;
+    const int horizontalShift = std::max(std::abs(delta.x), std::abs(delta.z));
+    const int verticalShift = std::abs(delta.y);
+
     priorityOrigin_ = origin;
     priorityForwardXZ_ = forwardXZ;
+
+    constexpr int kPriorityRebuildChunkShiftThreshold = 2;
+    constexpr int kPriorityRebuildForceShiftThreshold = 6;
+    constexpr float kPriorityRebuildFacingDotThreshold = 0.85f;
+    constexpr std::size_t kPriorityRebuildQueueThreshold = 128;
+
+    const bool forceRebuild = horizontalShift >= kPriorityRebuildForceShiftThreshold ||
+                              verticalShift >= kPriorityRebuildForceShiftThreshold;
+    const bool significantMove = horizontalShift >= kPriorityRebuildChunkShiftThreshold ||
+                                 verticalShift >= kPriorityRebuildChunkShiftThreshold;
+    const bool significantTurn = facingDot <= kPriorityRebuildFacingDotThreshold;
+    if (!forceRebuild && !significantMove && !significantTurn)
+    {
+        return;
+    }
+
+    std::size_t queuedJobs = 0;
+    for (const auto& queue : queues_)
+    {
+        queuedJobs += queue.size();
+    }
+
+    if (!forceRebuild && queuedJobs > kPriorityRebuildQueueThreshold)
+    {
+        return;
+    }
+
     rebuildLocked();
+}
+
+bool JobQueue::tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
+{
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+    {
+        return false;
+    }
+
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    const float facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    if (origin == priorityOrigin_ && facingDot >= 0.995f)
+    {
+        return true;
+    }
+
+    const glm::ivec3 delta = origin - priorityOrigin_;
+    const int horizontalShift = std::max(std::abs(delta.x), std::abs(delta.z));
+    const int verticalShift = std::abs(delta.y);
+
+    priorityOrigin_ = origin;
+    priorityForwardXZ_ = forwardXZ;
+
+    constexpr int kPriorityRebuildChunkShiftThreshold = 2;
+    constexpr int kPriorityRebuildForceShiftThreshold = 6;
+    constexpr float kPriorityRebuildFacingDotThreshold = 0.85f;
+    constexpr std::size_t kPriorityRebuildQueueThreshold = 128;
+
+    const bool forceRebuild = horizontalShift >= kPriorityRebuildForceShiftThreshold ||
+                              verticalShift >= kPriorityRebuildForceShiftThreshold;
+    const bool significantMove = horizontalShift >= kPriorityRebuildChunkShiftThreshold ||
+                                 verticalShift >= kPriorityRebuildChunkShiftThreshold;
+    const bool significantTurn = facingDot <= kPriorityRebuildFacingDotThreshold;
+    if (!forceRebuild && !significantMove && !significantTurn)
+    {
+        return true;
+    }
+
+    std::size_t queuedJobs = 0;
+    for (const auto& queue : queues_)
+    {
+        queuedJobs += queue.size();
+    }
+
+    if (!forceRebuild && queuedJobs > kPriorityRebuildQueueThreshold)
+    {
+        return true;
+    }
+
+    rebuildLocked();
+    return true;
 }
 
 bool JobQueue::JobComparer::operator()(const PrioritizedJob& lhs, const PrioritizedJob& rhs) const
@@ -4386,25 +4496,68 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     targetViewDistance_ = std::clamp(startupState_.exactNearCurrentChunks, 1, renderSettings_.nearChunks);
 
     resetColumnBudgets();
+    const auto verticalRadiusStart = std::chrono::steady_clock::now();
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
+    verticalRadiusMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verticalRadiusStart).count();
     lastVerticalRadius_ = verticalRadius;
     gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
     kFarPlane = computeFarPlaneForDistanceBlocks(renderSettings_.farBlocks);
 
+    const auto uploadBudgetStart = std::chrono::steady_clock::now();
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
+    uploadBudgetPrepMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadBudgetStart).count();
     uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
     uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
+    uploadChunkLimitThisFrame_ = uploadBudgets.chunkLimit;
     uploadBudgetMsThisFrame_ = uploadBudgets.timeBudgetMs;
     pendingUploadsLastFrame_ = uploadBudgets.queueSize;
 
-    jobQueue_.updatePriorityState(centerChunk, lastCameraForward_);
+    const glm::vec2 desiredPriorityForwardXZ = normalizePriorityForwardXZ(lastCameraForward_);
+    const glm::ivec3 priorityDelta = centerChunk - lastJobQueuePriorityOrigin_;
+    const int priorityHorizontalShift = std::max(std::abs(priorityDelta.x), std::abs(priorityDelta.z));
+    const int priorityVerticalShift = std::abs(priorityDelta.y);
+    const float priorityFacingDot = glm::dot(lastJobQueuePriorityForwardXZ_, desiredPriorityForwardXZ);
+    const double priorityRefreshAgeMs = (lastJobQueuePriorityRefreshTime_ == SteadyClock::time_point{})
+        ? std::numeric_limits<double>::infinity()
+        : std::chrono::duration<double, std::milli>(now - lastJobQueuePriorityRefreshTime_).count();
+
+    constexpr int kJobQueuePriorityShiftThreshold = 2;
+    constexpr float kJobQueuePriorityFacingThreshold = 0.85f;
+    constexpr double kJobQueuePriorityRefreshIntervalMs = 250.0;
+
+    const bool shouldRefreshJobQueuePriority =
+        priorityRefreshAgeMs >= kJobQueuePriorityRefreshIntervalMs ||
+        priorityHorizontalShift >= kJobQueuePriorityShiftThreshold ||
+        priorityVerticalShift >= kJobQueuePriorityShiftThreshold ||
+        priorityFacingDot <= kJobQueuePriorityFacingThreshold;
+    priorityUpdateMsLastFrame_ = 0.0;
+    if (shouldRefreshJobQueuePriority)
+    {
+        const auto priorityUpdateStart = std::chrono::steady_clock::now();
+        const bool updatedPriority = jobQueue_.tryUpdatePriorityState(centerChunk, lastCameraForward_);
+        priorityUpdateMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - priorityUpdateStart).count();
+        if (updatedPriority)
+        {
+            lastJobQueuePriorityOrigin_ = centerChunk;
+            lastJobQueuePriorityForwardXZ_ = desiredPriorityForwardXZ;
+            lastJobQueuePriorityRefreshTime_ = now;
+        }
+    }
 
     if (viewDistance_ > targetViewDistance_)
     {
         viewDistance_ = targetViewDistance_;
     }
 
-    const int missingChunks = estimateMissingChunks(centerChunk, targetViewDistance_, verticalRadius);
+    const auto missingScanStart = std::chrono::steady_clock::now();
+    const VisibleChunkCoverage visibleCoverage =
+        scanVisibleChunkCoverage(centerChunk, targetViewDistance_, verticalRadius);
+    const int missingChunks = visibleCoverage.missing;
+    missingScanMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - missingScanStart).count();
     const int backlogSteps = computeBacklogSteps(missingChunks,
                                                  kVerticalStreamingConfig.generationBudget.backlogStartThreshold,
                                                  kVerticalStreamingConfig.generationBudget.backlogStepSize);
@@ -4422,12 +4575,12 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     lastGenerationBudget_ = generationBudgetTarget;
     lastRingBudget_ = ringBudget;
-    lastMissingChunks_ = missingChunks;
     lastColumnCap_ = generationColumnCapThisFrame_;
     lastBacklogSteps_ = backlogSteps;
 
     int jobBudget = generationBudgetTarget;
 
+    const auto schedulingStart = std::chrono::steady_clock::now();
     for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
     {
         RingProgress progress = ensureVolume(centerChunk, ring, verticalRadius, jobBudget);
@@ -4457,17 +4610,39 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
         break;
     }
+    schedulingMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedulingStart).count();
 
     lastGenerationJobsIssued_ = std::clamp(generationBudgetTarget - jobBudget, 0, generationBudgetTarget);
     lastRingExpansionsUsed_ = ringsExpanded;
+    lastMissingChunks_ = std::max(0, missingChunks - lastGenerationJobsIssued_);
+    cachedExactReadyChunks_ = visibleCoverage.ready;
+    cachedExactRequiredChunks_ = visibleCoverage.required;
 
+    const auto evictionStart = std::chrono::steady_clock::now();
     removeDistantChunks(centerChunk,
                         targetViewDistance_ + kVerticalStreamingConfig.horizontalEvictionSlack,
                         verticalRadius);
+    evictionMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evictionStart).count();
 
-    processPendingRelightRequests(1);
+    const bool allowMainThreadRelight =
+        startupEnabled_ &&
+        startupState_.preloadStarted &&
+        startupState_.phase == StreamingPhase::ExactPreload;
+    relightMsLastFrame_ = 0.0;
+    if (allowMainThreadRelight)
+    {
+        const auto relightStart = std::chrono::steady_clock::now();
+        processPendingRelightRequests(1);
+        relightMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
+    }
     uploadReadyMeshes();
+    const auto poolTrimStart = std::chrono::steady_clock::now();
     trimChunkPoolToBudget();
+    poolTrimMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poolTrimStart).count();
 
     const bool farStreamingActive =
         renderSettings_.farTerrainEnabled &&
@@ -4495,6 +4670,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         farTerrainManager_.clear();
     }
 
+    const auto startupStateStart = std::chrono::steady_clock::now();
     if (startupEnabled_ && startupState_.preloadStarted)
     {
         const bool nearReady = missingChunks == 0;
@@ -4633,15 +4809,22 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             break;
         }
     }
+    startupStateMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startupStateStart).count();
 
+    benchmarkBookkeepingMsLastFrame_ = 0.0;
     if (benchmarkMetrics_.isEnabled())
     {
+        const auto benchmarkMetricsStart = std::chrono::steady_clock::now();
         benchmarkMetrics_.jobQueueDepth.record(jobQueue_.size());
         benchmarkMetrics_.uploadQueueDepth.record(estimateUploadQueueSize());
         benchmarkMetrics_.farBuildQueueDepth.record(
             static_cast<std::uint64_t>(std::max(farTerrainManager_.buildQueueDepth(), 0)));
         benchmarkMetrics_.farUploadQueueDepth.record(
             static_cast<std::uint64_t>(std::max(farTerrainManager_.pendingUploadTileCount(), 0)));
+        benchmarkBookkeepingMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - benchmarkMetricsStart)
+                .count();
     }
 
     updateMsLastFrame_ =
@@ -4844,6 +5027,12 @@ void ChunkManager::Impl::clear()
     uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
     lastUploadBytesUsed_ = 0;
     pendingUploadsLastFrame_ = 0;
+    lastMissingChunks_ = 0;
+    cachedExactReadyChunks_ = 0;
+    cachedExactRequiredChunks_ = 0;
+    lastJobQueuePriorityOrigin_ = glm::ivec3{0};
+    lastJobQueuePriorityForwardXZ_ = glm::vec2{0.0f, -1.0f};
+    lastJobQueuePriorityRefreshTime_ = SteadyClock::time_point{};
 
     if (climateMap_)
     {
@@ -5498,6 +5687,12 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
                                                   static_cast<int>(std::floor(spawnPos.z)));
     startupState_.exactNearCurrentChunks = std::min(renderSettings_.nearChunks, 6);
     startupState_.farCurrentBlocks = 0;
+    lastMissingChunks_ = 0;
+    cachedExactReadyChunks_ = 0;
+    cachedExactRequiredChunks_ = 0;
+    lastJobQueuePriorityOrigin_ = startupState_.spawnChunk;
+    lastJobQueuePriorityForwardXZ_ = normalizePriorityForwardXZ(lastCameraForward_);
+    lastJobQueuePriorityRefreshTime_ = SteadyClock::time_point{};
     targetViewDistance_ = startupState_.exactNearCurrentChunks;
     if (viewDistance_ > targetViewDistance_)
     {
@@ -5556,61 +5751,8 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
     snapshot.farReadyTiles = farTerrainManager_.readyTileCount();
     snapshot.farQueuedTiles = farTerrainManager_.queuedTileCount();
 
-    const int horizontalRadius = std::clamp(
-        (startupEnabled_ && startupState_.preloadStarted && startupState_.exactNearCurrentChunks > 0)
-            ? startupState_.exactNearCurrentChunks
-            : renderSettings_.nearChunks,
-        1,
-        renderSettings_.nearChunks);
-    const glm::ivec2 cameraColumn{lastCenterChunk_.x, lastCenterChunk_.z};
-    const int cameraChunkY = lastCenterChunk_.y;
-    const int verticalRadius = std::max(lastVerticalRadius_, kVerticalStreamingConfig.minRadiusChunks);
-
-    int readyChunks = 0;
-    int requiredChunks = 0;
-    std::lock_guard<std::mutex> lock(chunksMutex);
-    for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
-    {
-        for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
-        {
-            if (std::max(std::abs(dx), std::abs(dz)) > horizontalRadius)
-            {
-                continue;
-            }
-
-            const int chunkX = lastCenterChunk_.x + dx;
-            const int chunkZ = lastCenterChunk_.z + dz;
-            const glm::ivec2 column{chunkX, chunkZ};
-            const int worldX = chunkX * kChunkSizeX + kChunkSizeX / 2;
-            const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
-            const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
-            const int columnRadius = columnRadiusForHeight(column,
-                                                           cameraColumn,
-                                                           cameraChunkY,
-                                                           verticalRadius,
-                                                           columnHeight);
-            const int minChunkY = std::max(0, cameraChunkY - columnRadius);
-            const int maxChunkY = std::max(minChunkY, cameraChunkY + columnRadius);
-            for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
-            {
-                ++requiredChunks;
-                const auto it = chunks_.find(glm::ivec3{chunkX, chunkY, chunkZ});
-                if (it == chunks_.end() || !it->second)
-                {
-                    continue;
-                }
-
-                const ChunkState state = it->second->state.load(std::memory_order_acquire);
-                if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
-                {
-                    ++readyChunks;
-                }
-            }
-        }
-    }
-
-    snapshot.exactReadyChunks = readyChunks;
-    snapshot.exactRequiredChunks = requiredChunks;
+    snapshot.exactReadyChunks = cachedExactReadyChunks_;
+    snapshot.exactRequiredChunks = cachedExactRequiredChunks_;
 
     if (snapshot.playerReleaseReady)
     {
@@ -5645,10 +5787,13 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
 
     const int generated = profilingCounters_.generatedChunks.exchange(0, std::memory_order_relaxed);
     const int relit = profilingCounters_.relitChunks.exchange(0, std::memory_order_relaxed);
+    const int relightBatches = profilingCounters_.relightBatches.exchange(0, std::memory_order_relaxed);
     const int meshed = profilingCounters_.meshedChunks.exchange(0, std::memory_order_relaxed);
     const int uploaded = profilingCounters_.uploadedChunks.exchange(0, std::memory_order_relaxed);
 
     snapshot.generatedChunks = generated;
+    snapshot.relitChunks = relit;
+    snapshot.relightBatches = relightBatches;
     snapshot.meshedChunks = meshed;
     snapshot.uploadedChunks = uploaded;
     snapshot.uploadedBytes = profilingCounters_.uploadedBytes.exchange(0, std::memory_order_relaxed);
@@ -5689,10 +5834,26 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
     snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
     snapshot.updateMsLastFrame = updateMsLastFrame_;
+    snapshot.verticalRadiusMsLastFrame = verticalRadiusMsLastFrame_;
+    snapshot.priorityUpdateMsLastFrame = priorityUpdateMsLastFrame_;
+    snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
+    snapshot.missingScanMsLastFrame = missingScanMsLastFrame_;
+    snapshot.schedulingMsLastFrame = schedulingMsLastFrame_;
+    snapshot.evictionMsLastFrame = evictionMsLastFrame_;
+    snapshot.relightMsLastFrame = relightMsLastFrame_;
     snapshot.uploadMsLastFrame = lastUploadMsUsed_;
+    snapshot.poolTrimMsLastFrame = poolTrimMsLastFrame_;
+    snapshot.startupStateMsLastFrame = startupStateMsLastFrame_;
+    snapshot.benchmarkBookkeepingMsLastFrame = benchmarkBookkeepingMsLastFrame_;
     const std::size_t pendingUploads = pendingUploadsLastFrame_;
     snapshot.pendingUploadChunks = static_cast<int>(
         std::min<std::size_t>(pendingUploads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    snapshot.jobQueueDepth = static_cast<int>(std::min<std::size_t>(
+        jobQueue_.size(),
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    snapshot.uploadQueueDepth = static_cast<int>(std::min<std::size_t>(
+        estimateUploadQueueSize(),
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
     {
         std::lock_guard<std::mutex> lock(chunkPoolMutex_);
         snapshot.pooledChunkCount = chunkPool_.size();
@@ -5804,15 +5965,15 @@ void ChunkManager::Impl::startWorkerThreads()
     unsigned desired = 1u;
     if (concurrency >= 12)
     {
-        desired = 6u;
+        desired = 4u;
     }
     else if (concurrency >= 8)
     {
-        desired = 4u;
+        desired = 3u;
     }
     else
     {
-        desired = std::max(1u, concurrency > 2 ? concurrency - 2 : 1u);
+        desired = std::max(1u, concurrency > 3 ? concurrency - 3 : 1u);
     }
 
     if (kVerticalStreamingConfig.maxWorkerThreads > 0)
@@ -5855,6 +6016,9 @@ void ChunkManager::Impl::stopWorkerThreads()
 
 void ChunkManager::Impl::workerThreadFunction()
 {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
     while (true)
     {
         try
@@ -6052,9 +6216,12 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
         return nullptr;
     }
 
+    constexpr std::size_t kUploadPriorityScanLimit = 24;
     auto bestIt = uploadQueue_.end();
     std::shared_ptr<Chunk> bestChunk;
-    for (auto it = uploadQueue_.begin(); it != uploadQueue_.end();)
+    std::size_t liveEntriesScanned = 0;
+    for (auto it = uploadQueue_.begin();
+         it != uploadQueue_.end() && liveEntriesScanned < kUploadPriorityScanLimit;)
     {
         std::shared_ptr<Chunk> chunk = it->lock();
         if (!chunk)
@@ -6070,6 +6237,7 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
             bestChunk = chunk;
         }
 
+        ++liveEntriesScanned;
         ++it;
     }
 
@@ -6497,21 +6665,14 @@ int ChunkManager::Impl::baseUploadsPerColumnLimit(int verticalRadius) const noex
 std::size_t ChunkManager::Impl::estimateUploadQueueSize()
 {
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    std::size_t count = 0;
-    for (const auto& entry : uploadQueue_)
-    {
-        if (!entry.expired())
-        {
-            ++count;
-        }
-    }
-    return count;
+    return uploadQueue_.size();
 }
 
 ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int verticalRadius)
 {
     UploadBudgets budgets{};
     budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
+    budgets.chunkLimit = 2;
     budgets.queueSize = estimateUploadQueueSize();
     if (startupEnabled_ && startupState_.preloadStarted)
     {
@@ -6519,25 +6680,29 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
         {
             budgets.byteBudget = 4ull * 1024ull * 1024ull;
             budgets.columnLimit = std::min(budgets.columnLimit, 4);
-            budgets.timeBudgetMs = 2.0;
+            budgets.chunkLimit = 1;
+            budgets.timeBudgetMs = 1.5;
         }
         else if (startupState_.phase == StreamingPhase::InteractiveNearOnly ||
                  startupState_.phase == StreamingPhase::FarRamp)
         {
-            budgets.byteBudget = 8ull * 1024ull * 1024ull;
+            budgets.byteBudget = 4ull * 1024ull * 1024ull;
             budgets.columnLimit = std::min(budgets.columnLimit + 1, 6);
-            budgets.timeBudgetMs = 3.0;
+            budgets.chunkLimit = 1;
+            budgets.timeBudgetMs = 1.5;
         }
         else
         {
-            budgets.byteBudget = 32ull * 1024ull * 1024ull;
-            budgets.timeBudgetMs = 4.0;
+            budgets.byteBudget = 8ull * 1024ull * 1024ull;
+            budgets.chunkLimit = 2;
+            budgets.timeBudgetMs = 2.5;
         }
     }
     else
     {
-        budgets.byteBudget = 32ull * 1024ull * 1024ull;
-        budgets.timeBudgetMs = 4.0;
+        budgets.byteBudget = 8ull * 1024ull * 1024ull;
+        budgets.chunkLimit = 2;
+        budgets.timeBudgetMs = 2.5;
     }
 
     return budgets;
@@ -6634,15 +6799,29 @@ int ChunkManager::Impl::computeColumnJobCap(int backlogSteps, int backlogChunks)
     return std::max(baseCap, 0);
 }
 
-int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
-                                              int horizontalRadius,
-                                              int verticalRadius) const
+ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCoverage(const glm::ivec3& center,
+                                                                                      int horizontalRadius,
+                                                                                      int verticalRadius) const
 {
+    VisibleChunkCoverage coverage{};
     const glm::ivec2 cameraColumn{center.x, center.z};
     const int cameraChunkY = center.y;
 
-    int missing = 0;
-    std::lock_guard<std::mutex> lock(chunksMutex);
+    std::unordered_map<glm::ivec3, ChunkState, ChunkHasher> chunkStates;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        chunkStates.reserve(chunks_.size());
+        for (const auto& [coord, chunkPtr] : chunks_)
+        {
+            if (!chunkPtr)
+            {
+                continue;
+            }
+
+            chunkStates.emplace(coord, chunkPtr->state.load(std::memory_order_acquire));
+        }
+    }
+
     for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
     {
         for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
@@ -6657,26 +6836,42 @@ int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
             const glm::ivec2 column{chunkX, chunkZ};
             const int worldX = chunkX * kChunkSizeX + kChunkSizeX / 2;
             const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
-            const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
-            const int columnRadius = columnRadiusForHeight(column,
-                                                           cameraColumn,
-                                                           cameraChunkY,
-                                                           verticalRadius,
-                                                           columnHeight);
-            const int minChunkY = std::max(0, cameraChunkY - columnRadius);
-            const int maxChunkY = std::max(minChunkY, cameraChunkY + columnRadius);
+
+            int columnHeight = ColumnManager::kNoHeight;
+            tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+
+            const auto [minChunkY, maxChunkY] = columnSpanForHeight(column,
+                                                                    cameraColumn,
+                                                                    cameraChunkY,
+                                                                    verticalRadius,
+                                                                    columnHeight);
             for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
             {
-                const glm::ivec3 coord{chunkX, chunkY, chunkZ};
-                if (chunks_.find(coord) == chunks_.end())
+                ++coverage.required;
+                const auto stateIt = chunkStates.find(glm::ivec3{chunkX, chunkY, chunkZ});
+                if (stateIt == chunkStates.end())
                 {
-                    ++missing;
+                    ++coverage.missing;
+                    continue;
+                }
+
+                const ChunkState state = stateIt->second;
+                if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
+                {
+                    ++coverage.ready;
                 }
             }
         }
     }
 
-    return missing;
+    return coverage;
+}
+
+int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
+                                              int horizontalRadius,
+                                              int verticalRadius) const
+{
+    return scanVisibleChunkCoverage(center, horizontalRadius, verticalRadius).missing;
 }
 
 int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
@@ -6700,10 +6895,16 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
         for (int dz = -sampleRadius; dz <= sampleRadius; ++dz)
         {
             const glm::ivec2 column{center.x + dx, center.z + dz};
-            const int radius = columnRadiusFor(column,
-                                               cameraColumn,
-                                               cameraChunkY,
-                                               verticalRadius);
+            const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+            int columnHeight = ColumnManager::kNoHeight;
+            tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+
+            const int radius = columnRadiusForHeight(column,
+                                                     cameraColumn,
+                                                     cameraChunkY,
+                                                     verticalRadius,
+                                                     columnHeight);
             verticalRadius = std::max(verticalRadius, radius);
         }
     }
@@ -6726,6 +6927,21 @@ bool ChunkManager::Impl::tryGetPredictedColumnHeight(const glm::ivec2& column, i
     return true;
 }
 
+bool ChunkManager::Impl::tryGetCachedColumnHeight(const glm::ivec2& column,
+                                                  int worldX,
+                                                  int worldZ,
+                                                  int& outHeight) const
+{
+    const int highest = columnManager_.highestSolidBlock(worldX, worldZ);
+    if (highest != ColumnManager::kNoHeight)
+    {
+        outHeight = highest;
+        return true;
+    }
+
+    return tryGetPredictedColumnHeight(column, outHeight);
+}
+
 int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const
 {
     const ColumnSample sample = sampleColumn(worldX, worldZ);
@@ -6741,16 +6957,10 @@ int ChunkManager::Impl::ensureColumnHeightCached(const glm::ivec2& column,
                                                  int worldX,
                                                  int worldZ) const
 {
-    int highest = columnManager_.highestSolidBlock(worldX, worldZ);
-    if (highest != ColumnManager::kNoHeight)
+    int highest = ColumnManager::kNoHeight;
+    if (tryGetCachedColumnHeight(column, worldX, worldZ, highest))
     {
         return highest;
-    }
-
-    int cachedHeight = ColumnManager::kNoHeight;
-    if (tryGetPredictedColumnHeight(column, cachedHeight))
-    {
-        return cachedHeight;
     }
 
     return cacheSampledColumnHeight(column, worldX, worldZ);
@@ -7068,7 +7278,8 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
 
         const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
         const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-        const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+        int columnHeight = ColumnManager::kNoHeight;
+        tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
         const auto [minChunkY, maxChunkY] = columnSpanForHeight(column,
                                                                 cameraColumn,
                                                                 center.y,
@@ -7179,10 +7390,15 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             }
 
             const glm::ivec2 column{coord.x, coord.z};
-            const auto [minChunkY, maxChunkY] = columnSpanFor(column,
-                                                              cameraColumn,
-                                                              center.y,
-                                                              verticalRadius);
+            const int worldX = coord.x * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = coord.z * kChunkSizeZ + kChunkSizeZ / 2;
+            int columnHeight = ColumnManager::kNoHeight;
+            tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+            const auto [minChunkY, maxChunkY] = columnSpanForHeight(column,
+                                                                    cameraColumn,
+                                                                    center.y,
+                                                                    verticalRadius,
+                                                                    columnHeight);
             const int slack = kVerticalStreamingConfig.columnSlackChunks;
             if (coord.y < (minChunkY - slack) || coord.y > (maxChunkY + slack))
             {
@@ -7220,19 +7436,8 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                 const glm::ivec2 column{chunk->coord.x, chunk->coord.z};
                 const int worldX = chunk->coord.x * kChunkSizeX + kChunkSizeX / 2;
                 const int worldZ = chunk->coord.z * kChunkSizeZ + kChunkSizeZ / 2;
-                int columnHeight = columnManager_.highestSolidBlock(worldX, worldZ);
-                if (columnHeight == ColumnManager::kNoHeight)
-                {
-                    int predictedHeight = ColumnManager::kNoHeight;
-                    if (tryGetPredictedColumnHeight(column, predictedHeight))
-                    {
-                        columnHeight = predictedHeight;
-                    }
-                    else
-                    {
-                        columnHeight = sampleColumn(worldX, worldZ).surfaceY;
-                    }
-                }
+                int columnHeight = ColumnManager::kNoHeight;
+                tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
 
                 const auto [minChunkY, maxChunkY] =
                     columnSpanForHeight(column, evictionCameraColumn, center.y, lastVerticalRadius_, columnHeight);
@@ -7314,9 +7519,11 @@ void ChunkManager::Impl::uploadReadyMeshes()
     const std::size_t initialBudget = uploadBudgetBytesThisFrame_;
     std::size_t remainingBudget = initialBudget;
     bool uploadedAnything = false;
+    int uploadedChunkCount = 0;
     std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
     std::size_t attempts = 0;
     const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
+    const int chunkUploadLimit = std::max(1, uploadChunkLimitThisFrame_);
     const auto uploadStart = std::chrono::steady_clock::now();
     if (uploadContext_.ready())
     {
@@ -7325,6 +7532,11 @@ void ChunkManager::Impl::uploadReadyMeshes()
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
+        if (uploadedChunkCount >= chunkUploadLimit && uploadedAnything)
+        {
+            break;
+        }
+
         ++attempts;
         std::shared_ptr<Chunk> chunk = popNextChunkForUpload();
         if (!chunk)
@@ -7356,11 +7568,16 @@ void ChunkManager::Impl::uploadReadyMeshes()
         }
         const std::size_t totalBytes = vertexBytes + indexBytes;
 
-        if (uploadedAnything && totalBytes > remainingBudget && totalBytes > 0)
+        const bool allowOversizeUpload = !uploadedAnything && pendingUploadsLastFrame_ <= 2;
+        if (totalBytes > remainingBudget && totalBytes > 0 && !allowOversizeUpload)
         {
-            requeueChunkForUpload(chunk, true);
+            requeueChunkForUpload(chunk, false);
             profilingCounters_.deferredUploads.fetch_add(1, std::memory_order_relaxed);
-            break;
+            if (uploadedAnything)
+            {
+                break;
+            }
+            continue;
         }
 
         const auto uploadChunkStart = benchmarkMetrics_.isEnabled() ? SteadyClock::now() : SteadyClock::time_point{};
@@ -7368,6 +7585,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
         chunk->meshReady.store(false, std::memory_order_release);
         uploadedAnything = true;
+        ++uploadedChunkCount;
         ++columnUploads;
         noteChunkReadyLatency(*chunk);
 
@@ -8579,6 +8797,7 @@ void ChunkManager::Impl::processPendingRelightRequests(int maxBatches)
             return;
         }
 
+        profilingCounters_.relightBatches.fetch_add(1, std::memory_order_relaxed);
         const auto* forceRemeshCoords = batch.forceRemeshCoords.empty() ? nullptr : &batch.forceRemeshCoords;
         relightChunkRegion(batch.minCoord, batch.maxCoord, forceRemeshCoords);
     }

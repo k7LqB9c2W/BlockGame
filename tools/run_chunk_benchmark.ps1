@@ -280,6 +280,10 @@ $acceptanceView = foreach ($scenario in $scenarioObjects) {
         chunk_ready_latency_median_ms = $scenario.stages.chunk_ready_latency.median_ms
         chunk_ready_latency_p95_ms = $scenario.stages.chunk_ready_latency.p95_ms
         relight_avg_ms = $scenario.stages.relight.avg_ms
+        frame_p95_ms = $scenario.frame.p95_ms
+        frame_max_ms = $scenario.frame.max_ms
+        spike_count_over_50_ms = if ($scenario.frame_spikes) { $scenario.frame_spikes.count_over_50_ms } else { $null }
+        spike_count_over_100_ms = if ($scenario.frame_spikes) { $scenario.frame_spikes.count_over_100_ms } else { $null }
         upload_backlog_avg = $scenario.queues.upload_backlog.avg_depth
         upload_backlog_p95 = $scenario.queues.upload_backlog.p95_depth
         climate_hit_rate = $scenario.cache.climate.hit_rate
@@ -344,6 +348,20 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.frame.avg_ms,
         $scenario.frame.p95_ms,
         $scenario.frame.avg_fps))
+    if ($scenario.frame_spikes) {
+        $summaryLines.Add(("  spikes over50={0} over100={1} streak33={2}" -f `
+            $scenario.frame_spikes.count_over_50_ms,
+            $scenario.frame_spikes.count_over_100_ms,
+            $scenario.frame_spikes.longest_streak_over_33_3_ms))
+        if ($scenario.frame_spikes.worst -and $scenario.frame_spikes.worst.Count -gt 0) {
+            $worst = $scenario.frame_spikes.worst[0]
+            $summaryLines.Add(("  worst_spike_ms={0:F2} source={1} update_ms={2:F2} present_ms={3:F2}" -f `
+                $worst.frame_ms,
+                $worst.suspected_source,
+                $worst.chunk_update_ms,
+                $worst.renderer_present_ms))
+        }
+    }
     $summaryLines.Add("")
 }
 

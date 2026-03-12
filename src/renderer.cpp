@@ -2278,6 +2278,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
 void Renderer::endFrame()
 {
     ensureFrameStarted();
+    const auto endFrameStart = std::chrono::steady_clock::now();
 
     if (sceneColor_ != nullptr && sceneColorState_ == D3D12_RESOURCE_STATE_RENDER_TARGET)
     {
@@ -2336,7 +2337,10 @@ void Renderer::endFrame()
 
     ID3D12CommandList* lists[] = {commandList_.Get()};
     commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
+    const auto presentStart = std::chrono::steady_clock::now();
     throwIfFailed(swapChain_->Present(1, 0), "failed to present swap chain");
+    profilingSnapshot_.presentMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStart).count();
 
     ++fenceValue_;
     throwIfFailed(commandQueue_->Signal(fence_.Get(), fenceValue_), "failed to signal frame fence");
@@ -2357,6 +2361,8 @@ void Renderer::endFrame()
 
     frameStarted_ = false;
     imguiFrameStarted_ = false;
+    profilingSnapshot_.endFrameMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - endFrameStart).count();
 }
 
 void Renderer::AtmosphereRenderer::ensureResources(Renderer& renderer)

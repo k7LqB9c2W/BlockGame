@@ -52,6 +52,7 @@
   `queues.*` are backlog depths sampled once per streaming update.
   `cache.climate.hit_rate` and `cache.surface.hit_rate` are cache efficiency for the terrain fragment caches.
   Percentiles are low-overhead histogram estimates, so values are best read as approximate bands rather than exact microsecond-precise timings.
+- After completing a user-requested task or answer, run `.\alert.ps1 -Task "<short task summary>"` so the user gets the phone notification that work is done.
 
 ## Visual Default Policy
 - The canonical BlockGame lighting target is the plain `Base Game` look, not the enhanced atmosphere mode.

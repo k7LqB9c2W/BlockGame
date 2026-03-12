@@ -337,6 +337,59 @@ struct BenchmarkConfig
     double verticalSpanBlocks{192.0};
 };
 
+struct BenchmarkSpikeRecord
+{
+    double elapsedSeconds{0.0};
+    double frameMs{0.0};
+    glm::vec3 cameraPosition{0.0f};
+    glm::ivec3 cameraChunk{0};
+    std::string phase{"steady_state"};
+    std::string blockingReason{"ready"};
+    std::string suspectedSource{"unknown"};
+    double chunkUpdateMs{0.0};
+    double chunkVerticalRadiusMs{0.0};
+    double chunkPriorityUpdateMs{0.0};
+    double chunkUploadBudgetMs{0.0};
+    double chunkMissingScanMs{0.0};
+    double chunkSchedulingMs{0.0};
+    double chunkEvictionMs{0.0};
+    double chunkRelightMs{0.0};
+    double chunkUploadMs{0.0};
+    double chunkPoolTrimMs{0.0};
+    double chunkStartupStateMs{0.0};
+    double chunkBenchmarkBookkeepingMs{0.0};
+    double pollEventsMs{0.0};
+    double buildRenderDataMs{0.0};
+    double renderWorldCpuMs{0.0};
+    double rendererWorldMs{0.0};
+    double rendererShadowMs{0.0};
+    double rendererSkyMs{0.0};
+    double rendererAtmosphereMs{0.0};
+    double rendererToneMapMs{0.0};
+    double rendererPresentMs{0.0};
+    double rendererEndFrameMs{0.0};
+    int generatedChunks{0};
+    int relitChunks{0};
+    int relightBatches{0};
+    int meshedChunks{0};
+    int uploadedChunks{0};
+    int jobBacklog{0};
+    int uploadBacklog{0};
+    int exactPendingChunks{0};
+    int missingChunks{0};
+};
+
+struct BenchmarkSpikeSummary
+{
+    std::size_t countOver16_7Ms{0};
+    std::size_t countOver33_3Ms{0};
+    std::size_t countOver50Ms{0};
+    std::size_t countOver100Ms{0};
+    std::size_t countOver250Ms{0};
+    std::size_t longestStreakOver33_3Ms{0};
+    std::vector<BenchmarkSpikeRecord> worstSpikes;
+};
+
 struct BenchmarkRuntimeState
 {
     bool started{false};
@@ -348,6 +401,8 @@ struct BenchmarkRuntimeState
     float finalYawDegrees{0.0f};
     float finalPitchDegrees{0.0f};
     std::vector<double> frameTimesMs;
+    std::size_t currentSpikeStreakOver33_3Ms{0};
+    BenchmarkSpikeSummary spikeSummary{};
 };
 
 struct BenchmarkFrameSummary
@@ -556,6 +611,253 @@ struct BenchmarkFrameSummary
     return summary;
 }
 
+[[nodiscard]] int benchmarkFloorDiv(int value, int divisor) noexcept
+{
+    int quotient = value / divisor;
+    const int remainder = value % divisor;
+    if (remainder != 0 && ((remainder < 0) != (divisor < 0)))
+    {
+        --quotient;
+    }
+    return quotient;
+}
+
+[[nodiscard]] glm::ivec3 benchmarkWorldToChunkCoords(const glm::vec3& worldPos) noexcept
+{
+    return {
+        benchmarkFloorDiv(static_cast<int>(std::floor(worldPos.x)), kChunkSizeX),
+        benchmarkFloorDiv(static_cast<int>(std::floor(worldPos.y)), kChunkSizeY),
+        benchmarkFloorDiv(static_cast<int>(std::floor(worldPos.z)), kChunkSizeZ)};
+}
+
+[[nodiscard]] double rendererWorkMs(const RendererProfilingSnapshot& snapshot) noexcept
+{
+    return snapshot.atmosphereLutMs +
+           snapshot.skyDrawMs +
+           snapshot.shadowDrawMs +
+           snapshot.worldDrawMs +
+           snapshot.toneMapMs +
+           snapshot.endFrameMs;
+}
+
+[[nodiscard]] std::string classifyBenchmarkSpikeSource(double frameMs,
+                                                       const ChunkProfilingSnapshot& chunkSnapshot,
+                                                       const RendererProfilingSnapshot& rendererSnapshot,
+                                                       double pollEventsMs,
+                                                       double buildRenderDataMs,
+                                                       double renderWorldCpuMs) noexcept
+{
+    const double renderMs = rendererWorkMs(rendererSnapshot);
+    const double updateMs = chunkSnapshot.updateMsLastFrame;
+    const double verticalRadiusMs = chunkSnapshot.verticalRadiusMsLastFrame;
+    const double priorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
+    const double uploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
+    const double missingScanMs = chunkSnapshot.missingScanMsLastFrame;
+    const double schedulingMs = chunkSnapshot.schedulingMsLastFrame;
+    const double evictionMs = chunkSnapshot.evictionMsLastFrame;
+    const double relightMs = chunkSnapshot.relightMsLastFrame;
+    const double presentMs = rendererSnapshot.presentMs;
+    const double uploadMs = chunkSnapshot.uploadMsLastFrame;
+    const double poolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
+    const double startupStateMs = chunkSnapshot.startupStateMsLastFrame;
+    const double benchmarkBookkeepingMs = chunkSnapshot.benchmarkBookkeepingMsLastFrame;
+
+    if (pollEventsMs >= 25.0 && pollEventsMs >= frameMs * 0.35)
+    {
+        return "poll_events";
+    }
+    if (buildRenderDataMs >= 25.0 && buildRenderDataMs >= frameMs * 0.35)
+    {
+        return "build_render_data";
+    }
+    if (renderWorldCpuMs >= 25.0 && renderWorldCpuMs >= frameMs * 0.35)
+    {
+        return "render_world_cpu";
+    }
+    if (presentMs >= 25.0 && presentMs >= frameMs * 0.35)
+    {
+        return "present_wait";
+    }
+    if (updateMs >= 25.0 && updateMs >= renderMs * 1.25)
+    {
+        if (missingScanMs >= 10.0 && missingScanMs >= updateMs * 0.35)
+        {
+            return "chunk_missing_scan";
+        }
+        if (verticalRadiusMs >= 10.0 && verticalRadiusMs >= updateMs * 0.35)
+        {
+            return "chunk_vertical_radius";
+        }
+        if (priorityUpdateMs >= 10.0 && priorityUpdateMs >= updateMs * 0.35)
+        {
+            return "chunk_priority_update";
+        }
+        if (uploadBudgetMs >= 10.0 && uploadBudgetMs >= updateMs * 0.35)
+        {
+            return "chunk_upload_budget";
+        }
+        if (schedulingMs >= 10.0 && schedulingMs >= updateMs * 0.35)
+        {
+            return "chunk_scheduling";
+        }
+        if (evictionMs >= 10.0 && evictionMs >= updateMs * 0.35)
+        {
+            return "chunk_eviction";
+        }
+        if (relightMs >= 5.0 && relightMs >= updateMs * 0.2)
+        {
+            return "chunk_main_thread_relight";
+        }
+        if (uploadMs >= 6.0 && uploadMs >= updateMs * 0.25)
+        {
+            return "chunk_upload";
+        }
+        if (poolTrimMs >= 6.0 && poolTrimMs >= updateMs * 0.25)
+        {
+            return "chunk_pool_trim";
+        }
+        if (startupStateMs >= 6.0 && startupStateMs >= updateMs * 0.25)
+        {
+            return "chunk_startup_state";
+        }
+        if (benchmarkBookkeepingMs >= 6.0 && benchmarkBookkeepingMs >= updateMs * 0.25)
+        {
+            return "chunk_benchmark_bookkeeping";
+        }
+        if (chunkSnapshot.relightBatches > 0 || chunkSnapshot.relitChunks > 0)
+        {
+            return "chunk_update_relight";
+        }
+        if (chunkSnapshot.generatedChunks > 0 || chunkSnapshot.meshedChunks > 0)
+        {
+            return "chunk_update_streaming";
+        }
+        return "chunk_update";
+    }
+    if (renderMs >= 20.0 && renderMs >= frameMs * 0.35)
+    {
+        if (rendererSnapshot.shadowDrawMs >= rendererSnapshot.worldDrawMs &&
+            rendererSnapshot.shadowDrawMs >= rendererSnapshot.skyDrawMs)
+        {
+            return "renderer_shadow";
+        }
+        if (rendererSnapshot.worldDrawMs >= rendererSnapshot.skyDrawMs)
+        {
+            return "renderer_world";
+        }
+        return "renderer_sky";
+    }
+    if (chunkSnapshot.generatedChunks > 0 || chunkSnapshot.meshedChunks > 0 || chunkSnapshot.uploadedChunks > 0)
+    {
+        return "streaming_pressure";
+    }
+    return "unknown";
+}
+
+void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
+                          double frameMs,
+                          const Camera& camera,
+                          const ChunkProfilingSnapshot& chunkSnapshot,
+                          const RendererProfilingSnapshot& rendererSnapshot,
+                          const StreamingStatusSnapshot& streamingStatus,
+                          double pollEventsMs,
+                          double buildRenderDataMs,
+                          double renderWorldCpuMs)
+{
+    if (frameMs > 16.7)
+    {
+        ++runtimeState.spikeSummary.countOver16_7Ms;
+    }
+    if (frameMs > 33.3)
+    {
+        ++runtimeState.spikeSummary.countOver33_3Ms;
+        ++runtimeState.currentSpikeStreakOver33_3Ms;
+        runtimeState.spikeSummary.longestStreakOver33_3Ms =
+            std::max(runtimeState.spikeSummary.longestStreakOver33_3Ms,
+                     runtimeState.currentSpikeStreakOver33_3Ms);
+    }
+    else
+    {
+        runtimeState.currentSpikeStreakOver33_3Ms = 0;
+    }
+    if (frameMs > 50.0)
+    {
+        ++runtimeState.spikeSummary.countOver50Ms;
+    }
+    if (frameMs > 100.0)
+    {
+        ++runtimeState.spikeSummary.countOver100Ms;
+    }
+    if (frameMs > 250.0)
+    {
+        ++runtimeState.spikeSummary.countOver250Ms;
+    }
+
+    constexpr std::size_t kMaxStoredSpikes = 12;
+    if (frameMs <= 50.0)
+    {
+        return;
+    }
+
+    BenchmarkSpikeRecord record{};
+    record.elapsedSeconds = runtimeState.elapsedSeconds;
+    record.frameMs = frameMs;
+    record.cameraPosition = camera.position;
+    record.cameraChunk = benchmarkWorldToChunkCoords(camera.position);
+    record.phase = streamingPhaseName(streamingStatus.phase);
+    record.blockingReason = streamingStatus.blockingReason ? streamingStatus.blockingReason : "ready";
+    record.suspectedSource = classifyBenchmarkSpikeSource(frameMs,
+                                                          chunkSnapshot,
+                                                          rendererSnapshot,
+                                                          pollEventsMs,
+                                                          buildRenderDataMs,
+                                                          renderWorldCpuMs);
+    record.chunkUpdateMs = chunkSnapshot.updateMsLastFrame;
+    record.chunkVerticalRadiusMs = chunkSnapshot.verticalRadiusMsLastFrame;
+    record.chunkPriorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
+    record.chunkUploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
+    record.chunkMissingScanMs = chunkSnapshot.missingScanMsLastFrame;
+    record.chunkSchedulingMs = chunkSnapshot.schedulingMsLastFrame;
+    record.chunkEvictionMs = chunkSnapshot.evictionMsLastFrame;
+    record.chunkRelightMs = chunkSnapshot.relightMsLastFrame;
+    record.chunkUploadMs = chunkSnapshot.uploadMsLastFrame;
+    record.chunkPoolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
+    record.chunkStartupStateMs = chunkSnapshot.startupStateMsLastFrame;
+    record.chunkBenchmarkBookkeepingMs = chunkSnapshot.benchmarkBookkeepingMsLastFrame;
+    record.pollEventsMs = pollEventsMs;
+    record.buildRenderDataMs = buildRenderDataMs;
+    record.renderWorldCpuMs = renderWorldCpuMs;
+    record.rendererWorldMs = rendererSnapshot.worldDrawMs;
+    record.rendererShadowMs = rendererSnapshot.shadowDrawMs;
+    record.rendererSkyMs = rendererSnapshot.skyDrawMs;
+    record.rendererAtmosphereMs = rendererSnapshot.atmosphereLutMs;
+    record.rendererToneMapMs = rendererSnapshot.toneMapMs;
+    record.rendererPresentMs = rendererSnapshot.presentMs;
+    record.rendererEndFrameMs = rendererSnapshot.endFrameMs;
+    record.generatedChunks = chunkSnapshot.generatedChunks;
+    record.relitChunks = chunkSnapshot.relitChunks;
+    record.relightBatches = chunkSnapshot.relightBatches;
+    record.meshedChunks = chunkSnapshot.meshedChunks;
+    record.uploadedChunks = chunkSnapshot.uploadedChunks;
+    record.jobBacklog = chunkSnapshot.jobQueueDepth;
+    record.uploadBacklog = chunkSnapshot.uploadQueueDepth;
+    record.exactPendingChunks = chunkSnapshot.exactChunksPending;
+    record.missingChunks = chunkSnapshot.missingChunks;
+
+    std::vector<BenchmarkSpikeRecord>& spikes = runtimeState.spikeSummary.worstSpikes;
+    spikes.push_back(std::move(record));
+    std::sort(spikes.begin(),
+              spikes.end(),
+              [](const BenchmarkSpikeRecord& lhs, const BenchmarkSpikeRecord& rhs)
+              {
+                  return lhs.frameMs > rhs.frameMs;
+              });
+    if (spikes.size() > kMaxStoredSpikes)
+    {
+        spikes.resize(kMaxStoredSpikes);
+    }
+}
+
 [[nodiscard]] glm::vec3 benchmarkDirectionForYaw(float yawDegrees) noexcept
 {
     const float radians = glm::radians(yawDegrees);
@@ -687,6 +989,11 @@ void writeVec3Json(std::ostream& out, const glm::vec3& value)
     out << '[' << value.x << ',' << value.y << ',' << value.z << ']';
 }
 
+void writeIvec3Json(std::ostream& out, const glm::ivec3& value)
+{
+    out << '[' << value.x << ',' << value.y << ',' << value.z << ']';
+}
+
 void writeStageStatsJson(std::ostream& out, const BenchmarkStageStats& stats)
 {
     out << "{"
@@ -719,6 +1026,73 @@ void writeCacheStatsJson(std::ostream& out, const BenchmarkCacheStats& stats)
         << ",\"fills\":" << stats.fills
         << ",\"hit_rate\":" << stats.hitRate
         << "}";
+}
+
+void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summary)
+{
+    out << "{"
+        << "\"count_over_16_7_ms\":" << summary.countOver16_7Ms
+        << ",\"count_over_33_3_ms\":" << summary.countOver33_3Ms
+        << ",\"count_over_50_ms\":" << summary.countOver50Ms
+        << ",\"count_over_100_ms\":" << summary.countOver100Ms
+        << ",\"count_over_250_ms\":" << summary.countOver250Ms
+        << ",\"longest_streak_over_33_3_ms\":" << summary.longestStreakOver33_3Ms
+        << ",\"worst\":[";
+    for (std::size_t i = 0; i < summary.worstSpikes.size(); ++i)
+    {
+        if (i != 0)
+        {
+            out << ',';
+        }
+
+        const BenchmarkSpikeRecord& spike = summary.worstSpikes[i];
+        out << "{"
+            << "\"elapsed_s\":" << spike.elapsedSeconds
+            << ",\"frame_ms\":" << spike.frameMs
+            << ",\"camera\":";
+        writeVec3Json(out, spike.cameraPosition);
+        out << ",\"camera_chunk\":";
+        writeIvec3Json(out, spike.cameraChunk);
+        out << ",\"phase\":";
+        writeJsonEscaped(out, spike.phase);
+        out << ",\"blocking_reason\":";
+        writeJsonEscaped(out, spike.blockingReason);
+        out << ",\"suspected_source\":";
+        writeJsonEscaped(out, spike.suspectedSource);
+        out << ",\"chunk_update_ms\":" << spike.chunkUpdateMs
+            << ",\"chunk_vertical_radius_ms\":" << spike.chunkVerticalRadiusMs
+            << ",\"chunk_priority_update_ms\":" << spike.chunkPriorityUpdateMs
+            << ",\"chunk_upload_budget_ms\":" << spike.chunkUploadBudgetMs
+            << ",\"chunk_missing_scan_ms\":" << spike.chunkMissingScanMs
+            << ",\"chunk_scheduling_ms\":" << spike.chunkSchedulingMs
+            << ",\"chunk_eviction_ms\":" << spike.chunkEvictionMs
+            << ",\"chunk_relight_ms\":" << spike.chunkRelightMs
+            << ",\"chunk_upload_ms\":" << spike.chunkUploadMs
+            << ",\"chunk_pool_trim_ms\":" << spike.chunkPoolTrimMs
+            << ",\"chunk_startup_state_ms\":" << spike.chunkStartupStateMs
+            << ",\"chunk_benchmark_bookkeeping_ms\":" << spike.chunkBenchmarkBookkeepingMs
+            << ",\"poll_events_ms\":" << spike.pollEventsMs
+            << ",\"build_render_data_ms\":" << spike.buildRenderDataMs
+            << ",\"render_world_cpu_ms\":" << spike.renderWorldCpuMs
+            << ",\"renderer_world_ms\":" << spike.rendererWorldMs
+            << ",\"renderer_shadow_ms\":" << spike.rendererShadowMs
+            << ",\"renderer_sky_ms\":" << spike.rendererSkyMs
+            << ",\"renderer_atmosphere_ms\":" << spike.rendererAtmosphereMs
+            << ",\"renderer_tonemap_ms\":" << spike.rendererToneMapMs
+            << ",\"renderer_present_ms\":" << spike.rendererPresentMs
+            << ",\"renderer_end_frame_ms\":" << spike.rendererEndFrameMs
+            << ",\"generated_this_frame\":" << spike.generatedChunks
+            << ",\"relit_this_frame\":" << spike.relitChunks
+            << ",\"relight_batches_this_frame\":" << spike.relightBatches
+            << ",\"meshed_this_frame\":" << spike.meshedChunks
+            << ",\"uploaded_this_frame\":" << spike.uploadedChunks
+            << ",\"job_backlog\":" << spike.jobBacklog
+            << ",\"upload_backlog\":" << spike.uploadBacklog
+            << ",\"exact_pending_chunks\":" << spike.exactPendingChunks
+            << ",\"missing_chunks\":" << spike.missingChunks
+            << "}";
+    }
+    out << "]}";
 }
 
 bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
@@ -783,6 +1157,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"max_ms\":" << frameSummary.maxMs
         << ",\"avg_fps\":" << frameSummary.averageFps
         << "}";
+    out << ",\"frame_spikes\":";
+    writeSpikeSummaryJson(out, runtimeState.spikeSummary);
     out << ",\"throughput\":{"
         << "\"generated_chunks\":" << report.generatedChunks
         << ",\"meshed_chunks\":" << report.meshedChunks
@@ -1929,6 +2305,8 @@ int runGame()
         benchmarkState.started = true;
         benchmarkState.scenarioStartPosition = benchmarkState.spawnPosition;
         benchmarkState.frameTimesMs.clear();
+        benchmarkState.currentSpikeStreakOver33_3Ms = 0;
+        benchmarkState.spikeSummary = BenchmarkSpikeSummary{};
     }
     chunkManager.beginSpawnPreload(camera.position);
 
@@ -1953,9 +2331,14 @@ int runGame()
 
     while (!glfwWindowShouldClose(window))
     {
+        const auto frameCpuStart = std::chrono::steady_clock::now();
+        double pollEventsMs = 0.0;
+        double buildRenderDataMs = 0.0;
+        double renderWorldCpuMs = 0.0;
         bool benchmarkRequestClose = false;
         const double currentTime = glfwGetTime();
-        double frameTime = currentTime - previousTime;
+        const double rawFrameTime = currentTime - previousTime;
+        double frameTime = rawFrameTime;
         previousTime = currentTime;
         frameTime = std::min(frameTime, 0.25);
         accumulator += frameTime;
@@ -1972,7 +2355,7 @@ int runGame()
         }
         profilingOverlayTimer += frameTime;
 
-        if (profilingOverlayTimer >= 1.0)
+        if (!benchmarkConfig.enabled && profilingOverlayTimer >= 1.0)
         {
             ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
             const RendererProfilingSnapshot rendererSnapshot = renderer.profilingSnapshot();
@@ -2092,7 +2475,10 @@ int runGame()
             profilingOverlayTimer = 0.0;
         }
 
+        const auto pollEventsStart = std::chrono::steady_clock::now();
         glfwPollEvents();
+        pollEventsMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pollEventsStart).count();
 
         bool f1CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS);
         bool f1JustPressed = f1CurrentlyPressed && !inputContext.f1Pressed;
@@ -2169,13 +2555,14 @@ int runGame()
                 benchmarkState.started = true;
                 benchmarkState.elapsedSeconds = 0.0;
                 benchmarkState.frameTimesMs.clear();
+                benchmarkState.currentSpikeStreakOver33_3Ms = 0;
+                benchmarkState.spikeSummary = BenchmarkSpikeSummary{};
                 initializeBenchmarkCamera(camera, benchmarkConfig, benchmarkState);
             }
 
             if (benchmarkState.started && !benchmarkState.completed)
             {
                 benchmarkState.elapsedSeconds += frameTime;
-                benchmarkState.frameTimesMs.push_back(frameTime * 1000.0);
 
                 if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload)
                 {
@@ -2511,8 +2898,14 @@ int runGame()
                                       1.0f));
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
         {
+            const auto buildRenderDataStart = std::chrono::steady_clock::now();
             const WorldRenderData renderData = chunkManager.buildRenderData(frustum);
+            buildRenderDataMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - buildRenderDataStart).count();
+            const auto renderWorldStart = std::chrono::steady_clock::now();
             renderer.renderWorld(renderData, view, projection, camera.position, blockAtlas, environment);
+            renderWorldCpuMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - renderWorldStart).count();
         }
         renderer.beginImGuiFrame();
 
@@ -3132,6 +3525,26 @@ int runGame()
         }
 
         renderer.endFrame();
+
+        if (benchmarkConfig.enabled && benchmarkState.started)
+        {
+            const double frameCpuMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - frameCpuStart).count();
+            benchmarkState.frameTimesMs.push_back(frameCpuMs);
+
+            const ChunkProfilingSnapshot frameChunkSnapshot = chunkManager.sampleProfilingSnapshot();
+            const RendererProfilingSnapshot frameRendererSnapshot = renderer.profilingSnapshot();
+            const StreamingStatusSnapshot frameStreamingStatus = chunkManager.streamingStatusSnapshot();
+            recordBenchmarkSpike(benchmarkState,
+                                 frameCpuMs,
+                                 camera,
+                                 frameChunkSnapshot,
+                                 frameRendererSnapshot,
+                                 frameStreamingStatus,
+                                 pollEventsMs,
+                                 buildRenderDataMs,
+                                 renderWorldCpuMs);
+        }
 
         if (benchmarkRequestClose)
         {

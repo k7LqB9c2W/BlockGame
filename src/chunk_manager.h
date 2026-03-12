@@ -95,7 +95,7 @@ inline constexpr VerticalStreamingConfig kVerticalStreamingConfig{};
 inline constexpr std::size_t kUploadBudgetBytesPerFrame = 64ull * 1024ull * 1024ull;
 
 inline constexpr std::size_t kMinBufferSizeBytes = 4ull * 1024ull;
-inline constexpr std::size_t kUploadQueueScanLimit = 128ull;
+inline constexpr std::size_t kUploadQueueScanLimit = 24ull;
 inline constexpr int kBiomeSizeInChunks = 30; // Controls the width/height of each biome in chunks.
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept;
@@ -192,12 +192,24 @@ struct ChunkProfilingSnapshot
     double averageRelightMs{0.0};
     double averageMeshingMs{0.0};
     double updateMsLastFrame{0.0};
+    double verticalRadiusMsLastFrame{0.0};
+    double priorityUpdateMsLastFrame{0.0};
+    double uploadBudgetMsLastFrame{0.0};
+    double missingScanMsLastFrame{0.0};
+    double schedulingMsLastFrame{0.0};
+    double evictionMsLastFrame{0.0};
+    double relightMsLastFrame{0.0};
     double uploadMsLastFrame{0.0};
+    double poolTrimMsLastFrame{0.0};
+    double startupStateMsLastFrame{0.0};
+    double benchmarkBookkeepingMsLastFrame{0.0};
     double farBuildMsAverage{0.0};
     double farCollectMsLastFrame{0.0};
     double farUploadMsLastFrame{0.0};
     std::size_t uploadedBytes{0};
     int generatedChunks{0};
+    int relitChunks{0};
+    int relightBatches{0};
     int meshedChunks{0};
     int uploadedChunks{0};
     int throttledUploads{0};
@@ -215,6 +227,8 @@ struct ChunkProfilingSnapshot
     std::size_t uploadBudgetBytes{0};
     int uploadColumnLimit{0};
     int pendingUploadChunks{0};
+    int jobQueueDepth{0};
+    int uploadQueueDepth{0};
     int exactChunksReady{0};
     int exactChunksPending{0};
     std::size_t pooledChunkCount{0};

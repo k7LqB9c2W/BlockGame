@@ -113,6 +113,8 @@ struct RendererProfilingSnapshot
     double shadowDrawMs{0.0};
     double worldDrawMs{0.0};
     double toneMapMs{0.0};
+    double presentMs{0.0};
+    double endFrameMs{0.0};
 };
 
 class Renderer

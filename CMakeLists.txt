@@ -64,6 +64,27 @@ target_compile_options(blockgame
         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
 )
 
+if (MSVC)
+    target_compile_options(blockgame
+        PRIVATE
+            $<$<CONFIG:Release>:/Zi>
+            $<$<CONFIG:RelWithDebInfo>:/Zi>
+    )
+
+    target_link_options(blockgame
+        PRIVATE
+            $<$<CONFIG:Release>:/DEBUG:FULL /OPT:REF /OPT:ICF>
+            $<$<CONFIG:RelWithDebInfo>:/DEBUG:FULL>
+    )
+
+    set_target_properties(blockgame PROPERTIES
+        PDB_NAME "blockgame"
+        COMPILE_PDB_NAME "blockgame"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+        COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    )
+endif()
+
 if (NOT WIN32)
     message(FATAL_ERROR "The D3D12 port is Windows-only.")
 endif()
@@ -82,6 +103,7 @@ target_link_libraries(blockgame
         d3d12
         dxgi
         dxguid
+        Dbghelp
         d3dcompiler
         user32
         gdi32

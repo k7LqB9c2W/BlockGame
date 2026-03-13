@@ -41,6 +41,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
@@ -61,11 +62,34 @@ namespace
 {
 std::mutex gCrashLogMutex;
 std::filesystem::path gCrashLogPath;
+std::filesystem::path gCrashDumpPath;
+std::filesystem::path gHangDumpPath;
+std::mutex gSymbolMutex;
+std::mutex gDiagnosticStateMutex;
+std::deque<std::string> gDiagnosticBreadcrumbs;
+std::string gDiagnosticPhase{"startup"};
+std::atomic<std::uint64_t> gDiagnosticHeartbeatMicros{0};
+std::atomic<std::uint64_t> gDiagnosticFrameCounter{0};
+std::atomic<bool> gSymbolsReady{false};
+std::atomic<bool> gHangWatchdogStop{false};
+std::atomic<bool> gHangWatchdogDumped{false};
+std::thread gHangWatchdogThread;
+constexpr std::size_t kMaxDiagnosticBreadcrumbs = 64;
+constexpr auto kHangWatchdogTimeout = std::chrono::seconds(15);
 
 void appendCrashLog(std::string message);
+[[nodiscard]] std::uint64_t steadyMicrosNow() noexcept;
+void noteDiagnosticPhase(std::string_view phase, bool advanceFrame = false);
+void appendDiagnosticSnapshot(const char* reason);
+void initializeSymbolHandler(const std::filesystem::path& symbolRoot);
+void shutdownSymbolHandler() noexcept;
+void startHangWatchdog();
+void stopHangWatchdog() noexcept;
+void shutdownCrashLogging() noexcept;
 #ifdef _WIN32
 void appendStackTrace(EXCEPTION_POINTERS* exceptionPointers = nullptr);
 void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers);
+void writeHangMiniDump();
 int __cdecl crtReportHook(int reportType, char* message, int* returnValue);
 #endif
 
@@ -99,6 +123,7 @@ void crashSignalHandler(int signalValue)
 #endif
     }
     appendCrashLog(std::string("signal: ") + name);
+    appendDiagnosticSnapshot("signal");
 #ifdef _WIN32
     appendStackTrace();
     writeMiniDump(nullptr);
@@ -136,79 +161,196 @@ void appendCrashLog(std::string message)
     out.flush();
 }
 
-#ifdef _WIN32
-void appendStackTrace(EXCEPTION_POINTERS* exceptionPointers)
+[[nodiscard]] std::uint64_t steadyMicrosNow() noexcept
 {
-    constexpr USHORT kMaxFrames = 64;
-    void* stack[kMaxFrames]{};
-    const USHORT captured = CaptureStackBackTrace(0, kMaxFrames, stack, nullptr);
-
-    std::ostringstream oss;
-    oss << "stack:";
-    for (USHORT i = 0; i < captured; ++i)
-    {
-        const auto address = reinterpret_cast<std::uintptr_t>(stack[i]);
-        oss << "\n  [" << i << "] 0x" << std::hex << address << std::dec;
-    }
-
-    if (exceptionPointers && exceptionPointers->ExceptionRecord)
-    {
-        oss << "\n  exception code: 0x" << std::hex
-            << static_cast<std::uint32_t>(exceptionPointers->ExceptionRecord->ExceptionCode) << std::dec;
-    }
-
-    appendCrashLog(oss.str());
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers)
+void noteDiagnosticPhase(std::string_view phase, bool advanceFrame)
 {
-    std::filesystem::path dumpPath;
-    if (!gCrashLogPath.empty())
+    if (advanceFrame)
     {
-        dumpPath = gCrashLogPath.parent_path() / "blockgame_crash.dmp";
+        gDiagnosticFrameCounter.fetch_add(1, std::memory_order_relaxed);
     }
-    else
+
     {
-        std::error_code ec;
-        dumpPath = std::filesystem::current_path(ec);
-        if (ec)
+        std::lock_guard<std::mutex> lock(gDiagnosticStateMutex);
+        if (gDiagnosticPhase != phase)
         {
-            return;
+            gDiagnosticPhase.assign(phase.data(), phase.size());
+            gDiagnosticBreadcrumbs.emplace_back(gDiagnosticPhase);
+            if (gDiagnosticBreadcrumbs.size() > kMaxDiagnosticBreadcrumbs)
+            {
+                gDiagnosticBreadcrumbs.pop_front();
+            }
         }
-        dumpPath /= "blockgame_crash.dmp";
     }
 
-    HMODULE dbgHelp = LoadLibraryW(L"DbgHelp.dll");
-    if (!dbgHelp)
+    gDiagnosticHeartbeatMicros.store(steadyMicrosNow(), std::memory_order_relaxed);
+}
+
+void appendDiagnosticSnapshot(const char* reason)
+{
+    std::string phase;
+    std::deque<std::string> breadcrumbs;
     {
-        appendCrashLog("minidump: failed to load DbgHelp.dll");
+        std::lock_guard<std::mutex> lock(gDiagnosticStateMutex);
+        phase = gDiagnosticPhase;
+        breadcrumbs = gDiagnosticBreadcrumbs;
+    }
+
+    const std::uint64_t lastHeartbeatMicros = gDiagnosticHeartbeatMicros.load(std::memory_order_relaxed);
+    const std::uint64_t nowMicros = steadyMicrosNow();
+    const double heartbeatAgeMs =
+        (lastHeartbeatMicros == 0 || nowMicros < lastHeartbeatMicros)
+            ? 0.0
+            : static_cast<double>(nowMicros - lastHeartbeatMicros) / 1000.0;
+
+    std::ostringstream summary;
+    summary.setf(std::ios::fixed, std::ios::floatfield);
+    summary << std::setprecision(2)
+            << "diagnostics: " << reason
+            << " | phase=" << phase
+            << " | frame=" << gDiagnosticFrameCounter.load(std::memory_order_relaxed)
+            << " | heartbeat_age_ms=" << heartbeatAgeMs;
+    appendCrashLog(summary.str());
+
+    if (!breadcrumbs.empty())
+    {
+        std::ostringstream trail;
+        trail << "breadcrumbs:";
+        std::size_t index = 0;
+        for (const std::string& crumb : breadcrumbs)
+        {
+            trail << "\n  [" << index++ << "] " << crumb;
+        }
+        appendCrashLog(trail.str());
+    }
+}
+
+#ifdef _WIN32
+[[nodiscard]] std::string symbolizeAddress(std::uintptr_t address)
+{
+    std::ostringstream oss;
+    oss << "0x" << std::hex << address << std::dec;
+
+    if (!gSymbolsReady.load(std::memory_order_acquire))
+    {
+        return oss.str();
+    }
+
+    std::lock_guard<std::mutex> lock(gSymbolMutex);
+
+    HANDLE process = GetCurrentProcess();
+    const DWORD64 address64 = static_cast<DWORD64>(address);
+    const DWORD64 moduleBase = SymGetModuleBase64(process, address64);
+
+    IMAGEHLP_MODULE64 moduleInfo{};
+    moduleInfo.SizeOfStruct = sizeof(moduleInfo);
+    if (moduleBase != 0 && SymGetModuleInfo64(process, address64, &moduleInfo))
+    {
+        const char* moduleName = moduleInfo.ModuleName[0] != '\0' ? moduleInfo.ModuleName : moduleInfo.ImageName;
+        if (moduleName != nullptr && moduleName[0] != '\0')
+        {
+            oss << " " << std::filesystem::path(moduleName).filename().string();
+        }
+    }
+
+    std::array<std::byte, sizeof(SYMBOL_INFO) + MAX_SYM_NAME> symbolStorage{};
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(symbolStorage.data());
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = MAX_SYM_NAME;
+
+    DWORD64 displacement = 0;
+    if (SymFromAddr(process, address64, &displacement, symbol))
+    {
+        oss << "!" << symbol->Name;
+        if (displacement != 0)
+        {
+            oss << "+0x" << std::hex << displacement << std::dec;
+        }
+    }
+
+    if (moduleBase != 0)
+    {
+        oss << " [rva 0x" << std::hex << (address64 - moduleBase) << std::dec << "]";
+    }
+
+    IMAGEHLP_LINE64 lineInfo{};
+    lineInfo.SizeOfStruct = sizeof(lineInfo);
+    DWORD lineDisplacement = 0;
+    if (SymGetLineFromAddr64(process, address64, &lineDisplacement, &lineInfo))
+    {
+        oss << " at " << lineInfo.FileName << ":" << lineInfo.LineNumber;
+        if (lineDisplacement != 0)
+        {
+            oss << "+0x" << std::hex << lineDisplacement << std::dec;
+        }
+    }
+
+    return oss.str();
+}
+
+void initializeSymbolHandler(const std::filesystem::path& symbolRoot)
+{
+    std::lock_guard<std::mutex> lock(gSymbolMutex);
+    if (gSymbolsReady.load(std::memory_order_acquire))
+    {
         return;
     }
 
-    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
-                                              CONST PMINIDUMP_EXCEPTION_INFORMATION,
-                                              CONST PMINIDUMP_USER_STREAM_INFORMATION,
-                                              CONST PMINIDUMP_CALLBACK_INFORMATION);
-
-    auto miniDumpWriteDump = reinterpret_cast<MiniDumpWriteDumpFn>(GetProcAddress(dbgHelp, "MiniDumpWriteDump"));
-    if (!miniDumpWriteDump)
+    std::string searchPath = symbolRoot.string();
+    const std::filesystem::path parent = symbolRoot.parent_path();
+    if (!parent.empty())
     {
-        appendCrashLog("minidump: MiniDumpWriteDump not available");
-        FreeLibrary(dbgHelp);
+        searchPath += ';';
+        searchPath += parent.string();
+    }
+
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+    if (!SymInitialize(GetCurrentProcess(), searchPath.c_str(), TRUE))
+    {
+        appendCrashLog("symbols: SymInitialize failed error=" + std::to_string(GetLastError()));
         return;
+    }
+
+    gSymbolsReady.store(true, std::memory_order_release);
+}
+
+void shutdownSymbolHandler() noexcept
+{
+    std::lock_guard<std::mutex> lock(gSymbolMutex);
+    if (!gSymbolsReady.exchange(false, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    SymCleanup(GetCurrentProcess());
+}
+
+void writeMiniDumpTo(const std::filesystem::path& dumpPath,
+                     EXCEPTION_POINTERS* exceptionPointers,
+                     const char* label)
+{
+    std::error_code ec;
+    const std::filesystem::path parentPath = dumpPath.parent_path();
+    if (!parentPath.empty())
+    {
+        std::filesystem::create_directories(parentPath, ec);
     }
 
     HANDLE file = CreateFileW(dumpPath.c_str(),
                               GENERIC_WRITE,
-                              FILE_SHARE_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
                               nullptr,
                               CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL,
                               nullptr);
     if (file == INVALID_HANDLE_VALUE)
     {
-        appendCrashLog("minidump: failed to create dump file");
-        FreeLibrary(dbgHelp);
+        appendCrashLog(std::string(label) + ": failed to create dump file error=" + std::to_string(GetLastError()));
         return;
     }
 
@@ -217,25 +359,132 @@ void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers)
     info.ExceptionPointers = exceptionPointers;
     info.ClientPointers = FALSE;
 
-    const MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory);
-    const BOOL dumpResult = miniDumpWriteDump(GetCurrentProcess(),
+    const MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(
+        MiniDumpWithDataSegs |
+        MiniDumpWithHandleData |
+        MiniDumpWithIndirectlyReferencedMemory |
+        MiniDumpScanMemory |
+        MiniDumpWithProcessThreadData |
+        MiniDumpWithThreadInfo |
+        MiniDumpWithUnloadedModules);
+
+    const BOOL dumpResult = MiniDumpWriteDump(GetCurrentProcess(),
                                               GetCurrentProcessId(),
                                               file,
                                               dumpType,
                                               exceptionPointers ? &info : nullptr,
                                               nullptr,
                                               nullptr);
+    const DWORD dumpError = dumpResult ? ERROR_SUCCESS : GetLastError();
     CloseHandle(file);
-    FreeLibrary(dbgHelp);
 
-    appendCrashLog(dumpResult ? "minidump: written to blockgame_crash.dmp"
-                              : "minidump: MiniDumpWriteDump failed");
+    if (dumpResult)
+    {
+        appendCrashLog(std::string(label) + ": written to " + dumpPath.filename().string());
+    }
+    else
+    {
+        appendCrashLog(std::string(label) + ": MiniDumpWriteDump failed error=" + std::to_string(dumpError));
+    }
+}
+
+void writeHangMiniDump()
+{
+    const std::filesystem::path dumpPath =
+        gHangDumpPath.empty() ? std::filesystem::path("blockgame_hang.dmp") : gHangDumpPath;
+    writeMiniDumpTo(dumpPath, nullptr, "hang dump");
+}
+
+void startHangWatchdog()
+{
+    stopHangWatchdog();
+    gHangWatchdogStop.store(false, std::memory_order_release);
+    gHangWatchdogDumped.store(false, std::memory_order_release);
+    gDiagnosticHeartbeatMicros.store(steadyMicrosNow(), std::memory_order_relaxed);
+
+    gHangWatchdogThread = std::thread([]()
+    {
+        const std::uint64_t timeoutMicros = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(kHangWatchdogTimeout).count());
+        while (!gHangWatchdogStop.load(std::memory_order_acquire))
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            const std::uint64_t lastHeartbeatMicros = gDiagnosticHeartbeatMicros.load(std::memory_order_relaxed);
+            if (lastHeartbeatMicros == 0)
+            {
+                continue;
+            }
+
+            const std::uint64_t nowMicros = steadyMicrosNow();
+            if (nowMicros < lastHeartbeatMicros || (nowMicros - lastHeartbeatMicros) < timeoutMicros)
+            {
+                continue;
+            }
+
+            if (!gHangWatchdogDumped.exchange(true, std::memory_order_acq_rel))
+            {
+                appendDiagnosticSnapshot("hang watchdog timeout");
+                writeHangMiniDump();
+            }
+        }
+    });
+}
+
+void stopHangWatchdog() noexcept
+{
+    gHangWatchdogStop.store(true, std::memory_order_release);
+    if (gHangWatchdogThread.joinable())
+    {
+        gHangWatchdogThread.join();
+    }
+}
+#else
+void initializeSymbolHandler(const std::filesystem::path&) {}
+void shutdownSymbolHandler() noexcept {}
+void startHangWatchdog() {}
+void stopHangWatchdog() noexcept {}
+#endif
+
+#ifdef _WIN32
+void appendStackTrace(EXCEPTION_POINTERS* exceptionPointers)
+{
+    constexpr USHORT kMaxFrames = 64;
+    void* stack[kMaxFrames]{};
+    const USHORT captured = CaptureStackBackTrace(0, kMaxFrames, stack, nullptr);
+
+    std::ostringstream oss;
+    if (exceptionPointers && exceptionPointers->ExceptionRecord)
+    {
+        const auto exceptionCode =
+            static_cast<std::uint32_t>(exceptionPointers->ExceptionRecord->ExceptionCode);
+        const auto exceptionAddress = reinterpret_cast<std::uintptr_t>(
+            exceptionPointers->ExceptionRecord->ExceptionAddress);
+        oss << "exception: code=0x" << std::hex << exceptionCode << std::dec
+            << " address=" << symbolizeAddress(exceptionAddress) << '\n';
+    }
+
+    oss << "stack:";
+    for (USHORT i = 0; i < captured; ++i)
+    {
+        const auto address = reinterpret_cast<std::uintptr_t>(stack[i]);
+        oss << "\n  [" << i << "] " << symbolizeAddress(address);
+    }
+
+    appendCrashLog(oss.str());
+}
+
+void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers)
+{
+    const std::filesystem::path dumpPath =
+        gCrashDumpPath.empty() ? std::filesystem::path("blockgame_crash.dmp") : gCrashDumpPath;
+    writeMiniDumpTo(dumpPath, exceptionPointers, "minidump");
 }
 
 int __cdecl crtReportHook(int reportType, char* message, int*)
 {
     const char* text = message ? message : "<null>";
     appendCrashLog(std::string("CRT report[") + std::to_string(reportType) + "]: " + text);
+    appendDiagnosticSnapshot("crt report");
     return FALSE; // allow default processing
 }
 #endif
@@ -1738,11 +1987,17 @@ void applyCameraPose(Camera& camera,
 void initializeCrashLogging(const std::filesystem::path& logPath)
 {
     gCrashLogPath = logPath;
+    gCrashDumpPath = logPath.parent_path() / "blockgame_crash.dmp";
+    gHangDumpPath = logPath.parent_path() / "blockgame_hang.dmp";
 
     // Ensure the log file exists so later appends succeed even if the program dies immediately.
     {
         std::ofstream out(gCrashLogPath, std::ios::app);
     }
+
+    initializeSymbolHandler(logPath.parent_path());
+    noteDiagnosticPhase("startup/crash_logging");
+    startHangWatchdog();
 
     std::signal(SIGABRT, crashSignalHandler);
 #ifdef SIGSEGV
@@ -1780,6 +2035,7 @@ void initializeCrashLogging(const std::filesystem::path& logPath)
             appendCrashLog("terminate: no active exception");
         }
 
+        appendDiagnosticSnapshot("terminate");
 #ifdef _WIN32
         appendStackTrace();
         writeMiniDump(nullptr);
@@ -1793,6 +2049,7 @@ void initializeCrashLogging(const std::filesystem::path& logPath)
     SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* info) -> LONG
     {
         appendCrashLog("SEH crash");
+        appendDiagnosticSnapshot("seh");
         appendStackTrace(info);
         writeMiniDump(info);
         return EXCEPTION_EXECUTE_HANDLER;
@@ -1803,6 +2060,12 @@ void initializeCrashLogging(const std::filesystem::path& logPath)
     _set_abort_behavior(0, _CALL_REPORTFAULT);
 #endif
 #endif
+}
+
+void shutdownCrashLogging() noexcept
+{
+    stopHangWatchdog();
+    shutdownSymbolHandler();
 }
 
 bool applyRenderDistanceInput(ChunkManager& chunkManager, const std::string& input)
@@ -2210,10 +2473,12 @@ int runGame()
     glfwSetKeyCallback(window, keyCallback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     int exitCode = EXIT_SUCCESS;
+    noteDiagnosticPhase("startup/window_ready");
     {
     Renderer renderer;
     try
     {
+        noteDiagnosticPhase("startup/renderer_initialize");
         renderer.initialize(window, kInitialWidth, kInitialHeight);
     }
     catch (const std::exception& ex)
@@ -2312,7 +2577,9 @@ int runGame()
         return EXIT_FAILURE;
     }
 
+    {
     ChunkManager chunkManager(1337u);
+    noteDiagnosticPhase("startup/chunk_manager");
     chunkManager.initializeRendering(renderer.device());
     chunkManager.setBlockTextureAtlasConfig(BlockTextureAtlasConfig{
         blockAtlas.size,
@@ -2408,6 +2675,7 @@ int runGame()
 
     while (!glfwWindowShouldClose(window))
     {
+        noteDiagnosticPhase("frame/start", true);
         const auto frameCpuStart = std::chrono::steady_clock::now();
         double pollEventsMs = 0.0;
         double buildRenderDataMs = 0.0;
@@ -2432,6 +2700,7 @@ int runGame()
         }
         profilingOverlayTimer += frameTime;
 
+        noteDiagnosticPhase("frame/poll_events");
         if (!benchmarkConfig.enabled && profilingOverlayTimer >= 1.0)
         {
             ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
@@ -2559,6 +2828,7 @@ int runGame()
         glfwPollEvents();
         pollEventsMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pollEventsStart).count();
+        noteDiagnosticPhase("frame/input");
 
         bool f1CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS);
         bool f1JustPressed = f1CurrentlyPressed && !inputContext.f1Pressed;
@@ -2907,6 +3177,7 @@ int runGame()
         }
 
         chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
+        noteDiagnosticPhase("frame/chunk_update");
         chunkManager.update(camera.position, camera.front());
         renderer.setUploadSynchronization(chunkManager.uploadFence(), chunkManager.lastSubmittedUploadFenceValue());
 
@@ -2989,21 +3260,25 @@ int runGame()
         const bool nearHorizonView = std::abs(viewDirection.y) <= 0.08f;
         const bool lookingBelowHorizon = viewDirection.y < 0.0f;
 
+        noteDiagnosticPhase("frame/render_begin");
         renderer.beginFrame(glm::vec4(120.0f / 255.0f,
                                       167.0f / 255.0f,
                                       255.0f / 255.0f,
                                       1.0f));
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
         {
+            noteDiagnosticPhase("frame/build_render_data");
             const auto buildRenderDataStart = std::chrono::steady_clock::now();
             const WorldRenderData renderData = chunkManager.buildRenderData(frustum);
             buildRenderDataMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - buildRenderDataStart).count();
             const auto renderWorldStart = std::chrono::steady_clock::now();
+            noteDiagnosticPhase("frame/render_world");
             renderer.renderWorld(renderData, view, projection, camera.position, blockAtlas, environment);
             renderWorldCpuMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - renderWorldStart).count();
         }
+        noteDiagnosticPhase("frame/ui");
         renderer.beginImGuiFrame();
 
         const double currentFpsEstimate = (fpsFrameCount > 0 && fpsTimer > 0.0)
@@ -3657,7 +3932,9 @@ int runGame()
             drawCrosshairOverlay(framebufferWidth, framebufferHeight);
         }
 
+        noteDiagnosticPhase("frame/end_frame");
         renderer.endFrame();
+        noteDiagnosticPhase("frame/presented");
 
         if (benchmarkConfig.enabled && benchmarkState.started)
         {
@@ -3688,6 +3965,7 @@ int runGame()
 
         if (screenshotReproConfig.enabled && screenshotReproState.captureRequested)
         {
+            noteDiagnosticPhase("frame/request_close");
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
     }
@@ -3733,6 +4011,9 @@ int runGame()
         std::_Exit(exitCode);
     }
 
+    noteDiagnosticPhase("shutdown/chunk_manager");
+    }
+    noteDiagnosticPhase("shutdown/renderer");
     renderer.shutdown();
     }
     glfwDestroyWindow(window);
@@ -3792,9 +4073,10 @@ int main(int argc, char** argv)
 
     initializeCrashLogging(logPath);
 
+    int exitCode = EXIT_FAILURE;
     try
     {
-        return runGame();
+        exitCode = runGame();
     }
     catch (const std::exception& e)
     {
@@ -3807,5 +4089,6 @@ int main(int argc, char** argv)
         std::cerr << "Unhandled non-standard exception" << std::endl;
     }
 
-    return EXIT_FAILURE;
+    shutdownCrashLogging();
+    return exitCode;
 }

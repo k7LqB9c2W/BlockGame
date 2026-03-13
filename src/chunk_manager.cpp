@@ -3046,6 +3046,11 @@ public:
 
     ~FarTerrainManager()
     {
+        shutdown();
+    }
+
+    void shutdown()
+    {
         stopWorkers();
         clear();
         uploadContext_.shutdown();
@@ -6464,8 +6469,8 @@ ChunkManager::Impl::Impl(unsigned seed)
 ChunkManager::Impl::~Impl()
 {
     stopWorkerThreads();
+    farTerrainManager_.shutdown();
     clear();
-    farTerrainManager_.clear();
     destroyBufferPages();
     uploadContext_.shutdown();
 }

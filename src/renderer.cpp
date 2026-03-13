@@ -829,10 +829,15 @@ UINT64 Renderer::lastSubmittedFrameFenceValue() const noexcept
     return fenceValue_;
 }
 
-void Renderer::setUploadSynchronization(ID3D12Fence* uploadFence, UINT64 uploadFenceValue) noexcept
+void Renderer::setUploadSynchronization(ID3D12Fence* primaryUploadFence,
+                                        UINT64 primaryUploadFenceValue,
+                                        ID3D12Fence* secondaryUploadFence,
+                                        UINT64 secondaryUploadFenceValue) noexcept
 {
-    pendingUploadFence_ = uploadFence;
-    pendingUploadFenceValue_ = uploadFenceValue;
+    uploadSyncPoints_[0].fence = primaryUploadFence;
+    uploadSyncPoints_[0].value = primaryUploadFenceValue;
+    uploadSyncPoints_[1].fence = secondaryUploadFence;
+    uploadSyncPoints_[1].value = secondaryUploadFenceValue;
 }
 
 int Renderer::width() const noexcept
@@ -2232,7 +2237,12 @@ void Renderer::buildDepthPyramid()
     renderDebugLog("buildDepthPyramid: end");
 }
 
-void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch, const glm::mat4& viewProj)
+void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
+                                     const glm::mat4& viewProj,
+                                     D3D12_GPU_VIRTUAL_ADDRESS farConstantsGpuAddress,
+                                     D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                                     D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                                     D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv)
 {
     if (batch.gpuCullRecords.empty() ||
         !depthPyramid_ ||
@@ -2390,6 +2400,13 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch, const glm::m
                                             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     commandList_->ResourceBarrier(static_cast<UINT>(indirectBarriers.size()), indirectBarriers.data());
 
+    commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
+    commandList_->SetPipelineState(farPipelineState_.Get());
+    commandList_->SetGraphicsRootConstantBufferView(0, farConstantsGpuAddress);
+    commandList_->SetGraphicsRootDescriptorTable(1, atlasSrv);
+    commandList_->SetGraphicsRootDescriptorTable(2, aerialPerspectiveSrv);
+    commandList_->SetGraphicsRootDescriptorTable(3, shadowSrv);
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
     commandList_->IASetIndexBuffer(&batch.indexBufferView);
     renderDebugLog("renderFarBatchGpuCull: execute indirect");
@@ -2494,14 +2511,20 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         infoQueue_->ClearStoredMessages();
     }
 
-    if (pendingUploadFence_ != nullptr &&
-        pendingUploadFenceValue_ > consumedUploadFenceValue_ &&
-        pendingUploadFence_->GetCompletedValue() < pendingUploadFenceValue_)
+    for (UploadSyncPoint& syncPoint : uploadSyncPoints_)
     {
-        throwIfFailed(commandQueue_->Wait(pendingUploadFence_, pendingUploadFenceValue_),
-                      "failed to wait for chunk upload fence");
+        if (syncPoint.fence == nullptr || syncPoint.value <= syncPoint.consumedValue)
+        {
+            continue;
+        }
+
+        if (syncPoint.fence->GetCompletedValue() < syncPoint.value)
+        {
+            throwIfFailed(commandQueue_->Wait(syncPoint.fence, syncPoint.value),
+                          "failed to wait for upload fence");
+        }
+        syncPoint.consumedValue = std::max(syncPoint.consumedValue, syncPoint.value);
     }
-    consumedUploadFenceValue_ = std::max(consumedUploadFenceValue_, pendingUploadFenceValue_);
 
     const D3D12_RESOURCE_BARRIER backbufferBarrier =
         transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -2705,7 +2728,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         {
             if (!gpuFarCullDisabled && batch.supportsGpuCull && !batch.gpuCullRecords.empty())
             {
-                renderFarBatchGpuCull(batch, viewProj);
+                renderFarBatchGpuCull(batch,
+                                      viewProj,
+                                      farCb,
+                                      atlasTexture.srvGpu,
+                                      atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                                      shadowMapSrvGpu_);
                 continue;
             }
 

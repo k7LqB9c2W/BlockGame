@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
@@ -389,6 +390,8 @@ public:
     void setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue);
     [[nodiscard]] ID3D12Fence* uploadFence() const noexcept;
     [[nodiscard]] std::uint64_t lastSubmittedUploadFenceValue() const noexcept;
+    [[nodiscard]] ID3D12Fence* farUploadFence() const noexcept;
+    [[nodiscard]] std::uint64_t lastSubmittedFarUploadFenceValue() const noexcept;
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
@@ -437,6 +440,7 @@ public:
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
+    void writeLodDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const;
 
     ChunkProfilingSnapshot sampleProfilingSnapshot();
     void setBenchmarkMetricsEnabled(bool enabled) noexcept;

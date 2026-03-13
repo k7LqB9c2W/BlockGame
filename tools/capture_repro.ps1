@@ -14,6 +14,7 @@ param(
     [string]$Config = "Release",
     [string]$OutputPath = "artifacts\\repro_capture\\repro.bmp",
     [int]$SettleFrames = 20,
+    [int]$LodReadyTimeoutSeconds = 120,
     [double]$TimeOfDay,
     [int]$NearChunks,
     [int]$FarBlocks,
@@ -116,6 +117,8 @@ $previousValues = @{
     BLOCKGAME_REPRO_LOOK_Z = $env:BLOCKGAME_REPRO_LOOK_Z
     BLOCKGAME_REPRO_OUTPUT = $env:BLOCKGAME_REPRO_OUTPUT
     BLOCKGAME_REPRO_SETTLE_FRAMES = $env:BLOCKGAME_REPRO_SETTLE_FRAMES
+    BLOCKGAME_REPRO_WAIT_FOR_LOD_READY = $env:BLOCKGAME_REPRO_WAIT_FOR_LOD_READY
+    BLOCKGAME_REPRO_LOD_READY_TIMEOUT_SECONDS = $env:BLOCKGAME_REPRO_LOD_READY_TIMEOUT_SECONDS
     BLOCKGAME_CAPTURE_TIME_OF_DAY = $env:BLOCKGAME_CAPTURE_TIME_OF_DAY
     BLOCKGAME_CAPTURE_NEAR_CHUNKS = $env:BLOCKGAME_CAPTURE_NEAR_CHUNKS
     BLOCKGAME_CAPTURE_FAR_BLOCKS = $env:BLOCKGAME_CAPTURE_FAR_BLOCKS
@@ -133,6 +136,8 @@ try {
     $env:BLOCKGAME_REPRO_Z = "$Z"
     $env:BLOCKGAME_REPRO_OUTPUT = $resolvedOutputPath
     $env:BLOCKGAME_REPRO_SETTLE_FRAMES = "$SettleFrames"
+    $env:BLOCKGAME_REPRO_WAIT_FOR_LOD_READY = "1"
+    $env:BLOCKGAME_REPRO_LOD_READY_TIMEOUT_SECONDS = "$LodReadyTimeoutSeconds"
 
     if ($PSBoundParameters.ContainsKey("TimeOfDay")) {
         $env:BLOCKGAME_CAPTURE_TIME_OF_DAY = "$TimeOfDay"

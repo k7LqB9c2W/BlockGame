@@ -134,7 +134,10 @@ public:
     void shutdown();
     void waitForGpu();
     void resize(int width, int height);
-    void setUploadSynchronization(ID3D12Fence* uploadFence, UINT64 uploadFenceValue) noexcept;
+    void setUploadSynchronization(ID3D12Fence* primaryUploadFence,
+                                  UINT64 primaryUploadFenceValue,
+                                  ID3D12Fence* secondaryUploadFence = nullptr,
+                                  UINT64 secondaryUploadFenceValue = 0) noexcept;
 
     [[nodiscard]] ID3D12Device* device() const noexcept;
     [[nodiscard]] ID3D12Fence* frameFence() const noexcept;
@@ -224,6 +227,13 @@ private:
         UINT64 fenceValue{0};
     };
 
+    struct UploadSyncPoint
+    {
+        ID3D12Fence* fence{nullptr};
+        UINT64 value{0};
+        UINT64 consumedValue{0};
+    };
+
     struct ShadowConstants
     {
         glm::mat4 lightViewProj{1.0f};
@@ -263,7 +273,12 @@ private:
     void ensureScreenshotReadbackBuffer();
     void writePendingScreenshot(const std::filesystem::path& path);
     void buildDepthPyramid();
-    void renderFarBatchGpuCull(const ChunkRenderBatch& batch, const glm::mat4& viewProj);
+    void renderFarBatchGpuCull(const ChunkRenderBatch& batch,
+                               const glm::mat4& viewProj,
+                               D3D12_GPU_VIRTUAL_ADDRESS farConstantsGpuAddress,
+                               D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                               D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                               D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv);
     void renderShadowMap(const WorldRenderData& renderData,
                          const glm::mat4& view,
                          const glm::vec3& cameraPos,
@@ -341,9 +356,7 @@ private:
     std::size_t currentFrameConstantOffset_{0};
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
-    ID3D12Fence* pendingUploadFence_{nullptr};
-    UINT64 pendingUploadFenceValue_{0};
-    UINT64 consumedUploadFenceValue_{0};
+    std::array<UploadSyncPoint, 2> uploadSyncPoints_{};
     UINT currentBackBufferIndex_{0};
     UINT rtvDescriptorSize_{0};
     UINT dsvDescriptorSize_{0};

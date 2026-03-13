@@ -1599,6 +1599,9 @@ struct ScreenshotReproConfig
     glm::vec3 lookTarget{0.0f};
     std::filesystem::path outputPath{};
     int settleFrames{20};
+    bool waitForLodReady{true};
+    double lodReadyTimeoutSeconds{120.0};
+    bool writeLodDebugSnapshot{true};
 };
 
 struct ScreenshotReproState
@@ -1606,6 +1609,8 @@ struct ScreenshotReproState
     bool initialized{false};
     bool captureRequested{false};
     int waitFramesRemaining{0};
+    double lodReadyWaitSeconds{0.0};
+    bool lodTimeoutReported{false};
 };
 
 struct CapturePlacementAction
@@ -1934,6 +1939,19 @@ struct CaptureOverridesConfig
 
     config.settleFrames = std::max(0, static_cast<int>(std::lround(
         envFloatOrDefault("BLOCKGAME_REPRO_SETTLE_FRAMES", static_cast<float>(config.settleFrames)))));
+    if (const char* waitValue = std::getenv("BLOCKGAME_REPRO_WAIT_FOR_LOD_READY"))
+    {
+        config.waitForLodReady = envFlagEnabled("BLOCKGAME_REPRO_WAIT_FOR_LOD_READY");
+        (void)waitValue;
+    }
+    config.lodReadyTimeoutSeconds =
+        std::max(0.0, static_cast<double>(envFloatOrDefault("BLOCKGAME_REPRO_LOD_READY_TIMEOUT_SECONDS",
+                                                            static_cast<float>(config.lodReadyTimeoutSeconds))));
+    if (const char* writeDebugValue = std::getenv("BLOCKGAME_REPRO_WRITE_LOD_DEBUG"))
+    {
+        config.writeLodDebugSnapshot = envFlagEnabled("BLOCKGAME_REPRO_WRITE_LOD_DEBUG");
+        (void)writeDebugValue;
+    }
 
     return config;
 }
@@ -2667,7 +2685,10 @@ int runGame()
         runStreamingValidationScenarios(chunkManager, camera.position);
         chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         chunkManager.update(camera.position, camera.front());
-        renderer.setUploadSynchronization(chunkManager.uploadFence(), chunkManager.lastSubmittedUploadFenceValue());
+        renderer.setUploadSynchronization(chunkManager.uploadFence(),
+                                          chunkManager.lastSubmittedUploadFenceValue(),
+                                          chunkManager.farUploadFence(),
+                                          chunkManager.lastSubmittedFarUploadFenceValue());
     }
 
     constexpr double kFixedTimeStep = 1.0 / 60.0;
@@ -3080,6 +3101,7 @@ int runGame()
 
         bool screenshotReproCaptureThisFrame = false;
         std::filesystem::path screenshotReproCapturePath;
+        std::filesystem::path screenshotReproLodDebugPath;
         bool screenshotSweepCaptureThisFrame = false;
         std::filesystem::path screenshotSweepCapturePath;
         if (screenshotReproConfig.enabled && playerReleased)
@@ -3091,6 +3113,8 @@ int runGame()
             {
                 screenshotReproState.initialized = true;
                 screenshotReproState.waitFramesRemaining = screenshotReproConfig.settleFrames;
+                screenshotReproState.lodReadyWaitSeconds = 0.0;
+                screenshotReproState.lodTimeoutReported = false;
             }
 
             float reproYaw = screenshotReproConfig.yawDegrees;
@@ -3110,22 +3134,62 @@ int runGame()
                 if (!capturePlacementsApplied)
                 {
                     screenshotReproState.waitFramesRemaining = screenshotReproConfig.settleFrames;
-                }
-                else if (screenshotReproState.waitFramesRemaining > 0)
-                {
-                    --screenshotReproState.waitFramesRemaining;
+                    screenshotReproState.lodReadyWaitSeconds = 0.0;
+                    screenshotReproState.lodTimeoutReported = false;
                 }
                 else
                 {
-                    screenshotReproCapturePath = screenshotReproConfig.outputPath;
-                    screenshotReproCaptureThisFrame = true;
-                    screenshotReproState.captureRequested = true;
-                    std::cout << "Capturing repro screenshot at XYZ: "
-                              << camera.position.x << ", "
-                              << camera.position.y << ", "
-                              << camera.position.z
-                              << " yaw=" << camera.yaw
-                              << " pitch=" << camera.pitch << std::endl;
+                    const bool lodShellReady =
+                        !screenshotReproConfig.waitForLodReady ||
+                        (streamingStatus.farActiveTiles > 0 &&
+                         streamingStatus.farReadyTiles >= streamingStatus.farActiveTiles);
+                    const bool lodReadyTimedOut =
+                        screenshotReproConfig.waitForLodReady &&
+                        screenshotReproConfig.lodReadyTimeoutSeconds > 0.0 &&
+                        screenshotReproState.lodReadyWaitSeconds >= screenshotReproConfig.lodReadyTimeoutSeconds;
+
+                    if (!lodShellReady && !lodReadyTimedOut)
+                    {
+                        screenshotReproState.waitFramesRemaining = screenshotReproConfig.settleFrames;
+                        screenshotReproState.lodReadyWaitSeconds += frameTime;
+                    }
+                    else
+                    {
+                        if (!lodShellReady && lodReadyTimedOut && !screenshotReproState.lodTimeoutReported)
+                        {
+                            screenshotReproState.lodTimeoutReported = true;
+                            std::cout << "Repro capture LOD-ready wait timed out after "
+                                      << screenshotReproState.lodReadyWaitSeconds
+                                      << "s with "
+                                      << streamingStatus.farReadyTiles << '/'
+                                      << streamingStatus.farActiveTiles
+                                      << " far tiles ready." << std::endl;
+                        }
+
+                        if (screenshotReproState.waitFramesRemaining > 0)
+                        {
+                            --screenshotReproState.waitFramesRemaining;
+                        }
+                        else
+                        {
+                            screenshotReproCapturePath = screenshotReproConfig.outputPath;
+                            if (screenshotReproConfig.writeLodDebugSnapshot)
+                            {
+                                screenshotReproLodDebugPath = screenshotReproCapturePath;
+                                screenshotReproLodDebugPath.replace_extension(".lod.json");
+                            }
+                            screenshotReproCaptureThisFrame = true;
+                            screenshotReproState.captureRequested = true;
+                            std::cout << "Capturing repro screenshot at XYZ: "
+                                      << camera.position.x << ", "
+                                      << camera.position.y << ", "
+                                      << camera.position.z
+                                      << " yaw=" << camera.yaw
+                                      << " pitch=" << camera.pitch
+                                      << " lodReady=" << streamingStatus.farReadyTiles
+                                      << "/" << streamingStatus.farActiveTiles << std::endl;
+                        }
+                    }
                 }
             }
         }
@@ -3188,7 +3252,10 @@ int runGame()
         chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         noteDiagnosticPhase("frame/chunk_update");
         chunkManager.update(camera.position, camera.front());
-        renderer.setUploadSynchronization(chunkManager.uploadFence(), chunkManager.lastSubmittedUploadFenceValue());
+        renderer.setUploadSynchronization(chunkManager.uploadFence(),
+                                          chunkManager.lastSubmittedUploadFenceValue(),
+                                          chunkManager.farUploadFence(),
+                                          chunkManager.lastSubmittedFarUploadFenceValue());
 
         int framebufferWidth = 0;
         int framebufferHeight = 0;
@@ -3925,6 +3992,10 @@ int runGame()
 
         if (screenshotReproCaptureThisFrame)
         {
+            if (!screenshotReproLodDebugPath.empty())
+            {
+                chunkManager.writeLodDebugSnapshot(screenshotReproLodDebugPath, camera.position);
+            }
             renderer.requestScreenshot(screenshotReproCapturePath);
         }
         if (screenshotSweepCaptureThisFrame)

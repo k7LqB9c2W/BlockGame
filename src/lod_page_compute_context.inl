@@ -92,11 +92,12 @@ public:
             return bytecode;
         };
 
+        const Microsoft::WRL::ComPtr<ID3DBlob> columnSynthShader = compileShader("ColumnSynthesisMain");
         const Microsoft::WRL::ComPtr<ID3DBlob> synthShader = compileShader("SynthesizeMain");
         const Microsoft::WRL::ComPtr<ID3DBlob> stampShader = compileShader("StructureStampMain");
         const Microsoft::WRL::ComPtr<ID3DBlob> faceShader = compileShader("FaceMaskMain");
 
-        std::array<D3D12_ROOT_PARAMETER, 6> rootParams{};
+        std::array<D3D12_ROOT_PARAMETER, 7> rootParams{};
         rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rootParams[0].Constants.Num32BitValues = 8;
         rootParams[0].Constants.RegisterSpace = 0;
@@ -122,6 +123,10 @@ public:
         rootParams[5].Descriptor.RegisterSpace = 0;
         rootParams[5].Descriptor.ShaderRegister = 2;
         rootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        rootParams[6].Descriptor.RegisterSpace = 0;
+        rootParams[6].Descriptor.ShaderRegister = 3;
+        rootParams[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
         D3D12_ROOT_SIGNATURE_DESC rootSigDesc{};
         rootSigDesc.NumParameters = static_cast<UINT>(rootParams.size());
@@ -149,6 +154,7 @@ public:
             throwIfFailedDx(device_->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pipeline)),
                             "failed to create page compute pipeline");
         };
+        createPipeline(columnSynthShader.Get(), columnSynthesisPipelineState_);
         createPipeline(synthShader.Get(), synthesizePipelineState_);
         createPipeline(stampShader.Get(), structureStampPipelineState_);
         createPipeline(faceShader.Get(), faceMaskPipelineState_);
@@ -179,6 +185,7 @@ public:
         faceMaskPipelineState_.Reset();
         structureStampPipelineState_.Reset();
         synthesizePipelineState_.Reset();
+        columnSynthesisPipelineState_.Reset();
         rootSignature_.Reset();
         commandList_.Reset();
         allocator_.Reset();
@@ -197,6 +204,7 @@ public:
                allocator_ != nullptr &&
                commandList_ != nullptr &&
                rootSignature_ != nullptr &&
+               columnSynthesisPipelineState_ != nullptr &&
                synthesizePipelineState_ != nullptr &&
                structureStampPipelineState_ != nullptr &&
                faceMaskPipelineState_ != nullptr;
@@ -207,17 +215,30 @@ public:
     {
         outSummary = {};
         outTimings = {};
-        if (!ready() || page.cells.empty() || page.terrainColumns.empty())
+        if (!ready() || page.cells.empty() || page.terrainColumns.empty() || page.gridCount != 16)
         {
             return false;
         }
 
-        struct GpuTerrainColumn
+        struct GpuMacroSample
         {
             std::int32_t solidTopY;
             std::uint32_t solidBlock;
             std::int32_t waterTopY;
+            std::int32_t waterBottomY;
             std::uint32_t hasWater;
+            std::uint32_t padding[3];
+        };
+
+        struct GpuTerrainColumn
+        {
+            std::int32_t solidTopY;
+            std::int32_t solidBottomY;
+            std::uint32_t solidBlock;
+            std::int32_t waterTopY;
+            std::int32_t waterBottomY;
+            std::uint32_t hasWater;
+            std::uint32_t padding;
         };
 
         struct GpuStructureVoxel
@@ -258,15 +279,22 @@ public:
 
         constexpr int kSummaryValueCount = 8;
         const std::size_t cellCount = page.cells.size();
-        std::vector<GpuTerrainColumn> gpuColumns(page.terrainColumns.size());
-        for (std::size_t i = 0; i < page.terrainColumns.size(); ++i)
+        if (page.macroSamples.empty() || page.macroSamples.size() != page.terrainColumns.size() * 5u)
         {
-            const auto& src = page.terrainColumns[i];
-            gpuColumns[i] = GpuTerrainColumn{
+            return false;
+        }
+
+        std::vector<GpuMacroSample> gpuMacroSamples(page.macroSamples.size());
+        for (std::size_t i = 0; i < page.macroSamples.size(); ++i)
+        {
+            const auto& src = page.macroSamples[i];
+            gpuMacroSamples[i] = GpuMacroSample{
                 src.solidTopY,
                 static_cast<std::uint32_t>(src.solidBlock),
                 src.waterTopY,
-                src.hasWater ? 1u : 0u};
+                src.waterBottomY,
+                src.hasWater ? 1u : 0u,
+                {0u, 0u, 0u}};
         }
 
         std::vector<GpuStructureVoxel> gpuStructureVoxels;
@@ -282,6 +310,7 @@ public:
 
         std::vector<GpuPageCell> gpuCells(cellCount);
         std::vector<std::uint32_t> gpuFaceMasks(cellCount, 0u);
+        std::vector<GpuTerrainColumn> gpuColumns(page.terrainColumns.size());
         std::array<std::int32_t, kSummaryValueCount> initialSummary{
             std::numeric_limits<int>::max(),
             std::numeric_limits<int>::min(),
@@ -292,7 +321,8 @@ public:
             0,
             0};
 
-        const std::uint64_t inputBytes = static_cast<std::uint64_t>(gpuColumns.size() * sizeof(GpuTerrainColumn));
+        const std::uint64_t inputBytes = static_cast<std::uint64_t>(gpuMacroSamples.size() * sizeof(GpuMacroSample));
+        const std::uint64_t columnBytes = static_cast<std::uint64_t>(gpuColumns.size() * sizeof(GpuTerrainColumn));
         const std::uint64_t structureBytes = static_cast<std::uint64_t>(
             std::max<std::size_t>(gpuStructureVoxels.size(), 1u) * sizeof(GpuStructureVoxel));
         const std::uint64_t cellBytes = static_cast<std::uint64_t>(gpuCells.size() * sizeof(GpuPageCell));
@@ -303,6 +333,13 @@ public:
             createBuffer(D3D12_HEAP_TYPE_DEFAULT, inputBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
         Microsoft::WRL::ComPtr<ID3D12Resource> inputUpload =
             createBuffer(D3D12_HEAP_TYPE_UPLOAD, inputBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+        Microsoft::WRL::ComPtr<ID3D12Resource> columnDefault =
+            createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                         columnBytes,
+                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> columnReadback =
+            createBuffer(D3D12_HEAP_TYPE_READBACK, columnBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
         Microsoft::WRL::ComPtr<ID3D12Resource> structureDefault =
             createBuffer(D3D12_HEAP_TYPE_DEFAULT, structureBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
         Microsoft::WRL::ComPtr<ID3D12Resource> structureUpload =
@@ -333,7 +370,7 @@ public:
             uploadBuffer->Unmap(0, nullptr);
         };
 
-        uploadBufferData(inputUpload.Get(), gpuColumns.data(), inputBytes, "failed to map terrain upload buffer");
+        uploadBufferData(inputUpload.Get(), gpuMacroSamples.data(), inputBytes, "failed to map terrain upload buffer");
         if (!gpuStructureVoxels.empty())
         {
             uploadBufferData(structureUpload.Get(),
@@ -381,28 +418,43 @@ public:
         commandList_->SetComputeRoot32BitConstants(0, 8, &rootParams, 0);
         commandList_->SetComputeRootShaderResourceView(1, inputDefault->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(2, structureDefault->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(3, cellDefault->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(4, faceDefault->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(5, summaryDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(3, columnDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(4, cellDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(5, faceDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(6, summaryDefault->GetGPUVirtualAddress());
 
-        commandList_->SetPipelineState(synthesizePipelineState_.Get());
+        commandList_->SetPipelineState(columnSynthesisPipelineState_.Get());
         commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
-        commandList_->Dispatch(groups, 1, 1);
+        commandList_->Dispatch(1, 1, 1);
         commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
-        std::array<D3D12_RESOURCE_BARRIER, 3> synthBarriers{};
-        synthBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        synthBarriers[0].UAV.pResource = cellDefault.Get();
-        synthBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        synthBarriers[1].UAV.pResource = faceDefault.Get();
-        synthBarriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        synthBarriers[2].UAV.pResource = summaryDefault.Get();
-        commandList_->ResourceBarrier(static_cast<UINT>(synthBarriers.size()), synthBarriers.data());
+        std::array<D3D12_RESOURCE_BARRIER, 2> columnBarriers{};
+        columnBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        columnBarriers[0].UAV.pResource = columnDefault.Get();
+        columnBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        columnBarriers[1].UAV.pResource = summaryDefault.Get();
+        commandList_->ResourceBarrier(static_cast<UINT>(columnBarriers.size()), columnBarriers.data());
 
-        commandList_->SetPipelineState(structureStampPipelineState_.Get());
+        commandList_->SetPipelineState(synthesizePipelineState_.Get());
         commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
         commandList_->Dispatch(groups, 1, 1);
         commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
+
+        std::array<D3D12_RESOURCE_BARRIER, 4> synthBarriers{};
+        synthBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        synthBarriers[0].UAV.pResource = columnDefault.Get();
+        synthBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        synthBarriers[1].UAV.pResource = cellDefault.Get();
+        synthBarriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        synthBarriers[2].UAV.pResource = faceDefault.Get();
+        synthBarriers[3].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        synthBarriers[3].UAV.pResource = summaryDefault.Get();
+        commandList_->ResourceBarrier(static_cast<UINT>(synthBarriers.size()), synthBarriers.data());
+
+        commandList_->SetPipelineState(structureStampPipelineState_.Get());
+        commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
+        commandList_->Dispatch(groups, 1, 1);
+        commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 5);
 
         std::array<D3D12_RESOURCE_BARRIER, 2> stampBarriers{};
         stampBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -412,9 +464,9 @@ public:
         commandList_->ResourceBarrier(static_cast<UINT>(stampBarriers.size()), stampBarriers.data());
 
         commandList_->SetPipelineState(faceMaskPipelineState_.Get());
-        commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
+        commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 6);
         commandList_->Dispatch(groups, 1, 1);
-        commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 5);
+        commandList_->EndQuery(timestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 7);
 
         std::array<D3D12_RESOURCE_BARRIER, 2> faceBarriers{};
         faceBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -424,10 +476,12 @@ public:
         commandList_->ResourceBarrier(static_cast<UINT>(faceBarriers.size()), faceBarriers.data());
 
         const D3D12_RESOURCE_BARRIER toCopyBarriers[] = {
+            transitionBarrier(columnDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
             transitionBarrier(cellDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
             transitionBarrier(faceDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
             transitionBarrier(summaryDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)};
         commandList_->ResourceBarrier(static_cast<UINT>(std::size(toCopyBarriers)), toCopyBarriers);
+        commandList_->CopyBufferRegion(columnReadback.Get(), 0, columnDefault.Get(), 0, columnBytes);
         commandList_->CopyBufferRegion(cellReadback.Get(), 0, cellDefault.Get(), 0, cellBytes);
         commandList_->CopyBufferRegion(faceReadback.Get(), 0, faceDefault.Get(), 0, faceBytes);
         commandList_->CopyBufferRegion(summaryReadback.Get(), 0, summaryDefault.Get(), 0, summaryBytes);
@@ -452,6 +506,12 @@ public:
         throwIfFailedDx(summaryReadback->Map(0, &summaryRange, &mappedSummary), "failed to map page compute summary readback");
         std::memcpy(summaryValues.data(), mappedSummary, static_cast<std::size_t>(summaryBytes));
         summaryReadback->Unmap(0, nullptr);
+
+        void* mappedColumns = nullptr;
+        D3D12_RANGE columnRange{0, static_cast<SIZE_T>(columnBytes)};
+        throwIfFailedDx(columnReadback->Map(0, &columnRange, &mappedColumns), "failed to map page compute column readback");
+        std::memcpy(gpuColumns.data(), mappedColumns, static_cast<std::size_t>(columnBytes));
+        columnReadback->Unmap(0, nullptr);
 
         void* mappedCells = nullptr;
         D3D12_RANGE cellRange{0, static_cast<SIZE_T>(cellBytes)};
@@ -489,6 +549,37 @@ public:
                                   cell.trunkTopY != std::numeric_limits<int>::min();
             return hasSolid || hasWater || hasCanopy || hasTrunk;
         };
+        auto normalizeSentinel = [](std::int32_t value) noexcept
+        {
+            return (value == static_cast<std::int32_t>(-2147483647)) ? std::numeric_limits<int>::min() : value;
+        };
+
+        page.gpuTerrainParityChecked = true;
+        page.gpuTerrainParityMatched = true;
+        page.gpuTerrainColumnMismatchCount = 0;
+        for (std::size_t i = 0; i < gpuColumns.size(); ++i)
+        {
+            const auto& gpu = gpuColumns[i];
+            const auto& cpu = page.terrainColumns[i];
+            const bool matches = normalizeSentinel(gpu.solidTopY) == cpu.solidTopY &&
+                                 normalizeSentinel(gpu.solidBottomY) == cpu.solidBottomY &&
+                                 gpu.solidBlock == static_cast<std::uint32_t>(cpu.solidBlock) &&
+                                 normalizeSentinel(gpu.waterTopY) == cpu.waterTopY &&
+                                 normalizeSentinel(gpu.waterBottomY) == cpu.waterBottomY &&
+                                 (gpu.hasWater != 0u) == cpu.hasWater;
+            if (!matches)
+            {
+                page.gpuTerrainParityMatched = false;
+                ++page.gpuTerrainColumnMismatchCount;
+            }
+        }
+        if (!page.gpuTerrainParityMatched)
+        {
+            std::cerr << "LOD GPU terrain parity mismatch: worldMin=("
+                      << page.worldMinX << ", " << page.worldMinY << ", " << page.worldMinZ
+                      << "), mismatched columns=" << page.gpuTerrainColumnMismatchCount << std::endl;
+            return false;
+        }
 
         page.minY = std::numeric_limits<int>::max();
         page.maxY = std::numeric_limits<int>::min();
@@ -547,16 +638,17 @@ public:
                 return static_cast<double>(end - begin) * 1000.0 / static_cast<double>(timestampFrequency_);
             };
 
-            outTimings.synthesisMs = timestampMs(timestamps[0], timestamps[1]);
-            outTimings.stampMs = timestampMs(timestamps[2], timestamps[3]);
-            outTimings.faceBuildMs = timestampMs(timestamps[4], timestamps[5]);
+            outTimings.synthesisMs = timestampMs(timestamps[0], timestamps[1]) +
+                                     timestampMs(timestamps[2], timestamps[3]);
+            outTimings.stampMs = timestampMs(timestamps[4], timestamps[5]);
+            outTimings.faceBuildMs = timestampMs(timestamps[6], timestamps[7]);
         }
 
         return true;
     }
 
 private:
-    static constexpr UINT kTimestampQueryCount = 6u;
+    static constexpr UINT kTimestampQueryCount = 8u;
 
     void waitForIdle()
     {
@@ -612,6 +704,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> columnSynthesisPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> synthesizePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> structureStampPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> faceMaskPipelineState_;

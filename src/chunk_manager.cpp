@@ -2687,14 +2687,14 @@ private:
         std::size_t indexOffset{0};
     };
 
+    static constexpr int kCubicPageAxis = 16;
+
     struct PageCell
     {
         int solidTopY{std::numeric_limits<int>::min()};
         BlockId solidBlock{BlockId::Air};
         int waterTopY{std::numeric_limits<int>::min()};
         bool hasWater{false};
-        bool allowsTrees{false};
-        bool prefersSpruce{false};
         int canopyBaseY{std::numeric_limits<int>::min()};
         int canopyTopY{std::numeric_limits<int>::min()};
         BlockId canopyBlock{BlockId::Air};
@@ -2706,9 +2706,11 @@ private:
 
     struct PageData
     {
-        int gridCount{0};
+        int gridCount{kCubicPageAxis};
         int sampleStepBlocks{0};
+        int cellScaleBlocks{1};
         int worldMinX{0};
+        int worldMinY{0};
         int worldMinZ{0};
         int tileSpanBlocks{0};
         int minY{0};
@@ -3228,30 +3230,158 @@ private:
         return floorDiv(blockY, blockStep) * blockStep;
     }
 
-    static void stampPageStructures(PageData& page, const LevelConfig& level)
+    [[nodiscard]] static int pageCellScaleBlocks(const LevelConfig& level) noexcept
     {
-        if (level.lodLevel > 3 || page.gridCount <= 0 || page.sampleStepBlocks <= 0 || page.cells.empty())
+        const int tileSpanBlocks = level.tileSizeChunks * kChunkSizeX;
+        return std::max(1, tileSpanBlocks / kCubicPageAxis);
+    }
+
+    [[nodiscard]] static std::size_t pageColumnIndex(int gridCount, int x, int z) noexcept
+    {
+        return static_cast<std::size_t>(z * gridCount + x);
+    }
+
+    [[nodiscard]] static std::size_t pageCellIndex(int gridCount, int x, int y, int z) noexcept
+    {
+        return static_cast<std::size_t>((y * gridCount + z) * gridCount + x);
+    }
+
+    [[nodiscard]] static int pageCellMinY(const PageData& page, int y) noexcept
+    {
+        return page.worldMinY + y * page.cellScaleBlocks;
+    }
+
+    [[nodiscard]] static int pageCellTopY(const PageData& page, int y) noexcept
+    {
+        return pageCellMinY(page, y) + page.cellScaleBlocks - 1;
+    }
+
+    struct ResolvedPageCell
+    {
+        bool occupied{false};
+        BlockId block{BlockId::Air};
+        std::uint8_t flags{0};
+    };
+
+    [[nodiscard]] static bool hasRenderableSolid(const PageCell& cell) noexcept
+    {
+        return cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min();
+    }
+
+    [[nodiscard]] static bool hasRenderableWater(const PageCell& cell) noexcept
+    {
+        return cell.hasWater && cell.waterTopY != std::numeric_limits<int>::min();
+    }
+
+    [[nodiscard]] static bool hasRenderableCanopy(const PageCell& cell) noexcept
+    {
+        return cell.hasCanopy &&
+               cell.canopyBlock != BlockId::Air &&
+               cell.canopyBaseY != std::numeric_limits<int>::min() &&
+               cell.canopyTopY != std::numeric_limits<int>::min();
+    }
+
+    [[nodiscard]] static bool hasRenderableTrunk(const PageCell& cell) noexcept
+    {
+        return cell.hasTrunk &&
+               cell.trunkBlock != BlockId::Air &&
+               cell.trunkTopY != std::numeric_limits<int>::min();
+    }
+
+    [[nodiscard]] static ResolvedPageCell resolvePageCell(const PageCell& cell) noexcept
+    {
+        if (hasRenderableTrunk(cell))
+        {
+            return {true, cell.trunkBlock, kVertexFlagFarLod};
+        }
+        if (hasRenderableCanopy(cell))
+        {
+            return {true, cell.canopyBlock, kVertexFlagFarLod};
+        }
+        if (hasRenderableSolid(cell))
+        {
+            return {true, cell.solidBlock, kVertexFlagFarLod};
+        }
+        if (hasRenderableWater(cell))
+        {
+            return {true, BlockId::Water, static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater)};
+        }
+        return {};
+    }
+
+    static void updatePageBoundsForCell(PageData& page, int localY)
+    {
+        const int cellMinY = pageCellMinY(page, localY);
+        const int cellMaxY = pageCellTopY(page, localY) + 1;
+        page.minY = std::min(page.minY, cellMinY);
+        page.maxY = std::max(page.maxY, cellMaxY);
+    }
+
+    static void stampPageStructures(PageData& page,
+                                    const LevelConfig& level,
+                                    const std::vector<FarTerrainSurfaceSample>& sampledColumns)
+    {
+        if (level.lodLevel > 3 ||
+            page.gridCount <= 0 ||
+            page.cellScaleBlocks <= 0 ||
+            page.cells.empty() ||
+            sampledColumns.size() != static_cast<std::size_t>(page.gridCount * page.gridCount))
         {
             return;
         }
 
-        auto pageCellAt = [&](int x, int z) -> PageCell& {
-            return page.cells[static_cast<std::size_t>(z * page.gridCount + x)];
+        auto sampledColumnAt = [&](int x, int z) -> const FarTerrainSurfaceSample& {
+            return sampledColumns[pageColumnIndex(page.gridCount, x, z)];
+        };
+
+        auto pageCellAt = [&](int x, int y, int z) -> PageCell& {
+            return page.cells[pageCellIndex(page.gridCount, x, y, z)];
+        };
+
+        auto stampTrunkCell = [&](int x, int y, int z, BlockId block)
+        {
+            if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount || y < 0 || y >= page.gridCount)
+            {
+                return;
+            }
+
+            PageCell& cell = pageCellAt(x, y, z);
+            cell.hasTrunk = true;
+            cell.trunkTopY = std::max(cell.trunkTopY, pageCellTopY(page, y));
+            cell.trunkBlock = block;
+            updatePageBoundsForCell(page, y);
+        };
+
+        auto stampCanopyCell = [&](int x, int y, int z, BlockId block)
+        {
+            if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount || y < 0 || y >= page.gridCount)
+            {
+                return;
+            }
+
+            PageCell& cell = pageCellAt(x, y, z);
+            cell.hasCanopy = true;
+            cell.canopyBaseY = (cell.canopyBaseY == std::numeric_limits<int>::min())
+                                   ? pageCellMinY(page, y)
+                                   : std::min(cell.canopyBaseY, pageCellMinY(page, y));
+            cell.canopyTopY = std::max(cell.canopyTopY, pageCellTopY(page, y));
+            cell.canopyBlock = block;
+            updatePageBoundsForCell(page, y);
         };
 
         auto tryStampTree = [&](int originX, int originZ, bool spruce)
         {
-            const int localX = floorDiv(originX - page.worldMinX, page.sampleStepBlocks);
-            const int localZ = floorDiv(originZ - page.worldMinZ, page.sampleStepBlocks);
+            const int localX = floorDiv(originX - page.worldMinX, page.cellScaleBlocks);
+            const int localZ = floorDiv(originZ - page.worldMinZ, page.cellScaleBlocks);
             if (localX < 0 || localZ < 0 || localX >= page.gridCount || localZ >= page.gridCount)
             {
                 return;
             }
 
-            PageCell& anchor = pageCellAt(localX, localZ);
+            const FarTerrainSurfaceSample& anchor = sampledColumnAt(localX, localZ);
             if (!anchor.allowsTrees ||
-                anchor.solidTopY == std::numeric_limits<int>::min() ||
-                anchor.hasWater ||
+                !hasSolidSurface(anchor) ||
+                anchor.hasVisibleWater ||
                 anchor.solidBlock == BlockId::Sand ||
                 anchor.solidBlock == BlockId::Stone)
             {
@@ -3259,7 +3389,7 @@ private:
             }
 
             const bool useSpruce = spruce || anchor.prefersSpruce || anchor.solidBlock == BlockId::Podzol;
-            const int macroStep = std::max(page.sampleStepBlocks, 1);
+            const int macroStep = std::max(page.cellScaleBlocks, 1);
             const int trunkHeight = useSpruce
                                         ? 8 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 37, originZ) * 8.0f)
                                         : 6 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 19, originZ) * 6.0f);
@@ -3268,30 +3398,27 @@ private:
                                             : std::max(2, trunkHeight - 3);
             const int canopyTopY = quantizeMacroTopY(anchor.solidTopY + trunkHeight, macroStep);
             const int bareTrunkTopY = quantizeMacroTopY(anchor.solidTopY + std::max(bareTrunkHeight, 1), macroStep);
+            const int trunkStartLocalY = floorDiv(anchor.solidTopY + 1 - page.worldMinY, macroStep);
+            const int trunkTopLocalY = floorDiv(bareTrunkTopY - page.worldMinY, macroStep);
 
             if (level.lodLevel <= 2)
             {
-                anchor.hasTrunk = true;
-                anchor.trunkTopY = std::max(anchor.trunkTopY, bareTrunkTopY);
-                anchor.trunkBlock = useSpruce ? BlockId::SpruceLog : BlockId::Wood;
+                const BlockId trunkBlock = useSpruce ? BlockId::SpruceLog : BlockId::Wood;
+                for (int localY = trunkStartLocalY; localY <= trunkTopLocalY; ++localY)
+                {
+                    stampTrunkCell(localX, localY, localZ, trunkBlock);
+                }
             }
 
-            auto stampCanopyCell = [&](int x, int z, int canopyBaseY, int canopyTopCellY)
+            auto stampCanopyRange = [&](int x, int z, int canopyBaseY, int canopyTopCellY)
             {
-                if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount)
+                const int canopyBaseLocalY = floorDiv(canopyBaseY - page.worldMinY, macroStep);
+                const int canopyTopLocalY = floorDiv(canopyTopCellY - page.worldMinY, macroStep);
+                const BlockId canopyBlock = useSpruce ? BlockId::SpruceLeaves : BlockId::Leaves;
+                for (int localY = canopyBaseLocalY; localY <= canopyTopLocalY; ++localY)
                 {
-                    return;
+                    stampCanopyCell(x, localY, z, canopyBlock);
                 }
-                PageCell& cell = pageCellAt(x, z);
-                if (cell.solidTopY == std::numeric_limits<int>::min())
-                {
-                    return;
-                }
-                cell.hasCanopy = true;
-                cell.canopyBaseY = std::max(cell.canopyBaseY, canopyBaseY);
-                cell.canopyTopY = std::max(cell.canopyTopY, canopyTopCellY);
-                cell.canopyBlock = useSpruce ? BlockId::SpruceLeaves : BlockId::Leaves;
-                page.maxY = std::max(page.maxY, canopyTopCellY + 1);
             };
 
             if (useSpruce)
@@ -3316,7 +3443,7 @@ private:
                             {
                                 continue;
                             }
-                            stampCanopyCell(x, z, tierBaseY, tierTopY);
+                            stampCanopyRange(x, z, tierBaseY, tierTopY);
                         }
                     }
                 }
@@ -3336,10 +3463,10 @@ private:
                         {
                             continue;
                         }
-                        stampCanopyCell(x, z, lowerBaseY, lowerTopY);
+                        stampCanopyRange(x, z, lowerBaseY, lowerTopY);
                         if (chebyshev == 0 || level.lodLevel == 1)
                         {
-                            stampCanopyCell(x, z, upperBaseY, canopyTopY);
+                            stampCanopyRange(x, z, upperBaseY, canopyTopY);
                         }
                     }
                 }
@@ -3902,339 +4029,296 @@ private:
 
         const auto start = std::chrono::steady_clock::now();
         const int tileSpanBlocks = level.tileSizeChunks * kChunkSizeX;
-        const int gridCount = std::max(1, tileSpanBlocks / std::max(level.sampleStepBlocks, 1));
+        const int gridCount = kCubicPageAxis;
+        const int cellScaleBlocks = pageCellScaleBlocks(level);
         const int worldMinX = key.tileX * tileSpanBlocks;
         const int worldMinZ = key.tileZ * tileSpanBlocks;
-        const float step = static_cast<float>(level.sampleStepBlocks);
-        const int macroStep = std::max(level.sampleStepBlocks, 1);
-        const int waterMacroStep = (level.lodLevel <= 2) ? 1 : macroStep;
+        const float cellScale = static_cast<float>(cellScaleBlocks);
+        const std::size_t expectedCellCount = static_cast<std::size_t>(gridCount * gridCount * gridCount);
 
         std::shared_ptr<PageData> page = std::move(sourcePage);
+        if (page && page->cells.size() != expectedCellCount)
+        {
+            page.reset();
+        }
+
         if (!page)
         {
             page = std::make_shared<PageData>();
             page->gridCount = gridCount;
             page->sampleStepBlocks = level.sampleStepBlocks;
+            page->cellScaleBlocks = cellScaleBlocks;
             page->worldMinX = worldMinX;
             page->worldMinZ = worldMinZ;
             page->tileSpanBlocks = tileSpanBlocks;
+
+            std::vector<FarTerrainSurfaceSample> sampledColumns(static_cast<std::size_t>(gridCount * gridCount));
+            int minFeatureY = std::numeric_limits<int>::max();
+            int maxFeatureY = std::numeric_limits<int>::min();
+            const int sampleOffset = std::max(cellScaleBlocks / 2, 0);
+
+            for (int z = 0; z < gridCount; ++z)
+            {
+                for (int x = 0; x < gridCount; ++x)
+                {
+                    const int worldX = worldMinX + x * cellScaleBlocks + sampleOffset;
+                    const int worldZ = worldMinZ + z * cellScaleBlocks + sampleOffset;
+                    FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
+                    sample.solidTopY = quantizeMacroTopY(sample.solidTopY, cellScaleBlocks);
+                    sample.waterTopY = quantizeMacroTopY(sample.waterTopY, cellScaleBlocks);
+                    sample.canopyBaseY = quantizeMacroBaseY(sample.canopyBaseY, cellScaleBlocks);
+                    sample.canopyTopY = quantizeMacroTopY(sample.canopyTopY, cellScaleBlocks);
+                    sample.trunkTopY = quantizeMacroTopY(sample.trunkTopY, cellScaleBlocks);
+                    sampledColumns[pageColumnIndex(gridCount, x, z)] = sample;
+
+                    if (hasSolidSurface(sample))
+                    {
+                        minFeatureY = std::min(minFeatureY, sample.solidTopY);
+                        maxFeatureY = std::max(maxFeatureY, sample.solidTopY + 1);
+                    }
+                    if (sample.hasVisibleWater)
+                    {
+                        minFeatureY = std::min(minFeatureY, sample.waterTopY);
+                        maxFeatureY = std::max(maxFeatureY, sample.waterTopY + 1);
+                    }
+                    if (hasCanopySurface(sample))
+                    {
+                        minFeatureY = std::min(minFeatureY, sample.canopyBaseY);
+                        maxFeatureY = std::max(maxFeatureY, sample.canopyTopY + 1);
+                    }
+                    if (hasTrunkSurface(sample))
+                    {
+                        minFeatureY = std::min(minFeatureY, sample.solidTopY + 1);
+                        maxFeatureY = std::max(maxFeatureY, sample.trunkTopY + 1);
+                    }
+                }
+            }
+
+            const int verticalSpanBlocks = gridCount * cellScaleBlocks;
+            if (minFeatureY == std::numeric_limits<int>::max())
+            {
+                page->worldMinY = 0;
+            }
+            else
+            {
+                const int lowerPad = std::max(level.skirtDepthBlocks, cellScaleBlocks * 2);
+                const int upperPad = std::max(cellScaleBlocks * 3, 24);
+                int worldMinY = quantizeMacroBaseY(minFeatureY - lowerPad, cellScaleBlocks);
+                const int requiredMaxExclusive =
+                    quantizeMacroTopY(maxFeatureY + upperPad, cellScaleBlocks) + 1;
+                if (requiredMaxExclusive > worldMinY + verticalSpanBlocks)
+                {
+                    worldMinY = quantizeMacroBaseY(requiredMaxExclusive - verticalSpanBlocks, cellScaleBlocks);
+                }
+                page->worldMinY = worldMinY;
+            }
+            page->worldMinZ = worldMinZ;
             page->minY = std::numeric_limits<int>::max();
             page->maxY = std::numeric_limits<int>::min();
-            page->cells.resize(static_cast<std::size_t>(gridCount * gridCount));
+            page->cells.assign(expectedCellCount, PageCell{});
 
-            const int sampleOffset = std::max(level.sampleStepBlocks / 2, 0);
-            auto sampledPageCellAt = [&](int x, int z) -> PageCell& {
-                return page->cells[static_cast<std::size_t>(z * gridCount + x)];
+            auto pageCellAt = [&](int x, int y, int z) -> PageCell& {
+                return page->cells[pageCellIndex(gridCount, x, y, z)];
             };
 
             for (int z = 0; z < gridCount; ++z)
             {
                 for (int x = 0; x < gridCount; ++x)
                 {
-                    const int worldX = worldMinX + x * level.sampleStepBlocks + sampleOffset;
-                    const int worldZ = worldMinZ + z * level.sampleStepBlocks + sampleOffset;
-                    FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
-                    sample.solidTopY = quantizeMacroTopY(sample.solidTopY, macroStep);
-                    sample.waterTopY = quantizeMacroTopY(sample.waterTopY, waterMacroStep);
-                    sample.canopyBaseY = quantizeMacroBaseY(sample.canopyBaseY, macroStep);
-                    sample.canopyTopY = quantizeMacroTopY(sample.canopyTopY, macroStep);
-                    sample.trunkTopY = quantizeMacroTopY(sample.trunkTopY, macroStep);
-                    PageCell& cell = sampledPageCellAt(x, z);
-                    cell.solidTopY = sample.solidTopY;
-                    cell.solidBlock = sample.solidBlock;
-                    cell.waterTopY = sample.waterTopY;
-                    cell.hasWater = sample.hasVisibleWater;
-                    cell.allowsTrees = sample.allowsTrees;
-                    cell.prefersSpruce = sample.prefersSpruce;
-                    cell.canopyBaseY = sample.canopyBaseY;
-                    cell.canopyTopY = sample.canopyTopY;
-                    cell.canopyBlock = sample.canopyBlock;
-                    cell.hasCanopy = sample.hasVisibleCanopy;
-                    cell.trunkTopY = sample.trunkTopY;
-                    cell.trunkBlock = sample.trunkBlock;
-                    cell.hasTrunk = sample.hasVisibleTrunk;
+                    const FarTerrainSurfaceSample& sample = sampledColumns[pageColumnIndex(gridCount, x, z)];
 
                     if (hasSolidSurface(sample))
                     {
-                        page->minY = std::min(page->minY, sample.solidTopY);
-                        page->maxY = std::max(page->maxY, sample.solidTopY + 1);
+                        const int topLocalY = floorDiv(sample.solidTopY - page->worldMinY, cellScaleBlocks);
+                        const int clampedTopLocalY = std::min(gridCount - 1, topLocalY);
+                        for (int localY = 0; localY <= clampedTopLocalY; ++localY)
+                        {
+                            if (localY < 0)
+                            {
+                                continue;
+                            }
+
+                            PageCell& cell = pageCellAt(x, localY, z);
+                            cell.solidTopY = pageCellTopY(*page, localY);
+                            cell.solidBlock = sample.solidBlock;
+                            updatePageBoundsForCell(*page, localY);
+                        }
                     }
-                    if (sample.hasVisibleWater)
+
+                    if (sample.hasVisibleWater && sample.waterTopY != std::numeric_limits<int>::min())
                     {
-                        page->minY = std::min(page->minY, sample.waterTopY);
-                        page->maxY = std::max(page->maxY, sample.waterTopY + 1);
-                    }
-                    if (sample.hasVisibleCanopy)
-                    {
-                        page->minY = std::min(page->minY, sample.canopyBaseY);
-                        page->maxY = std::max(page->maxY, sample.canopyTopY + 1);
-                    }
-                    if (sample.hasVisibleTrunk)
-                    {
-                        page->minY = std::min(page->minY, sample.solidTopY + 1);
-                        page->maxY = std::max(page->maxY, sample.trunkTopY + 1);
+                        const int topLocalY = floorDiv(sample.waterTopY - page->worldMinY, cellScaleBlocks);
+                        const int clampedTopLocalY = std::min(gridCount - 1, topLocalY);
+                        for (int localY = 0; localY <= clampedTopLocalY; ++localY)
+                        {
+                            if (localY < 0)
+                            {
+                                continue;
+                            }
+
+                            PageCell& cell = pageCellAt(x, localY, z);
+                            if (hasRenderableSolid(cell))
+                            {
+                                continue;
+                            }
+
+                            cell.hasWater = true;
+                            cell.waterTopY = pageCellTopY(*page, localY);
+                            updatePageBoundsForCell(*page, localY);
+                        }
                     }
                 }
             }
+
+            stampPageStructures(*page, level, sampledColumns);
         }
         else
         {
             page->gridCount = gridCount;
             page->sampleStepBlocks = level.sampleStepBlocks;
+            page->cellScaleBlocks = cellScaleBlocks;
             page->worldMinX = worldMinX;
             page->worldMinZ = worldMinZ;
             page->tileSpanBlocks = tileSpanBlocks;
-            if (page->cells.size() != static_cast<std::size_t>(gridCount * gridCount))
+            if (page->cells.size() != expectedCellCount)
             {
-                page->cells.resize(static_cast<std::size_t>(gridCount * gridCount));
+                page->cells.assign(expectedCellCount, PageCell{});
+                page->worldMinY = 0;
                 page->minY = 0;
                 page->maxY = 1;
             }
         }
 
-        if (page->minY == std::numeric_limits<int>::max())
+        if (page->minY == std::numeric_limits<int>::max() || page->maxY == std::numeric_limits<int>::min())
         {
-            page->minY = 0;
-            page->maxY = 1;
+            page->minY = page->worldMinY;
+            page->maxY = page->worldMinY + 1;
         }
-
-        stampPageStructures(*page, level);
 
         result.page = page;
 
-        auto pageCellAt = [&](int x, int z) -> PageCell& {
-            return page->cells[static_cast<std::size_t>(z * gridCount + x)];
+        auto pageCellAt = [&](int x, int y, int z) -> const PageCell& {
+            return page->cells[pageCellIndex(gridCount, x, y, z)];
+        };
+
+        auto resolvedCellAt = [&](int x, int y, int z) -> ResolvedPageCell
+        {
+            if (x < 0 || y < 0 || z < 0 || x >= gridCount || y >= gridCount || z >= gridCount)
+            {
+                return {};
+            }
+
+            return resolvePageCell(pageCellAt(x, y, z));
         };
 
         auto& vertices = result.mesh.vertices;
         auto& indices = result.mesh.indices;
-        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * 48));
-        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * 72));
+        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * gridCount * 12));
+        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * gridCount * 18));
 
-        const float baseFloorY =
-            static_cast<float>(quantizeMacroBaseY(page->minY - level.skirtDepthBlocks, macroStep));
-        auto terrainTopAt = [&](int x, int z) -> float
+        for (int y = 0; y < gridCount; ++y)
         {
-            if (x < 0 || z < 0 || x >= gridCount || z >= gridCount)
-            {
-                return baseFloorY;
-            }
-            const PageCell& neighbor = pageCellAt(x, z);
-            if (neighbor.solidBlock == BlockId::Air || neighbor.solidTopY == std::numeric_limits<int>::min())
-            {
-                return baseFloorY;
-            }
-            return blockTopY(neighbor.solidTopY);
-        };
+            const float minY = static_cast<float>(pageCellMinY(*page, y));
+            const float maxY = minY + cellScale;
 
-        auto waterTopAt = [&](int x, int z, float fallback) -> float
-        {
-            if (x < 0 || z < 0 || x >= gridCount || z >= gridCount)
+            for (int z = 0; z < gridCount; ++z)
             {
-                return fallback;
-            }
-            const PageCell& neighbor = pageCellAt(x, z);
-            if (!neighbor.hasWater || neighbor.waterTopY == std::numeric_limits<int>::min())
-            {
-                return fallback;
-            }
-            return blockTopY(neighbor.waterTopY);
-        };
+                const float minZ = static_cast<float>(worldMinZ) + static_cast<float>(z) * cellScale;
+                const float maxZ = minZ + cellScale;
 
-        for (int z = 0; z < gridCount; ++z)
-        {
-            for (int x = 0; x < gridCount; ++x)
-            {
-                const PageCell& cell = pageCellAt(x, z);
-                const float minX = static_cast<float>(worldMinX) + static_cast<float>(x) * step;
-                const float maxX = minX + step;
-                const float minZ = static_cast<float>(worldMinZ) + static_cast<float>(z) * step;
-                const float maxZ = minZ + step;
-
-                if (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
+                for (int x = 0; x < gridCount; ++x)
                 {
-                    const float topY = blockTopY(cell.solidTopY);
-                    appendQuad(vertices,
-                               indices,
-                               glm::vec3(minX, topY, minZ),
-                               glm::vec3(maxX, topY, minZ),
-                               glm::vec3(maxX, topY, maxZ),
-                               glm::vec3(minX, topY, maxZ),
-                               glm::vec3(0.0f, 1.0f, 0.0f),
-                               uvLookup(cell.solidBlock, BlockFace::Top),
-                               kVertexFlagFarLod);
+                    const ResolvedPageCell cell = resolvedCellAt(x, y, z);
+                    if (!cell.occupied)
+                    {
+                        continue;
+                    }
 
-                    const auto westTop = terrainTopAt(x - 1, z);
-                    const auto eastTop = terrainTopAt(x + 1, z);
-                    const auto northTop = terrainTopAt(x, z - 1);
-                    const auto southTop = terrainTopAt(x, z + 1);
+                    const float minX = static_cast<float>(worldMinX) + static_cast<float>(x) * cellScale;
+                    const float maxX = minX + cellScale;
+                    const auto faceUv = [&](BlockFace face)
+                    {
+                        return uvLookup(cell.block, face);
+                    };
 
-                    if (westTop < topY)
+                    if (!resolvedCellAt(x, y + 1, z).occupied)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(minX, westTop, maxZ),
-                                   glm::vec3(minX, westTop, minZ),
-                                   glm::vec3(minX, topY, minZ),
-                                   glm::vec3(minX, topY, maxZ),
+                                   glm::vec3(minX, maxY, minZ),
+                                   glm::vec3(maxX, maxY, minZ),
+                                   glm::vec3(maxX, maxY, maxZ),
+                                   glm::vec3(minX, maxY, maxZ),
+                                   glm::vec3(0.0f, 1.0f, 0.0f),
+                                   faceUv(BlockFace::Top),
+                                   cell.flags);
+                    }
+                    if (!resolvedCellAt(x, y - 1, z).occupied)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(maxX, minY, minZ),
+                                   glm::vec3(minX, minY, minZ),
+                                   glm::vec3(minX, minY, maxZ),
+                                   glm::vec3(maxX, minY, maxZ),
+                                   glm::vec3(0.0f, -1.0f, 0.0f),
+                                   faceUv(BlockFace::Bottom),
+                                   cell.flags);
+                    }
+                    if (!resolvedCellAt(x - 1, y, z).occupied)
+                    {
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, minY, maxZ),
+                                   glm::vec3(minX, minY, minZ),
+                                   glm::vec3(minX, maxY, minZ),
+                                   glm::vec3(minX, maxY, maxZ),
                                    glm::vec3(-1.0f, 0.0f, 0.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::West),
-                                   kVertexFlagFarLod);
+                                   faceUv(BlockFace::West),
+                                   cell.flags);
                     }
-                    if (eastTop < topY)
+                    if (!resolvedCellAt(x + 1, y, z).occupied)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(maxX, eastTop, minZ),
-                                   glm::vec3(maxX, eastTop, maxZ),
-                                   glm::vec3(maxX, topY, maxZ),
-                                   glm::vec3(maxX, topY, minZ),
+                                   glm::vec3(maxX, minY, minZ),
+                                   glm::vec3(maxX, minY, maxZ),
+                                   glm::vec3(maxX, maxY, maxZ),
+                                   glm::vec3(maxX, maxY, minZ),
                                    glm::vec3(1.0f, 0.0f, 0.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::East),
-                                   kVertexFlagFarLod);
+                                   faceUv(BlockFace::East),
+                                   cell.flags);
                     }
-                    if (northTop < topY)
+                    if (!resolvedCellAt(x, y, z - 1).occupied)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(maxX, northTop, minZ),
-                                   glm::vec3(minX, northTop, minZ),
-                                   glm::vec3(minX, topY, minZ),
-                                   glm::vec3(maxX, topY, minZ),
+                                   glm::vec3(maxX, minY, minZ),
+                                   glm::vec3(minX, minY, minZ),
+                                   glm::vec3(minX, maxY, minZ),
+                                   glm::vec3(maxX, maxY, minZ),
                                    glm::vec3(0.0f, 0.0f, -1.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::North),
-                                   kVertexFlagFarLod);
+                                   faceUv(BlockFace::North),
+                                   cell.flags);
                     }
-                    if (southTop < topY)
+                    if (!resolvedCellAt(x, y, z + 1).occupied)
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(minX, southTop, maxZ),
-                                   glm::vec3(maxX, southTop, maxZ),
-                                   glm::vec3(maxX, topY, maxZ),
-                                   glm::vec3(minX, topY, maxZ),
+                                   glm::vec3(minX, minY, maxZ),
+                                   glm::vec3(maxX, minY, maxZ),
+                                   glm::vec3(maxX, maxY, maxZ),
+                                   glm::vec3(minX, maxY, maxZ),
                                    glm::vec3(0.0f, 0.0f, 1.0f),
-                                   uvLookup(cell.solidBlock, BlockFace::South),
-                                   kVertexFlagFarLod);
+                                   faceUv(BlockFace::South),
+                                   cell.flags);
                     }
-                }
-
-                if (cell.hasWater && cell.waterTopY != std::numeric_limits<int>::min())
-                {
-                    const float waterTop = blockTopY(cell.waterTopY);
-                    appendQuad(vertices,
-                               indices,
-                               glm::vec3(minX, waterTop, minZ),
-                               glm::vec3(maxX, waterTop, minZ),
-                               glm::vec3(maxX, waterTop, maxZ),
-                               glm::vec3(minX, waterTop, maxZ),
-                               glm::vec3(0.0f, 1.0f, 0.0f),
-                               uvLookup(BlockId::Water, BlockFace::Top),
-                               static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
-
-                    const float terrainTop = (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
-                                                 ? blockTopY(cell.solidTopY)
-                                                 : baseFloorY;
-                    const float westWater = waterTopAt(x - 1, z, terrainTop);
-                    const float eastWater = waterTopAt(x + 1, z, terrainTop);
-                    const float northWater = waterTopAt(x, z - 1, terrainTop);
-                    const float southWater = waterTopAt(x, z + 1, terrainTop);
-
-                    if (westWater < waterTop)
-                    {
-                        appendQuad(vertices,
-                                   indices,
-                                   glm::vec3(minX, westWater, maxZ),
-                                   glm::vec3(minX, westWater, minZ),
-                                   glm::vec3(minX, waterTop, minZ),
-                                   glm::vec3(minX, waterTop, maxZ),
-                                   glm::vec3(-1.0f, 0.0f, 0.0f),
-                                   uvLookup(BlockId::Water, BlockFace::West),
-                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
-                    }
-                    if (eastWater < waterTop)
-                    {
-                        appendQuad(vertices,
-                                   indices,
-                                   glm::vec3(maxX, eastWater, minZ),
-                                   glm::vec3(maxX, eastWater, maxZ),
-                                   glm::vec3(maxX, waterTop, maxZ),
-                                   glm::vec3(maxX, waterTop, minZ),
-                                   glm::vec3(1.0f, 0.0f, 0.0f),
-                                   uvLookup(BlockId::Water, BlockFace::East),
-                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
-                    }
-                    if (northWater < waterTop)
-                    {
-                        appendQuad(vertices,
-                                   indices,
-                                   glm::vec3(maxX, northWater, minZ),
-                                   glm::vec3(minX, northWater, minZ),
-                                   glm::vec3(minX, waterTop, minZ),
-                                   glm::vec3(maxX, waterTop, minZ),
-                                   glm::vec3(0.0f, 0.0f, -1.0f),
-                                   uvLookup(BlockId::Water, BlockFace::North),
-                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
-                    }
-                    if (southWater < waterTop)
-                    {
-                        appendQuad(vertices,
-                                   indices,
-                                   glm::vec3(minX, southWater, maxZ),
-                                   glm::vec3(maxX, southWater, maxZ),
-                                   glm::vec3(maxX, waterTop, maxZ),
-                                   glm::vec3(minX, waterTop, maxZ),
-                                   glm::vec3(0.0f, 0.0f, 1.0f),
-                                   uvLookup(BlockId::Water, BlockFace::South),
-                                   static_cast<std::uint8_t>(kVertexFlagFarLod | kVertexFlagWater));
-                    }
-                }
-
-                if (cell.hasTrunk && cell.trunkTopY != std::numeric_limits<int>::min() && cell.trunkBlock != BlockId::Air)
-                {
-                    const float terrainTop = (cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min())
-                                                 ? blockTopY(cell.solidTopY)
-                                                 : blockBottomY(cell.trunkTopY);
-                    const float trunkTop = blockTopY(cell.trunkTopY);
-                    const float trunkInset = (level.lodLevel == 1)
-                                                 ? std::clamp(step * 0.18f, 0.15f, step * 0.24f)
-                                                 : std::clamp(step * 0.26f, 0.22f, step * 0.32f);
-                    appendAxisAlignedBox(vertices,
-                                         indices,
-                                         minX + trunkInset,
-                                         terrainTop,
-                                         minZ + trunkInset,
-                                         maxX - trunkInset,
-                                         trunkTop,
-                                         maxZ - trunkInset,
-                                         uvLookup(cell.trunkBlock, BlockFace::Top),
-                                         uvLookup(cell.trunkBlock, BlockFace::North),
-                                         kVertexFlagFarLod);
-                }
-
-                if (cell.hasCanopy && cell.canopyTopY != std::numeric_limits<int>::min() &&
-                    cell.canopyBaseY != std::numeric_limits<int>::min() &&
-                    cell.canopyBlock != BlockId::Air)
-                {
-                    const float canopyInset = level.id == 1 ? std::clamp(step * 0.06f, 0.08f, step * 0.18f)
-                                                            : std::clamp(step * 0.12f, 0.15f, step * 0.28f);
-                    appendAxisAlignedBox(vertices,
-                                         indices,
-                                         minX + canopyInset,
-                                         blockBottomY(cell.canopyBaseY),
-                                         minZ + canopyInset,
-                                         maxX - canopyInset,
-                                         blockTopY(cell.canopyTopY),
-                                         maxZ - canopyInset,
-                                         uvLookup(cell.canopyBlock, BlockFace::Top),
-                                         uvLookup(cell.canopyBlock, BlockFace::North),
-                                         kVertexFlagFarLod);
                 }
             }
         }
 
         result.mesh.boundsMin = glm::vec3(static_cast<float>(worldMinX),
-                                          baseFloorY,
+                                          static_cast<float>(page->minY),
                                           static_cast<float>(worldMinZ));
         result.mesh.boundsMax = glm::vec3(static_cast<float>(worldMinX + tileSpanBlocks),
                                           static_cast<float>(page->maxY),

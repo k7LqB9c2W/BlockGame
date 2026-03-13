@@ -404,8 +404,10 @@ void startHangWatchdog()
 
     gHangWatchdogThread = std::thread([]()
     {
-        const std::uint64_t timeoutMicros = static_cast<std::uint64_t>(
+        const std::uint64_t defaultTimeoutMicros = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(kHangWatchdogTimeout).count());
+        const std::uint64_t shutdownTimeoutMicros = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::seconds(60)).count());
         while (!gHangWatchdogStop.load(std::memory_order_acquire))
         {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -416,6 +418,13 @@ void startHangWatchdog()
             }
 
             const std::uint64_t nowMicros = steadyMicrosNow();
+            std::string phase;
+            {
+                std::lock_guard<std::mutex> lock(gDiagnosticStateMutex);
+                phase = gDiagnosticPhase;
+            }
+            const bool shutdownPhase = phase.rfind("shutdown/", 0) == 0;
+            const std::uint64_t timeoutMicros = shutdownPhase ? shutdownTimeoutMicros : defaultTimeoutMicros;
             if (nowMicros < lastHeartbeatMicros || (nowMicros - lastHeartbeatMicros) < timeoutMicros)
             {
                 continue;
@@ -4081,11 +4090,13 @@ int main(int argc, char** argv)
     catch (const std::exception& e)
     {
         appendCrashLog(std::string("uncaught exception: ") + e.what());
+        appendDiagnosticSnapshot("uncaught exception");
         std::cerr << "Unhandled exception: " << e.what() << '\n';
     }
     catch (...)
     {
         appendCrashLog("uncaught exception: unknown exception");
+        appendDiagnosticSnapshot("uncaught exception");
         std::cerr << "Unhandled non-standard exception" << std::endl;
     }
 

@@ -796,3 +796,235 @@ stack:
 2026-03-12 21:22:15 - uncaught exception: Renderer: failed to close command list
 2026-03-12 21:24:35 - uncaught exception: Renderer: failed to close command list
 2026-03-12 21:27:56 - uncaught exception: Renderer: failed to close command list
+2026-03-12 21:34:52 - SEH crash
+2026-03-12 21:34:52 - diagnostics: seh | phase=frame/render_world | frame=60 | heartbeat_age_ms=13.12
+2026-03-12 21:34:52 - breadcrumbs:
+  [0] frame/chunk_update
+  [1] frame/render_begin
+  [2] frame/build_render_data
+  [3] frame/render_world
+  [4] frame/ui
+  [5] frame/end_frame
+  [6] frame/presented
+  [7] frame/start
+  [8] frame/poll_events
+  [9] frame/input
+  [10] frame/chunk_update
+  [11] frame/render_begin
+  [12] frame/build_render_data
+  [13] frame/render_world
+  [14] frame/ui
+  [15] frame/end_frame
+  [16] frame/presented
+  [17] frame/start
+  [18] frame/poll_events
+  [19] frame/input
+  [20] frame/chunk_update
+  [21] frame/render_begin
+  [22] frame/build_render_data
+  [23] frame/render_world
+  [24] frame/ui
+  [25] frame/end_frame
+  [26] frame/presented
+  [27] frame/start
+  [28] frame/poll_events
+  [29] frame/input
+  [30] frame/chunk_update
+  [31] frame/render_begin
+  [32] frame/build_render_data
+  [33] frame/render_world
+  [34] frame/ui
+  [35] frame/end_frame
+  [36] frame/presented
+  [37] frame/start
+  [38] frame/poll_events
+  [39] frame/input
+  [40] frame/chunk_update
+  [41] frame/render_begin
+  [42] frame/build_render_data
+  [43] frame/render_world
+  [44] frame/ui
+  [45] frame/end_frame
+  [46] frame/presented
+  [47] frame/start
+  [48] frame/poll_events
+  [49] frame/input
+  [50] frame/chunk_update
+  [51] frame/render_begin
+  [52] frame/build_render_data
+  [53] frame/render_world
+  [54] frame/ui
+  [55] frame/end_frame
+  [56] frame/presented
+  [57] frame/start
+  [58] frame/poll_events
+  [59] frame/input
+  [60] frame/chunk_update
+  [61] frame/render_begin
+  [62] frame/build_render_data
+  [63] frame/render_world
+2026-03-12 21:34:52 - exception: code=0x87a address=0x7ffaa7035369 KERNELBASE!RaiseException+0x69 [rva 0x25369]
+stack:
+  [0] 0x7ff61d30b7e2 blockgame!`anonymous namespace'::appendStackTrace+0x62 [rva 0xb7e2] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:453+0x14
+  [1] 0x7ff61d3011ef blockgame!``anonymous namespace'::initializeCrashLogging'::`2'::<lambda_2>::<lambda_invoker_cdecl>+0x5f [rva 0x11ef] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:2056+0x47
+  [2] 0x7ffaa713c507 KERNELBASE!UnhandledExceptionFilter+0x1e7 [rva 0x12c507]
+  [3] 0x7ffaa99958d8 ntdll!memset+0x1218 [rva 0xa58d8]
+  [4] 0x7ffaa997ce46 ntdll!_C_specific_handler+0x96 [rva 0x8ce46]
+  [5] 0x7ffaa999296f ntdll!_chkstk+0x11f [rva 0xa296f]
+  [6] 0x7ffaa9942554 ntdll!RtlRaiseException+0x484 [rva 0x52554]
+  [7] 0x7ffaa99422a7 ntdll!RtlRaiseException+0x1d7 [rva 0x522a7]
+  [8] 0x7ffaa7035369 KERNELBASE!RaiseException+0x69 [rva 0x25369]
+  [9] 0x7ffa4c533563
+  [10] 0x7ff9ef182559
+  [11] 0x7ff9ef0c3081
+  [12] 0x7ff9ef0c2f4b
+  [13] 0x7ff9ef0f093c
+  [14] 0x7ff9ef16583b
+  [15] 0x7ff9ef150fdd
+  [16] 0x7ff9ef13da02
+  [17] 0x7ff9ef151a5f
+  [18] 0x7ff61d36103c blockgame!Renderer::buildDepthPyramid+0x1dc [rva 0x6103c] at C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp:2185
+  [19] 0x7ff61d36d54d blockgame!Renderer::renderWorld+0xbad [rva 0x6d54d] at C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp:2693
+  [20] 0x7ff61d3156a5 blockgame!`anonymous namespace'::runGame+0x34a5 [rva 0x156a5] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:3278
+  [21] 0x7ff61d31f2d6 blockgame!main+0x716 [rva 0x1f2d6] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:4079+0x5
+  [22] 0x7ff61d3f9ef0 blockgame!__scrt_common_main_seh+0x10c [rva 0xf9ef0] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288+0x22
+  [23] 0x7ffaa8187374 KERNEL32!BaseThreadInitThunk+0x14 [rva 0x17374]
+  [24] 0x7ffaa993cc91 ntdll!RtlUserThreadStart+0x21 [rva 0x4cc91]
+2026-03-12 21:34:52 - minidump: written to blockgame_crash.dmp
+2026-03-12 21:36:38 - uncaught exception: Renderer: failed to close command list; D3D12 debug messages:
+  [0] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+  [1] ID3D12CommandList::ResourceBarrier: D3D12_RESOURCE_STATES has an invalid combination of state bits.
+  [2] ID3D12CommandList::ResourceBarrier: D3D12_RESOURCE_STATES has an invalid combination of state bits.
+2026-03-12 21:36:38 - diagnostics: uncaught exception | phase=frame/end_frame | frame=51 | heartbeat_age_ms=12603.50
+2026-03-12 21:36:38 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-12 21:42:36 - diagnostics: hang watchdog timeout | phase=shutdown/chunk_manager | frame=2450 | heartbeat_age_ms=15412.18
+2026-03-12 21:42:36 - breadcrumbs:
+  [0] frame/ui
+  [1] frame/end_frame
+  [2] frame/presented
+  [3] frame/start
+  [4] frame/poll_events
+  [5] frame/input
+  [6] frame/chunk_update
+  [7] frame/render_begin
+  [8] frame/build_render_data
+  [9] frame/render_world
+  [10] frame/ui
+  [11] frame/end_frame
+  [12] frame/presented
+  [13] frame/start
+  [14] frame/poll_events
+  [15] frame/input
+  [16] frame/chunk_update
+  [17] frame/render_begin
+  [18] frame/build_render_data
+  [19] frame/render_world
+  [20] frame/ui
+  [21] frame/end_frame
+  [22] frame/presented
+  [23] frame/start
+  [24] frame/poll_events
+  [25] frame/input
+  [26] frame/chunk_update
+  [27] frame/render_begin
+  [28] frame/build_render_data
+  [29] frame/render_world
+  [30] frame/ui
+  [31] frame/end_frame
+  [32] frame/presented
+  [33] frame/start
+  [34] frame/poll_events
+  [35] frame/input
+  [36] frame/chunk_update
+  [37] frame/render_begin
+  [38] frame/build_render_data
+  [39] frame/render_world
+  [40] frame/ui
+  [41] frame/end_frame
+  [42] frame/presented
+  [43] frame/start
+  [44] frame/poll_events
+  [45] frame/input
+  [46] frame/chunk_update
+  [47] frame/render_begin
+  [48] frame/build_render_data
+  [49] frame/render_world
+  [50] frame/ui
+  [51] frame/end_frame
+  [52] frame/presented
+  [53] frame/start
+  [54] frame/poll_events
+  [55] frame/input
+  [56] frame/chunk_update
+  [57] frame/render_begin
+  [58] frame/build_render_data
+  [59] frame/render_world
+  [60] frame/ui
+  [61] frame/end_frame
+  [62] frame/presented
+  [63] shutdown/chunk_manager
+2026-03-12 21:42:37 - hang dump: written to blockgame_hang.dmp

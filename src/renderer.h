@@ -269,6 +269,7 @@ private:
                          const glm::vec3& cameraPos,
                          const EnvironmentState& environment,
                          WorldConstants& nearConstants);
+    [[nodiscard]] std::string collectDebugMessages() const;
 
     [[nodiscard]] std::string shaderPath(const char* relativePath) const;
     [[nodiscard]] std::uint64_t allocateFrameConstantBytes(std::size_t size, void** cpuPtrOut);
@@ -284,6 +285,7 @@ private:
     int sceneColorSrvIndex_{-1};
     bool frameStarted_{false};
     bool imguiFrameStarted_{false};
+    bool debugLayerEnabled_{false};
     bool initialized_{false};
 
     Microsoft::WRL::ComPtr<IDXGIFactory6> factory_;
@@ -293,6 +295,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> uploadCommandAllocator_;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap_;

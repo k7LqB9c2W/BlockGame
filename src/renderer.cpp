@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -66,6 +67,25 @@ void renderDebugLog(const std::string& message)
         return;
     }
     std::cout << message << std::endl;
+}
+
+[[nodiscard]] bool envFlagEnabled(const char* name)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr)
+    {
+        return false;
+    }
+
+    std::string normalized(value);
+    std::transform(normalized.begin(),
+                   normalized.end(),
+                   normalized.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return normalized != "0" &&
+           normalized != "false" &&
+           normalized != "off" &&
+           normalized != "no";
 }
 
 void throwIfFailed(HRESULT hr, const std::string& message)
@@ -407,14 +427,15 @@ struct FrustumPlane
 
 [[nodiscard]] D3D12_RESOURCE_BARRIER transitionBarrier(ID3D12Resource* resource,
                                                        D3D12_RESOURCE_STATES before,
-                                                       D3D12_RESOURCE_STATES after) noexcept
+                                                       D3D12_RESOURCE_STATES after,
+                                                       UINT subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) noexcept
 {
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = resource;
     barrier.Transition.StateBefore = before;
     barrier.Transition.StateAfter = after;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.Subresource = subresource;
     return barrier;
 }
 
@@ -832,14 +853,31 @@ RendererProfilingSnapshot Renderer::profilingSnapshot() const noexcept
 void Renderer::createFactory()
 {
     UINT flags = 0;
+    const bool enableDebugLayer =
 #ifndef NDEBUG
-    Microsoft::WRL::ComPtr<ID3D12Debug> debugController;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
-    {
-        debugController->EnableDebugLayer();
-        flags |= DXGI_CREATE_FACTORY_DEBUG;
-    }
+        true;
+#else
+        envFlagEnabled("BLOCKGAME_ENABLE_D3D12_DEBUG_LAYER");
 #endif
+
+    if (enableDebugLayer)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Debug> debugController;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+        {
+            debugController->EnableDebugLayer();
+            if (envFlagEnabled("BLOCKGAME_ENABLE_D3D12_GPU_VALIDATION"))
+            {
+                Microsoft::WRL::ComPtr<ID3D12Debug1> debugController1;
+                if (SUCCEEDED(debugController.As(&debugController1)))
+                {
+                    debugController1->SetEnableGPUBasedValidation(TRUE);
+                }
+            }
+            flags |= DXGI_CREATE_FACTORY_DEBUG;
+            debugLayerEnabled_ = true;
+        }
+    }
     throwIfFailed(CreateDXGIFactory2(flags, IID_PPV_ARGS(&factory_)), "failed to create DXGI factory");
 }
 
@@ -850,11 +888,26 @@ void Renderer::createDevice()
     {
         throwIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)),
                       "failed to create D3D12 device");
-        return;
+    }
+    else
+    {
+        throwIfFailed(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)),
+                      "failed to create D3D12 device");
     }
 
-    throwIfFailed(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)),
-                  "failed to create D3D12 device");
+    if (debugLayerEnabled_)
+    {
+        device_.As(&infoQueue_);
+        if (infoQueue_ != nullptr)
+        {
+            if (envFlagEnabled("BLOCKGAME_BREAK_ON_D3D12_ERROR"))
+            {
+                infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+                infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+            }
+            infoQueue_->ClearStoredMessages();
+        }
+    }
 }
 
 void Renderer::createCommandObjects()
@@ -2119,21 +2172,11 @@ void Renderer::buildDepthPyramid()
         return;
     }
 
-    constexpr D3D12_RESOURCE_STATES kDepthPyramidBuildState =
-        static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     renderDebugLog("buildDepthPyramid: begin");
 
-    std::array<D3D12_RESOURCE_BARRIER, 2> beginBarriers{};
-    UINT beginBarrierCount = 0;
-    beginBarriers[beginBarrierCount++] =
+    const D3D12_RESOURCE_BARRIER depthBeginBarrier =
         transitionBarrier(depthBuffer_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    if (depthPyramidState_ != kDepthPyramidBuildState)
-    {
-        beginBarriers[beginBarrierCount++] = transitionBarrier(depthPyramid_.Get(), depthPyramidState_, kDepthPyramidBuildState);
-    }
-    commandList_->ResourceBarrier(beginBarrierCount, beginBarriers.data());
-    depthPyramidState_ = kDepthPyramidBuildState;
+    commandList_->ResourceBarrier(1, &depthBeginBarrier);
 
     commandList_->SetComputeRootSignature(depthPyramidRootSignature_.Get());
     commandList_->SetPipelineState(depthPyramidPipelineState_.Get());
@@ -2149,6 +2192,13 @@ void Renderer::buildDepthPyramid()
 
     for (UINT mipIndex = 0; mipIndex < depthPyramidMipCount_; ++mipIndex)
     {
+        const D3D12_RESOURCE_BARRIER mipBeginBarrier =
+            transitionBarrier(depthPyramid_.Get(),
+                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                              mipIndex);
+        commandList_->ResourceBarrier(1, &mipBeginBarrier);
+
         const UINT srcWidth = std::max(1u, static_cast<UINT>(width_) >> ((mipIndex == 0) ? 0u : (mipIndex - 1u)));
         const UINT srcHeight = std::max(1u, static_cast<UINT>(height_) >> ((mipIndex == 0) ? 0u : (mipIndex - 1u)));
         const UINT dstWidth = std::max(1u, static_cast<UINT>(width_) >> mipIndex);
@@ -2165,16 +2215,19 @@ void Renderer::buildDepthPyramid()
         commandList_->SetComputeRootDescriptorTable(2, depthPyramidUavGpuHandles_[mipIndex]);
         commandList_->Dispatch((dstWidth + 7u) / 8u, (dstHeight + 7u) / 8u, 1u);
 
-        D3D12_RESOURCE_BARRIER uavBarrier{};
-        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        uavBarrier.UAV.pResource = depthPyramid_.Get();
-        commandList_->ResourceBarrier(1, &uavBarrier);
+        std::array<D3D12_RESOURCE_BARRIER, 2> mipEndBarriers{};
+        mipEndBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        mipEndBarriers[0].UAV.pResource = depthPyramid_.Get();
+        mipEndBarriers[1] = transitionBarrier(depthPyramid_.Get(),
+                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                              mipIndex);
+        commandList_->ResourceBarrier(static_cast<UINT>(mipEndBarriers.size()), mipEndBarriers.data());
     }
 
-    const D3D12_RESOURCE_BARRIER endBarriers[] = {
-        transitionBarrier(depthPyramid_.Get(), depthPyramidState_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-        transitionBarrier(depthBuffer_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE)};
-    commandList_->ResourceBarrier(static_cast<UINT>(std::size(endBarriers)), endBarriers);
+    const D3D12_RESOURCE_BARRIER depthEndBarrier =
+        transitionBarrier(depthBuffer_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    commandList_->ResourceBarrier(1, &depthEndBarrier);
     depthPyramidState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     renderDebugLog("buildDepthPyramid: end");
 }
@@ -2349,6 +2402,43 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch, const glm::m
     renderDebugLog("renderFarBatchGpuCull: end");
 }
 
+std::string Renderer::collectDebugMessages() const
+{
+    if (infoQueue_ == nullptr)
+    {
+        return {};
+    }
+
+    const UINT64 messageCount = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
+    if (messageCount == 0)
+    {
+        return {};
+    }
+
+    std::ostringstream oss;
+    const UINT64 firstMessage = messageCount > 12 ? messageCount - 12 : 0;
+    for (UINT64 i = firstMessage; i < messageCount; ++i)
+    {
+        SIZE_T messageSize = 0;
+        if (FAILED(infoQueue_->GetMessage(i, nullptr, &messageSize)) || messageSize == 0)
+        {
+            continue;
+        }
+
+        std::vector<std::byte> storage(messageSize);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(infoQueue_->GetMessage(i, message, &messageSize)))
+        {
+            continue;
+        }
+
+        oss << "\n  [" << i << "] " << message->pDescription;
+    }
+
+    infoQueue_->ClearStoredMessages();
+    return oss.str();
+}
+
 void Renderer::ensureFrameStarted() const
 {
     if (!frameStarted_)
@@ -2399,6 +2489,10 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
 
     throwIfFailed(frame.allocator->Reset(), "failed to reset frame allocator");
     throwIfFailed(commandList_->Reset(frame.allocator.Get(), nullptr), "failed to reset command list");
+    if (infoQueue_ != nullptr)
+    {
+        infoQueue_->ClearStoredMessages();
+    }
 
     if (pendingUploadFence_ != nullptr &&
         pendingUploadFenceValue_ > consumedUploadFenceValue_ &&
@@ -2891,7 +2985,18 @@ void Renderer::endFrame()
                               D3D12_RESOURCE_STATE_PRESENT);
         commandList_->ResourceBarrier(1, &barrier);
     }
-    throwIfFailed(commandList_->Close(), "failed to close command list");
+    const HRESULT closeHr = commandList_->Close();
+    if (FAILED(closeHr))
+    {
+        std::ostringstream message;
+        message << "failed to close command list";
+        const std::string debugMessages = collectDebugMessages();
+        if (!debugMessages.empty())
+        {
+            message << "; D3D12 debug messages:" << debugMessages;
+        }
+        throwRenderError(message.str());
+    }
 
     ID3D12CommandList* lists[] = {commandList_.Get()};
     commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);

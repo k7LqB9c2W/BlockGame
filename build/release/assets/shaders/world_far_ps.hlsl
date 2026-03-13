@@ -88,7 +88,13 @@ float4 main(PSInput input) : SV_TARGET
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
-    clip(textureSample.a - 0.5f);
+    // Far LOD tiles are expected to behave like a sealed opaque terrain shell. Applying the
+    // same alpha cutout threshold used by exact voxel geometry turns atlas mip bleed into
+    // screen-door holes across the distant terrain, especially on grass and snow edges.
+    if (!((input.materialFlags & kMaterialFlagFarLod) != 0u))
+    {
+        clip(textureSample.a - 0.5f);
+    }
 
     const float skyLight = saturate(input.lightChannels.x);
     const float blockLight = saturate(input.lightChannels.y);

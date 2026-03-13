@@ -1528,8 +1528,8 @@ void Renderer::createPipelines()
                   "failed to create near pipeline");
 
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
-      throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
-                    "failed to create far pipeline");
+    throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
+                  "failed to create far pipeline");
 
       D3D12_INDIRECT_ARGUMENT_DESC drawIndexedArgument{};
       drawIndexedArgument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;

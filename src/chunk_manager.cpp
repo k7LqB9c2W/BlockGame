@@ -281,7 +281,9 @@ struct ChunkBenchmarkMetrics
         meshStage.reset();
         uploadStage.reset();
         farBuildStage.reset();
+        lodGpuSynthesisStage.reset();
         chunkReadyLatency.reset();
+        structureQueryStage.reset();
         jobQueueDepth.reset();
         uploadQueueDepth.reset();
         farBuildQueueDepth.reset();
@@ -302,7 +304,9 @@ struct ChunkBenchmarkMetrics
         report.meshStage = meshStage.snapshot();
         report.uploadStage = uploadStage.snapshot();
         report.farBuildStage = farBuildStage.snapshot();
+        report.lodGpuSynthesisStage = lodGpuSynthesisStage.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
+        report.structureQueryStage = structureQueryStage.snapshot();
         report.jobQueueDepth = jobQueueDepth.snapshot();
         report.uploadQueueDepth = uploadQueueDepth.snapshot();
         report.farBuildQueueDepth = farBuildQueueDepth.snapshot();
@@ -321,7 +325,9 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram meshStage{};
     AtomicLatencyHistogram uploadStage{};
     AtomicLatencyHistogram farBuildStage{};
+    AtomicLatencyHistogram lodGpuSynthesisStage{};
     AtomicLatencyHistogram chunkReadyLatency{};
+    AtomicLatencyHistogram structureQueryStage{};
     AtomicDepthHistogram<4096> jobQueueDepth{};
     AtomicDepthHistogram<4096> uploadQueueDepth{};
     AtomicDepthHistogram<1024> farBuildQueueDepth{};
@@ -770,7 +776,18 @@ public:
         static constexpr const char* kShaderSource = R"(
 cbuffer Params : register(b0)
 {
+    uint gGridCount;
+    int gWorldMinY;
+    int gCellScaleBlocks;
     uint gCellCount;
+};
+
+struct TerrainColumnInputGpu
+{
+    int solidTopY;
+    uint solidBlock;
+    int waterTopY;
+    uint hasWater;
 };
 
 struct PageCellGpu
@@ -789,8 +806,9 @@ struct PageCellGpu
     uint padding;
 };
 
-StructuredBuffer<PageCellGpu> gCells : register(t0);
-RWStructuredBuffer<int4> gSummary : register(u0);
+StructuredBuffer<TerrainColumnInputGpu> gColumns : register(t0);
+RWStructuredBuffer<PageCellGpu> gCells : register(u0);
+RWStructuredBuffer<int4> gSummary : register(u1);
 
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -801,26 +819,45 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    const PageCellGpu cell = gCells[index];
-    if (cell.solidBlock != 0 && cell.solidTopY > -2147480000)
+    const uint x = index % gGridCount;
+    const uint yz = index / gGridCount;
+    const uint z = yz % gGridCount;
+    const uint y = yz / gGridCount;
+    const uint columnIndex = z * gGridCount + x;
+    const TerrainColumnInputGpu column = gColumns[columnIndex];
+    const int cellTopY = gWorldMinY + int(y) * gCellScaleBlocks + (gCellScaleBlocks - 1);
+
+    PageCellGpu cell;
+    cell.solidTopY = -2147483647;
+    cell.solidBlock = 0;
+    cell.waterTopY = -2147483647;
+    cell.hasWater = 0;
+    cell.canopyBaseY = -2147483647;
+    cell.canopyTopY = -2147483647;
+    cell.canopyBlock = 0;
+    cell.hasCanopy = 0;
+    cell.trunkTopY = -2147483647;
+    cell.trunkBlock = 0;
+    cell.hasTrunk = 0;
+    cell.padding = 0;
+
+    if (column.solidBlock != 0 && column.solidTopY >= cellTopY)
     {
-        InterlockedMin(gSummary[0].x, cell.solidTopY);
-        InterlockedMax(gSummary[0].y, cell.solidTopY + 1);
+        cell.solidTopY = cellTopY;
+        cell.solidBlock = column.solidBlock;
+        InterlockedMin(gSummary[0].x, cellTopY);
+        InterlockedMax(gSummary[0].y, cellTopY + 1);
         InterlockedAdd(gSummary[1].z, 1);
     }
-    if (cell.hasWater != 0 && cell.waterTopY > -2147480000)
+    else if (column.hasWater != 0 && column.waterTopY >= cellTopY)
     {
-        InterlockedMax(gSummary[0].z, cell.waterTopY + 1);
+        cell.waterTopY = cellTopY;
+        cell.hasWater = 1;
+        InterlockedMax(gSummary[0].z, cellTopY + 1);
         InterlockedAdd(gSummary[0].w, 1);
     }
-    if (cell.hasCanopy != 0)
-    {
-        InterlockedAdd(gSummary[1].x, 1);
-    }
-    if (cell.hasTrunk != 0)
-    {
-        InterlockedAdd(gSummary[1].y, 1);
-    }
+
+    gCells[index] = cell;
 }
 )";
 
@@ -855,9 +892,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             throwIfFailedDx(shaderHr, message.c_str());
         }
 
-        std::array<D3D12_ROOT_PARAMETER, 3> rootParams{};
+        std::array<D3D12_ROOT_PARAMETER, 4> rootParams{};
         rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        rootParams[0].Constants.Num32BitValues = 1;
+        rootParams[0].Constants.Num32BitValues = 4;
         rootParams[0].Constants.RegisterSpace = 0;
         rootParams[0].Constants.ShaderRegister = 0;
         rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -869,6 +906,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         rootParams[2].Descriptor.RegisterSpace = 0;
         rootParams[2].Descriptor.ShaderRegister = 0;
         rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        rootParams[3].Descriptor.RegisterSpace = 0;
+        rootParams[3].Descriptor.ShaderRegister = 1;
+        rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
         D3D12_ROOT_SIGNATURE_DESC rootSigDesc{};
         rootSigDesc.NumParameters = static_cast<UINT>(rootParams.size());
@@ -925,14 +966,22 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     template <typename PageType>
-    bool processPage(const PageType& page, Summary& outSummary, double& outMs)
+    bool processPage(PageType& page, Summary& outSummary, double& outMs)
     {
         outSummary = {};
         outMs = 0.0;
-        if (!ready() || page.cells.empty())
+        if (!ready() || page.cells.empty() || page.terrainColumns.empty())
         {
             return false;
         }
+
+        struct GpuTerrainColumn
+        {
+            std::int32_t solidTopY;
+            std::uint32_t solidBlock;
+            std::int32_t waterTopY;
+            std::uint32_t hasWater;
+        };
 
         struct GpuPageCell
         {
@@ -952,24 +1001,32 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
         const auto start = std::chrono::steady_clock::now();
         const std::size_t cellCount = page.cells.size();
-        std::vector<GpuPageCell> gpuCells(cellCount);
-        for (std::size_t i = 0; i < cellCount; ++i)
+        std::vector<GpuTerrainColumn> gpuColumns(page.terrainColumns.size());
+        for (std::size_t i = 0; i < page.terrainColumns.size(); ++i)
         {
-            const auto& src = page.cells[i];
-            gpuCells[i] = GpuPageCell{
+            const auto& src = page.terrainColumns[i];
+            gpuColumns[i] = GpuTerrainColumn{
                 src.solidTopY,
                 static_cast<std::uint32_t>(src.solidBlock),
                 src.waterTopY,
-                src.hasWater ? 1u : 0u,
-                src.canopyBaseY,
-                src.canopyTopY,
-                static_cast<std::uint32_t>(src.canopyBlock),
-                src.hasCanopy ? 1u : 0u,
-                src.trunkTopY,
-                static_cast<std::uint32_t>(src.trunkBlock),
-                src.hasTrunk ? 1u : 0u,
-                0u};
+                src.hasWater ? 1u : 0u};
         }
+
+        std::vector<GpuPageCell> gpuCells(
+            cellCount,
+            GpuPageCell{
+                std::numeric_limits<int>::min(),
+                0u,
+                std::numeric_limits<int>::min(),
+                0u,
+                std::numeric_limits<int>::min(),
+                std::numeric_limits<int>::min(),
+                0u,
+                0u,
+                std::numeric_limits<int>::min(),
+                0u,
+                0u,
+                0u});
 
         struct alignas(16) SummaryBlock
         {
@@ -984,7 +1041,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                                      0,
                                      0}};
 
-        const std::uint64_t inputBytes = static_cast<std::uint64_t>(gpuCells.size() * sizeof(GpuPageCell));
+        const std::uint64_t inputBytes = static_cast<std::uint64_t>(gpuColumns.size() * sizeof(GpuTerrainColumn));
+        const std::uint64_t cellBytes = static_cast<std::uint64_t>(gpuCells.size() * sizeof(GpuPageCell));
         const std::uint64_t summaryBytes = static_cast<std::uint64_t>(sizeof(SummaryBlock));
 
         auto createBuffer = [this](D3D12_HEAP_TYPE heapType,
@@ -1024,6 +1082,13 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             createBuffer(D3D12_HEAP_TYPE_DEFAULT, inputBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
         Microsoft::WRL::ComPtr<ID3D12Resource> inputUpload =
             createBuffer(D3D12_HEAP_TYPE_UPLOAD, inputBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+        Microsoft::WRL::ComPtr<ID3D12Resource> cellDefault =
+            createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                         cellBytes,
+                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> cellReadback =
+            createBuffer(D3D12_HEAP_TYPE_READBACK, cellBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
         Microsoft::WRL::ComPtr<ID3D12Resource> summaryDefault =
             createBuffer(D3D12_HEAP_TYPE_DEFAULT,
                          summaryBytes,
@@ -1036,7 +1101,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
         void* mappedInput = nullptr;
         throwIfFailedDx(inputUpload->Map(0, nullptr, &mappedInput), "failed to map page compute upload");
-        std::memcpy(mappedInput, gpuCells.data(), static_cast<std::size_t>(inputBytes));
+        std::memcpy(mappedInput, gpuColumns.data(), static_cast<std::size_t>(inputBytes));
         inputUpload->Unmap(0, nullptr);
 
         void* mappedSummary = nullptr;
@@ -1061,21 +1126,39 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         commandList_->ResourceBarrier(static_cast<UINT>(std::size(barriers)), barriers);
 
         commandList_->SetComputeRootSignature(rootSignature_.Get());
-        const UINT cellCount32 = static_cast<UINT>(gpuCells.size());
-        commandList_->SetComputeRoot32BitConstants(0, 1, &cellCount32, 0);
+        struct RootParams
+        {
+            UINT gridCount;
+            INT worldMinY;
+            INT cellScaleBlocks;
+            UINT cellCount;
+        };
+        const RootParams params{
+            static_cast<UINT>(page.gridCount),
+            static_cast<INT>(page.worldMinY),
+            static_cast<INT>(page.cellScaleBlocks),
+            static_cast<UINT>(gpuCells.size())};
+        commandList_->SetComputeRoot32BitConstants(0, 4, &params, 0);
         commandList_->SetComputeRootShaderResourceView(1, inputDefault->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(2, summaryDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(2, cellDefault->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(3, summaryDefault->GetGPUVirtualAddress());
         const UINT groups = std::max<UINT>(1u, static_cast<UINT>((gpuCells.size() + 63u) / 64u));
         commandList_->Dispatch(groups, 1, 1);
 
-        D3D12_RESOURCE_BARRIER uavBarrier{};
-        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        uavBarrier.UAV.pResource = summaryDefault.Get();
-        commandList_->ResourceBarrier(1, &uavBarrier);
+        D3D12_RESOURCE_BARRIER uavBarriers[2]{};
+        uavBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        uavBarriers[0].UAV.pResource = cellDefault.Get();
+        uavBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        uavBarriers[1].UAV.pResource = summaryDefault.Get();
+        commandList_->ResourceBarrier(static_cast<UINT>(std::size(uavBarriers)), uavBarriers);
 
-        const D3D12_RESOURCE_BARRIER toCopyBarrier =
-            transitionBarrier(summaryDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        commandList_->ResourceBarrier(1, &toCopyBarrier);
+        const D3D12_RESOURCE_BARRIER toCopyBarriers[] = {
+            transitionBarrier(cellDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+            transitionBarrier(summaryDefault.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)};
+        commandList_->ResourceBarrier(static_cast<UINT>(std::size(toCopyBarriers)), toCopyBarriers);
+        commandList_->CopyBufferRegion(cellReadback.Get(), 0, cellDefault.Get(), 0, cellBytes);
         commandList_->CopyBufferRegion(summaryReadback.Get(), 0, summaryDefault.Get(), 0, summaryBytes);
 
         throwIfFailedDx(commandList_->Close(), "failed to close page compute command list");
@@ -1092,6 +1175,39 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         throwIfFailedDx(summaryReadback->Map(0, &readRange, &mappedReadback), "failed to map page compute readback");
         std::memcpy(&summary, mappedReadback, sizeof(summary));
         summaryReadback->Unmap(0, nullptr);
+
+        void* mappedCells = nullptr;
+        D3D12_RANGE cellReadRange{0, static_cast<SIZE_T>(cellBytes)};
+        throwIfFailedDx(cellReadback->Map(0, &cellReadRange, &mappedCells), "failed to map page compute cell readback");
+        std::memcpy(gpuCells.data(), mappedCells, static_cast<std::size_t>(cellBytes));
+        cellReadback->Unmap(0, nullptr);
+
+        page.minY = std::numeric_limits<int>::max();
+        page.maxY = std::numeric_limits<int>::min();
+        for (std::size_t i = 0; i < cellCount; ++i)
+        {
+            auto& dst = page.cells[i];
+            const GpuPageCell& src = gpuCells[i];
+            dst.solidTopY = src.solidTopY;
+            dst.solidBlock = static_cast<BlockId>(src.solidBlock);
+            dst.waterTopY = src.waterTopY;
+            dst.hasWater = src.hasWater != 0;
+            dst.canopyBaseY = std::numeric_limits<int>::min();
+            dst.canopyTopY = std::numeric_limits<int>::min();
+            dst.canopyBlock = BlockId::Air;
+            dst.hasCanopy = false;
+            dst.trunkTopY = std::numeric_limits<int>::min();
+            dst.trunkBlock = BlockId::Air;
+            dst.hasTrunk = false;
+            if ((dst.solidBlock != BlockId::Air && dst.solidTopY != std::numeric_limits<int>::min()) ||
+                (dst.hasWater && dst.waterTopY != std::numeric_limits<int>::min()))
+            {
+                const int localY = static_cast<int>(i / static_cast<std::size_t>(page.gridCount * page.gridCount));
+                const int cellMinY = page.worldMinY + localY * page.cellScaleBlocks;
+                page.minY = std::min(page.minY, cellMinY);
+                page.maxY = std::max(page.maxY, cellMinY + page.cellScaleBlocks);
+            }
+        }
 
         outSummary.minSolidY = (summary.values[0] == std::numeric_limits<int>::max()) ? 0 : summary.values[0];
         outSummary.maxSolidY = (summary.values[1] == std::numeric_limits<int>::min()) ? 1 : summary.values[1];
@@ -1792,6 +1908,559 @@ inline bool defaultTreeHasSpacingConflict(const DefaultTreeCandidate& candidate,
     return false;
 }
 
+constexpr int kStructureRegionSize = 128;
+constexpr int kMaxStructureHorizontalRadius = kTaigaSpruceMaxLeafRadius + 1;
+
+struct StructureAabb
+{
+    glm::ivec3 min{0};
+    glm::ivec3 max{0};
+
+    [[nodiscard]] bool intersects(const glm::ivec3& otherMin, const glm::ivec3& otherMax) const noexcept
+    {
+        return min.x <= otherMax.x && max.x >= otherMin.x &&
+               min.y <= otherMax.y && max.y >= otherMin.y &&
+               min.z <= otherMax.z && max.z >= otherMin.z;
+    }
+};
+
+enum class StructureType : std::uint8_t
+{
+    DefaultTree = 0,
+    TaigaSpruce = 1,
+};
+
+struct StructureInstance
+{
+    StructureType type{StructureType::DefaultTree};
+    glm::ivec3 origin{0};
+    StructureAabb bounds{};
+    int trunkHeight{0};
+    int bareTrunkHeight{0};
+    float priority{0.0f};
+    int maxLodLevel{3};
+};
+
+struct StructureRegionKey
+{
+    int regionX{0};
+    int regionZ{0};
+
+    bool operator==(const StructureRegionKey& other) const noexcept
+    {
+        return regionX == other.regionX && regionZ == other.regionZ;
+    }
+};
+
+struct StructureRegionKeyHasher
+{
+    std::size_t operator()(const StructureRegionKey& key) const noexcept
+    {
+        std::size_t hash = static_cast<std::size_t>(key.regionX) * 73856093u;
+        hash ^= static_cast<std::size_t>(key.regionZ) * 19349663u;
+        return hash;
+    }
+};
+
+struct StructureBvhNode
+{
+    StructureAabb bounds{};
+    int leftFirst{0};
+    int rightChild{0};
+    int primitiveCount{0};
+};
+
+struct StructureBvh
+{
+    static constexpr int kLeafSize = 4;
+
+    void build(const std::vector<StructureInstance>& instances)
+    {
+        nodes.clear();
+        indices.resize(instances.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        if (instances.empty())
+        {
+            return;
+        }
+
+        buildNode(instances, 0, static_cast<int>(indices.size()));
+    }
+
+    void query(const glm::ivec3& queryMin,
+               const glm::ivec3& queryMax,
+               const std::vector<StructureInstance>& instances,
+               std::vector<const StructureInstance*>& out) const
+    {
+        if (nodes.empty())
+        {
+            return;
+        }
+
+        std::vector<int> stack;
+        stack.push_back(0);
+        while (!stack.empty())
+        {
+            const int nodeIndex = stack.back();
+            stack.pop_back();
+            const StructureBvhNode& node = nodes[static_cast<std::size_t>(nodeIndex)];
+            if (!node.bounds.intersects(queryMin, queryMax))
+            {
+                continue;
+            }
+
+            if (node.primitiveCount > 0)
+            {
+                for (int i = 0; i < node.primitiveCount; ++i)
+                {
+                    const int instanceIndex = indices[static_cast<std::size_t>(node.leftFirst + i)];
+                    const StructureInstance& instance = instances[static_cast<std::size_t>(instanceIndex)];
+                    if (instance.bounds.intersects(queryMin, queryMax))
+                    {
+                        out.push_back(&instance);
+                    }
+                }
+                continue;
+            }
+
+            stack.push_back(node.leftFirst);
+            stack.push_back(node.rightChild);
+        }
+    }
+
+    std::vector<StructureBvhNode> nodes;
+    std::vector<int> indices;
+
+private:
+    int buildNode(const std::vector<StructureInstance>& instances, int begin, int end)
+    {
+        const int nodeIndex = static_cast<int>(nodes.size());
+        nodes.push_back(StructureBvhNode{});
+        nodes[static_cast<std::size_t>(nodeIndex)].bounds = boundsForRange(instances, begin, end);
+
+        const int count = end - begin;
+        if (count <= kLeafSize)
+        {
+            nodes[static_cast<std::size_t>(nodeIndex)].leftFirst = begin;
+            nodes[static_cast<std::size_t>(nodeIndex)].rightChild = -1;
+            nodes[static_cast<std::size_t>(nodeIndex)].primitiveCount = count;
+            return nodeIndex;
+        }
+
+        const glm::ivec3 extent = nodes[static_cast<std::size_t>(nodeIndex)].bounds.max -
+                                  nodes[static_cast<std::size_t>(nodeIndex)].bounds.min;
+        int axis = 0;
+        if (extent.y > extent.x && extent.y >= extent.z)
+        {
+            axis = 1;
+        }
+        else if (extent.z > extent.x)
+        {
+            axis = 2;
+        }
+
+        const int mid = begin + count / 2;
+        std::nth_element(indices.begin() + begin,
+                         indices.begin() + mid,
+                         indices.begin() + end,
+                         [&](int lhs, int rhs)
+                         {
+                             return centerComponent(instances[static_cast<std::size_t>(lhs)].bounds, axis) <
+                                    centerComponent(instances[static_cast<std::size_t>(rhs)].bounds, axis);
+                         });
+
+        const int leftNode = buildNode(instances, begin, mid);
+        const int rightNode = buildNode(instances, mid, end);
+        nodes[static_cast<std::size_t>(nodeIndex)].leftFirst = leftNode;
+        nodes[static_cast<std::size_t>(nodeIndex)].rightChild = rightNode;
+        nodes[static_cast<std::size_t>(nodeIndex)].primitiveCount = 0;
+        return nodeIndex;
+    }
+
+    [[nodiscard]] StructureAabb boundsForRange(const std::vector<StructureInstance>& instances, int begin, int end) const
+    {
+        StructureAabb bounds{};
+        bounds.min = glm::ivec3(std::numeric_limits<int>::max());
+        bounds.max = glm::ivec3(std::numeric_limits<int>::min());
+        for (int i = begin; i < end; ++i)
+        {
+            const StructureAabb& instanceBounds = instances[static_cast<std::size_t>(indices[static_cast<std::size_t>(i)])].bounds;
+            bounds.min = glm::min(bounds.min, instanceBounds.min);
+            bounds.max = glm::max(bounds.max, instanceBounds.max);
+        }
+        return bounds;
+    }
+
+    [[nodiscard]] static float centerComponent(const StructureAabb& bounds, int axis) noexcept
+    {
+        const glm::ivec3 center = bounds.min + ((bounds.max - bounds.min) / 2);
+        if (axis == 1)
+        {
+            return static_cast<float>(center.y);
+        }
+        if (axis == 2)
+        {
+            return static_cast<float>(center.z);
+        }
+        return static_cast<float>(center.x);
+    }
+};
+
+struct StructureRegion
+{
+    StructureRegionKey key{};
+    glm::ivec2 worldMin{0};
+    glm::ivec2 worldMax{0};
+    std::vector<StructureInstance> instances;
+    StructureBvh bvh{};
+};
+
+struct StructureRegistryProfilingSnapshot
+{
+    std::uint64_t cacheHits{0};
+    std::uint64_t cacheMisses{0};
+    std::uint64_t regionsBuilt{0};
+    std::uint64_t queryCount{0};
+    std::uint64_t totalQueryMicros{0};
+    double cacheHitRate{0.0};
+    double averageQueryMs{0.0};
+};
+
+class StructureRegistry
+{
+public:
+    using SampleColumnFn = std::function<ColumnSample(int worldX, int worldZ)>;
+    using SurfaceBlockFn = std::function<BlockId(int worldX, int worldZ, const ColumnSample&)>;
+    using DensityFn = std::function<float(int worldX, int worldZ)>;
+
+    StructureRegistry() = default;
+
+    StructureRegistry(SampleColumnFn sampleColumnFn,
+                      SurfaceBlockFn surfaceBlockFn,
+                      DensityFn densityFn)
+        : sampleColumnFn_(std::move(sampleColumnFn)),
+          surfaceBlockFn_(std::move(surfaceBlockFn)),
+          densityFn_(std::move(densityFn))
+    {
+    }
+
+    void configure(SampleColumnFn sampleColumnFn,
+                   SurfaceBlockFn surfaceBlockFn,
+                   DensityFn densityFn)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sampleColumnFn_ = std::move(sampleColumnFn);
+        surfaceBlockFn_ = std::move(surfaceBlockFn);
+        densityFn_ = std::move(densityFn);
+        regions_.clear();
+    }
+
+    void clear()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        regions_.clear();
+    }
+
+    void setProfilingEnabled(bool enabled) noexcept
+    {
+        profilingEnabled_.store(enabled, std::memory_order_release);
+    }
+
+    void resetProfiling() noexcept
+    {
+        cacheHits_.store(0, std::memory_order_relaxed);
+        cacheMisses_.store(0, std::memory_order_relaxed);
+        regionsBuilt_.store(0, std::memory_order_relaxed);
+        queryCount_.store(0, std::memory_order_relaxed);
+        totalQueryMicros_.store(0, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] StructureRegistryProfilingSnapshot profilingSnapshot() const noexcept
+    {
+        StructureRegistryProfilingSnapshot snapshot{};
+        snapshot.cacheHits = cacheHits_.load(std::memory_order_relaxed);
+        snapshot.cacheMisses = cacheMisses_.load(std::memory_order_relaxed);
+        snapshot.regionsBuilt = regionsBuilt_.load(std::memory_order_relaxed);
+        snapshot.queryCount = queryCount_.load(std::memory_order_relaxed);
+        snapshot.totalQueryMicros = totalQueryMicros_.load(std::memory_order_relaxed);
+        const std::uint64_t totalLookups = snapshot.cacheHits + snapshot.cacheMisses;
+        if (totalLookups > 0)
+        {
+            snapshot.cacheHitRate = static_cast<double>(snapshot.cacheHits) / static_cast<double>(totalLookups);
+        }
+        if (snapshot.queryCount > 0)
+        {
+            snapshot.averageQueryMs =
+                static_cast<double>(snapshot.totalQueryMicros) / (1000.0 * static_cast<double>(snapshot.queryCount));
+        }
+        return snapshot;
+    }
+
+    [[nodiscard]] std::vector<StructureInstance> query(const glm::ivec3& queryMin,
+                                                       const glm::ivec3& queryMax,
+                                                       int lodLevel = 0) const
+    {
+        const SteadyClock::time_point queryStart = SteadyClock::now();
+        std::vector<StructureInstance> result;
+        const int minRegionX = floorDiv(queryMin.x - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(queryMax.x + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(queryMin.z - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(queryMax.z + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                const std::shared_ptr<const StructureRegion> region =
+                    getOrBuildRegion(StructureRegionKey{regionX, regionZ});
+                if (!region)
+                {
+                    continue;
+                }
+
+                std::vector<const StructureInstance*> candidates;
+                region->bvh.query(queryMin, queryMax, region->instances, candidates);
+                for (const StructureInstance* candidate : candidates)
+                {
+                    if (candidate == nullptr)
+                    {
+                        continue;
+                    }
+                    if (lodLevel > 0 && candidate->maxLodLevel < lodLevel)
+                    {
+                        continue;
+                    }
+                    result.push_back(*candidate);
+                }
+            }
+        }
+
+        if (profilingEnabled_.load(std::memory_order_acquire))
+        {
+            queryCount_.fetch_add(1, std::memory_order_relaxed);
+            const auto elapsedMicros =
+                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+            totalQueryMicros_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedMicros, 0)),
+                                        std::memory_order_relaxed);
+        }
+
+        return result;
+    }
+
+private:
+    [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegion(const StructureRegionKey& key) const
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = regions_.find(key);
+            if (it != regions_.end())
+            {
+                if (profilingEnabled_.load(std::memory_order_acquire))
+                {
+                    cacheHits_.fetch_add(1, std::memory_order_relaxed);
+                }
+                return it->second;
+            }
+        }
+
+        if (!sampleColumnFn_ || !surfaceBlockFn_ || !densityFn_)
+        {
+            return {};
+        }
+
+        if (profilingEnabled_.load(std::memory_order_acquire))
+        {
+            cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        auto builtRegion = std::make_shared<StructureRegion>(buildRegion(key));
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto [it, inserted] = regions_.emplace(key, builtRegion);
+            if (inserted && profilingEnabled_.load(std::memory_order_acquire))
+            {
+                regionsBuilt_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return it->second;
+        }
+    }
+
+    [[nodiscard]] StructureRegion buildRegion(const StructureRegionKey& key) const
+    {
+        StructureRegion region{};
+        region.key = key;
+        region.worldMin = glm::ivec2(key.regionX * kStructureRegionSize, key.regionZ * kStructureRegionSize);
+        region.worldMax = region.worldMin + glm::ivec2(kStructureRegionSize - 1);
+        region.instances.reserve(64);
+
+        auto sampleColumn = [this](int worldX, int worldZ) -> ColumnSample {
+            return sampleColumnFn_(worldX, worldZ);
+        };
+
+        auto resolvedSurfaceBlockAt = [this](int worldX, int worldZ, const ColumnSample& sample) -> BlockId {
+            return surfaceBlockFn_(worldX, worldZ, sample);
+        };
+
+        auto densityAt = [this](int worldX, int worldZ) noexcept {
+            return densityFn_(worldX, worldZ);
+        };
+
+        auto canAnchorTaigaSpruce = [&](int originX, int originZ, int& outGroundWorldY) -> bool
+        {
+            int groundWorldY = std::numeric_limits<int>::min();
+
+            for (int trunkX = 0; trunkX < 2; ++trunkX)
+            {
+                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+                {
+                    const ColumnSample baseSample = sampleColumn(originX + trunkX, originZ + trunkZ);
+                    if (!baseSample.dominantBiome || !terrain::isTaigaBiome(*baseSample.dominantBiome))
+                    {
+                        return false;
+                    }
+                    if (baseSample.dominantWeight < kTreeBiomeWeightThreshold)
+                    {
+                        return false;
+                    }
+
+                    const BlockId surfaceBlock =
+                        resolvedSurfaceBlockAt(originX + trunkX, originZ + trunkZ, baseSample);
+                    if (surfaceBlock != BlockId::Grass && surfaceBlock != BlockId::Podzol)
+                    {
+                        return false;
+                    }
+
+                    if (groundWorldY == std::numeric_limits<int>::min())
+                    {
+                        groundWorldY = baseSample.surfaceY;
+                    }
+                    else if (baseSample.surfaceY != groundWorldY)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            for (int dx = -2; dx <= 3; ++dx)
+            {
+                for (int dz = -2; dz <= 3; ++dz)
+                {
+                    const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
+                    if (!neighborSample.dominantBiome)
+                    {
+                        return false;
+                    }
+                    if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            outGroundWorldY = groundWorldY;
+            return groundWorldY > 2;
+        };
+
+        for (int worldX = region.worldMin.x; worldX <= region.worldMax.x; ++worldX)
+        {
+            for (int worldZ = region.worldMin.y; worldZ <= region.worldMax.y; ++worldZ)
+            {
+                const ColumnSample columnSample = sampleColumn(worldX, worldZ);
+                if (!columnSample.dominantBiome)
+                {
+                    continue;
+                }
+
+                const BiomeDefinition& biome = *columnSample.dominantBiome;
+                if (!biome.generatesTrees || columnSample.dominantWeight < kTreeBiomeWeightThreshold)
+                {
+                    continue;
+                }
+
+                const int groundWorldY = columnSample.surfaceY;
+                if (groundWorldY <= 2)
+                {
+                    continue;
+                }
+
+                if (terrain::isTaigaBiome(biome))
+                {
+                    if (!shouldSpawnTaigaSpruce(biome, worldX, groundWorldY, worldZ))
+                    {
+                        continue;
+                    }
+
+                    int taigaGroundWorldY = std::numeric_limits<int>::min();
+                    if (!canAnchorTaigaSpruce(worldX, worldZ, taigaGroundWorldY))
+                    {
+                        continue;
+                    }
+
+                    StructureInstance instance{};
+                    instance.type = StructureType::TaigaSpruce;
+                    instance.origin = glm::ivec3(worldX, taigaGroundWorldY, worldZ);
+                    instance.trunkHeight = taigaSpruceTrunkHeight(worldX, taigaGroundWorldY, worldZ);
+                    instance.bareTrunkHeight = taigaSpruceBareTrunkHeight(worldX, taigaGroundWorldY, worldZ);
+                    instance.maxLodLevel = 4;
+                    instance.bounds.min = glm::ivec3(worldX - kTaigaSpruceMaxLeafRadius,
+                                                     taigaGroundWorldY + 1,
+                                                     worldZ - kTaigaSpruceMaxLeafRadius);
+                    instance.bounds.max = glm::ivec3(worldX + 1 + kTaigaSpruceMaxLeafRadius,
+                                                     taigaGroundWorldY + instance.trunkHeight + 1,
+                                                     worldZ + 1 + kTaigaSpruceMaxLeafRadius);
+                    region.instances.push_back(instance);
+                    continue;
+                }
+
+                DefaultTreeCandidate candidate{};
+                if (!tryBuildDefaultTreeCandidate(worldX,
+                                                  worldZ,
+                                                  columnSample,
+                                                  sampleColumn,
+                                                  densityAt,
+                                                  candidate))
+                {
+                    continue;
+                }
+
+                if (defaultTreeHasSpacingConflict(candidate, sampleColumn, densityAt))
+                {
+                    continue;
+                }
+
+                StructureInstance instance{};
+                instance.type = StructureType::DefaultTree;
+                instance.origin = glm::ivec3(candidate.originX, candidate.groundWorldY, candidate.originZ);
+                instance.trunkHeight = candidate.trunkHeight;
+                instance.priority = candidate.priority;
+                instance.maxLodLevel = 3;
+                instance.bounds.min = glm::ivec3(candidate.originX - kDefaultTreeMaxRadius,
+                                                 candidate.groundWorldY,
+                                                 candidate.originZ - kDefaultTreeMaxRadius);
+                instance.bounds.max = glm::ivec3(candidate.originX + kDefaultTreeMaxRadius,
+                                                 candidate.groundWorldY + candidate.trunkHeight,
+                                                 candidate.originZ + kDefaultTreeMaxRadius);
+                region.instances.push_back(instance);
+            }
+        }
+
+        region.bvh.build(region.instances);
+        return region;
+    }
+
+    mutable std::mutex mutex_;
+    mutable std::unordered_map<StructureRegionKey, std::shared_ptr<StructureRegion>, StructureRegionKeyHasher> regions_{};
+    SampleColumnFn sampleColumnFn_{};
+    SurfaceBlockFn surfaceBlockFn_{};
+    DensityFn densityFn_{};
+    std::atomic<bool> profilingEnabled_{false};
+    mutable std::atomic<std::uint64_t> cacheHits_{0};
+    mutable std::atomic<std::uint64_t> cacheMisses_{0};
+    mutable std::atomic<std::uint64_t> regionsBuilt_{0};
+    mutable std::atomic<std::uint64_t> queryCount_{0};
+    mutable std::atomic<std::uint64_t> totalQueryMicros_{0};
+};
+
 struct MeshData
 {
     static constexpr std::size_t kReusableVertexCapacity = 4096;
@@ -2265,6 +2934,9 @@ public:
 
     using SampleFn = std::function<FarTerrainSurfaceSample(int worldX, int worldZ, int lodLevel)>;
     using UvLookupFn = std::function<std::pair<glm::vec2, glm::vec2>(BlockId block, BlockFace face)>;
+    using StructureQueryFn = std::function<std::vector<StructureInstance>(const glm::ivec3& minWorld,
+                                                                          const glm::ivec3& maxWorld,
+                                                                          int lodLevel)>;
 
     FarTerrainManager()
         : levels_{
@@ -2360,7 +3032,8 @@ public:
                 int realDistanceBlocks,
                 double uploadBudgetMs,
                 const SampleFn& sampleFn,
-                const UvLookupFn& uvLookup)
+                const UvLookupFn& uvLookup,
+                const StructureQueryFn& structureQueryFn)
     {
         builtTilesLastUpdate_ = 0;
         if (!enabled_ || realDistanceBlocks <= 0)
@@ -2386,6 +3059,7 @@ public:
             std::lock_guard<std::mutex> lock(configMutex_);
             sampleFn_ = sampleFn;
             uvLookupFn_ = uvLookup;
+            structureQueryFn_ = structureQueryFn;
         }
 
         const int realRadiusChunks = std::max(nearRadiusChunks + 1,
@@ -2545,6 +3219,7 @@ public:
         destroyBufferPages();
         builtTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
+        lastAverageGpuSynthesisMs_ = 0.0;
         lastCollectMs_ = 0.0;
         lastUploadMs_ = 0.0;
     }
@@ -2704,6 +3379,14 @@ private:
         bool hasTrunk{false};
     };
 
+    struct TerrainColumnInput
+    {
+        int solidTopY{std::numeric_limits<int>::min()};
+        BlockId solidBlock{BlockId::Air};
+        int waterTopY{std::numeric_limits<int>::min()};
+        bool hasWater{false};
+    };
+
     struct PageData
     {
         int gridCount{kCubicPageAxis};
@@ -2716,6 +3399,9 @@ private:
         int minY{0};
         int maxY{1};
         std::vector<PageCell> cells;
+        std::vector<TerrainColumnInput> terrainColumns;
+        std::vector<StructureInstance> structures;
+        bool occupancyReady{false};
         bool gpuProcessed{false};
         int gpuMinSolidY{0};
         int gpuMaxSolidY{1};
@@ -2763,6 +3449,7 @@ private:
         std::shared_ptr<PageData> page;
         TileMesh mesh{};
         double buildMs{0.0};
+        double gpuSynthesisMs{0.0};
     };
 
     struct BuildJob
@@ -3319,193 +4006,147 @@ private:
 
     static void stampPageStructures(PageData& page,
                                     const LevelConfig& level,
-                                    const std::vector<FarTerrainSurfaceSample>& sampledColumns)
+                                    const std::vector<StructureInstance>& structures)
     {
-        if (level.lodLevel > 3 ||
-            page.gridCount <= 0 ||
-            page.cellScaleBlocks <= 0 ||
-            page.cells.empty() ||
-            sampledColumns.size() != static_cast<std::size_t>(page.gridCount * page.gridCount))
+        if (structures.empty() || page.gridCount <= 0 || page.cellScaleBlocks <= 0 || page.cells.empty())
         {
             return;
         }
-
-        auto sampledColumnAt = [&](int x, int z) -> const FarTerrainSurfaceSample& {
-            return sampledColumns[pageColumnIndex(page.gridCount, x, z)];
-        };
 
         auto pageCellAt = [&](int x, int y, int z) -> PageCell& {
             return page.cells[pageCellIndex(page.gridCount, x, y, z)];
         };
 
-        auto stampTrunkCell = [&](int x, int y, int z, BlockId block)
+        auto stampBlock = [&](int worldX, int worldY, int worldZ, BlockId block)
         {
-            if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount || y < 0 || y >= page.gridCount)
+            const int localX = floorDiv(worldX - page.worldMinX, page.cellScaleBlocks);
+            const int localY = floorDiv(worldY - page.worldMinY, page.cellScaleBlocks);
+            const int localZ = floorDiv(worldZ - page.worldMinZ, page.cellScaleBlocks);
+            if (localX < 0 || localY < 0 || localZ < 0 ||
+                localX >= page.gridCount || localY >= page.gridCount || localZ >= page.gridCount)
             {
                 return;
             }
 
-            PageCell& cell = pageCellAt(x, y, z);
-            cell.hasTrunk = true;
-            cell.trunkTopY = std::max(cell.trunkTopY, pageCellTopY(page, y));
-            cell.trunkBlock = block;
-            updatePageBoundsForCell(page, y);
+            PageCell& cell = pageCellAt(localX, localY, localZ);
+            const bool cellWasOccupied =
+                hasRenderableTrunk(cell) || hasRenderableCanopy(cell) || hasRenderableSolid(cell) || hasRenderableWater(cell);
+            if (block == BlockId::Wood || block == BlockId::SpruceLog)
+            {
+                if (!cell.hasTrunk)
+                {
+                    ++page.gpuTrunkCells;
+                }
+                cell.hasTrunk = true;
+                cell.trunkTopY = std::max(cell.trunkTopY, pageCellTopY(page, localY));
+                cell.trunkBlock = block;
+            }
+            else if (block == BlockId::Leaves || block == BlockId::SpruceLeaves)
+            {
+                if (!cell.hasCanopy)
+                {
+                    ++page.gpuCanopyCells;
+                }
+                cell.hasCanopy = true;
+                cell.canopyBaseY = (cell.canopyBaseY == std::numeric_limits<int>::min())
+                                       ? pageCellMinY(page, localY)
+                                       : std::min(cell.canopyBaseY, pageCellMinY(page, localY));
+                cell.canopyTopY = std::max(cell.canopyTopY, pageCellTopY(page, localY));
+                cell.canopyBlock = block;
+            }
+            if (!cellWasOccupied)
+            {
+                ++page.gpuOccupiedCells;
+            }
+            updatePageBoundsForCell(page, localY);
         };
 
-        auto stampCanopyCell = [&](int x, int y, int z, BlockId block)
+        auto stampSpruce = [&](const StructureInstance& instance)
         {
-            if (x < 0 || z < 0 || x >= page.gridCount || z >= page.gridCount || y < 0 || y >= page.gridCount)
+            for (int trunkX = 0; trunkX < 2; ++trunkX)
             {
-                return;
-            }
-
-            PageCell& cell = pageCellAt(x, y, z);
-            cell.hasCanopy = true;
-            cell.canopyBaseY = (cell.canopyBaseY == std::numeric_limits<int>::min())
-                                   ? pageCellMinY(page, y)
-                                   : std::min(cell.canopyBaseY, pageCellMinY(page, y));
-            cell.canopyTopY = std::max(cell.canopyTopY, pageCellTopY(page, y));
-            cell.canopyBlock = block;
-            updatePageBoundsForCell(page, y);
-        };
-
-        auto tryStampTree = [&](int originX, int originZ, bool spruce)
-        {
-            const int localX = floorDiv(originX - page.worldMinX, page.cellScaleBlocks);
-            const int localZ = floorDiv(originZ - page.worldMinZ, page.cellScaleBlocks);
-            if (localX < 0 || localZ < 0 || localX >= page.gridCount || localZ >= page.gridCount)
-            {
-                return;
-            }
-
-            const FarTerrainSurfaceSample& anchor = sampledColumnAt(localX, localZ);
-            if (!anchor.allowsTrees ||
-                !hasSolidSurface(anchor) ||
-                anchor.hasVisibleWater ||
-                anchor.solidBlock == BlockId::Sand ||
-                anchor.solidBlock == BlockId::Stone)
-            {
-                return;
-            }
-
-            const bool useSpruce = spruce || anchor.prefersSpruce || anchor.solidBlock == BlockId::Podzol;
-            const int macroStep = std::max(page.cellScaleBlocks, 1);
-            const int trunkHeight = useSpruce
-                                        ? 8 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 37, originZ) * 8.0f)
-                                        : 6 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 19, originZ) * 6.0f);
-            const int bareTrunkHeight = useSpruce
-                                            ? 3 + static_cast<int>(hashToUnitFloat(originX, anchor.solidTopY + 83, originZ) * 3.0f)
-                                            : std::max(2, trunkHeight - 3);
-            const int canopyTopY = quantizeMacroTopY(anchor.solidTopY + trunkHeight, macroStep);
-            const int bareTrunkTopY = quantizeMacroTopY(anchor.solidTopY + std::max(bareTrunkHeight, 1), macroStep);
-            const int trunkStartLocalY = floorDiv(anchor.solidTopY + 1 - page.worldMinY, macroStep);
-            const int trunkTopLocalY = floorDiv(bareTrunkTopY - page.worldMinY, macroStep);
-
-            if (level.lodLevel <= 2)
-            {
-                const BlockId trunkBlock = useSpruce ? BlockId::SpruceLog : BlockId::Wood;
-                for (int localY = trunkStartLocalY; localY <= trunkTopLocalY; ++localY)
+                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
                 {
-                    stampTrunkCell(localX, localY, localZ, trunkBlock);
-                }
-            }
-
-            auto stampCanopyRange = [&](int x, int z, int canopyBaseY, int canopyTopCellY)
-            {
-                const int canopyBaseLocalY = floorDiv(canopyBaseY - page.worldMinY, macroStep);
-                const int canopyTopLocalY = floorDiv(canopyTopCellY - page.worldMinY, macroStep);
-                const BlockId canopyBlock = useSpruce ? BlockId::SpruceLeaves : BlockId::Leaves;
-                for (int localY = canopyBaseLocalY; localY <= canopyTopLocalY; ++localY)
-                {
-                    stampCanopyCell(x, localY, z, canopyBlock);
-                }
-            };
-
-            if (useSpruce)
-            {
-                const int tierCount = (level.lodLevel == 1) ? 3 : 2;
-                for (int tier = 0; tier < tierCount; ++tier)
-                {
-                    const int radius = (tier == 0) ? 0 : 1;
-                    const int tierTopY = canopyTopY - tier * macroStep;
-                    const int tierBaseY = std::max(bareTrunkTopY + 1, tierTopY - macroStep + 1);
-                    for (int z = localZ - radius; z <= localZ + radius; ++z)
+                    for (int dy = 1; dy <= instance.trunkHeight; ++dy)
                     {
-                        for (int x = localX - radius; x <= localX + radius; ++x)
-                        {
-                            const int chebyshev = std::max(std::abs(x - localX), std::abs(z - localZ));
-                            if (chebyshev > radius)
-                            {
-                                continue;
-                            }
-                            if (tier > 0 && chebyshev == radius &&
-                                (((x - localX) != 0) && ((z - localZ) != 0)))
-                            {
-                                continue;
-                            }
-                            stampCanopyRange(x, z, tierBaseY, tierTopY);
-                        }
+                        stampBlock(instance.origin.x + trunkX,
+                                   instance.origin.y + dy,
+                                   instance.origin.z + trunkZ,
+                                   BlockId::SpruceLog);
                     }
                 }
             }
-            else
-            {
-                const int lowerTopY = canopyTopY - macroStep;
-                const int lowerBaseY = std::max(bareTrunkTopY + 1, lowerTopY - macroStep + 1);
-                const int upperBaseY = std::max(lowerTopY, canopyTopY - macroStep + 1);
 
-                for (int z = localZ - 1; z <= localZ + 1; ++z)
+            const int canopyBaseWorld = instance.origin.y + instance.bareTrunkHeight + 1;
+            const int canopyTopWorld = instance.origin.y + instance.trunkHeight;
+            const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
+            for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+            {
+                const int layerFromBottom = worldY - canopyBaseWorld;
+                const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
+                if (radius <= 0)
                 {
-                    for (int x = localX - 1; x <= localX + 1; ++x)
+                    continue;
+                }
+
+                for (int worldX = instance.origin.x - radius; worldX <= instance.origin.x + 1 + radius; ++worldX)
+                {
+                    for (int worldZ = instance.origin.z - radius; worldZ <= instance.origin.z + 1 + radius; ++worldZ)
                     {
-                        const int chebyshev = std::max(std::abs(x - localX), std::abs(z - localZ));
-                        if (chebyshev > 1)
+                        if (!taigaSpruceLeafOccupiesCell(instance.origin.x,
+                                                         instance.origin.z,
+                                                         worldX,
+                                                         worldZ,
+                                                         radius,
+                                                         layerFromBottom,
+                                                         totalLayers))
                         {
                             continue;
                         }
-                        stampCanopyRange(x, z, lowerBaseY, lowerTopY);
-                        if (chebyshev == 0 || level.lodLevel == 1)
-                        {
-                            stampCanopyRange(x, z, upperBaseY, canopyTopY);
-                        }
+                        stampBlock(worldX, worldY, worldZ, BlockId::SpruceLeaves);
                     }
                 }
             }
-        };
 
-        auto stampGrid = [&](int cellSize, bool spruce)
-        {
-            const int minCellX = floorDiv(page.worldMinX - cellSize, cellSize);
-            const int maxCellX = floorDiv(page.worldMinX + page.tileSpanBlocks + cellSize, cellSize);
-            const int minCellZ = floorDiv(page.worldMinZ - cellSize, cellSize);
-            const int maxCellZ = floorDiv(page.worldMinZ + page.tileSpanBlocks + cellSize, cellSize);
-            const float lodDensityScale = (level.lodLevel == 1) ? 1.0f : (level.lodLevel == 2 ? 0.70f : 0.45f);
-
-            for (int cellZ = minCellZ; cellZ <= maxCellZ; ++cellZ)
+            const int crownWorldY = canopyTopWorld + 1;
+            for (int trunkX = 0; trunkX < 2; ++trunkX)
             {
-                for (int cellX = minCellX; cellX <= maxCellX; ++cellX)
+                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
                 {
-                    const int usableExtent = std::max(cellSize - 4, 1);
-                    const int originX = cellX * cellSize + 2 +
-                                        static_cast<int>(hashToUnitFloat(cellX, spruce ? 911 : 431, cellZ) *
-                                                         static_cast<float>(usableExtent));
-                    const int originZ = cellZ * cellSize + 2 +
-                                        static_cast<int>(hashToUnitFloat(cellX, spruce ? 977 : 577, cellZ) *
-                                                         static_cast<float>(usableExtent));
-                    const float densityRoll = hashToUnitFloat(originX, spruce ? 151 : 211, originZ);
-                    const float densityBias = hashToUnitFloat(originX >> 1, spruce ? 281 : 337, originZ >> 1);
-                    const float baseChance = spruce ? 0.28f : 0.18f;
-                    const float spawnChance = std::clamp(baseChance * lodDensityScale * (0.5f + densityBias), 0.0f, 0.35f);
-                    if (densityRoll <= spawnChance)
-                    {
-                        tryStampTree(originX, originZ, spruce);
-                    }
+                    stampBlock(instance.origin.x + trunkX,
+                               crownWorldY,
+                               instance.origin.z + trunkZ,
+                               BlockId::SpruceLeaves);
                 }
             }
         };
 
-        stampGrid(kTaigaSpruceCellSize, true);
-        stampGrid(12, false);
+        for (const StructureInstance& instance : structures)
+        {
+            if (instance.maxLodLevel < level.lodLevel ||
+                !instance.bounds.intersects(glm::ivec3(page.worldMinX, page.worldMinY, page.worldMinZ),
+                                            glm::ivec3(page.worldMinX + page.tileSpanBlocks - 1,
+                                                       page.worldMinY + page.gridCount * page.cellScaleBlocks - 1,
+                                                       page.worldMinZ + page.tileSpanBlocks - 1)))
+            {
+                continue;
+            }
+
+            if (instance.type == StructureType::TaigaSpruce)
+            {
+                stampSpruce(instance);
+                continue;
+            }
+
+            forEachDefaultTreeBlock(instance.origin.x,
+                                    instance.origin.z,
+                                    instance.origin.y,
+                                    instance.trunkHeight,
+                                    [&](int blockX, int blockY, int blockZ, BlockId block) {
+                                        stampBlock(blockX, blockY, blockZ, block);
+                                        return false;
+                                    });
+        }
     }
 
     static void appendAxisAlignedBox(std::vector<Vertex>& vertices,
@@ -3652,6 +4293,11 @@ public:
         return lastAverageBuildMs_;
     }
 
+    [[nodiscard]] double averageGpuSynthesisMs() const noexcept
+    {
+        return lastAverageGpuSynthesisMs_;
+    }
+
 private:
     void startWorkers()
     {
@@ -3712,10 +4358,12 @@ private:
 
             SampleFn sampleFn;
             UvLookupFn uvLookup;
+            StructureQueryFn structureQueryFn;
             {
                 std::lock_guard<std::mutex> lock(configMutex_);
                 sampleFn = sampleFn_;
                 uvLookup = uvLookupFn_;
+                structureQueryFn = structureQueryFn_;
             }
 
             if (!sampleFn || !uvLookup)
@@ -3723,24 +4371,42 @@ private:
                 continue;
             }
 
-            BuildResult result = buildTileMesh(job.key, job.level, sampleFn, uvLookup, job.sourcePage);
-            if (result.page && pageComputeContext_.ready())
+            BuildResult result = buildTileMesh(job.key, job.level, sampleFn, uvLookup, structureQueryFn, false, job.sourcePage);
+            if (result.page && !result.page->occupancyReady)
             {
-                std::lock_guard<std::mutex> computeLock(pageComputeMutex_);
                 PageComputeContext::Summary summary{};
-                double computeMs = 0.0;
-                if (pageComputeContext_.processPage(*result.page, summary, computeMs))
+                double synthesisMs = 0.0;
+                bool usedGpuSynthesis = false;
+                if (pageComputeContext_.ready())
                 {
-                    result.page->gpuProcessed = true;
-                    result.page->gpuMinSolidY = summary.minSolidY;
-                    result.page->gpuMaxSolidY = summary.maxSolidY;
-                    result.page->gpuMaxWaterY = summary.maxWaterY;
-                    result.page->gpuCanopyCells = summary.canopyCells;
-                    result.page->gpuTrunkCells = summary.trunkCells;
-                    result.page->gpuOccupiedCells = summary.occupiedCells;
-                    result.page->gpuProcessMs = computeMs;
-                    result.buildMs += computeMs;
+                    std::lock_guard<std::mutex> computeLock(pageComputeMutex_);
+                    usedGpuSynthesis = pageComputeContext_.processPage(*result.page, summary, synthesisMs);
                 }
+                if (!usedGpuSynthesis)
+                {
+                    const auto synthStart = std::chrono::steady_clock::now();
+                    summary = synthesizePageTerrainCpu(*result.page);
+                    synthesisMs =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - synthStart).count();
+                }
+
+                result.page->gpuProcessed = usedGpuSynthesis;
+                result.page->gpuMinSolidY = summary.minSolidY;
+                result.page->gpuMaxSolidY = summary.maxSolidY;
+                result.page->gpuMaxWaterY = summary.maxWaterY;
+                result.page->gpuCanopyCells = summary.canopyCells;
+                result.page->gpuTrunkCells = summary.trunkCells;
+                result.page->gpuOccupiedCells = summary.occupiedCells;
+                result.page->gpuProcessMs = usedGpuSynthesis ? synthesisMs : 0.0;
+                stampPageStructures(*result.page, job.level, result.page->structures);
+                result.page->occupancyReady = true;
+
+                BuildResult meshedResult =
+                    buildTileMesh(job.key, job.level, sampleFn, uvLookup, structureQueryFn, true, result.page);
+                result.page = std::move(meshedResult.page);
+                result.mesh = std::move(meshedResult.mesh);
+                result.buildMs += synthesisMs + meshedResult.buildMs;
+                result.gpuSynthesisMs = usedGpuSynthesis ? synthesisMs : 0.0;
             }
             result.buildVersion = job.buildVersion;
             result.epoch = job.epoch;
@@ -3749,6 +4415,11 @@ private:
             {
                 const std::uint64_t buildMicros = static_cast<std::uint64_t>(std::max(result.buildMs, 0.0) * 1000.0);
                 benchmarkMetrics_->farBuildStage.recordMicros(buildMicros);
+                if (result.gpuSynthesisMs > 0.0)
+                {
+                    benchmarkMetrics_->lodGpuSynthesisStage.recordMicros(
+                        static_cast<std::uint64_t>(std::max(result.gpuSynthesisMs, 0.0) * 1000.0));
+                }
             }
 
             if (job.epoch != buildEpoch_.load(std::memory_order_acquire))
@@ -3944,10 +4615,12 @@ private:
             if (builtTilesLastUpdate_ == 1)
             {
                 lastAverageBuildMs_ = result.buildMs;
+                lastAverageGpuSynthesisMs_ = result.gpuSynthesisMs;
             }
             else
             {
                 lastAverageBuildMs_ = (lastAverageBuildMs_ * 0.65) + (result.buildMs * 0.35);
+                lastAverageGpuSynthesisMs_ = (lastAverageGpuSynthesisMs_ * 0.65) + (result.gpuSynthesisMs * 0.35);
             }
 
             const double elapsedMs =
@@ -4018,10 +4691,104 @@ private:
         }
     }
 
+    static PageComputeContext::Summary synthesizePageTerrainCpu(PageData& page)
+    {
+        PageComputeContext::Summary summary{};
+        bool hasSolid = false;
+
+        page.minY = std::numeric_limits<int>::max();
+        page.maxY = std::numeric_limits<int>::min();
+        page.gpuCanopyCells = 0;
+        page.gpuTrunkCells = 0;
+        page.gpuOccupiedCells = 0;
+        for (PageCell& cell : page.cells)
+        {
+            cell = PageCell{};
+        }
+
+        for (int z = 0; z < page.gridCount; ++z)
+        {
+            for (int x = 0; x < page.gridCount; ++x)
+            {
+                const TerrainColumnInput& input = page.terrainColumns[pageColumnIndex(page.gridCount, x, z)];
+                if (input.solidBlock != BlockId::Air && input.solidTopY != std::numeric_limits<int>::min())
+                {
+                    const int topLocalY = floorDiv(input.solidTopY - page.worldMinY, page.cellScaleBlocks);
+                    const int clampedTopLocalY = std::min(page.gridCount - 1, topLocalY);
+                    for (int localY = 0; localY <= clampedTopLocalY; ++localY)
+                    {
+                        if (localY < 0)
+                        {
+                            continue;
+                        }
+
+                        PageCell& cell = page.cells[pageCellIndex(page.gridCount, x, localY, z)];
+                        const bool wasOccupied =
+                            hasRenderableSolid(cell) || hasRenderableWater(cell) ||
+                            hasRenderableCanopy(cell) || hasRenderableTrunk(cell);
+                        cell.solidTopY = pageCellTopY(page, localY);
+                        cell.solidBlock = input.solidBlock;
+                        if (!wasOccupied)
+                        {
+                            ++summary.occupiedCells;
+                        }
+                        summary.minSolidY = hasSolid ? std::min(summary.minSolidY, pageCellMinY(page, localY))
+                                                     : pageCellMinY(page, localY);
+                        summary.maxSolidY = std::max(summary.maxSolidY, pageCellTopY(page, localY) + 1);
+                        hasSolid = true;
+                        updatePageBoundsForCell(page, localY);
+                    }
+                }
+
+                if (input.hasWater && input.waterTopY != std::numeric_limits<int>::min())
+                {
+                    const int topLocalY = floorDiv(input.waterTopY - page.worldMinY, page.cellScaleBlocks);
+                    const int clampedTopLocalY = std::min(page.gridCount - 1, topLocalY);
+                    for (int localY = 0; localY <= clampedTopLocalY; ++localY)
+                    {
+                        if (localY < 0)
+                        {
+                            continue;
+                        }
+
+                        PageCell& cell = page.cells[pageCellIndex(page.gridCount, x, localY, z)];
+                        if (hasRenderableSolid(cell))
+                        {
+                            continue;
+                        }
+
+                        const bool wasOccupied =
+                            hasRenderableSolid(cell) || hasRenderableWater(cell) ||
+                            hasRenderableCanopy(cell) || hasRenderableTrunk(cell);
+                        cell.hasWater = true;
+                        cell.waterTopY = pageCellTopY(page, localY);
+                        if (!wasOccupied)
+                        {
+                            ++summary.occupiedCells;
+                        }
+                        ++summary.waterCells;
+                        summary.maxWaterY = std::max(summary.maxWaterY, pageCellTopY(page, localY) + 1);
+                        updatePageBoundsForCell(page, localY);
+                    }
+                }
+            }
+        }
+
+        if (!hasSolid)
+        {
+            summary.minSolidY = 0;
+            summary.maxSolidY = 1;
+        }
+
+        return summary;
+    }
+
     static BuildResult buildTileMesh(const FarTileKey& key,
                                      const LevelConfig& level,
                                      const SampleFn& sampleFn,
                                      const UvLookupFn& uvLookup,
+                                     const StructureQueryFn& structureQueryFn,
+                                     bool synthesizeTerrainOnCpu,
                                      std::shared_ptr<PageData> sourcePage = {})
     {
         BuildResult result{};
@@ -4035,9 +4802,10 @@ private:
         const int worldMinZ = key.tileZ * tileSpanBlocks;
         const float cellScale = static_cast<float>(cellScaleBlocks);
         const std::size_t expectedCellCount = static_cast<std::size_t>(gridCount * gridCount * gridCount);
+        const std::size_t expectedColumnCount = static_cast<std::size_t>(gridCount * gridCount);
 
         std::shared_ptr<PageData> page = std::move(sourcePage);
-        if (page && page->cells.size() != expectedCellCount)
+        if (page && (page->cells.size() != expectedCellCount || page->terrainColumns.size() != expectedColumnCount))
         {
             page.reset();
         }
@@ -4051,8 +4819,17 @@ private:
             page->worldMinX = worldMinX;
             page->worldMinZ = worldMinZ;
             page->tileSpanBlocks = tileSpanBlocks;
+            page->terrainColumns.assign(expectedColumnCount, TerrainColumnInput{});
+            page->structures.clear();
+            page->occupancyReady = false;
+            page->gpuProcessed = false;
+            page->gpuMinSolidY = 0;
+            page->gpuMaxSolidY = 1;
+            page->gpuMaxWaterY = std::numeric_limits<int>::min();
+            page->gpuCanopyCells = 0;
+            page->gpuTrunkCells = 0;
+            page->gpuOccupiedCells = 0;
 
-            std::vector<FarTerrainSurfaceSample> sampledColumns(static_cast<std::size_t>(gridCount * gridCount));
             int minFeatureY = std::numeric_limits<int>::max();
             int maxFeatureY = std::numeric_limits<int>::min();
             const int sampleOffset = std::max(cellScaleBlocks / 2, 0);
@@ -4066,10 +4843,11 @@ private:
                     FarTerrainSurfaceSample sample = sampleFn(worldX, worldZ, level.lodLevel);
                     sample.solidTopY = quantizeMacroTopY(sample.solidTopY, cellScaleBlocks);
                     sample.waterTopY = quantizeMacroTopY(sample.waterTopY, cellScaleBlocks);
-                    sample.canopyBaseY = quantizeMacroBaseY(sample.canopyBaseY, cellScaleBlocks);
-                    sample.canopyTopY = quantizeMacroTopY(sample.canopyTopY, cellScaleBlocks);
-                    sample.trunkTopY = quantizeMacroTopY(sample.trunkTopY, cellScaleBlocks);
-                    sampledColumns[pageColumnIndex(gridCount, x, z)] = sample;
+                    page->terrainColumns[pageColumnIndex(gridCount, x, z)] = TerrainColumnInput{
+                        sample.solidTopY,
+                        sample.solidBlock,
+                        sample.waterTopY,
+                        sample.hasVisibleWater};
 
                     if (hasSolidSurface(sample))
                     {
@@ -4081,16 +4859,22 @@ private:
                         minFeatureY = std::min(minFeatureY, sample.waterTopY);
                         maxFeatureY = std::max(maxFeatureY, sample.waterTopY + 1);
                     }
-                    if (hasCanopySurface(sample))
-                    {
-                        minFeatureY = std::min(minFeatureY, sample.canopyBaseY);
-                        maxFeatureY = std::max(maxFeatureY, sample.canopyTopY + 1);
-                    }
-                    if (hasTrunkSurface(sample))
-                    {
-                        minFeatureY = std::min(minFeatureY, sample.solidTopY + 1);
-                        maxFeatureY = std::max(maxFeatureY, sample.trunkTopY + 1);
-                    }
+                }
+            }
+
+            if (structureQueryFn)
+            {
+                const glm::ivec3 queryMin(worldMinX - kMaxStructureHorizontalRadius,
+                                          std::numeric_limits<int>::min() / 4,
+                                          worldMinZ - kMaxStructureHorizontalRadius);
+                const glm::ivec3 queryMax(worldMinX + tileSpanBlocks - 1 + kMaxStructureHorizontalRadius,
+                                          std::numeric_limits<int>::max() / 4,
+                                          worldMinZ + tileSpanBlocks - 1 + kMaxStructureHorizontalRadius);
+                page->structures = structureQueryFn(queryMin, queryMax, level.lodLevel);
+                for (const StructureInstance& instance : page->structures)
+                {
+                    minFeatureY = std::min(minFeatureY, instance.bounds.min.y);
+                    maxFeatureY = std::max(maxFeatureY, instance.bounds.max.y + 1);
                 }
             }
 
@@ -4116,61 +4900,6 @@ private:
             page->minY = std::numeric_limits<int>::max();
             page->maxY = std::numeric_limits<int>::min();
             page->cells.assign(expectedCellCount, PageCell{});
-
-            auto pageCellAt = [&](int x, int y, int z) -> PageCell& {
-                return page->cells[pageCellIndex(gridCount, x, y, z)];
-            };
-
-            for (int z = 0; z < gridCount; ++z)
-            {
-                for (int x = 0; x < gridCount; ++x)
-                {
-                    const FarTerrainSurfaceSample& sample = sampledColumns[pageColumnIndex(gridCount, x, z)];
-
-                    if (hasSolidSurface(sample))
-                    {
-                        const int topLocalY = floorDiv(sample.solidTopY - page->worldMinY, cellScaleBlocks);
-                        const int clampedTopLocalY = std::min(gridCount - 1, topLocalY);
-                        for (int localY = 0; localY <= clampedTopLocalY; ++localY)
-                        {
-                            if (localY < 0)
-                            {
-                                continue;
-                            }
-
-                            PageCell& cell = pageCellAt(x, localY, z);
-                            cell.solidTopY = pageCellTopY(*page, localY);
-                            cell.solidBlock = sample.solidBlock;
-                            updatePageBoundsForCell(*page, localY);
-                        }
-                    }
-
-                    if (sample.hasVisibleWater && sample.waterTopY != std::numeric_limits<int>::min())
-                    {
-                        const int topLocalY = floorDiv(sample.waterTopY - page->worldMinY, cellScaleBlocks);
-                        const int clampedTopLocalY = std::min(gridCount - 1, topLocalY);
-                        for (int localY = 0; localY <= clampedTopLocalY; ++localY)
-                        {
-                            if (localY < 0)
-                            {
-                                continue;
-                            }
-
-                            PageCell& cell = pageCellAt(x, localY, z);
-                            if (hasRenderableSolid(cell))
-                            {
-                                continue;
-                            }
-
-                            cell.hasWater = true;
-                            cell.waterTopY = pageCellTopY(*page, localY);
-                            updatePageBoundsForCell(*page, localY);
-                        }
-                    }
-                }
-            }
-
-            stampPageStructures(*page, level, sampledColumns);
         }
         else
         {
@@ -4183,10 +4912,26 @@ private:
             if (page->cells.size() != expectedCellCount)
             {
                 page->cells.assign(expectedCellCount, PageCell{});
+                page->terrainColumns.assign(expectedColumnCount, TerrainColumnInput{});
                 page->worldMinY = 0;
                 page->minY = 0;
                 page->maxY = 1;
+                page->occupancyReady = false;
             }
+        }
+
+        if (!page->occupancyReady && synthesizeTerrainOnCpu)
+        {
+            const PageComputeContext::Summary terrainSummary = synthesizePageTerrainCpu(*page);
+            page->gpuProcessed = false;
+            page->gpuMinSolidY = terrainSummary.minSolidY;
+            page->gpuMaxSolidY = terrainSummary.maxSolidY;
+            page->gpuMaxWaterY = terrainSummary.maxWaterY;
+            page->gpuCanopyCells = terrainSummary.canopyCells;
+            page->gpuTrunkCells = terrainSummary.trunkCells;
+            page->gpuOccupiedCells = terrainSummary.occupiedCells;
+            stampPageStructures(*page, level, page->structures);
+            page->occupancyReady = true;
         }
 
         if (page->minY == std::numeric_limits<int>::max() || page->maxY == std::numeric_limits<int>::min())
@@ -4196,6 +4941,11 @@ private:
         }
 
         result.page = page;
+        if (!page->occupancyReady)
+        {
+            result.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            return result;
+        }
 
         auto pageCellAt = [&](int x, int y, int z) -> const PageCell& {
             return page->cells[pageCellIndex(gridCount, x, y, z)];
@@ -4335,6 +5085,7 @@ private:
     std::uint64_t updateStamp_{0};
     int builtTilesLastUpdate_{0};
     double lastAverageBuildMs_{0.0};
+    double lastAverageGpuSynthesisMs_{0.0};
     double lastCollectMs_{0.0};
     double lastUploadMs_{0.0};
     std::vector<LevelConfig> levels_;
@@ -4348,6 +5099,7 @@ private:
     std::mutex pageComputeMutex_;
     SampleFn sampleFn_{};
     UvLookupFn uvLookupFn_{};
+    StructureQueryFn structureQueryFn_{};
     mutable std::mutex buildQueueMutex_;
     std::condition_variable buildQueueCv_;
     std::deque<BuildJob> buildQueue_;
@@ -4491,6 +5243,7 @@ private:
     std::unique_ptr<terrain::TerrainGenerator> terrainGenerator_;
     int globalSeaLevel_{20};
     TreeDensityNoise noise_{};
+    mutable StructureRegistry structureRegistry_{};
 
     void startWorkerThreads();
     void stopWorkerThreads();
@@ -4631,6 +5384,12 @@ private:
     void invalidatePredictedColumn(const glm::ivec2& column) const;
     bool applyPendingStructureEditsLocked(Chunk& chunk);
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
+    std::vector<StructureInstance> queryStructureInstances(const glm::ivec3& minWorld,
+                                                           const glm::ivec3& maxWorld,
+                                                           int lodLevel = 0) const;
+    void stampStructureInstanceIntoChunk(Chunk& chunk,
+                                         const StructureInstance& instance,
+                                         bool& anySolid) const;
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
     void buildSurfaceOnlyMesh(Chunk& chunk);
@@ -5436,6 +6195,27 @@ ChunkManager::Impl::Impl(unsigned seed)
             return this->sampleColumn(worldX, worldZ, slabMin, slabMax);
         });
 
+    structureRegistry_.configure(
+        [this](int worldX, int worldZ) {
+            return this->sampleColumn(worldX, worldZ);
+        },
+        [this](int worldX, int worldZ, const ColumnSample& sample) {
+            if (!sample.dominantBiome)
+            {
+                return BlockId::Air;
+            }
+            const terrain::TerrainColumnBlocks blocks =
+                terrain::resolveTerrainColumnBlocks(*sample.dominantBiome, sample, worldX, worldZ, globalSeaLevel_);
+            return blocks.surfaceBlock;
+        },
+        [this](int worldX, int worldZ) noexcept {
+            return noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                              static_cast<float>(worldZ) * 0.05f,
+                              4,
+                              0.55f,
+                              2.0f);
+        });
+
     gActiveVerticalRadius.store(kVerticalStreamingConfig.minRadiusChunks, std::memory_order_relaxed);
     farTerrainManager_.setEnabled(false);
     farTerrainManager_.setDistanceBlocks(0);
@@ -5856,6 +6636,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                   [this](BlockId block, BlockFace face)
                                   {
                                       return atlasUvFor(block, face);
+                                  },
+                                  [this](const glm::ivec3& minWorld, const glm::ivec3& maxWorld, int lodLevel)
+                                  {
+                                      return queryStructureInstances(minWorld, maxWorld, lodLevel);
                                   });
     }
     else
@@ -6151,6 +6935,7 @@ void ChunkManager::Impl::clear()
     activeRelightProcessors_.store(0, std::memory_order_release);
     farTerrainManager_.clear();
     columnManager_.clear();
+    structureRegistry_.clear();
     {
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.clear();
@@ -7026,6 +7811,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         snapshot.pooledChunkBudgetBytes = chunkPoolBudgetBytes_;
     }
     snapshot.farBuildMsAverage = farTerrainManager_.averageBuildMs();
+    snapshot.lodGpuSynthesisMs = farTerrainManager_.averageGpuSynthesisMs();
     snapshot.farCollectMsLastFrame = farTerrainManager_.lastCollectMs();
     snapshot.farUploadMsLastFrame = farTerrainManager_.lastUploadMs();
     snapshot.farActiveTiles = farTerrainManager_.activeTileCount();
@@ -7034,6 +7820,10 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.farTilesBuilt = farTerrainManager_.builtTilesLastUpdate();
     snapshot.farTilesQueued = farTerrainManager_.queuedTileCount();
     snapshot.farTilesPendingUpload = farTerrainManager_.pendingUploadTileCount();
+    const StructureRegistryProfilingSnapshot structureSnapshot = structureRegistry_.profilingSnapshot();
+    snapshot.structureQueryMs = structureSnapshot.averageQueryMs;
+    snapshot.structureCacheHitRate = structureSnapshot.cacheHitRate;
+    snapshot.structureRegionsBuilt = structureSnapshot.regionsBuilt;
     snapshot.exactChunksReady = status.exactReadyChunks;
     snapshot.exactChunksPending = std::max(status.exactRequiredChunks - status.exactReadyChunks, 0);
 
@@ -7051,6 +7841,7 @@ void ChunkManager::Impl::setBenchmarkMetricsEnabled(bool enabled) noexcept
     {
         surfaceMap_->setProfilingEnabled(enabled);
     }
+    structureRegistry_.setProfilingEnabled(enabled);
 }
 
 bool ChunkManager::Impl::benchmarkMetricsEnabled() const noexcept
@@ -7069,6 +7860,7 @@ void ChunkManager::Impl::resetBenchmarkMetrics()
     {
         surfaceMap_->resetProfiling();
     }
+    structureRegistry_.resetProfiling();
 }
 
 ChunkBenchmarkReport ChunkManager::Impl::benchmarkReport() const
@@ -7100,6 +7892,13 @@ ChunkBenchmarkReport ChunkManager::Impl::benchmarkReport() const
             report.surfaceCache.hitRate = static_cast<double>(surface.hits) / static_cast<double>(total);
         }
     }
+
+    const StructureRegistryProfilingSnapshot structureSnapshot = structureRegistry_.profilingSnapshot();
+    report.structureCache.hits = structureSnapshot.cacheHits;
+    report.structureCache.misses = structureSnapshot.cacheMisses;
+    report.structureCache.fills = structureSnapshot.regionsBuilt;
+    report.structureCache.hitRate = structureSnapshot.cacheHitRate;
+    report.structureRegionsBuilt = structureSnapshot.regionsBuilt;
 
     return report;
 }
@@ -10762,9 +11561,132 @@ void ChunkManager::Impl::generateSurfaceOnlyChunk(Chunk& chunk)
     invalidatePredictedColumn({chunk.coord.x, chunk.coord.z});
 }
 
+std::vector<StructureInstance> ChunkManager::Impl::queryStructureInstances(const glm::ivec3& minWorld,
+                                                                           const glm::ivec3& maxWorld,
+                                                                           int lodLevel) const
+{
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point queryStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    std::vector<StructureInstance> instances = structureRegistry_.query(minWorld, maxWorld, lodLevel);
+    if (benchmarkEnabled)
+    {
+        const auto queryMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+        benchmarkMetrics_.structureQueryStage.recordMicros(
+            static_cast<std::uint64_t>(std::max<std::int64_t>(queryMicros, 0)));
+    }
+    return instances;
+}
+
+void ChunkManager::Impl::stampStructureInstanceIntoChunk(Chunk& chunk,
+                                                         const StructureInstance& instance,
+                                                         bool& anySolid) const
+{
+    auto setLocalBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
+    {
+        const glm::ivec3 worldPos{worldX, worldY, worldZ};
+        if (worldToChunkCoords(worldX, worldY, worldZ) != chunk.coord)
+        {
+            return;
+        }
+
+        const glm::ivec3 local = localBlockCoords(worldPos, chunk.coord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.z < 0 || local.z >= kChunkSizeZ ||
+            worldY < chunk.minWorldY || worldY > chunk.maxWorldY)
+        {
+            return;
+        }
+
+        const int localY = worldY - chunk.minWorldY;
+        BlockId& destination = chunk.blocks[blockIndex(local.x, localY, local.z)];
+        if (!replaceSolid && destination != BlockId::Air)
+        {
+            return;
+        }
+
+        destination = block;
+        if (block != BlockId::Air)
+        {
+            anySolid = true;
+        }
+    };
+
+    if (instance.type == StructureType::TaigaSpruce)
+    {
+        for (int trunkX = 0; trunkX < 2; ++trunkX)
+        {
+            for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+            {
+                for (int dy = 1; dy <= instance.trunkHeight; ++dy)
+                {
+                    setLocalBlock(instance.origin.x + trunkX,
+                                  instance.origin.y + dy,
+                                  instance.origin.z + trunkZ,
+                                  BlockId::SpruceLog,
+                                  true);
+                }
+            }
+        }
+
+        const int canopyBaseWorld = instance.origin.y + instance.bareTrunkHeight + 1;
+        const int canopyTopWorld = instance.origin.y + instance.trunkHeight;
+        const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
+        for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+        {
+            const int layerFromBottom = worldY - canopyBaseWorld;
+            const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
+            if (radius <= 0)
+            {
+                continue;
+            }
+
+            for (int worldX = instance.origin.x - radius; worldX <= instance.origin.x + 1 + radius; ++worldX)
+            {
+                for (int worldZ = instance.origin.z - radius; worldZ <= instance.origin.z + 1 + radius; ++worldZ)
+                {
+                    if (!taigaSpruceLeafOccupiesCell(instance.origin.x,
+                                                     instance.origin.z,
+                                                     worldX,
+                                                     worldZ,
+                                                     radius,
+                                                     layerFromBottom,
+                                                     totalLayers))
+                    {
+                        continue;
+                    }
+                    setLocalBlock(worldX, worldY, worldZ, BlockId::SpruceLeaves, false);
+                }
+            }
+        }
+
+        const int crownWorldY = canopyTopWorld + 1;
+        for (int trunkX = 0; trunkX < 2; ++trunkX)
+        {
+            for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+            {
+                setLocalBlock(instance.origin.x + trunkX,
+                              crownWorldY,
+                              instance.origin.z + trunkZ,
+                              BlockId::SpruceLeaves,
+                              false);
+            }
+        }
+        return;
+    }
+
+    forEachDefaultTreeBlock(instance.origin.x,
+                            instance.origin.z,
+                            instance.origin.y,
+                            instance.trunkHeight,
+                            [&](int blockX, int blockY, int blockZ, BlockId block) {
+                                setLocalBlock(blockX, blockY, blockZ, block, block == BlockId::Wood);
+                                return false;
+                            });
+}
+
 void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 {
-    std::vector<PendingStructureEdit> externalEdits;
     bool anySolid = false;
 
     {
@@ -10825,296 +11747,13 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
             anySolid = anySolid || summary.anySolid;
         }
 
-        const bool slabContainsTerrain = summary.slabContainsTerrain;
-
-        auto setOrQueueBlock = [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
+        // Structure-only slabs above the ground still need canopy/trunk blocks.
+        const glm::ivec3 queryMin(baseWorldX, chunk.minWorldY, baseWorldZ);
+        const glm::ivec3 queryMax(baseWorldX + kChunkSizeX - 1, chunk.maxWorldY, baseWorldZ + kChunkSizeZ - 1);
+        const std::vector<StructureInstance> structures = queryStructureInstances(queryMin, queryMax, 0);
+        for (const StructureInstance& instance : structures)
         {
-            const glm::ivec3 worldPos{worldX, worldY, worldZ};
-            const glm::ivec3 targetChunk = worldToChunkCoords(worldX, worldY, worldZ);
-            if (targetChunk == chunk.coord)
-            {
-                if (worldY < chunk.minWorldY || worldY > chunk.maxWorldY)
-                {
-                    return;
-                }
-
-                const glm::ivec3 local = localBlockCoords(worldPos, targetChunk);
-                const int localY = worldY - chunk.minWorldY;
-                BlockId& destination = chunk.blocks[blockIndex(local.x, localY, local.z)];
-                if (!replaceSolid && destination != BlockId::Air)
-                {
-                    return;
-                }
-
-                destination = block;
-                if (block != BlockId::Air)
-                {
-                    anySolid = true;
-                }
-            }
-            else
-            {
-                if (block == BlockId::Air)
-                {
-                    return;
-                }
-
-                externalEdits.push_back(PendingStructureEdit{targetChunk, worldPos, block, replaceSolid});
-            }
-        };
-
-        auto getLocalColumnSample = [&](int worldX, int worldZ) -> ColumnSample
-        {
-            if (worldX >= baseWorldX && worldX < baseWorldX + kChunkSizeX && worldZ >= baseWorldZ
-                && worldZ < baseWorldZ + kChunkSizeZ)
-            {
-                const int localX = worldX - baseWorldX;
-                const int localZ = worldZ - baseWorldZ;
-                return columnResults[columnIndex(localX, localZ)].sample;
-            }
-            return sampleColumn(worldX, worldZ);
-        };
-
-        if (slabContainsTerrain)
-        {
-            const int treePadding = std::max(kDefaultTreeMaxRadius, kTaigaSpruceMaxLeafRadius);
-            const int minWorldX = baseWorldX - treePadding;
-            const int maxWorldX = baseWorldX + kChunkSizeX + treePadding - 1;
-            const int minWorldZ = baseWorldZ - treePadding;
-            const int maxWorldZ = baseWorldZ + kChunkSizeZ + treePadding - 1;
-            auto computeDefaultTreeDensity = [&](int worldX, int worldZ) noexcept
-            {
-                return noise_.fbm(static_cast<float>(worldX) * 0.05f,
-                                  static_cast<float>(worldZ) * 0.05f,
-                                  4,
-                                  0.55f,
-                                  2.0f);
-            };
-
-            auto resolvedSurfaceBlockAt = [&](int worldX, int worldZ, const ColumnSample& sample) -> BlockId
-            {
-                if (!sample.dominantBiome)
-                {
-                    return BlockId::Air;
-                }
-
-                const terrain::TerrainColumnBlocks blocks =
-                    terrain::resolveTerrainColumnBlocks(*sample.dominantBiome, sample, worldX, worldZ, globalSeaLevel_);
-                return blocks.surfaceBlock;
-            };
-
-            auto canAnchorTaigaSpruce = [&](int originX, int originZ, int& outGroundWorldY) -> bool
-            {
-                int groundWorldY = std::numeric_limits<int>::min();
-
-                for (int trunkX = 0; trunkX < 2; ++trunkX)
-                {
-                    for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
-                    {
-                        const ColumnSample baseSample = getLocalColumnSample(originX + trunkX, originZ + trunkZ);
-                        if (!baseSample.dominantBiome || !terrain::isTaigaBiome(*baseSample.dominantBiome))
-                        {
-                            return false;
-                        }
-                        if (baseSample.dominantWeight < kTreeBiomeWeightThreshold)
-                        {
-                            return false;
-                        }
-
-                        const BlockId surfaceBlock =
-                            resolvedSurfaceBlockAt(originX + trunkX, originZ + trunkZ, baseSample);
-                        if (surfaceBlock != BlockId::Grass && surfaceBlock != BlockId::Podzol)
-                        {
-                            return false;
-                        }
-
-                        if (groundWorldY == std::numeric_limits<int>::min())
-                        {
-                            groundWorldY = baseSample.surfaceY;
-                        }
-                        else if (baseSample.surfaceY != groundWorldY)
-                        {
-                            return false;
-                        }
-                    }
-                }
-
-                for (int dx = -2; dx <= 3; ++dx)
-                {
-                    for (int dz = -2; dz <= 3; ++dz)
-                    {
-                        const ColumnSample neighborSample = getLocalColumnSample(originX + dx, originZ + dz);
-                        if (!neighborSample.dominantBiome)
-                        {
-                            return false;
-                        }
-                        if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
-                        {
-                            return false;
-                        }
-                    }
-                }
-
-                outGroundWorldY = groundWorldY;
-                return groundWorldY > 2;
-            };
-
-            auto placeTaigaSpruce = [&](int originX, int originZ, int groundWorldY)
-            {
-                const int trunkHeight = taigaSpruceTrunkHeight(originX, groundWorldY, originZ);
-                const int bareTrunkHeight = taigaSpruceBareTrunkHeight(originX, groundWorldY, originZ);
-
-                for (int trunkX = 0; trunkX < 2; ++trunkX)
-                {
-                    for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
-                    {
-                        for (int dy = 1; dy <= trunkHeight; ++dy)
-                        {
-                            setOrQueueBlock(originX + trunkX,
-                                            groundWorldY + dy,
-                                            originZ + trunkZ,
-                                            BlockId::SpruceLog,
-                                            true);
-                        }
-                    }
-                }
-
-                const int canopyBaseWorld = groundWorldY + bareTrunkHeight + 1;
-                const int canopyTopWorld = groundWorldY + trunkHeight;
-                const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
-
-                for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
-                {
-                    const int layerFromBottom = worldY - canopyBaseWorld;
-                    const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
-                    if (radius <= 0)
-                    {
-                        continue;
-                    }
-
-                    for (int worldX = originX - radius; worldX <= originX + 1 + radius; ++worldX)
-                    {
-                        for (int worldZ = originZ - radius; worldZ <= originZ + 1 + radius; ++worldZ)
-                        {
-                            if (!taigaSpruceLeafOccupiesCell(originX,
-                                                             originZ,
-                                                             worldX,
-                                                             worldZ,
-                                                             radius,
-                                                             layerFromBottom,
-                                                             totalLayers))
-                            {
-                                continue;
-                            }
-
-                            setOrQueueBlock(worldX, worldY, worldZ, BlockId::SpruceLeaves, false);
-                        }
-                    }
-                }
-
-                const int crownWorldY = canopyTopWorld + 1;
-                for (int trunkX = 0; trunkX < 2; ++trunkX)
-                {
-                    for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
-                    {
-                        setOrQueueBlock(originX + trunkX,
-                                        crownWorldY,
-                                        originZ + trunkZ,
-                                        BlockId::SpruceLeaves,
-                                        false);
-                    }
-                }
-            };
-
-            for (int worldX = minWorldX; worldX <= maxWorldX; ++worldX)
-            {
-                for (int worldZ = minWorldZ; worldZ <= maxWorldZ; ++worldZ)
-                {
-                    const ColumnSample columnSample = getLocalColumnSample(worldX, worldZ);
-                    if (!columnSample.dominantBiome)
-                    {
-                        continue;
-                    }
-
-                    const BiomeDefinition& biome = *columnSample.dominantBiome;
-                    if (!biome.generatesTrees)
-                    {
-                        continue;
-                    }
-
-                    if (columnSample.dominantWeight < kTreeBiomeWeightThreshold)
-                    {
-                        continue;
-                    }
-
-                    const int groundWorldY = columnSample.surfaceY;
-                    if (groundWorldY <= 2)
-                    {
-                        continue;
-                    }
-
-                    if (terrain::isTaigaBiome(biome))
-                    {
-                        if (!shouldSpawnTaigaSpruce(biome, worldX, groundWorldY, worldZ))
-                        {
-                            continue;
-                        }
-
-                        int taigaGroundWorldY = std::numeric_limits<int>::min();
-                        if (!canAnchorTaigaSpruce(worldX, worldZ, taigaGroundWorldY))
-                        {
-                            continue;
-                        }
-
-                        placeTaigaSpruce(worldX, worldZ, taigaGroundWorldY);
-                        continue;
-                    }
-
-                    DefaultTreeCandidate candidate{};
-                    if (!tryBuildDefaultTreeCandidate(worldX,
-                                                      worldZ,
-                                                      columnSample,
-                                                      getLocalColumnSample,
-                                                      computeDefaultTreeDensity,
-                                                      candidate))
-                    {
-                        continue;
-                    }
-
-                    if (defaultTreeHasSpacingConflict(candidate, getLocalColumnSample, computeDefaultTreeDensity))
-                    {
-                        continue;
-                    }
-
-                    const int groundLocalY = candidate.groundWorldY - chunk.minWorldY;
-                    if (groundLocalY < 0 || groundLocalY >= kChunkSizeY)
-                    {
-                        continue;
-                    }
-
-                    const int localX = worldX - baseWorldX;
-                    const int localZ = worldZ - baseWorldZ;
-                    const BlockId resolvedSurfaceBlock = resolvedSurfaceBlockAt(worldX, worldZ, columnSample);
-                    if (localX >= 0 && localX < kChunkSizeX && localZ >= 0 && localZ < kChunkSizeZ)
-                    {
-                        const std::size_t blockIdx = blockIndex(localX, groundLocalY, localZ);
-                        if (chunk.blocks[blockIdx] != resolvedSurfaceBlock)
-                        {
-                            continue;
-                        }
-                    }
-
-                    forEachDefaultTreeBlock(candidate.originX,
-                                            candidate.originZ,
-                                            candidate.groundWorldY,
-                                            candidate.trunkHeight,
-                                            [&](int blockX, int blockY, int blockZ, BlockId block) {
-                                                const bool replaceSolid = block == BlockId::Wood;
-                                                setOrQueueBlock(blockX, blockY, blockZ, block, replaceSolid);
-                                                return false;
-                                            });
-                }
-            }
+            stampStructureInstanceIntoChunk(chunk, instance, anySolid);
         }
 
         const bool appliedPending = applyPendingStructureEditsLocked(chunk);
@@ -11125,11 +11764,6 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
 
         chunk.hasBlocks.store(anySolid, std::memory_order_release);
         columnManager_.updateChunk(chunk);
-    }
-
-    if (!externalEdits.empty())
-    {
-        dispatchStructureEdits(externalEdits);
     }
 
     invalidatePredictedColumn({chunk.coord.x, chunk.coord.z});

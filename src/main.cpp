@@ -1202,8 +1202,12 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.uploadStage);
     out << ",\"far_build\":";
     writeStageStatsJson(out, report.farBuildStage);
+    out << ",\"lod_gpu_synthesis\":";
+    writeStageStatsJson(out, report.lodGpuSynthesisStage);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
+    out << ",\"structure_query\":";
+    writeStageStatsJson(out, report.structureQueryStage);
     out << "}";
     out << ",\"queues\":{"
         << "\"job_backlog\":";
@@ -1220,7 +1224,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeCacheStatsJson(out, report.climateCache);
     out << ",\"surface\":";
     writeCacheStatsJson(out, report.surfaceCache);
+    out << ",\"structure\":";
+    writeCacheStatsJson(out, report.structureCache);
     out << "}";
+    out << ",\"structures\":{"
+        << "\"regions_built\":" << report.structureRegionsBuilt
+        << ",\"query_avg_ms\":" << report.structureQueryStage.averageMs
+        << ",\"cache_hit_rate\":" << report.structureCache.hitRate
+        << "}";
     out << ",\"final_profiling\":{"
         << "\"pooled_chunks\":" << finalProfiling.pooledChunkCount
         << ",\"pooled_chunk_bytes\":" << finalProfiling.pooledChunkBytes
@@ -1232,8 +1243,12 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"lod_tiles_queued\":" << finalProfiling.farTilesQueued
         << ",\"lod_tiles_pending_upload\":" << finalProfiling.farTilesPendingUpload
         << ",\"lod_build_avg_ms\":" << finalProfiling.farBuildMsAverage
+        << ",\"lod_gpu_synthesis_ms\":" << finalProfiling.lodGpuSynthesisMs
         << ",\"lod_collect_ms\":" << finalProfiling.farCollectMsLastFrame
         << ",\"lod_upload_ms\":" << finalProfiling.farUploadMsLastFrame
+        << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs
+        << ",\"structure_cache_hit_rate\":" << finalProfiling.structureCacheHitRate
+        << ",\"structure_regions_built\":" << finalProfiling.structureRegionsBuilt
         << "}";
     out << ",\"final_streaming\":{"
         << "\"phase\":";

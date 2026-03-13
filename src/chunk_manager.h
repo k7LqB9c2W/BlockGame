@@ -207,6 +207,10 @@ struct ChunkProfilingSnapshot
     double farBuildMsAverage{0.0};
     double farCollectMsLastFrame{0.0};
     double farUploadMsLastFrame{0.0};
+    double lodGpuSynthesisMs{0.0};
+    double structureQueryMs{0.0};
+    double structureCacheHitRate{0.0};
+    std::uint64_t structureRegionsBuilt{0};
     std::size_t uploadedBytes{0};
     int generatedChunks{0};
     int relitChunks{0};
@@ -279,17 +283,21 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats meshStage{};
     BenchmarkStageStats uploadStage{};
     BenchmarkStageStats farBuildStage{};
+    BenchmarkStageStats lodGpuSynthesisStage{};
     BenchmarkStageStats chunkReadyLatency{};
+    BenchmarkStageStats structureQueryStage{};
     BenchmarkQueueDepthStats jobQueueDepth{};
     BenchmarkQueueDepthStats uploadQueueDepth{};
     BenchmarkQueueDepthStats farBuildQueueDepth{};
     BenchmarkQueueDepthStats farUploadQueueDepth{};
     BenchmarkCacheStats climateCache{};
     BenchmarkCacheStats surfaceCache{};
+    BenchmarkCacheStats structureCache{};
     std::uint64_t generatedChunks{0};
     std::uint64_t meshedChunks{0};
     std::uint64_t uploadedChunks{0};
     std::uint64_t farBuiltTiles{0};
+    std::uint64_t structureRegionsBuilt{0};
     std::uint64_t uploadedBytes{0};
 };
 

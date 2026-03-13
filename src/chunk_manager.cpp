@@ -15,6 +15,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <condition_variable>
 #include <deque>
@@ -282,6 +283,10 @@ struct ChunkBenchmarkMetrics
         uploadStage.reset();
         farBuildStage.reset();
         lodGpuSynthesisStage.reset();
+        lodGpuStampStage.reset();
+        lodGpuFaceBuildStage.reset();
+        lodGpuCullStage.reset();
+        lodIndirectBuildStage.reset();
         chunkReadyLatency.reset();
         structureQueryStage.reset();
         jobQueueDepth.reset();
@@ -305,6 +310,10 @@ struct ChunkBenchmarkMetrics
         report.uploadStage = uploadStage.snapshot();
         report.farBuildStage = farBuildStage.snapshot();
         report.lodGpuSynthesisStage = lodGpuSynthesisStage.snapshot();
+        report.lodGpuStampStage = lodGpuStampStage.snapshot();
+        report.lodGpuFaceBuildStage = lodGpuFaceBuildStage.snapshot();
+        report.lodGpuCullStage = lodGpuCullStage.snapshot();
+        report.lodIndirectBuildStage = lodIndirectBuildStage.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
         report.structureQueryStage = structureQueryStage.snapshot();
         report.jobQueueDepth = jobQueueDepth.snapshot();
@@ -326,6 +335,10 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram uploadStage{};
     AtomicLatencyHistogram farBuildStage{};
     AtomicLatencyHistogram lodGpuSynthesisStage{};
+    AtomicLatencyHistogram lodGpuStampStage{};
+    AtomicLatencyHistogram lodGpuFaceBuildStage{};
+    AtomicLatencyHistogram lodGpuCullStage{};
+    AtomicLatencyHistogram lodIndirectBuildStage{};
     AtomicLatencyHistogram chunkReadyLatency{};
     AtomicLatencyHistogram structureQueryStage{};
     AtomicDepthHistogram<4096> jobQueueDepth{};
@@ -723,6 +736,7 @@ private:
     bool hasCommands_{false};
 };
 
+#if 0
 class PageComputeContext
 {
 public:
@@ -781,7 +795,6 @@ cbuffer Params : register(b0)
     int gCellScaleBlocks;
     uint gCellCount;
 };
-
 struct TerrainColumnInputGpu
 {
     int solidTopY;
@@ -1247,6 +1260,9 @@ private:
     UINT64 fenceValue_{0};
     UINT64 lastSubmittedFenceValue_{0};
 };
+#endif
+
+#include "lod_page_compute_context.inl"
 
 inline int floorDiv(int value, int divisor) noexcept
 {
@@ -1940,6 +1956,86 @@ struct StructureInstance
     float priority{0.0f};
     int maxLodLevel{3};
 };
+
+template <typename Callback>
+inline bool forEachStructureVoxel(const StructureInstance& instance, Callback&& callback)
+{
+    if (instance.type == StructureType::TaigaSpruce)
+    {
+        for (int trunkX = 0; trunkX < 2; ++trunkX)
+        {
+            for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+            {
+                for (int dy = 1; dy <= instance.trunkHeight; ++dy)
+                {
+                    if (callback(instance.origin.x + trunkX,
+                                 instance.origin.y + dy,
+                                 instance.origin.z + trunkZ,
+                                 BlockId::SpruceLog))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        const int canopyBaseWorld = instance.origin.y + instance.bareTrunkHeight + 1;
+        const int canopyTopWorld = instance.origin.y + instance.trunkHeight;
+        const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
+        for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
+        {
+            const int layerFromBottom = worldY - canopyBaseWorld;
+            const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
+            if (radius <= 0)
+            {
+                continue;
+            }
+
+            for (int worldX = instance.origin.x - radius; worldX <= instance.origin.x + 1 + radius; ++worldX)
+            {
+                for (int worldZ = instance.origin.z - radius; worldZ <= instance.origin.z + 1 + radius; ++worldZ)
+                {
+                    if (!taigaSpruceLeafOccupiesCell(instance.origin.x,
+                                                     instance.origin.z,
+                                                     worldX,
+                                                     worldZ,
+                                                     radius,
+                                                     layerFromBottom,
+                                                     totalLayers))
+                    {
+                        continue;
+                    }
+                    if (callback(worldX, worldY, worldZ, BlockId::SpruceLeaves))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        const int crownWorldY = canopyTopWorld + 1;
+        for (int trunkX = 0; trunkX < 2; ++trunkX)
+        {
+            for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+            {
+                if (callback(instance.origin.x + trunkX,
+                             crownWorldY,
+                             instance.origin.z + trunkZ,
+                             BlockId::SpruceLeaves))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    return forEachDefaultTreeBlock(instance.origin.x,
+                                   instance.origin.z,
+                                   instance.origin.y,
+                                   instance.trunkHeight,
+                                   std::forward<Callback>(callback));
+}
 
 struct StructureRegionKey
 {
@@ -3012,7 +3108,10 @@ public:
     {
         device_ = device;
         uploadContext_.initialize(device_.Get());
-        pageComputeContext_.initialize(device_.Get());
+        if (std::getenv("BLOCKGAME_DISABLE_LOD_PAGE_COMPUTE") == nullptr)
+        {
+            pageComputeContext_.initialize(device_.Get());
+        }
         clear();
     }
 
@@ -3151,26 +3250,39 @@ public:
             {
                 continue;
             }
-            if (!frustum.intersectsAABB(tile.boundsMin, tile.boundsMax))
+            if (tile.pageIndex == kInvalidChunkBufferPage || tile.pageIndex >= batches.size())
             {
                 continue;
             }
-            if (tile.pageIndex == kInvalidChunkBufferPage || tile.pageIndex >= batches.size())
+            if (tile.vertexOffset > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+                tile.indexOffset > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
             {
                 continue;
             }
 
             ChunkRenderBatch& batch = batches[tile.pageIndex];
-            batch.indexCounts.push_back(tile.indexCount);
-            batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(tile.indexOffset));
-            batch.baseVertices.push_back(static_cast<std::int32_t>(tile.vertexOffset));
+            batch.gpuCullRecords.push_back(ChunkRenderBatch::GpuCullRecord{
+                glm::vec4(tile.boundsMin, 0.0f),
+                glm::vec4(tile.boundsMax, 0.0f),
+                tile.indexCount,
+                static_cast<std::uint32_t>(tile.indexOffset),
+                static_cast<std::int32_t>(tile.vertexOffset),
+                0u});
+            batch.supportsGpuCull = true;
+
+            if (frustum.intersectsAABB(tile.boundsMin, tile.boundsMax))
+            {
+                batch.indexCounts.push_back(tile.indexCount);
+                batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(tile.indexOffset));
+                batch.baseVertices.push_back(static_cast<std::int32_t>(tile.vertexOffset));
+            }
         }
 
         auto emptyIt = std::remove_if(batches.begin(),
                                       batches.end(),
                                       [](const ChunkRenderBatch& batch)
                                       {
-                                          return batch.indexCounts.empty();
+                                          return batch.indexCounts.empty() && batch.gpuCullRecords.empty();
                                       });
         batches.erase(emptyIt, batches.end());
         return batches;
@@ -3220,6 +3332,8 @@ public:
         builtTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
         lastAverageGpuSynthesisMs_ = 0.0;
+        lastAverageGpuStampMs_ = 0.0;
+        lastAverageGpuFaceBuildMs_ = 0.0;
         lastCollectMs_ = 0.0;
         lastUploadMs_ = 0.0;
     }
@@ -3387,6 +3501,14 @@ private:
         bool hasWater{false};
     };
 
+    struct StructureVoxelInput
+    {
+        int worldX{0};
+        int worldY{0};
+        int worldZ{0};
+        BlockId block{BlockId::Air};
+    };
+
     struct PageData
     {
         int gridCount{kCubicPageAxis};
@@ -3401,15 +3523,21 @@ private:
         std::vector<PageCell> cells;
         std::vector<TerrainColumnInput> terrainColumns;
         std::vector<StructureInstance> structures;
+        std::vector<StructureVoxelInput> structureVoxels;
+        std::vector<std::uint8_t> faceMasks;
         bool occupancyReady{false};
         bool gpuProcessed{false};
+        bool faceMasksReady{false};
         int gpuMinSolidY{0};
         int gpuMaxSolidY{1};
         int gpuMaxWaterY{std::numeric_limits<int>::min()};
         int gpuCanopyCells{0};
         int gpuTrunkCells{0};
         int gpuOccupiedCells{0};
+        int gpuVisibleFaceCount{0};
         double gpuProcessMs{0.0};
+        double gpuStampMs{0.0};
+        double gpuFaceBuildMs{0.0};
     };
 
     struct FarTile
@@ -3450,6 +3578,8 @@ private:
         TileMesh mesh{};
         double buildMs{0.0};
         double gpuSynthesisMs{0.0};
+        double gpuStampMs{0.0};
+        double gpuFaceBuildMs{0.0};
     };
 
     struct BuildJob
@@ -3950,6 +4080,16 @@ private:
         std::uint8_t flags{0};
     };
 
+    enum PageFaceMaskBit : std::uint8_t
+    {
+        kPageFaceMaskTop = 1u << 0,
+        kPageFaceMaskBottom = 1u << 1,
+        kPageFaceMaskNorth = 1u << 2,
+        kPageFaceMaskSouth = 1u << 3,
+        kPageFaceMaskEast = 1u << 4,
+        kPageFaceMaskWest = 1u << 5
+    };
+
     [[nodiscard]] static bool hasRenderableSolid(const PageCell& cell) noexcept
     {
         return cell.solidBlock != BlockId::Air && cell.solidTopY != std::numeric_limits<int>::min();
@@ -4004,148 +4144,153 @@ private:
         page.maxY = std::max(page.maxY, cellMaxY);
     }
 
-    static void stampPageStructures(PageData& page,
-                                    const LevelConfig& level,
-                                    const std::vector<StructureInstance>& structures)
+    static void stampStructureVoxelIntoPage(PageData& page, int worldX, int worldY, int worldZ, BlockId block)
     {
-        if (structures.empty() || page.gridCount <= 0 || page.cellScaleBlocks <= 0 || page.cells.empty())
+        const int localX = floorDiv(worldX - page.worldMinX, page.cellScaleBlocks);
+        const int localY = floorDiv(worldY - page.worldMinY, page.cellScaleBlocks);
+        const int localZ = floorDiv(worldZ - page.worldMinZ, page.cellScaleBlocks);
+        if (localX < 0 || localY < 0 || localZ < 0 ||
+            localX >= page.gridCount || localY >= page.gridCount || localZ >= page.gridCount)
         {
             return;
         }
 
-        auto pageCellAt = [&](int x, int y, int z) -> PageCell& {
-            return page.cells[pageCellIndex(page.gridCount, x, y, z)];
-        };
-
-        auto stampBlock = [&](int worldX, int worldY, int worldZ, BlockId block)
+        PageCell& cell = page.cells[pageCellIndex(page.gridCount, localX, localY, localZ)];
+        const bool cellWasOccupied =
+            hasRenderableTrunk(cell) || hasRenderableCanopy(cell) || hasRenderableSolid(cell) || hasRenderableWater(cell);
+        if (block == BlockId::Wood || block == BlockId::SpruceLog)
         {
-            const int localX = floorDiv(worldX - page.worldMinX, page.cellScaleBlocks);
-            const int localY = floorDiv(worldY - page.worldMinY, page.cellScaleBlocks);
-            const int localZ = floorDiv(worldZ - page.worldMinZ, page.cellScaleBlocks);
-            if (localX < 0 || localY < 0 || localZ < 0 ||
-                localX >= page.gridCount || localY >= page.gridCount || localZ >= page.gridCount)
+            if (!cell.hasTrunk)
             {
-                return;
+                ++page.gpuTrunkCells;
             }
-
-            PageCell& cell = pageCellAt(localX, localY, localZ);
-            const bool cellWasOccupied =
-                hasRenderableTrunk(cell) || hasRenderableCanopy(cell) || hasRenderableSolid(cell) || hasRenderableWater(cell);
-            if (block == BlockId::Wood || block == BlockId::SpruceLog)
-            {
-                if (!cell.hasTrunk)
-                {
-                    ++page.gpuTrunkCells;
-                }
-                cell.hasTrunk = true;
-                cell.trunkTopY = std::max(cell.trunkTopY, pageCellTopY(page, localY));
-                cell.trunkBlock = block;
-            }
-            else if (block == BlockId::Leaves || block == BlockId::SpruceLeaves)
-            {
-                if (!cell.hasCanopy)
-                {
-                    ++page.gpuCanopyCells;
-                }
-                cell.hasCanopy = true;
-                cell.canopyBaseY = (cell.canopyBaseY == std::numeric_limits<int>::min())
-                                       ? pageCellMinY(page, localY)
-                                       : std::min(cell.canopyBaseY, pageCellMinY(page, localY));
-                cell.canopyTopY = std::max(cell.canopyTopY, pageCellTopY(page, localY));
-                cell.canopyBlock = block;
-            }
-            if (!cellWasOccupied)
-            {
-                ++page.gpuOccupiedCells;
-            }
-            updatePageBoundsForCell(page, localY);
-        };
-
-        auto stampSpruce = [&](const StructureInstance& instance)
+            cell.hasTrunk = true;
+            cell.trunkTopY = std::max(cell.trunkTopY, pageCellTopY(page, localY));
+            cell.trunkBlock = block;
+        }
+        else if (block == BlockId::Leaves || block == BlockId::SpruceLeaves)
         {
-            for (int trunkX = 0; trunkX < 2; ++trunkX)
+            if (!cell.hasCanopy)
             {
-                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
-                {
-                    for (int dy = 1; dy <= instance.trunkHeight; ++dy)
-                    {
-                        stampBlock(instance.origin.x + trunkX,
-                                   instance.origin.y + dy,
-                                   instance.origin.z + trunkZ,
-                                   BlockId::SpruceLog);
-                    }
-                }
+                ++page.gpuCanopyCells;
             }
+            cell.hasCanopy = true;
+            cell.canopyBaseY = (cell.canopyBaseY == std::numeric_limits<int>::min())
+                                   ? pageCellMinY(page, localY)
+                                   : std::min(cell.canopyBaseY, pageCellMinY(page, localY));
+            cell.canopyTopY = std::max(cell.canopyTopY, pageCellTopY(page, localY));
+            cell.canopyBlock = block;
+        }
+        if (!cellWasOccupied)
+        {
+            ++page.gpuOccupiedCells;
+        }
+        updatePageBoundsForCell(page, localY);
+    }
 
-            const int canopyBaseWorld = instance.origin.y + instance.bareTrunkHeight + 1;
-            const int canopyTopWorld = instance.origin.y + instance.trunkHeight;
-            const int totalLayers = std::max(1, canopyTopWorld - canopyBaseWorld + 1);
-            for (int worldY = canopyBaseWorld; worldY <= canopyTopWorld; ++worldY)
-            {
-                const int layerFromBottom = worldY - canopyBaseWorld;
-                const int radius = taigaSpruceLeafRadiusForLayer(layerFromBottom, totalLayers);
-                if (radius <= 0)
-                {
-                    continue;
-                }
+    static void rebuildPageStructureVoxelInputs(PageData& page,
+                                                const LevelConfig& level,
+                                                const std::vector<StructureInstance>& structures)
+    {
+        page.structureVoxels.clear();
+        if (structures.empty())
+        {
+            return;
+        }
 
-                for (int worldX = instance.origin.x - radius; worldX <= instance.origin.x + 1 + radius; ++worldX)
-                {
-                    for (int worldZ = instance.origin.z - radius; worldZ <= instance.origin.z + 1 + radius; ++worldZ)
-                    {
-                        if (!taigaSpruceLeafOccupiesCell(instance.origin.x,
-                                                         instance.origin.z,
-                                                         worldX,
-                                                         worldZ,
-                                                         radius,
-                                                         layerFromBottom,
-                                                         totalLayers))
-                        {
-                            continue;
-                        }
-                        stampBlock(worldX, worldY, worldZ, BlockId::SpruceLeaves);
-                    }
-                }
-            }
-
-            const int crownWorldY = canopyTopWorld + 1;
-            for (int trunkX = 0; trunkX < 2; ++trunkX)
-            {
-                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
-                {
-                    stampBlock(instance.origin.x + trunkX,
-                               crownWorldY,
-                               instance.origin.z + trunkZ,
-                               BlockId::SpruceLeaves);
-                }
-            }
-        };
+        const glm::ivec3 pageMin(page.worldMinX, page.worldMinY, page.worldMinZ);
+        const glm::ivec3 pageMax(page.worldMinX + page.tileSpanBlocks - 1,
+                                 page.worldMinY + page.gridCount * page.cellScaleBlocks - 1,
+                                 page.worldMinZ + page.tileSpanBlocks - 1);
 
         for (const StructureInstance& instance : structures)
         {
-            if (instance.maxLodLevel < level.lodLevel ||
-                !instance.bounds.intersects(glm::ivec3(page.worldMinX, page.worldMinY, page.worldMinZ),
-                                            glm::ivec3(page.worldMinX + page.tileSpanBlocks - 1,
-                                                       page.worldMinY + page.gridCount * page.cellScaleBlocks - 1,
-                                                       page.worldMinZ + page.tileSpanBlocks - 1)))
+            if (instance.maxLodLevel < level.lodLevel || !instance.bounds.intersects(pageMin, pageMax))
             {
                 continue;
             }
 
-            if (instance.type == StructureType::TaigaSpruce)
-            {
-                stampSpruce(instance);
-                continue;
-            }
+            forEachStructureVoxel(instance,
+                                  [&](int worldX, int worldY, int worldZ, BlockId block) {
+                                      if (worldX < pageMin.x || worldX > pageMax.x ||
+                                          worldY < pageMin.y || worldY > pageMax.y ||
+                                          worldZ < pageMin.z || worldZ > pageMax.z)
+                                      {
+                                          return false;
+                                      }
 
-            forEachDefaultTreeBlock(instance.origin.x,
-                                    instance.origin.z,
-                                    instance.origin.y,
-                                    instance.trunkHeight,
-                                    [&](int blockX, int blockY, int blockZ, BlockId block) {
-                                        stampBlock(blockX, blockY, blockZ, block);
-                                        return false;
-                                    });
+                                      page.structureVoxels.push_back(StructureVoxelInput{
+                                          worldX,
+                                          worldY,
+                                          worldZ,
+                                          block});
+                                      return false;
+                                  });
+        }
+    }
+
+    static int rebuildPageFaceMasksCpu(PageData& page)
+    {
+        const int gridCount = page.gridCount;
+        const std::size_t expectedCount = static_cast<std::size_t>(gridCount * gridCount * gridCount);
+        page.faceMasks.assign(expectedCount, 0);
+
+        auto resolvedCellAt = [&](int x, int y, int z) -> ResolvedPageCell
+        {
+            if (x < 0 || y < 0 || z < 0 || x >= gridCount || y >= gridCount || z >= gridCount)
+            {
+                return {};
+            }
+            return resolvePageCell(page.cells[pageCellIndex(gridCount, x, y, z)]);
+        };
+
+        int visibleFaceCount = 0;
+        for (int y = 0; y < gridCount; ++y)
+        {
+            for (int z = 0; z < gridCount; ++z)
+            {
+                for (int x = 0; x < gridCount; ++x)
+                {
+                    const ResolvedPageCell cell = resolvedCellAt(x, y, z);
+                    if (!cell.occupied)
+                    {
+                        continue;
+                    }
+
+                    std::uint8_t mask = 0;
+                    if (!resolvedCellAt(x, y + 1, z).occupied) mask |= kPageFaceMaskTop;
+                    if (!resolvedCellAt(x, y - 1, z).occupied) mask |= kPageFaceMaskBottom;
+                    if (!resolvedCellAt(x, y, z - 1).occupied) mask |= kPageFaceMaskNorth;
+                    if (!resolvedCellAt(x, y, z + 1).occupied) mask |= kPageFaceMaskSouth;
+                    if (!resolvedCellAt(x + 1, y, z).occupied) mask |= kPageFaceMaskEast;
+                    if (!resolvedCellAt(x - 1, y, z).occupied) mask |= kPageFaceMaskWest;
+
+                    page.faceMasks[pageCellIndex(gridCount, x, y, z)] = mask;
+                    visibleFaceCount += std::popcount(static_cast<unsigned>(mask));
+                }
+            }
+        }
+
+        page.faceMasksReady = true;
+        page.gpuVisibleFaceCount = visibleFaceCount;
+        return visibleFaceCount;
+    }
+
+    static void stampPageStructures(PageData& page,
+                                    const LevelConfig& level,
+                                    const std::vector<StructureInstance>& structures)
+    {
+        if (page.gridCount <= 0 || page.cellScaleBlocks <= 0 || page.cells.empty())
+        {
+            return;
+        }
+        if (page.structureVoxels.empty() && !structures.empty())
+        {
+            rebuildPageStructureVoxelInputs(page, level, structures);
+        }
+        for (const StructureVoxelInput& voxel : page.structureVoxels)
+        {
+            stampStructureVoxelIntoPage(page, voxel.worldX, voxel.worldY, voxel.worldZ, voxel.block);
         }
     }
 
@@ -4298,6 +4443,16 @@ public:
         return lastAverageGpuSynthesisMs_;
     }
 
+    [[nodiscard]] double averageGpuStampMs() const noexcept
+    {
+        return lastAverageGpuStampMs_;
+    }
+
+    [[nodiscard]] double averageGpuFaceBuildMs() const noexcept
+    {
+        return lastAverageGpuFaceBuildMs_;
+    }
+
 private:
     void startWorkers()
     {
@@ -4375,12 +4530,17 @@ private:
             if (result.page && !result.page->occupancyReady)
             {
                 PageComputeContext::Summary summary{};
+                PageComputeContext::PassTimings gpuTimings{};
                 double synthesisMs = 0.0;
                 bool usedGpuSynthesis = false;
                 if (pageComputeContext_.ready())
                 {
                     std::lock_guard<std::mutex> computeLock(pageComputeMutex_);
-                    usedGpuSynthesis = pageComputeContext_.processPage(*result.page, summary, synthesisMs);
+                    usedGpuSynthesis = pageComputeContext_.processPage(*result.page, summary, gpuTimings);
+                    if (usedGpuSynthesis)
+                    {
+                        synthesisMs = gpuTimings.synthesisMs + gpuTimings.stampMs + gpuTimings.faceBuildMs;
+                    }
                 }
                 if (!usedGpuSynthesis)
                 {
@@ -4397,8 +4557,15 @@ private:
                 result.page->gpuCanopyCells = summary.canopyCells;
                 result.page->gpuTrunkCells = summary.trunkCells;
                 result.page->gpuOccupiedCells = summary.occupiedCells;
-                result.page->gpuProcessMs = usedGpuSynthesis ? synthesisMs : 0.0;
-                stampPageStructures(*result.page, job.level, result.page->structures);
+                result.page->gpuVisibleFaceCount = summary.visibleFaceCount;
+                result.page->gpuProcessMs = usedGpuSynthesis ? gpuTimings.synthesisMs : 0.0;
+                result.page->gpuStampMs = usedGpuSynthesis ? gpuTimings.stampMs : 0.0;
+                result.page->gpuFaceBuildMs = usedGpuSynthesis ? gpuTimings.faceBuildMs : 0.0;
+                if (!usedGpuSynthesis)
+                {
+                    stampPageStructures(*result.page, job.level, result.page->structures);
+                    rebuildPageFaceMasksCpu(*result.page);
+                }
                 result.page->occupancyReady = true;
 
                 BuildResult meshedResult =
@@ -4406,7 +4573,9 @@ private:
                 result.page = std::move(meshedResult.page);
                 result.mesh = std::move(meshedResult.mesh);
                 result.buildMs += synthesisMs + meshedResult.buildMs;
-                result.gpuSynthesisMs = usedGpuSynthesis ? synthesisMs : 0.0;
+                result.gpuSynthesisMs = usedGpuSynthesis ? gpuTimings.synthesisMs : 0.0;
+                result.gpuStampMs = usedGpuSynthesis ? gpuTimings.stampMs : 0.0;
+                result.gpuFaceBuildMs = usedGpuSynthesis ? gpuTimings.faceBuildMs : 0.0;
             }
             result.buildVersion = job.buildVersion;
             result.epoch = job.epoch;
@@ -4419,6 +4588,16 @@ private:
                 {
                     benchmarkMetrics_->lodGpuSynthesisStage.recordMicros(
                         static_cast<std::uint64_t>(std::max(result.gpuSynthesisMs, 0.0) * 1000.0));
+                }
+                if (result.gpuStampMs > 0.0)
+                {
+                    benchmarkMetrics_->lodGpuStampStage.recordMicros(
+                        static_cast<std::uint64_t>(std::max(result.gpuStampMs, 0.0) * 1000.0));
+                }
+                if (result.gpuFaceBuildMs > 0.0)
+                {
+                    benchmarkMetrics_->lodGpuFaceBuildStage.recordMicros(
+                        static_cast<std::uint64_t>(std::max(result.gpuFaceBuildMs, 0.0) * 1000.0));
                 }
             }
 
@@ -4616,11 +4795,15 @@ private:
             {
                 lastAverageBuildMs_ = result.buildMs;
                 lastAverageGpuSynthesisMs_ = result.gpuSynthesisMs;
+                lastAverageGpuStampMs_ = result.gpuStampMs;
+                lastAverageGpuFaceBuildMs_ = result.gpuFaceBuildMs;
             }
             else
             {
                 lastAverageBuildMs_ = (lastAverageBuildMs_ * 0.65) + (result.buildMs * 0.35);
                 lastAverageGpuSynthesisMs_ = (lastAverageGpuSynthesisMs_ * 0.65) + (result.gpuSynthesisMs * 0.35);
+                lastAverageGpuStampMs_ = (lastAverageGpuStampMs_ * 0.65) + (result.gpuStampMs * 0.35);
+                lastAverageGpuFaceBuildMs_ = (lastAverageGpuFaceBuildMs_ * 0.65) + (result.gpuFaceBuildMs * 0.35);
             }
 
             const double elapsedMs =
@@ -4821,14 +5004,21 @@ private:
             page->tileSpanBlocks = tileSpanBlocks;
             page->terrainColumns.assign(expectedColumnCount, TerrainColumnInput{});
             page->structures.clear();
+            page->structureVoxels.clear();
+            page->faceMasks.assign(expectedCellCount, 0);
             page->occupancyReady = false;
             page->gpuProcessed = false;
+            page->faceMasksReady = false;
             page->gpuMinSolidY = 0;
             page->gpuMaxSolidY = 1;
             page->gpuMaxWaterY = std::numeric_limits<int>::min();
             page->gpuCanopyCells = 0;
             page->gpuTrunkCells = 0;
             page->gpuOccupiedCells = 0;
+            page->gpuVisibleFaceCount = 0;
+            page->gpuProcessMs = 0.0;
+            page->gpuStampMs = 0.0;
+            page->gpuFaceBuildMs = 0.0;
 
             int minFeatureY = std::numeric_limits<int>::max();
             int maxFeatureY = std::numeric_limits<int>::min();
@@ -4876,6 +5066,7 @@ private:
                     minFeatureY = std::min(minFeatureY, instance.bounds.min.y);
                     maxFeatureY = std::max(maxFeatureY, instance.bounds.max.y + 1);
                 }
+                rebuildPageStructureVoxelInputs(*page, level, page->structures);
             }
 
             const int verticalSpanBlocks = gridCount * cellScaleBlocks;
@@ -4900,6 +5091,7 @@ private:
             page->minY = std::numeric_limits<int>::max();
             page->maxY = std::numeric_limits<int>::min();
             page->cells.assign(expectedCellCount, PageCell{});
+            page->faceMasks.assign(expectedCellCount, 0);
         }
         else
         {
@@ -4913,10 +5105,17 @@ private:
             {
                 page->cells.assign(expectedCellCount, PageCell{});
                 page->terrainColumns.assign(expectedColumnCount, TerrainColumnInput{});
+                page->faceMasks.assign(expectedCellCount, 0);
                 page->worldMinY = 0;
                 page->minY = 0;
                 page->maxY = 1;
                 page->occupancyReady = false;
+                page->faceMasksReady = false;
+            }
+            else if (page->faceMasks.size() != expectedCellCount)
+            {
+                page->faceMasks.assign(expectedCellCount, 0);
+                page->faceMasksReady = false;
             }
         }
 
@@ -4930,7 +5129,11 @@ private:
             page->gpuCanopyCells = terrainSummary.canopyCells;
             page->gpuTrunkCells = terrainSummary.trunkCells;
             page->gpuOccupiedCells = terrainSummary.occupiedCells;
+            page->gpuProcessMs = 0.0;
+            page->gpuStampMs = 0.0;
+            page->gpuFaceBuildMs = 0.0;
             stampPageStructures(*page, level, page->structures);
+            rebuildPageFaceMasksCpu(*page);
             page->occupancyReady = true;
         }
 
@@ -4959,6 +5162,19 @@ private:
             }
 
             return resolvePageCell(pageCellAt(x, y, z));
+        };
+
+        auto faceMaskAt = [&](int x, int y, int z) -> std::uint8_t
+        {
+            if (x < 0 || y < 0 || z < 0 || x >= gridCount || y >= gridCount || z >= gridCount)
+            {
+                return 0;
+            }
+            if (!page->faceMasksReady || page->faceMasks.size() != expectedCellCount)
+            {
+                return 0;
+            }
+            return page->faceMasks[pageCellIndex(gridCount, x, y, z)];
         };
 
         auto& vertices = result.mesh.vertices;
@@ -4990,8 +5206,23 @@ private:
                     {
                         return uvLookup(cell.block, face);
                     };
+                    const std::uint8_t faceMask = page->faceMasksReady
+                                                      ? faceMaskAt(x, y, z)
+                                                      : static_cast<std::uint8_t>(0);
+                    const bool emitTop = page->faceMasksReady ? ((faceMask & kPageFaceMaskTop) != 0u)
+                                                              : !resolvedCellAt(x, y + 1, z).occupied;
+                    const bool emitBottom = page->faceMasksReady ? ((faceMask & kPageFaceMaskBottom) != 0u)
+                                                                 : !resolvedCellAt(x, y - 1, z).occupied;
+                    const bool emitNorth = page->faceMasksReady ? ((faceMask & kPageFaceMaskNorth) != 0u)
+                                                                : !resolvedCellAt(x, y, z - 1).occupied;
+                    const bool emitSouth = page->faceMasksReady ? ((faceMask & kPageFaceMaskSouth) != 0u)
+                                                                : !resolvedCellAt(x, y, z + 1).occupied;
+                    const bool emitEast = page->faceMasksReady ? ((faceMask & kPageFaceMaskEast) != 0u)
+                                                               : !resolvedCellAt(x + 1, y, z).occupied;
+                    const bool emitWest = page->faceMasksReady ? ((faceMask & kPageFaceMaskWest) != 0u)
+                                                               : !resolvedCellAt(x - 1, y, z).occupied;
 
-                    if (!resolvedCellAt(x, y + 1, z).occupied)
+                    if (emitTop)
                     {
                         appendQuad(vertices,
                                    indices,
@@ -5003,7 +5234,7 @@ private:
                                    faceUv(BlockFace::Top),
                                    cell.flags);
                     }
-                    if (!resolvedCellAt(x, y - 1, z).occupied)
+                    if (emitBottom)
                     {
                         appendQuad(vertices,
                                    indices,
@@ -5015,7 +5246,7 @@ private:
                                    faceUv(BlockFace::Bottom),
                                    cell.flags);
                     }
-                    if (!resolvedCellAt(x - 1, y, z).occupied)
+                    if (emitWest)
                     {
                         appendQuad(vertices,
                                    indices,
@@ -5027,7 +5258,7 @@ private:
                                    faceUv(BlockFace::West),
                                    cell.flags);
                     }
-                    if (!resolvedCellAt(x + 1, y, z).occupied)
+                    if (emitEast)
                     {
                         appendQuad(vertices,
                                    indices,
@@ -5039,7 +5270,7 @@ private:
                                    faceUv(BlockFace::East),
                                    cell.flags);
                     }
-                    if (!resolvedCellAt(x, y, z - 1).occupied)
+                    if (emitNorth)
                     {
                         appendQuad(vertices,
                                    indices,
@@ -5051,7 +5282,7 @@ private:
                                    faceUv(BlockFace::North),
                                    cell.flags);
                     }
-                    if (!resolvedCellAt(x, y, z + 1).occupied)
+                    if (emitSouth)
                     {
                         appendQuad(vertices,
                                    indices,
@@ -5086,6 +5317,8 @@ private:
     int builtTilesLastUpdate_{0};
     double lastAverageBuildMs_{0.0};
     double lastAverageGpuSynthesisMs_{0.0};
+    double lastAverageGpuStampMs_{0.0};
+    double lastAverageGpuFaceBuildMs_{0.0};
     double lastCollectMs_{0.0};
     double lastUploadMs_{0.0};
     std::vector<LevelConfig> levels_;
@@ -7812,6 +8045,8 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     }
     snapshot.farBuildMsAverage = farTerrainManager_.averageBuildMs();
     snapshot.lodGpuSynthesisMs = farTerrainManager_.averageGpuSynthesisMs();
+    snapshot.lodGpuStampMs = farTerrainManager_.averageGpuStampMs();
+    snapshot.lodGpuFaceBuildMs = farTerrainManager_.averageGpuFaceBuildMs();
     snapshot.farCollectMsLastFrame = farTerrainManager_.lastCollectMs();
     snapshot.farUploadMsLastFrame = farTerrainManager_.lastUploadMs();
     snapshot.farActiveTiles = farTerrainManager_.activeTileCount();

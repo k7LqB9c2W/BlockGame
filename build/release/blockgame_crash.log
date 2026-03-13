@@ -346,3 +346,243 @@
   [16] 0x7ffaa993cc91
   exception code: 0xc0000005
 2026-03-12 10:46:56 - minidump: written to blockgame_crash.dmp
+2026-03-12 19:46:18 - SEH crash
+2026-03-12 19:46:18 - stack:
+  [0] 0x7ff614d2a3b0
+  [1] 0x7ff614d21163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff614d70ae6
+  [9] 0x7ff614d570b2
+  [10] 0x7ff614d479c3
+  [11] 0x7ff614d5cffc
+  [12] 0x7ff614d6a33e
+  [13] 0x7ff614d6aa8e
+  [14] 0x7ff614d571ef
+  [15] 0x7ff614d5e258
+  [16] 0x7ff614d7a290
+  [17] 0x7ff614d40f1f
+  [18] 0x7ffaa77b1bb2
+  [19] 0x7ffaa8187374
+  [20] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:46:18 - SEH crash
+2026-03-12 19:46:18 - stack:
+  [0] 0x7ff614d2a3b0
+  [1] 0x7ff614d21163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff614d70cc5
+  [9] 0x7ff614d570b2
+  [10] 0x7ff614d479c3
+  [11] 0x7ff614d5cffc
+  [12] 0x7ff614d6a33e
+  [13] 0x7ff614d6aa8e
+  [14] 0x7ff614d571ef
+  [15] 0x7ff614d5e258
+  [16] 0x7ff614d7a290
+  [17] 0x7ff614d40f1f
+  [18] 0x7ffaa77b1bb2
+  [19] 0x7ffaa8187374
+  [20] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:46:18 - minidump: failed to create dump file
+2026-03-12 19:46:54 - SEH crash
+2026-03-12 19:46:54 - stack:
+  [0] 0x7ff614d2a3b0
+  [1] 0x7ff614d21163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff614d5ceac
+  [9] 0x7ff614d6a33e
+  [10] 0x7ff614d6aa8e
+  [11] 0x7ff614d571ef
+  [12] 0x7ff614d5e258
+  [13] 0x7ff614d7a290
+  [14] 0x7ff614d40f1f
+  [15] 0x7ffaa77b1bb2
+  [16] 0x7ffaa8187374
+  [17] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:46:54 - SEH crash
+2026-03-12 19:46:54 - stack:
+  [0] 0x7ff614d2a3b0
+  [1] 0x7ff614d21163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff614d70ae6
+  [9] 0x7ff614d570b2
+  [10] 0x7ff614d5ce9f
+  [11] 0x7ff614d6a33e
+  [12] 0x7ff614d6aa8e
+  [13] 0x7ff614d571ef
+  [14] 0x7ff614d5e258
+  [15] 0x7ff614d7a290
+  [16] 0x7ff614d40f1f
+  [17] 0x7ffaa77b1bb2
+  [18] 0x7ffaa8187374
+  [19] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:46:54 - minidump: failed to create dump file
+2026-03-12 19:50:06 - SEH crash
+2026-03-12 19:50:06 - stack:
+  [0] 0x7ff66422a3b0
+  [1] 0x7ff664221163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff664270ae6
+  [9] 0x7ff6642570b2
+  [10] 0x7ff66425ce9f
+  [11] 0x7ff66426a33e
+  [12] 0x7ff66426aa8e
+  [13] 0x7ff6642571ef
+  [14] 0x7ff66425e258
+  [15] 0x7ff66427a290
+  [16] 0x7ff664240f1f
+  [17] 0x7ffaa77b1bb2
+  [18] 0x7ffaa8187374
+  [19] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:50:06 - SEH crash
+2026-03-12 19:50:06 - stack:
+  [0] 0x7ff66422a3b0
+  [1] 0x7ff664221163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff664270ae6
+  [9] 0x7ff6642570b2
+  [10] 0x7ff6642479c3
+  [11] 0x7ff66425cffc
+  [12] 0x7ff66426a33e
+  [13] 0x7ff66426aa8e
+  [14] 0x7ff6642571ef
+  [15] 0x7ff66425e258
+  [16] 0x7ff66427a290
+  [17] 0x7ff664240f1f
+  [18] 0x7ffaa77b1bb2
+  [19] 0x7ffaa8187374
+  [20] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:50:06 - minidump: failed to create dump file
+2026-03-12 19:50:54 - SEH crash
+2026-03-12 19:50:54 - stack:
+  [0] 0x7ff66422a3b0
+  [1] 0x7ff664221163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff664270ae6
+  [9] 0x7ff6642570b2
+  [10] 0x7ff6642479c3
+  [11] 0x7ff66425cffc
+  [12] 0x7ff66426a33e
+  [13] 0x7ff66426aa8e
+  [14] 0x7ff6642571ef
+  [15] 0x7ff66425e258
+  [16] 0x7ff66427a290
+  [17] 0x7ff664240f1f
+  [18] 0x7ffaa77b1bb2
+  [19] 0x7ffaa8187374
+  [20] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:50:54 - minidump: written to blockgame_crash.dmp
+2026-03-12 19:53:11 - SEH crash
+2026-03-12 19:53:11 - stack:
+  [0] 0x7ff6f6efa3b0
+  [1] 0x7ff6f6ef1163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff6f6f40af6
+  [9] 0x7ff6f6f270b2
+  [10] 0x7ff6f6f179c3
+  [11] 0x7ff6f6f2cffc
+  [12] 0x7ff6f6f3a34e
+  [13] 0x7ff6f6f3aa9e
+  [14] 0x7ff6f6f271ef
+  [15] 0x7ff6f6f2e258
+  [16] 0x7ff6f6f4a2a0
+  [17] 0x7ff6f6f10f1f
+  [18] 0x7ffaa77b1bb2
+  [19] 0x7ffaa8187374
+  [20] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:53:11 - minidump: written to blockgame_crash.dmp
+2026-03-12 19:54:06 - SEH crash
+2026-03-12 19:54:06 - stack:
+  [0] 0x7ff7d17ca3b0
+  [1] 0x7ff7d17c1163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff7d1810af6
+  [9] 0x7ff7d17f70b2
+  [10] 0x7ff7d17ec334
+  [11] 0x7ff7d17fcfe1
+  [12] 0x7ff7d180a34e
+  [13] 0x7ff7d180aa9e
+  [14] 0x7ff7d17f71ef
+  [15] 0x7ff7d17fe258
+  [16] 0x7ff7d181a2a0
+  [17] 0x7ff7d17e0f1f
+  [18] 0x7ffaa77b1bb2
+  [19] 0x7ffaa8187374
+  [20] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:54:06 - SEH crash
+2026-03-12 19:54:06 - stack:
+  [0] 0x7ff7d17ca3b0
+  [1] 0x7ff7d17c1163
+  [2] 0x7ffaa713c507
+  [3] 0x7ffaa99958d8
+  [4] 0x7ffaa997ce46
+  [5] 0x7ffaa999296f
+  [6] 0x7ffaa9942554
+  [7] 0x7ffaa999147e
+  [8] 0x7ff7d1810af6
+  [9] 0x7ff7d17f70b2
+  [10] 0x7ff7d17fce9f
+  [11] 0x7ff7d180a34e
+  [12] 0x7ff7d180aa9e
+  [13] 0x7ff7d17f71ef
+  [14] 0x7ff7d17fe258
+  [15] 0x7ff7d181a2a0
+  [16] 0x7ff7d17e0f1f
+  [17] 0x7ffaa77b1bb2
+  [18] 0x7ffaa8187374
+  [19] 0x7ffaa993cc91
+  exception code: 0xc0000005
+2026-03-12 19:54:06 - minidump: failed to create dump file

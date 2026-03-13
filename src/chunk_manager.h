@@ -169,6 +169,17 @@ struct ChunkRenderBatch
     std::vector<std::uint32_t> indexCounts;
     std::vector<std::uint32_t> firstIndexLocations;
     std::vector<std::int32_t> baseVertices;
+    struct GpuCullRecord
+    {
+        glm::vec4 boundsMin{0.0f};
+        glm::vec4 boundsMax{0.0f};
+        std::uint32_t indexCount{0};
+        std::uint32_t firstIndexLocation{0};
+        std::int32_t baseVertex{0};
+        std::uint32_t reserved{0};
+    };
+    std::vector<GpuCullRecord> gpuCullRecords;
+    bool supportsGpuCull{false};
 };
 
 struct WorldRenderData
@@ -208,6 +219,10 @@ struct ChunkProfilingSnapshot
     double farCollectMsLastFrame{0.0};
     double farUploadMsLastFrame{0.0};
     double lodGpuSynthesisMs{0.0};
+    double lodGpuStampMs{0.0};
+    double lodGpuFaceBuildMs{0.0};
+    double lodGpuCullMs{0.0};
+    double lodIndirectBuildMs{0.0};
     double structureQueryMs{0.0};
     double structureCacheHitRate{0.0};
     std::uint64_t structureRegionsBuilt{0};
@@ -284,6 +299,10 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats uploadStage{};
     BenchmarkStageStats farBuildStage{};
     BenchmarkStageStats lodGpuSynthesisStage{};
+    BenchmarkStageStats lodGpuStampStage{};
+    BenchmarkStageStats lodGpuFaceBuildStage{};
+    BenchmarkStageStats lodGpuCullStage{};
+    BenchmarkStageStats lodIndirectBuildStage{};
     BenchmarkStageStats chunkReadyLatency{};
     BenchmarkStageStats structureQueryStage{};
     BenchmarkQueueDepthStats jobQueueDepth{};

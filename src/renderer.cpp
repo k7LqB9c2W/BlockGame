@@ -3,10 +3,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,7 +34,9 @@
 namespace
 {
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-constexpr DXGI_FORMAT kDepthBufferFormat = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kDepthBufferResourceFormat = DXGI_FORMAT_R32_TYPELESS;
+constexpr DXGI_FORMAT kDepthBufferDsvFormat = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kDepthBufferSrvFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kShadowMapFormat = DXGI_FORMAT_R32_TYPELESS;
 constexpr DXGI_FORMAT kShadowMapDsvFormat = DXGI_FORMAT_D32_FLOAT;
 constexpr DXGI_FORMAT kShadowMapSrvFormat = DXGI_FORMAT_R32_FLOAT;
@@ -53,6 +57,15 @@ constexpr int kAtlasMinimumPaddingPixels = 2;
 [[noreturn]] void throwRenderError(const std::string& message)
 {
     throw std::runtime_error("Renderer: " + message);
+}
+
+void renderDebugLog(const std::string& message)
+{
+    if (std::getenv("BLOCKGAME_RENDER_DEBUG_LOG") == nullptr)
+    {
+        return;
+    }
+    std::cout << message << std::endl;
 }
 
 void throwIfFailed(HRESULT hr, const std::string& message)
@@ -168,6 +181,32 @@ struct RuntimeAtlasInfo
     info.tileStridePixels = nextPowerOfTwo(kAtlasTileSizePixels + kAtlasMinimumPaddingPixels * 2);
     info.tilePaddingPixels = (info.tileStridePixels - kAtlasTileSizePixels) / 2;
     return info;
+}
+
+struct FrustumPlane
+{
+    glm::vec4 equation{0.0f};
+};
+
+[[nodiscard]] std::array<FrustumPlane, 6> extractFrustumPlanes(const glm::mat4& viewProj)
+{
+    const glm::mat4 rows = glm::transpose(viewProj);
+    std::array<glm::vec4, 6> planes = {
+        rows[3] + rows[0],
+        rows[3] - rows[0],
+        rows[3] + rows[1],
+        rows[3] - rows[1],
+        rows[3] + rows[2],
+        rows[3] - rows[2]};
+
+    std::array<FrustumPlane, 6> normalized{};
+    for (std::size_t i = 0; i < planes.size(); ++i)
+    {
+        const glm::vec3 normal(planes[i]);
+        const float length = glm::length(normal);
+        normalized[i].equation = (length > 1e-5f) ? (planes[i] / length) : planes[i];
+    }
+    return normalized;
 }
 
 [[nodiscard]] std::vector<std::uint8_t> buildRuntimeAtlasPixels(const std::uint8_t* sourcePixels,
@@ -676,6 +715,7 @@ void Renderer::initialize(GLFWwindow* window, int width, int height)
     createSwapChain(window);
     createRenderTargets();
     createDepthBuffer();
+    createDepthPyramid();
     createShadowResources();
     createFrameResources();
     createSceneColor();
@@ -717,11 +757,18 @@ void Renderer::shutdown()
     shadowPipelineState_.Reset();
     nearPipelineState_.Reset();
     farPipelineState_.Reset();
+    lodIndirectPipelineState_.Reset();
+    lodCullPipelineState_.Reset();
+    depthPyramidPipelineState_.Reset();
     drawIndexedCommandSignature_.Reset();
+    lodIndirectRootSignature_.Reset();
+    lodCullRootSignature_.Reset();
+    depthPyramidRootSignature_.Reset();
     fullscreenRootSignature_.Reset();
     shadowRootSignature_.Reset();
     worldRootSignature_.Reset();
     destroyShadowResources();
+    destroyDepthPyramid();
     destroyDepthBuffer();
     destroyRenderTargets();
     srvHeap_.Reset();
@@ -912,12 +959,14 @@ void Renderer::destroyRenderTargets()
 
 void Renderer::createDepthBuffer()
 {
+    destroyDepthBuffer();
+
     D3D12_CLEAR_VALUE clearValue{};
-    clearValue.Format = kDepthBufferFormat;
+    clearValue.Format = kDepthBufferDsvFormat;
     clearValue.DepthStencil.Depth = 1.0f;
 
     const D3D12_RESOURCE_DESC depthDesc =
-        texture2DDesc(kDepthBufferFormat,
+        texture2DDesc(kDepthBufferResourceFormat,
                       static_cast<UINT>(width_),
                       static_cast<UINT>(height_),
                       1,
@@ -931,15 +980,112 @@ void Renderer::createDepthBuffer()
                                                    IID_PPV_ARGS(&depthBuffer_)),
                   "failed to create depth buffer");
 
+    if (depthSrvIndex_ < 0)
+    {
+        depthSrvIndex_ = static_cast<int>(allocateSrvDescriptor());
+    }
+    depthSrvCpu_ = srvCpuHandle(static_cast<UINT>(depthSrvIndex_));
+    depthSrvGpu_ = srvGpuHandle(static_cast<UINT>(depthSrvIndex_));
+
     D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-    dsvDesc.Format = kDepthBufferFormat;
+    dsvDesc.Format = kDepthBufferDsvFormat;
     dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     device_->CreateDepthStencilView(depthBuffer_.Get(), &dsvDesc, depthDsv_);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = kDepthBufferSrvFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(depthBuffer_.Get(), &srvDesc, depthSrvCpu_);
 }
 
 void Renderer::destroyDepthBuffer()
 {
+    if (depthSrvIndex_ >= 0)
+    {
+        freeSrvDescriptor(static_cast<UINT>(depthSrvIndex_));
+        depthSrvIndex_ = -1;
+    }
+    depthSrvCpu_ = {};
+    depthSrvGpu_ = {};
     depthBuffer_.Reset();
+}
+
+void Renderer::createDepthPyramid()
+{
+    destroyDepthPyramid();
+    if (!device_ || width_ <= 0 || height_ <= 0)
+    {
+        return;
+    }
+
+    depthPyramidMipCount_ = computeMipLevelCount(width_, height_, 16);
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    const D3D12_RESOURCE_DESC desc =
+        texture2DDesc(DXGI_FORMAT_R32_FLOAT,
+                      static_cast<UINT>(width_),
+                      static_cast<UINT>(height_),
+                      static_cast<UINT16>(depthPyramidMipCount_),
+                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
+                                                   D3D12_HEAP_FLAG_NONE,
+                                                   &desc,
+                                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                   nullptr,
+                                                   IID_PPV_ARGS(&depthPyramid_)),
+                  "failed to create depth pyramid");
+
+    depthPyramidSrvIndex_ = static_cast<int>(allocateSrvDescriptor());
+    depthPyramidSrvCpu_ = srvCpuHandle(static_cast<UINT>(depthPyramidSrvIndex_));
+    depthPyramidSrvGpu_ = srvGpuHandle(static_cast<UINT>(depthPyramidSrvIndex_));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = depthPyramidMipCount_;
+    device_->CreateShaderResourceView(depthPyramid_.Get(), &srvDesc, depthPyramidSrvCpu_);
+
+    depthPyramidUavIndices_.reserve(depthPyramidMipCount_);
+    depthPyramidUavCpuHandles_.reserve(depthPyramidMipCount_);
+    depthPyramidUavGpuHandles_.reserve(depthPyramidMipCount_);
+    for (UINT mipIndex = 0; mipIndex < depthPyramidMipCount_; ++mipIndex)
+    {
+        const UINT descriptorIndex = allocateSrvDescriptor();
+        depthPyramidUavIndices_.push_back(descriptorIndex);
+        depthPyramidUavCpuHandles_.push_back(srvCpuHandle(descriptorIndex));
+        depthPyramidUavGpuHandles_.push_back(srvGpuHandle(descriptorIndex));
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        uavDesc.Texture2D.MipSlice = mipIndex;
+        device_->CreateUnorderedAccessView(depthPyramid_.Get(), nullptr, &uavDesc, depthPyramidUavCpuHandles_.back());
+    }
+
+    depthPyramidState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::destroyDepthPyramid()
+{
+    if (depthPyramidSrvIndex_ >= 0)
+    {
+        freeSrvDescriptor(static_cast<UINT>(depthPyramidSrvIndex_));
+        depthPyramidSrvIndex_ = -1;
+    }
+    for (const UINT descriptorIndex : depthPyramidUavIndices_)
+    {
+        freeSrvDescriptor(descriptorIndex);
+    }
+    depthPyramidSrvCpu_ = {};
+    depthPyramidSrvGpu_ = {};
+    depthPyramidUavIndices_.clear();
+    depthPyramidUavCpuHandles_.clear();
+    depthPyramidUavGpuHandles_.clear();
+    depthPyramidMipCount_ = 0;
+    depthPyramid_.Reset();
+    depthPyramidState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 }
 
 void Renderer::createShadowResources()
@@ -1015,6 +1161,7 @@ void Renderer::createFrameResources()
                       "failed to create frame constant buffer");
         throwIfFailed(frame.constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&frame.mappedConstants)),
                       "failed to map frame constant buffer");
+        frame.transientResources.clear();
         frame.fenceValue = 0;
     }
 }
@@ -1023,6 +1170,7 @@ void Renderer::destroyFrameResources()
 {
     for (auto& frame : frameResources_)
     {
+        frame.transientResources.clear();
         frame.mappedConstants = nullptr;
         frame.constantBuffer.Reset();
         frame.allocator.Reset();
@@ -1247,6 +1395,12 @@ void Renderer::createPipelines()
         compileShaderFromFile(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
           compileShaderFromFile(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> depthPyramidCs =
+          compileShaderFromFile(shaderPath("depth_pyramid.hlsl"), "DepthPyramidMain", "cs_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> lodCullCs =
+          compileShaderFromFile(shaderPath("lod_gpu_cull.hlsl"), "LodCullMain", "cs_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> lodIndirectCs =
+          compileShaderFromFile(shaderPath("lod_gpu_cull.hlsl"), "LodIndirectBuildMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
           compileShaderFromFile(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> baseSkyPs =
@@ -1307,7 +1461,7 @@ void Renderer::createPipelines()
     worldPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     worldPso.NumRenderTargets = 1;
     worldPso.RTVFormats[0] = kSceneColorFormat;
-    worldPso.DSVFormat = kDepthBufferFormat;
+    worldPso.DSVFormat = kDepthBufferDsvFormat;
     worldPso.SampleDesc.Count = 1;
     worldPso.DepthStencilState.DepthEnable = TRUE;
     worldPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -1329,6 +1483,99 @@ void Renderer::createPipelines()
                                                     nullptr,
                                                     IID_PPV_ARGS(&drawIndexedCommandSignature_)),
                     "failed to create draw indexed command signature");
+
+      auto createComputeRootSignature = [this](const D3D12_ROOT_SIGNATURE_DESC& desc,
+                                               Microsoft::WRL::ComPtr<ID3D12RootSignature>& rootSignature,
+                                               const char* label)
+      {
+          const std::string serializeMessage = std::string("failed to serialize ") + label;
+          const std::string createMessage = std::string("failed to create ") + label;
+          Microsoft::WRL::ComPtr<ID3DBlob> serialized;
+          Microsoft::WRL::ComPtr<ID3DBlob> rootErrors;
+          throwIfFailed(D3D12SerializeRootSignature(&desc,
+                                                    D3D_ROOT_SIGNATURE_VERSION_1,
+                                                    &serialized,
+                                                    &rootErrors),
+                        serializeMessage);
+          throwIfFailed(device_->CreateRootSignature(0,
+                                                     serialized->GetBufferPointer(),
+                                                     serialized->GetBufferSize(),
+                                                     IID_PPV_ARGS(&rootSignature)),
+                        createMessage);
+      };
+
+      D3D12_DESCRIPTOR_RANGE depthPyramidSrvRange{};
+      depthPyramidSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      depthPyramidSrvRange.NumDescriptors = 1;
+      depthPyramidSrvRange.BaseShaderRegister = 0;
+      std::array<D3D12_ROOT_PARAMETER, 3> depthPyramidRootParams{};
+      depthPyramidRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      depthPyramidRootParams[0].Constants.ShaderRegister = 0;
+      depthPyramidRootParams[0].Constants.Num32BitValues = 5;
+      depthPyramidRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      depthPyramidRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+      depthPyramidRootParams[1].DescriptorTable.pDescriptorRanges = &depthPyramidSrvRange;
+      depthPyramidRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      D3D12_DESCRIPTOR_RANGE depthPyramidUavRange{};
+      depthPyramidUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+      depthPyramidUavRange.NumDescriptors = 1;
+      depthPyramidUavRange.BaseShaderRegister = 0;
+      depthPyramidRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+      depthPyramidRootParams[2].DescriptorTable.pDescriptorRanges = &depthPyramidUavRange;
+      D3D12_ROOT_SIGNATURE_DESC depthPyramidRootDesc{};
+      depthPyramidRootDesc.NumParameters = static_cast<UINT>(depthPyramidRootParams.size());
+      depthPyramidRootDesc.pParameters = depthPyramidRootParams.data();
+      createComputeRootSignature(depthPyramidRootDesc, depthPyramidRootSignature_, "depth pyramid root signature");
+
+      D3D12_COMPUTE_PIPELINE_STATE_DESC depthPyramidPso{};
+      depthPyramidPso.pRootSignature = depthPyramidRootSignature_.Get();
+      depthPyramidPso.CS = {depthPyramidCs->GetBufferPointer(), depthPyramidCs->GetBufferSize()};
+      throwIfFailed(device_->CreateComputePipelineState(&depthPyramidPso, IID_PPV_ARGS(&depthPyramidPipelineState_)),
+                    "failed to create depth pyramid pipeline");
+
+      std::array<D3D12_ROOT_PARAMETER, 5> lodCullRootParams{};
+      lodCullRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      lodCullRootParams[0].Constants.ShaderRegister = 0;
+      lodCullRootParams[0].Constants.Num32BitValues = 44;
+      lodCullRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      lodCullRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+      lodCullRootParams[1].DescriptorTable.pDescriptorRanges = &depthPyramidSrvRange;
+      lodCullRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      lodCullRootParams[2].Descriptor.ShaderRegister = 1;
+      lodCullRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      lodCullRootParams[3].Descriptor.ShaderRegister = 0;
+      lodCullRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      lodCullRootParams[4].Descriptor.ShaderRegister = 1;
+      D3D12_ROOT_SIGNATURE_DESC lodCullRootDesc{};
+      lodCullRootDesc.NumParameters = static_cast<UINT>(lodCullRootParams.size());
+      lodCullRootDesc.pParameters = lodCullRootParams.data();
+      createComputeRootSignature(lodCullRootDesc, lodCullRootSignature_, "lod cull root signature");
+
+      D3D12_COMPUTE_PIPELINE_STATE_DESC lodCullPso{};
+      lodCullPso.pRootSignature = lodCullRootSignature_.Get();
+      lodCullPso.CS = {lodCullCs->GetBufferPointer(), lodCullCs->GetBufferSize()};
+      throwIfFailed(device_->CreateComputePipelineState(&lodCullPso, IID_PPV_ARGS(&lodCullPipelineState_)),
+                    "failed to create lod cull pipeline");
+
+      std::array<D3D12_ROOT_PARAMETER, 4> lodIndirectRootParams{};
+      lodIndirectRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      lodIndirectRootParams[0].Descriptor.ShaderRegister = 1;
+      lodIndirectRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      lodIndirectRootParams[1].Descriptor.ShaderRegister = 2;
+      lodIndirectRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      lodIndirectRootParams[2].Descriptor.ShaderRegister = 2;
+      lodIndirectRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      lodIndirectRootParams[3].Descriptor.ShaderRegister = 1;
+      D3D12_ROOT_SIGNATURE_DESC lodIndirectRootDesc{};
+      lodIndirectRootDesc.NumParameters = static_cast<UINT>(lodIndirectRootParams.size());
+      lodIndirectRootDesc.pParameters = lodIndirectRootParams.data();
+      createComputeRootSignature(lodIndirectRootDesc, lodIndirectRootSignature_, "lod indirect root signature");
+
+      D3D12_COMPUTE_PIPELINE_STATE_DESC lodIndirectPso{};
+      lodIndirectPso.pRootSignature = lodIndirectRootSignature_.Get();
+      lodIndirectPso.CS = {lodIndirectCs->GetBufferPointer(), lodIndirectCs->GetBufferSize()};
+      throwIfFailed(device_->CreateComputePipelineState(&lodIndirectPso, IID_PPV_ARGS(&lodIndirectPipelineState_)),
+                    "failed to create lod indirect pipeline");
 
       D3D12_GRAPHICS_PIPELINE_STATE_DESC baseSkyPso{};
       baseSkyPso.pRootSignature = fullscreenRootSignature_.Get();
@@ -1370,7 +1617,7 @@ void Renderer::createPipelines()
       cloudPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
       cloudPso.NumRenderTargets = 1;
       cloudPso.RTVFormats[0] = kSceneColorFormat;
-      cloudPso.DSVFormat = kDepthBufferFormat;
+      cloudPso.DSVFormat = kDepthBufferDsvFormat;
       cloudPso.SampleDesc.Count = 1;
       cloudPso.DepthStencilState.DepthEnable = TRUE;
       cloudPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -1416,7 +1663,7 @@ void Renderer::createImGui(GLFWwindow* window)
     initInfo.CommandQueue = commandQueue_.Get();
     initInfo.NumFramesInFlight = static_cast<int>(kBackBufferCount);
     initInfo.RTVFormat = kBackBufferFormat;
-    initInfo.DSVFormat = kDepthBufferFormat;
+    initInfo.DSVFormat = kDepthBufferDsvFormat;
     initInfo.UserData = this;
     initInfo.SrvDescriptorHeap = srvHeap_.Get();
     initInfo.SrvDescriptorAllocFn = &Renderer::imguiSrvAlloc;
@@ -1476,6 +1723,7 @@ void Renderer::resize(int width, int height)
 
     waitForGpu();
     destroySceneColor();
+    destroyDepthPyramid();
     destroyDepthBuffer();
     destroyRenderTargets();
 
@@ -1493,6 +1741,7 @@ void Renderer::resize(int width, int height)
     currentBackBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
     createRenderTargets();
     createDepthBuffer();
+    createDepthPyramid();
     createSceneColor();
     if (atmosphere_)
     {
@@ -1859,6 +2108,247 @@ void Renderer::writePendingScreenshot(const std::filesystem::path& path)
     }
 }
 
+void Renderer::buildDepthPyramid()
+{
+    if (!depthBuffer_ ||
+        !depthPyramid_ ||
+        depthPyramidMipCount_ == 0 ||
+        !depthPyramidRootSignature_ ||
+        !depthPyramidPipelineState_)
+    {
+        return;
+    }
+
+    constexpr D3D12_RESOURCE_STATES kDepthPyramidBuildState =
+        static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    renderDebugLog("buildDepthPyramid: begin");
+
+    std::array<D3D12_RESOURCE_BARRIER, 2> beginBarriers{};
+    UINT beginBarrierCount = 0;
+    beginBarriers[beginBarrierCount++] =
+        transitionBarrier(depthBuffer_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (depthPyramidState_ != kDepthPyramidBuildState)
+    {
+        beginBarriers[beginBarrierCount++] = transitionBarrier(depthPyramid_.Get(), depthPyramidState_, kDepthPyramidBuildState);
+    }
+    commandList_->ResourceBarrier(beginBarrierCount, beginBarriers.data());
+    depthPyramidState_ = kDepthPyramidBuildState;
+
+    commandList_->SetComputeRootSignature(depthPyramidRootSignature_.Get());
+    commandList_->SetPipelineState(depthPyramidPipelineState_.Get());
+
+    struct BuildParams
+    {
+        UINT srcMip;
+        UINT srcWidth;
+        UINT srcHeight;
+        UINT dstWidth;
+        UINT dstHeight;
+    };
+
+    for (UINT mipIndex = 0; mipIndex < depthPyramidMipCount_; ++mipIndex)
+    {
+        const UINT srcWidth = std::max(1u, static_cast<UINT>(width_) >> ((mipIndex == 0) ? 0u : (mipIndex - 1u)));
+        const UINT srcHeight = std::max(1u, static_cast<UINT>(height_) >> ((mipIndex == 0) ? 0u : (mipIndex - 1u)));
+        const UINT dstWidth = std::max(1u, static_cast<UINT>(width_) >> mipIndex);
+        const UINT dstHeight = std::max(1u, static_cast<UINT>(height_) >> mipIndex);
+        const BuildParams params{
+            (mipIndex == 0) ? 0u : (mipIndex - 1u),
+            srcWidth,
+            srcHeight,
+            dstWidth,
+            dstHeight};
+
+        commandList_->SetComputeRoot32BitConstants(0, 5, &params, 0);
+        commandList_->SetComputeRootDescriptorTable(1, (mipIndex == 0) ? depthSrvGpu_ : depthPyramidSrvGpu_);
+        commandList_->SetComputeRootDescriptorTable(2, depthPyramidUavGpuHandles_[mipIndex]);
+        commandList_->Dispatch((dstWidth + 7u) / 8u, (dstHeight + 7u) / 8u, 1u);
+
+        D3D12_RESOURCE_BARRIER uavBarrier{};
+        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier.UAV.pResource = depthPyramid_.Get();
+        commandList_->ResourceBarrier(1, &uavBarrier);
+    }
+
+    const D3D12_RESOURCE_BARRIER endBarriers[] = {
+        transitionBarrier(depthPyramid_.Get(), depthPyramidState_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        transitionBarrier(depthBuffer_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE)};
+    commandList_->ResourceBarrier(static_cast<UINT>(std::size(endBarriers)), endBarriers);
+    depthPyramidState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    renderDebugLog("buildDepthPyramid: end");
+}
+
+void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch, const glm::mat4& viewProj)
+{
+    if (batch.gpuCullRecords.empty() ||
+        !depthPyramid_ ||
+        !lodCullRootSignature_ ||
+        !lodCullPipelineState_ ||
+        !lodIndirectRootSignature_ ||
+        !lodIndirectPipelineState_)
+    {
+        return;
+    }
+
+    FrameResource& frame = frameResources_[currentBackBufferIndex_];
+    renderDebugLog("renderFarBatchGpuCull: begin");
+    const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecords.size());
+    const std::uint64_t recordBytes = recordCount * sizeof(ChunkRenderBatch::GpuCullRecord);
+    const std::uint64_t visibleIndexBytes = std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u);
+    const std::uint64_t countBytes = sizeof(std::uint32_t);
+    const std::uint64_t indirectBytes = std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u);
+
+    auto createBuffer = [this](D3D12_HEAP_TYPE heapType,
+                               std::uint64_t sizeInBytes,
+                               D3D12_RESOURCE_STATES initialState,
+                               D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        const D3D12_HEAP_PROPERTIES heap = heapProps(heapType);
+        D3D12_RESOURCE_DESC desc = bufferDesc(std::max<std::uint64_t>(sizeInBytes, 4u));
+        desc.Flags = flags;
+        throwIfFailed(device_->CreateCommittedResource(&heap,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &desc,
+                                                       initialState,
+                                                       nullptr,
+                                                       IID_PPV_ARGS(&resource)),
+                      "failed to create transient far cull buffer");
+        return resource;
+    };
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> recordsDefault =
+        createBuffer(D3D12_HEAP_TYPE_DEFAULT, recordBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+    Microsoft::WRL::ComPtr<ID3D12Resource> recordsUpload =
+        createBuffer(D3D12_HEAP_TYPE_UPLOAD, recordBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    Microsoft::WRL::ComPtr<ID3D12Resource> visibleIndices =
+        createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                     visibleIndexBytes,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Microsoft::WRL::ComPtr<ID3D12Resource> visibleCount =
+        createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                     countBytes,
+                     D3D12_RESOURCE_STATE_COPY_DEST,
+                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Microsoft::WRL::ComPtr<ID3D12Resource> countUpload =
+        createBuffer(D3D12_HEAP_TYPE_UPLOAD, countBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    Microsoft::WRL::ComPtr<ID3D12Resource> indirectArgs =
+        createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                     indirectBytes,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+    frame.transientResources.push_back(recordsDefault);
+    frame.transientResources.push_back(recordsUpload);
+    frame.transientResources.push_back(visibleIndices);
+    frame.transientResources.push_back(visibleCount);
+    frame.transientResources.push_back(countUpload);
+    frame.transientResources.push_back(indirectArgs);
+
+    void* mappedRecords = nullptr;
+    throwIfFailed(recordsUpload->Map(0, nullptr, &mappedRecords), "failed to map far cull upload buffer");
+    std::memcpy(mappedRecords, batch.gpuCullRecords.data(), static_cast<std::size_t>(recordBytes));
+    recordsUpload->Unmap(0, nullptr);
+
+    void* mappedCount = nullptr;
+    throwIfFailed(countUpload->Map(0, nullptr, &mappedCount), "failed to map far cull count upload");
+    const std::uint32_t zeroValue = 0;
+    std::memcpy(mappedCount, &zeroValue, sizeof(zeroValue));
+    countUpload->Unmap(0, nullptr);
+
+    commandList_->CopyBufferRegion(recordsDefault.Get(), 0, recordsUpload.Get(), 0, recordBytes);
+    commandList_->CopyBufferRegion(visibleCount.Get(), 0, countUpload.Get(), 0, countBytes);
+
+    const D3D12_RESOURCE_BARRIER setupBarriers[] = {
+        transitionBarrier(recordsDefault.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        transitionBarrier(visibleCount.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+    commandList_->ResourceBarrier(static_cast<UINT>(std::size(setupBarriers)), setupBarriers);
+
+    struct CullRootConstants
+    {
+        glm::mat4 viewProj{1.0f};
+        glm::vec4 frustumPlanes[6]{};
+        UINT recordCount{0};
+        UINT depthWidth{0};
+        UINT depthHeight{0};
+        UINT depthMipCount{0};
+    } constants{};
+    constants.viewProj = viewProj;
+    const std::array<FrustumPlane, 6> frustumPlanes = extractFrustumPlanes(viewProj);
+    for (std::size_t i = 0; i < frustumPlanes.size(); ++i)
+    {
+        constants.frustumPlanes[i] = frustumPlanes[i].equation;
+    }
+    constants.recordCount = static_cast<UINT>(recordCount);
+    constants.depthWidth = static_cast<UINT>(std::max(width_, 1));
+    constants.depthHeight = static_cast<UINT>(std::max(height_, 1));
+    constants.depthMipCount = depthPyramidMipCount_;
+
+    const UINT dispatchGroups = static_cast<UINT>((recordCount + 63u) / 64u);
+    const auto cullStart = std::chrono::steady_clock::now();
+    renderDebugLog("renderFarBatchGpuCull: dispatch cull");
+    commandList_->SetComputeRootSignature(lodCullRootSignature_.Get());
+    commandList_->SetPipelineState(lodCullPipelineState_.Get());
+    commandList_->SetComputeRoot32BitConstants(0, 44, &constants, 0);
+    commandList_->SetComputeRootDescriptorTable(1, depthPyramidSrvGpu_);
+    commandList_->SetComputeRootShaderResourceView(2, recordsDefault->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(3, visibleIndices->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(4, visibleCount->GetGPUVirtualAddress());
+    commandList_->Dispatch(dispatchGroups, 1, 1);
+    profilingSnapshot_.lodGpuCullMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cullStart).count();
+    renderDebugLog("renderFarBatchGpuCull: cull complete");
+
+    std::array<D3D12_RESOURCE_BARRIER, 3> cullBarriers{};
+    cullBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    cullBarriers[0].UAV.pResource = visibleIndices.Get();
+    cullBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    cullBarriers[1].UAV.pResource = visibleCount.Get();
+    cullBarriers[2] = transitionBarrier(visibleIndices.Get(),
+                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    commandList_->ResourceBarrier(static_cast<UINT>(cullBarriers.size()), cullBarriers.data());
+
+    const auto indirectStart = std::chrono::steady_clock::now();
+    renderDebugLog("renderFarBatchGpuCull: dispatch indirect build");
+    commandList_->SetComputeRootSignature(lodIndirectRootSignature_.Get());
+    commandList_->SetPipelineState(lodIndirectPipelineState_.Get());
+    commandList_->SetComputeRootShaderResourceView(0, recordsDefault->GetGPUVirtualAddress());
+    commandList_->SetComputeRootShaderResourceView(1, visibleIndices->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(2, indirectArgs->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(3, visibleCount->GetGPUVirtualAddress());
+    commandList_->Dispatch(dispatchGroups, 1, 1);
+    profilingSnapshot_.lodIndirectBuildMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - indirectStart).count();
+    renderDebugLog("renderFarBatchGpuCull: indirect build complete");
+
+    std::array<D3D12_RESOURCE_BARRIER, 4> indirectBarriers{};
+    indirectBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    indirectBarriers[0].UAV.pResource = indirectArgs.Get();
+    indirectBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    indirectBarriers[1].UAV.pResource = visibleCount.Get();
+    indirectBarriers[2] = transitionBarrier(indirectArgs.Get(),
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    indirectBarriers[3] = transitionBarrier(visibleCount.Get(),
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    commandList_->ResourceBarrier(static_cast<UINT>(indirectBarriers.size()), indirectBarriers.data());
+
+    commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
+    commandList_->IASetIndexBuffer(&batch.indexBufferView);
+    renderDebugLog("renderFarBatchGpuCull: execute indirect");
+    commandList_->ExecuteIndirect(drawIndexedCommandSignature_.Get(),
+                                  static_cast<UINT>(recordCount),
+                                  indirectArgs.Get(),
+                                  0,
+                                  visibleCount.Get(),
+                                  0);
+    renderDebugLog("renderFarBatchGpuCull: end");
+}
+
 void Renderer::ensureFrameStarted() const
 {
     if (!frameStarted_)
@@ -1905,6 +2395,7 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         throwIfFailed(fence_->SetEventOnCompletion(frame.fenceValue, fenceEvent_), "failed to wait for frame fence");
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
+    frame.transientResources.clear();
 
     throwIfFailed(frame.allocator->Reset(), "failed to reset frame allocator");
     throwIfFailed(commandList_->Reset(frame.allocator.Get(), nullptr), "failed to reset command list");
@@ -2094,6 +2585,21 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             }
         }
 
+        const bool gpuFarCullDisabled = std::getenv("BLOCKGAME_DISABLE_LOD_GPU_CULL") != nullptr;
+        bool shouldUseGpuFarCull = false;
+        for (const ChunkRenderBatch& batch : renderData.farBatches)
+        {
+            if (!gpuFarCullDisabled && batch.supportsGpuCull && !batch.gpuCullRecords.empty())
+            {
+                shouldUseGpuFarCull = true;
+                break;
+            }
+        }
+        if (shouldUseGpuFarCull)
+        {
+            buildDepthPyramid();
+        }
+
         void* farCpu = nullptr;
         const std::uint64_t farCb = allocateFrameConstantBytes(sizeof(WorldConstants), &farCpu);
         auto* farConstants = static_cast<WorldConstants*>(farCpu);
@@ -2103,6 +2609,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootConstantBufferView(0, farCb);
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
+            if (!gpuFarCullDisabled && batch.supportsGpuCull && !batch.gpuCullRecords.empty())
+            {
+                renderFarBatchGpuCull(batch, viewProj);
+                continue;
+            }
+
             if (batch.indexCounts.empty())
             {
                 continue;

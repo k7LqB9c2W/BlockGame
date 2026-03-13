@@ -410,6 +410,8 @@ struct BenchmarkRuntimeState
     float finalYawDegrees{0.0f};
     float finalPitchDegrees{0.0f};
     std::vector<double> frameTimesMs;
+    std::vector<double> lodGpuCullMs;
+    std::vector<double> lodIndirectBuildMs;
     std::size_t currentSpikeStreakOver33_3Ms{0};
     BenchmarkSpikeSummary spikeSummary{};
 };
@@ -624,6 +626,26 @@ struct BenchmarkFrameSummary
         summary.averageFps = 1000.0 / summary.averageMs;
     }
     return summary;
+}
+
+[[nodiscard]] BenchmarkStageStats summarizeStageSamples(const std::vector<double>& samplesMs)
+{
+    BenchmarkStageStats stats{};
+    if (samplesMs.empty())
+    {
+        return stats;
+    }
+
+    std::vector<double> sorted = samplesMs;
+    std::sort(sorted.begin(), sorted.end());
+    stats.count = sorted.size();
+    stats.totalMs = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+    stats.averageMs = stats.totalMs / static_cast<double>(stats.count);
+    stats.medianMs = percentileFromSorted(sorted, 0.50);
+    stats.p95Ms = percentileFromSorted(sorted, 0.95);
+    stats.p99Ms = percentileFromSorted(sorted, 0.99);
+    stats.maxMs = sorted.back();
+    return stats;
 }
 
 [[nodiscard]] int benchmarkFloorDiv(int value, int divisor) noexcept
@@ -1138,6 +1160,9 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out.setf(std::ios::fixed, std::ios::floatfield);
     out << std::setprecision(4);
 
+    const BenchmarkStageStats lodGpuCullStats = summarizeStageSamples(runtimeState.lodGpuCullMs);
+    const BenchmarkStageStats lodIndirectBuildStats = summarizeStageSamples(runtimeState.lodIndirectBuildMs);
+
     out << "{";
     out << "\"schema_version\":1";
     out << ",\"scenario\":";
@@ -1204,6 +1229,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.farBuildStage);
     out << ",\"lod_gpu_synthesis\":";
     writeStageStatsJson(out, report.lodGpuSynthesisStage);
+    out << ",\"lod_gpu_stamp\":";
+    writeStageStatsJson(out, report.lodGpuStampStage);
+    out << ",\"lod_gpu_face_build\":";
+    writeStageStatsJson(out, report.lodGpuFaceBuildStage);
+    out << ",\"lod_gpu_cull\":";
+    writeStageStatsJson(out, lodGpuCullStats);
+    out << ",\"lod_indirect_build\":";
+    writeStageStatsJson(out, lodIndirectBuildStats);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
     out << ",\"structure_query\":";
@@ -1244,6 +1277,10 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"lod_tiles_pending_upload\":" << finalProfiling.farTilesPendingUpload
         << ",\"lod_build_avg_ms\":" << finalProfiling.farBuildMsAverage
         << ",\"lod_gpu_synthesis_ms\":" << finalProfiling.lodGpuSynthesisMs
+        << ",\"lod_gpu_stamp_ms\":" << finalProfiling.lodGpuStampMs
+        << ",\"lod_gpu_face_build_ms\":" << finalProfiling.lodGpuFaceBuildMs
+        << ",\"lod_gpu_cull_ms\":" << finalProfiling.lodGpuCullMs
+        << ",\"lod_indirect_build_ms\":" << finalProfiling.lodIndirectBuildMs
         << ",\"lod_collect_ms\":" << finalProfiling.farCollectMsLastFrame
         << ",\"lod_upload_ms\":" << finalProfiling.farUploadMsLastFrame
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs
@@ -2399,6 +2436,8 @@ int runGame()
         {
             ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
             const RendererProfilingSnapshot rendererSnapshot = renderer.profilingSnapshot();
+            snapshot.lodGpuCullMs = rendererSnapshot.lodGpuCullMs;
+            snapshot.lodIndirectBuildMs = rendererSnapshot.lodIndirectBuildMs;
             const char* phaseName = "steady";
             switch (snapshot.phase)
             {
@@ -3628,6 +3667,8 @@ int runGame()
 
             const ChunkProfilingSnapshot frameChunkSnapshot = chunkManager.sampleProfilingSnapshot();
             const RendererProfilingSnapshot frameRendererSnapshot = renderer.profilingSnapshot();
+            benchmarkState.lodGpuCullMs.push_back(frameRendererSnapshot.lodGpuCullMs);
+            benchmarkState.lodIndirectBuildMs.push_back(frameRendererSnapshot.lodIndirectBuildMs);
             const StreamingStatusSnapshot frameStreamingStatus = chunkManager.streamingStatusSnapshot();
             recordBenchmarkSpike(benchmarkState,
                                  frameCpuMs,
@@ -3663,7 +3704,10 @@ int runGame()
         {
             const BenchmarkFrameSummary frameSummary = summarizeFrameTimes(benchmarkState.frameTimesMs);
             const ChunkBenchmarkReport benchmarkReport = chunkManager.benchmarkReport();
-            const ChunkProfilingSnapshot finalProfiling = chunkManager.sampleProfilingSnapshot();
+            ChunkProfilingSnapshot finalProfiling = chunkManager.sampleProfilingSnapshot();
+            const RendererProfilingSnapshot finalRendererProfiling = renderer.profilingSnapshot();
+            finalProfiling.lodGpuCullMs = finalRendererProfiling.lodGpuCullMs;
+            finalProfiling.lodIndirectBuildMs = finalRendererProfiling.lodIndirectBuildMs;
             const StreamingStatusSnapshot finalStreamingStatus = chunkManager.streamingStatusSnapshot();
             const RenderDistanceSettings finalRenderSettings = chunkManager.renderDistanceSettings();
             if (!writeBenchmarkScenarioJson(benchmarkConfig,

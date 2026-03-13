@@ -112,6 +112,8 @@ struct RendererProfilingSnapshot
     double skyDrawMs{0.0};
     double shadowDrawMs{0.0};
     double worldDrawMs{0.0};
+    double lodGpuCullMs{0.0};
+    double lodIndirectBuildMs{0.0};
     double toneMapMs{0.0};
     double presentMs{0.0};
     double endFrameMs{0.0};
@@ -217,6 +219,7 @@ private:
     {
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
         Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer;
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> transientResources;
         std::byte* mappedConstants{nullptr};
         UINT64 fenceValue{0};
     };
@@ -243,11 +246,13 @@ private:
     void createDescriptorHeaps();
     void createRenderTargets();
     void createDepthBuffer();
+    void createDepthPyramid();
     void createShadowResources();
     void createPipelines();
     void createImGui(GLFWwindow* window);
     void destroyRenderTargets();
     void destroyDepthBuffer();
+    void destroyDepthPyramid();
     void destroyShadowResources();
     void updateViewport(int width, int height);
     void ensureFrameStarted() const;
@@ -257,6 +262,8 @@ private:
     void destroySceneColor();
     void ensureScreenshotReadbackBuffer();
     void writePendingScreenshot(const std::filesystem::path& path);
+    void buildDepthPyramid();
+    void renderFarBatchGpuCull(const ChunkRenderBatch& batch, const glm::mat4& viewProj);
     void renderShadowMap(const WorldRenderData& renderData,
                          const glm::mat4& view,
                          const glm::vec3& cameraPos,
@@ -292,23 +299,35 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> shadowRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> worldRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> fullscreenRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> depthPyramidRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> lodCullRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> lodIndirectRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> depthPyramidPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> lodCullPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> lodIndirectPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedCommandSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> depthPyramid_;
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> sceneColor_;
     Microsoft::WRL::ComPtr<ID3D12Resource> screenshotReadbackBuffer_;
     D3D12_RESOURCE_STATES shadowMapState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES depthPyramidState_{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES sceneColorState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT screenshotReadbackLayout_{};
 
     D3D12_CPU_DESCRIPTOR_HANDLE depthDsv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE depthSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE depthSrvGpu_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE depthPyramidSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE depthPyramidSrvGpu_{};
     D3D12_CPU_DESCRIPTOR_HANDLE shadowMapDsv_{};
     D3D12_CPU_DESCRIPTOR_HANDLE shadowMapSrvCpu_{};
     D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu_{};
@@ -326,7 +345,13 @@ private:
     UINT rtvDescriptorSize_{0};
     UINT dsvDescriptorSize_{0};
     UINT srvDescriptorSize_{0};
+    int depthSrvIndex_{-1};
+    int depthPyramidSrvIndex_{-1};
     int shadowMapSrvIndex_{-1};
+    std::vector<UINT> depthPyramidUavIndices_{};
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> depthPyramidUavCpuHandles_{};
+    std::vector<D3D12_GPU_DESCRIPTOR_HANDLE> depthPyramidUavGpuHandles_{};
+    UINT depthPyramidMipCount_{0};
     UINT64 screenshotReadbackBufferSize_{0};
     std::vector<bool> srvSlotsInUse_{};
     D3D12_VIEWPORT viewport_{};

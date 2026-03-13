@@ -3535,6 +3535,19 @@ private:
         bool gpuTerrainParityChecked{false};
         bool gpuTerrainParityMatched{true};
         int gpuTerrainColumnMismatchCount{0};
+        int shellSolidColumnsMeshed{0};
+        int shellWaterColumnsMeshed{0};
+        int shellSkirtQuadsMeshed{0};
+        int shellStructureCellsMeshed{0};
+        int shellColumnsSkippedAboveWindow{0};
+        int shellColumnsSkippedBelowWindow{0};
+        int shellWaterColumnsSkippedAboveWindow{0};
+        int shellWaterColumnsSkippedBelowWindow{0};
+        int shellWaterColumnsSuppressedBySolid{0};
+        int shellSkirtsUsingColumnBottom{0};
+        int shellSkirtsUsingNeighborTop{0};
+        int shellMaxSkirtDropBlocks{0};
+        int shellMaxColumnBottomDropBlocks{0};
         int gpuMinSolidY{0};
         int gpuMaxSolidY{1};
         int gpuMaxWaterY{std::numeric_limits<int>::min()};
@@ -4485,6 +4498,171 @@ public:
         return lastAverageGpuFaceBuildMs_;
     }
 
+    [[nodiscard]] LodDiagnosticsSnapshot diagnosticsSnapshot(const glm::vec3& cameraPos) const
+    {
+        struct OrderedTile
+        {
+            const FarTile* tile{nullptr};
+            float distanceSq{0.0f};
+        };
+
+        constexpr std::size_t kMaxSnapshotTiles = 8;
+        LodDiagnosticsSnapshot snapshot{};
+
+        std::lock_guard<std::mutex> lock(configMutex_);
+        std::vector<OrderedTile> orderedTiles;
+        orderedTiles.reserve(tiles_.size());
+        for (const auto& [key, tile] : tiles_)
+        {
+            (void)key;
+            if (!tile.active)
+            {
+                continue;
+            }
+
+            ++snapshot.activeTiles;
+            if (tile.indexCount > 0)
+            {
+                ++snapshot.readyTiles;
+            }
+            if (tile.dirty)
+            {
+                ++snapshot.dirtyTiles;
+            }
+            if (tile.inFlight)
+            {
+                ++snapshot.inFlightTiles;
+            }
+
+            const glm::vec3 center = (tile.boundsMin + tile.boundsMax) * 0.5f;
+            const glm::vec3 delta = center - cameraPos;
+            orderedTiles.push_back(OrderedTile{&tile, glm::dot(delta, delta)});
+        }
+
+        snapshot.averageBuildMs = lastAverageBuildMs_;
+        snapshot.averageGpuSynthesisMs = lastAverageGpuSynthesisMs_;
+        snapshot.averageGpuStampMs = lastAverageGpuStampMs_;
+        snapshot.averageGpuFaceBuildMs = lastAverageGpuFaceBuildMs_;
+
+        std::sort(orderedTiles.begin(),
+                  orderedTiles.end(),
+                  [](const OrderedTile& lhs, const OrderedTile& rhs)
+                  {
+                      return lhs.distanceSq < rhs.distanceSq;
+                  });
+
+        snapshot.tiles.reserve(std::min<std::size_t>(orderedTiles.size(), kMaxSnapshotTiles));
+        for (std::size_t tileIndex = 0; tileIndex < orderedTiles.size() && tileIndex < kMaxSnapshotTiles; ++tileIndex)
+        {
+            const FarTile& tile = *orderedTiles[tileIndex].tile;
+            LodDiagnosticsTileSnapshot tileSnapshot{};
+            tileSnapshot.level = tile.key.level;
+            tileSnapshot.tileCoord = glm::ivec2(tile.key.tileX, tile.key.tileZ);
+            tileSnapshot.distanceSq = orderedTiles[tileIndex].distanceSq;
+            tileSnapshot.active = tile.active;
+            tileSnapshot.dirty = tile.dirty;
+            tileSnapshot.inFlight = tile.inFlight;
+            tileSnapshot.pageNeedsResample = tile.pageNeedsResample;
+            tileSnapshot.indexCount = tile.indexCount;
+
+            if (tile.page)
+            {
+                const PageData& page = *tile.page;
+                tileSnapshot.gridCount = page.gridCount;
+                tileSnapshot.cellScaleBlocks = page.cellScaleBlocks;
+                tileSnapshot.worldMin = glm::ivec3(page.worldMinX, page.worldMinY, page.worldMinZ);
+                tileSnapshot.worldMax = glm::ivec3(page.worldMinX + page.tileSpanBlocks,
+                                                   page.worldMinY + page.gridCount * page.cellScaleBlocks,
+                                                   page.worldMinZ + page.tileSpanBlocks);
+                tileSnapshot.minY = page.minY;
+                tileSnapshot.maxY = page.maxY;
+                tileSnapshot.selectedWindowScore =
+                    static_cast<int>(std::clamp<std::int64_t>(page.selectedWindowScore,
+                                                              static_cast<std::int64_t>(std::numeric_limits<int>::min()),
+                                                              static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+                tileSnapshot.selectedWindowCandidateCount = page.selectedWindowCandidateCount;
+                tileSnapshot.selectedWindowSolidColumns = page.selectedWindowSolidColumns;
+                tileSnapshot.selectedWindowWaterColumns = page.selectedWindowWaterColumns;
+                tileSnapshot.selectedWindowStructureCount = page.selectedWindowStructureCount;
+                tileSnapshot.occupancyReady = page.occupancyReady;
+                tileSnapshot.gpuProcessed = page.gpuProcessed;
+                tileSnapshot.gpuTerrainParityChecked = page.gpuTerrainParityChecked;
+                tileSnapshot.gpuTerrainParityMatched = page.gpuTerrainParityMatched;
+                tileSnapshot.faceMasksReady = page.faceMasksReady;
+                tileSnapshot.gpuTerrainColumnMismatchCount = page.gpuTerrainColumnMismatchCount;
+                tileSnapshot.structureCount = static_cast<int>(page.structures.size());
+                tileSnapshot.structureVoxelCount = static_cast<int>(page.structureVoxels.size());
+                tileSnapshot.shellSolidColumnsMeshed = page.shellSolidColumnsMeshed;
+                tileSnapshot.shellWaterColumnsMeshed = page.shellWaterColumnsMeshed;
+                tileSnapshot.shellSkirtQuadsMeshed = page.shellSkirtQuadsMeshed;
+                tileSnapshot.shellStructureCellsMeshed = page.shellStructureCellsMeshed;
+                tileSnapshot.shellColumnsSkippedAboveWindow = page.shellColumnsSkippedAboveWindow;
+                tileSnapshot.shellColumnsSkippedBelowWindow = page.shellColumnsSkippedBelowWindow;
+                tileSnapshot.shellWaterColumnsSkippedAboveWindow = page.shellWaterColumnsSkippedAboveWindow;
+                tileSnapshot.shellWaterColumnsSkippedBelowWindow = page.shellWaterColumnsSkippedBelowWindow;
+                tileSnapshot.shellWaterColumnsSuppressedBySolid = page.shellWaterColumnsSuppressedBySolid;
+                tileSnapshot.shellSkirtsUsingColumnBottom = page.shellSkirtsUsingColumnBottom;
+                tileSnapshot.shellSkirtsUsingNeighborTop = page.shellSkirtsUsingNeighborTop;
+                tileSnapshot.shellMaxSkirtDropBlocks = page.shellMaxSkirtDropBlocks;
+                tileSnapshot.shellMaxColumnBottomDropBlocks = page.shellMaxColumnBottomDropBlocks;
+
+                tileSnapshot.solidTopMin = std::numeric_limits<int>::max();
+                tileSnapshot.solidTopMax = std::numeric_limits<int>::min();
+                tileSnapshot.solidBottomMin = std::numeric_limits<int>::max();
+                tileSnapshot.solidBottomMax = std::numeric_limits<int>::min();
+                tileSnapshot.waterTopMin = std::numeric_limits<int>::max();
+                tileSnapshot.waterTopMax = std::numeric_limits<int>::min();
+                const int pageMaxYExclusive = page.worldMinY + page.gridCount * page.cellScaleBlocks;
+                for (int z = 0; z < page.gridCount; ++z)
+                {
+                    for (int x = 0; x < page.gridCount; ++x)
+                    {
+                        const TerrainColumnInput& column = page.terrainColumns[pageColumnIndex(page.gridCount, x, z)];
+                        if (column.solidBlock != BlockId::Air && column.solidTopY != std::numeric_limits<int>::min())
+                        {
+                            ++tileSnapshot.solidColumnCount;
+                            tileSnapshot.solidTopMin = std::min(tileSnapshot.solidTopMin, column.solidTopY);
+                            tileSnapshot.solidTopMax = std::max(tileSnapshot.solidTopMax, column.solidTopY);
+                            tileSnapshot.solidBottomMin = std::min(tileSnapshot.solidBottomMin, column.solidBottomY);
+                            tileSnapshot.solidBottomMax = std::max(tileSnapshot.solidBottomMax, column.solidBottomY);
+                            if (column.solidBottomY < page.worldMinY || column.solidTopY >= pageMaxYExclusive)
+                            {
+                                ++tileSnapshot.solidColumnsClippedByPage;
+                            }
+                        }
+                        if (column.hasWater && column.waterTopY != std::numeric_limits<int>::min())
+                        {
+                            ++tileSnapshot.waterColumnCount;
+                            tileSnapshot.waterTopMin = std::min(tileSnapshot.waterTopMin, column.waterTopY);
+                            tileSnapshot.waterTopMax = std::max(tileSnapshot.waterTopMax, column.waterTopY);
+                            if (column.waterBottomY < page.worldMinY || column.waterTopY >= pageMaxYExclusive)
+                            {
+                                ++tileSnapshot.waterColumnsClippedByPage;
+                            }
+                        }
+                    }
+                }
+
+                if (tileSnapshot.solidColumnCount == 0)
+                {
+                    tileSnapshot.solidTopMin = 0;
+                    tileSnapshot.solidTopMax = 0;
+                    tileSnapshot.solidBottomMin = 0;
+                    tileSnapshot.solidBottomMax = 0;
+                }
+                if (tileSnapshot.waterColumnCount == 0)
+                {
+                    tileSnapshot.waterTopMin = 0;
+                    tileSnapshot.waterTopMax = 0;
+                }
+            }
+
+            snapshot.tiles.push_back(tileSnapshot);
+        }
+
+        return snapshot;
+    }
+
     void writeDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const
     {
         struct OrderedTile
@@ -4714,6 +4892,25 @@ public:
                 writeBool(out, page.faceMasksReady);
                 out << ",\n        \"gpu_terrain_column_mismatches\":" << page.gpuTerrainColumnMismatchCount
                     << ",\n        \"macro_sample_count\":" << page.macroSamples.size()
+                    << ",\n        \"shell_solid_columns_meshed\":" << page.shellSolidColumnsMeshed
+                    << ",\n        \"shell_water_columns_meshed\":" << page.shellWaterColumnsMeshed
+                    << ",\n        \"shell_skirt_quads_meshed\":" << page.shellSkirtQuadsMeshed
+                    << ",\n        \"shell_structure_cells_meshed\":" << page.shellStructureCellsMeshed
+                    << ",\n        \"shell_columns_skipped_above_window\":" << page.shellColumnsSkippedAboveWindow
+                    << ",\n        \"shell_columns_skipped_below_window\":" << page.shellColumnsSkippedBelowWindow
+                    << ",\n        \"shell_water_columns_skipped_above_window\":"
+                    << page.shellWaterColumnsSkippedAboveWindow
+                    << ",\n        \"shell_water_columns_skipped_below_window\":"
+                    << page.shellWaterColumnsSkippedBelowWindow
+                    << ",\n        \"shell_water_columns_suppressed_by_solid\":"
+                    << page.shellWaterColumnsSuppressedBySolid
+                    << ",\n        \"shell_skirts_using_column_bottom\":"
+                    << page.shellSkirtsUsingColumnBottom
+                    << ",\n        \"shell_skirts_using_neighbor_top\":"
+                    << page.shellSkirtsUsingNeighborTop
+                    << ",\n        \"shell_max_skirt_drop_blocks\":" << page.shellMaxSkirtDropBlocks
+                    << ",\n        \"shell_max_column_bottom_drop_blocks\":"
+                    << page.shellMaxColumnBottomDropBlocks
                     << ",\n        \"gpu_occupied_cells\":" << page.gpuOccupiedCells
                     << ",\n        \"gpu_visible_face_count\":" << page.gpuVisibleFaceCount
                     << ",\n        \"gpu_min_solid_y\":" << page.gpuMinSolidY
@@ -5591,6 +5788,19 @@ private:
             page->gpuTerrainParityChecked = false;
             page->gpuTerrainParityMatched = true;
             page->gpuTerrainColumnMismatchCount = 0;
+            page->shellSolidColumnsMeshed = 0;
+            page->shellWaterColumnsMeshed = 0;
+            page->shellSkirtQuadsMeshed = 0;
+            page->shellStructureCellsMeshed = 0;
+            page->shellColumnsSkippedAboveWindow = 0;
+            page->shellColumnsSkippedBelowWindow = 0;
+            page->shellWaterColumnsSkippedAboveWindow = 0;
+            page->shellWaterColumnsSkippedBelowWindow = 0;
+            page->shellWaterColumnsSuppressedBySolid = 0;
+            page->shellSkirtsUsingColumnBottom = 0;
+            page->shellSkirtsUsingNeighborTop = 0;
+            page->shellMaxSkirtDropBlocks = 0;
+            page->shellMaxColumnBottomDropBlocks = 0;
             page->gpuMinSolidY = 0;
             page->gpuMaxSolidY = 1;
             page->gpuMaxWaterY = std::numeric_limits<int>::min();
@@ -5910,6 +6120,19 @@ private:
                 page->gpuTerrainParityChecked = false;
                 page->gpuTerrainParityMatched = true;
                 page->gpuTerrainColumnMismatchCount = 0;
+                page->shellSolidColumnsMeshed = 0;
+                page->shellWaterColumnsMeshed = 0;
+                page->shellSkirtQuadsMeshed = 0;
+                page->shellStructureCellsMeshed = 0;
+                page->shellColumnsSkippedAboveWindow = 0;
+                page->shellColumnsSkippedBelowWindow = 0;
+                page->shellWaterColumnsSkippedAboveWindow = 0;
+                page->shellWaterColumnsSkippedBelowWindow = 0;
+                page->shellWaterColumnsSuppressedBySolid = 0;
+                page->shellSkirtsUsingColumnBottom = 0;
+                page->shellSkirtsUsingNeighborTop = 0;
+                page->shellMaxSkirtDropBlocks = 0;
+                page->shellMaxColumnBottomDropBlocks = 0;
             }
             else if (page->faceMasks.size() != expectedCellCount)
             {
@@ -5978,8 +6201,252 @@ private:
 
         auto& vertices = result.mesh.vertices;
         auto& indices = result.mesh.indices;
-        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * gridCount * 12));
-        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * gridCount * 18));
+        page->shellSolidColumnsMeshed = 0;
+        page->shellWaterColumnsMeshed = 0;
+        page->shellSkirtQuadsMeshed = 0;
+        page->shellStructureCellsMeshed = 0;
+        page->shellColumnsSkippedAboveWindow = 0;
+        page->shellColumnsSkippedBelowWindow = 0;
+        page->shellWaterColumnsSkippedAboveWindow = 0;
+        page->shellWaterColumnsSkippedBelowWindow = 0;
+        page->shellWaterColumnsSuppressedBySolid = 0;
+        page->shellSkirtsUsingColumnBottom = 0;
+        page->shellSkirtsUsingNeighborTop = 0;
+        page->shellMaxSkirtDropBlocks = 0;
+        page->shellMaxColumnBottomDropBlocks = 0;
+
+        vertices.reserve(static_cast<std::size_t>(gridCount * gridCount * 20));
+        indices.reserve(static_cast<std::size_t>(gridCount * gridCount * 30));
+
+        auto hasVisibleSolidColumn = [&](const TerrainColumnInput& column) noexcept
+        {
+            return column.solidBlock != BlockId::Air &&
+                   column.solidTopY != std::numeric_limits<int>::min();
+        };
+        auto hasVisibleWaterColumn = [&](const TerrainColumnInput& column) noexcept
+        {
+            return column.hasWater &&
+                   column.waterTopY != std::numeric_limits<int>::min();
+        };
+        auto resolvedSolidBottomY = [&](const TerrainColumnInput& column) noexcept
+        {
+            return (column.solidBottomY == std::numeric_limits<int>::min())
+                       ? (column.solidTopY + 1 - std::max(page->cellScaleBlocks, 1))
+                       : column.solidBottomY;
+        };
+        auto columnTopLocalY = [&](int topY) noexcept
+        {
+            return floorDiv(topY - page->worldMinY, page->cellScaleBlocks);
+        };
+        auto solidNeighborTopExclusiveY = [&](int neighborX, int neighborZ) noexcept
+        {
+            if (neighborX < 0 || neighborZ < 0 || neighborX >= gridCount || neighborZ >= gridCount)
+            {
+                return std::numeric_limits<int>::min();
+            }
+
+            const TerrainColumnInput& neighbor = page->terrainColumns[pageColumnIndex(gridCount, neighborX, neighborZ)];
+            if (!hasVisibleSolidColumn(neighbor))
+            {
+                return std::numeric_limits<int>::min();
+            }
+
+            return neighbor.solidTopY + 1;
+        };
+
+        for (int z = 0; z < gridCount; ++z)
+        {
+            const float minZ = static_cast<float>(worldMinZ) + static_cast<float>(z) * cellScale;
+            const float maxZ = minZ + cellScale;
+
+            for (int x = 0; x < gridCount; ++x)
+            {
+                const float minX = static_cast<float>(worldMinX) + static_cast<float>(x) * cellScale;
+                const float maxX = minX + cellScale;
+                const TerrainColumnInput& column = page->terrainColumns[pageColumnIndex(gridCount, x, z)];
+
+                if (hasVisibleSolidColumn(column))
+                {
+                    const int localY = columnTopLocalY(column.solidTopY);
+                    if (localY < 0)
+                    {
+                        ++page->shellColumnsSkippedBelowWindow;
+                    }
+                    else
+                    {
+                        const int pageTopExclusiveY = page->worldMinY + gridCount * page->cellScaleBlocks;
+                        if (localY >= gridCount)
+                        {
+                            ++page->shellColumnsSkippedAboveWindow;
+                        }
+
+                        const int currentTopExclusiveY =
+                            (localY >= gridCount) ? pageTopExclusiveY : (column.solidTopY + 1);
+                        const int currentBottomY = std::min(resolvedSolidBottomY(column),
+                                                            currentTopExclusiveY - std::max(page->cellScaleBlocks, 1));
+                        const float topFaceY = static_cast<float>(currentTopExclusiveY);
+                        const auto faceUv = [&](BlockFace face)
+                        {
+                            return uvLookup(column.solidBlock, face);
+                        };
+
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, topFaceY, minZ),
+                                   glm::vec3(maxX, topFaceY, minZ),
+                                   glm::vec3(maxX, topFaceY, maxZ),
+                                   glm::vec3(minX, topFaceY, maxZ),
+                                   glm::vec3(0.0f, 1.0f, 0.0f),
+                                   faceUv(BlockFace::Top),
+                                   0u);
+                        ++page->shellSolidColumnsMeshed;
+                        page->shellMaxColumnBottomDropBlocks =
+                            std::max(page->shellMaxColumnBottomDropBlocks, currentTopExclusiveY - currentBottomY);
+
+                        struct SkirtDecision
+                        {
+                            int bottomY{std::numeric_limits<int>::min()};
+                            bool usedColumnBottom{false};
+                            bool usedNeighborTop{false};
+                        };
+                        const auto skirtBottomYForNeighbor = [&](int neighborX, int neighborZ) noexcept
+                        {
+                            SkirtDecision decision{};
+                            const int neighborTopExclusiveY = solidNeighborTopExclusiveY(neighborX, neighborZ);
+                            if (neighborTopExclusiveY != std::numeric_limits<int>::min() &&
+                                neighborTopExclusiveY >= currentTopExclusiveY)
+                            {
+                                decision.bottomY = currentTopExclusiveY;
+                                decision.usedNeighborTop = true;
+                                return decision;
+                            }
+                            const int unclampedBottomY = (neighborTopExclusiveY == std::numeric_limits<int>::min())
+                                                             ? currentBottomY
+                                                             : std::max(neighborTopExclusiveY, currentBottomY);
+                            decision.bottomY = std::min(unclampedBottomY,
+                                                        currentTopExclusiveY - std::max(page->cellScaleBlocks, 1));
+                            decision.usedColumnBottom = (decision.bottomY <= currentBottomY);
+                            decision.usedNeighborTop = (neighborTopExclusiveY != std::numeric_limits<int>::min());
+                            return decision;
+                        };
+                        const auto emitSkirt = [&](const SkirtDecision& decision,
+                                                   const glm::vec3& p0,
+                                                   const glm::vec3& p1,
+                                                   const glm::vec3& p2,
+                                                   const glm::vec3& p3,
+                                                   const glm::vec3& normal,
+                                                   BlockFace face)
+                        {
+                            const int bottomY = decision.bottomY;
+                            if (bottomY >= currentTopExclusiveY)
+                            {
+                                return;
+                            }
+
+                            ++page->shellSkirtQuadsMeshed;
+                            if (decision.usedColumnBottom)
+                            {
+                                ++page->shellSkirtsUsingColumnBottom;
+                            }
+                            if (decision.usedNeighborTop)
+                            {
+                                ++page->shellSkirtsUsingNeighborTop;
+                            }
+                            page->shellMaxSkirtDropBlocks =
+                                std::max(page->shellMaxSkirtDropBlocks, currentTopExclusiveY - bottomY);
+                            appendQuad(vertices,
+                                       indices,
+                                       p0,
+                                       p1,
+                                       p2,
+                                       p3,
+                                       normal,
+                                       faceUv(face),
+                                       0u);
+                        };
+
+                        const SkirtDecision skirtNorth = skirtBottomYForNeighbor(x, z - 1);
+                        const int skirtNorthY = skirtNorth.bottomY;
+                        emitSkirt(skirtNorth,
+                                  glm::vec3(maxX, static_cast<float>(skirtNorthY), minZ),
+                                  glm::vec3(minX, static_cast<float>(skirtNorthY), minZ),
+                                  glm::vec3(minX, topFaceY, minZ),
+                                  glm::vec3(maxX, topFaceY, minZ),
+                                  glm::vec3(0.0f, 0.0f, -1.0f),
+                                  BlockFace::North);
+
+                        const SkirtDecision skirtSouth = skirtBottomYForNeighbor(x, z + 1);
+                        const int skirtSouthY = skirtSouth.bottomY;
+                        emitSkirt(skirtSouth,
+                                  glm::vec3(minX, static_cast<float>(skirtSouthY), maxZ),
+                                  glm::vec3(maxX, static_cast<float>(skirtSouthY), maxZ),
+                                  glm::vec3(maxX, topFaceY, maxZ),
+                                  glm::vec3(minX, topFaceY, maxZ),
+                                  glm::vec3(0.0f, 0.0f, 1.0f),
+                                  BlockFace::South);
+
+                        const SkirtDecision skirtEast = skirtBottomYForNeighbor(x + 1, z);
+                        const int skirtEastY = skirtEast.bottomY;
+                        emitSkirt(skirtEast,
+                                  glm::vec3(maxX, static_cast<float>(skirtEastY), minZ),
+                                  glm::vec3(maxX, static_cast<float>(skirtEastY), maxZ),
+                                  glm::vec3(maxX, topFaceY, maxZ),
+                                  glm::vec3(maxX, topFaceY, minZ),
+                                  glm::vec3(1.0f, 0.0f, 0.0f),
+                                  BlockFace::East);
+
+                        const SkirtDecision skirtWest = skirtBottomYForNeighbor(x - 1, z);
+                        const int skirtWestY = skirtWest.bottomY;
+                        emitSkirt(skirtWest,
+                                  glm::vec3(minX, static_cast<float>(skirtWestY), maxZ),
+                                  glm::vec3(minX, static_cast<float>(skirtWestY), minZ),
+                                  glm::vec3(minX, topFaceY, minZ),
+                                  glm::vec3(minX, topFaceY, maxZ),
+                                  glm::vec3(-1.0f, 0.0f, 0.0f),
+                                  BlockFace::West);
+                    }
+                }
+
+                if (hasVisibleWaterColumn(column) &&
+                    (!hasVisibleSolidColumn(column) || column.waterTopY > column.solidTopY))
+                {
+                    const int localY = columnTopLocalY(column.waterTopY);
+                    if (localY < 0)
+                    {
+                        ++page->shellWaterColumnsSkippedBelowWindow;
+                    }
+                    else
+                    {
+                        const int pageTopExclusiveY = page->worldMinY + gridCount * page->cellScaleBlocks;
+                        if (localY >= gridCount)
+                        {
+                            ++page->shellWaterColumnsSkippedAboveWindow;
+                        }
+
+                        const float topFaceY = static_cast<float>((localY >= gridCount) ? pageTopExclusiveY
+                                                                                          : (column.waterTopY + 1));
+                        const auto faceUv = [&](BlockFace face)
+                        {
+                            return uvLookup(BlockId::Water, face);
+                        };
+                        appendQuad(vertices,
+                                   indices,
+                                   glm::vec3(minX, topFaceY, minZ),
+                                   glm::vec3(maxX, topFaceY, minZ),
+                                   glm::vec3(maxX, topFaceY, maxZ),
+                                   glm::vec3(minX, topFaceY, maxZ),
+                                   glm::vec3(0.0f, 1.0f, 0.0f),
+                                   faceUv(BlockFace::Top),
+                                   0u);
+                        ++page->shellWaterColumnsMeshed;
+                    }
+                }
+                else if (hasVisibleWaterColumn(column))
+                {
+                    ++page->shellWaterColumnsSuppressedBySolid;
+                }
+            }
+        }
 
         for (int y = 0; y < gridCount; ++y)
         {
@@ -5993,7 +6460,13 @@ private:
 
                 for (int x = 0; x < gridCount; ++x)
                 {
-                    const ResolvedPageCell cell = resolvedCellAt(x, y, z);
+                    const PageCell& rawCell = pageCellAt(x, y, z);
+                    if (!hasRenderableCanopy(rawCell) && !hasRenderableTrunk(rawCell))
+                    {
+                        continue;
+                    }
+
+                    const ResolvedPageCell cell = resolvePageCell(rawCell);
                     if (!cell.occupied)
                     {
                         continue;
@@ -6001,56 +6474,25 @@ private:
 
                     const float minX = static_cast<float>(worldMinX) + static_cast<float>(x) * cellScale;
                     const float maxX = minX + cellScale;
-                    const PageCell& rawCell = pageCellAt(x, y, z);
                     const auto faceUv = [&](BlockFace face)
                     {
                         return uvLookup(cell.block, face);
                     };
-                    const bool isSolidTerrainCell = hasRenderableSolid(rawCell) &&
-                                                    !hasRenderableCanopy(rawCell) &&
-                                                    !hasRenderableTrunk(rawCell);
-                    const bool isWaterSurfaceCell = hasRenderableWater(rawCell) && !hasRenderableSolid(rawCell);
-                    const bool lowestSolidTerrainCell =
-                        isSolidTerrainCell && !resolvedCellAt(x, y - 1, z).occupied;
-                    // Keep only the bottom cap extension. Extending every exposed side face down to
-                    // the page floor turns steep coastal/desert tiles into giant box curtains. The
-                    // column bottoms already encode the conservative footing directly.
-                    const float bottomCapMinY = lowestSolidTerrainCell
-                                                    ? static_cast<float>(page->worldMinY)
-                                                    : minY;
                     const std::uint8_t faceMask = page->faceMasksReady
                                                       ? faceMaskAt(x, y, z)
                                                       : static_cast<std::uint8_t>(0);
                     const bool emitTop = page->faceMasksReady ? ((faceMask & kPageFaceMaskTop) != 0u)
                                                               : !resolvedCellAt(x, y + 1, z).occupied;
-                    // Far-water intentionally renders as a capped surface shell. Keeping deep water
-                    // side/bottom faces on the hybrid path makes inland seas and coastlines read as
-                    // giant translucent holes long before the player gets close enough for exact
-                    // chunks to take over.
-                    const bool capSolidBottom = isSolidTerrainCell && lowestSolidTerrainCell;
-                    const bool emitBottom = isWaterSurfaceCell
-                                                ? false
-                                                : (capSolidBottom
-                                                       ? true
-                                                       : (page->faceMasksReady ? ((faceMask & kPageFaceMaskBottom) != 0u)
-                                                                               : !resolvedCellAt(x, y - 1, z).occupied));
-                    const float bottomFaceY = capSolidBottom ? bottomCapMinY : minY;
-                    const bool emitNorth = isWaterSurfaceCell
-                                               ? false
-                                               : (page->faceMasksReady ? ((faceMask & kPageFaceMaskNorth) != 0u)
-                                                                       : !resolvedCellAt(x, y, z - 1).occupied);
-                    const bool emitSouth = isWaterSurfaceCell
-                                               ? false
-                                               : (page->faceMasksReady ? ((faceMask & kPageFaceMaskSouth) != 0u)
-                                                                       : !resolvedCellAt(x, y, z + 1).occupied);
-                    const bool emitEast = isWaterSurfaceCell
-                                              ? false
-                                              : (page->faceMasksReady ? ((faceMask & kPageFaceMaskEast) != 0u)
-                                                                      : !resolvedCellAt(x + 1, y, z).occupied);
-                    const bool emitWest = isWaterSurfaceCell
-                                              ? false
-                                              : (page->faceMasksReady ? ((faceMask & kPageFaceMaskWest) != 0u)
-                                                                      : !resolvedCellAt(x - 1, y, z).occupied);
+                    const bool emitBottom = page->faceMasksReady ? ((faceMask & kPageFaceMaskBottom) != 0u)
+                                                                 : !resolvedCellAt(x, y - 1, z).occupied;
+                    const bool emitNorth = page->faceMasksReady ? ((faceMask & kPageFaceMaskNorth) != 0u)
+                                                                : !resolvedCellAt(x, y, z - 1).occupied;
+                    const bool emitSouth = page->faceMasksReady ? ((faceMask & kPageFaceMaskSouth) != 0u)
+                                                                : !resolvedCellAt(x, y, z + 1).occupied;
+                    const bool emitEast = page->faceMasksReady ? ((faceMask & kPageFaceMaskEast) != 0u)
+                                                               : !resolvedCellAt(x + 1, y, z).occupied;
+                    const bool emitWest = page->faceMasksReady ? ((faceMask & kPageFaceMaskWest) != 0u)
+                                                               : !resolvedCellAt(x - 1, y, z).occupied;
 
                     if (emitTop)
                     {
@@ -6068,10 +6510,10 @@ private:
                     {
                         appendQuad(vertices,
                                    indices,
-                                   glm::vec3(maxX, bottomFaceY, minZ),
-                                   glm::vec3(minX, bottomFaceY, minZ),
-                                   glm::vec3(minX, bottomFaceY, maxZ),
-                                   glm::vec3(maxX, bottomFaceY, maxZ),
+                                   glm::vec3(maxX, minY, minZ),
+                                   glm::vec3(minX, minY, minZ),
+                                   glm::vec3(minX, minY, maxZ),
+                                   glm::vec3(maxX, minY, maxZ),
                                    glm::vec3(0.0f, -1.0f, 0.0f),
                                    faceUv(BlockFace::Bottom),
                                    cell.flags);
@@ -6124,6 +6566,8 @@ private:
                                    faceUv(BlockFace::South),
                                    cell.flags);
                     }
+
+                    ++page->shellStructureCellsMeshed;
                 }
             }
         }
@@ -6235,6 +6679,7 @@ struct ChunkManager::Impl
     void setStartupEnabled(bool enabled) noexcept;
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
+    LodDiagnosticsSnapshot lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const;
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
     void writeLodDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const;
     ChunkProfilingSnapshot sampleProfilingSnapshot();
@@ -8809,6 +9254,11 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
 StreamingStatusSnapshot ChunkManager::Impl::streamingStatusSnapshot() const noexcept
 {
     return computeStreamingStatusSnapshot();
+}
+
+LodDiagnosticsSnapshot ChunkManager::Impl::lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const
+{
+    return farTerrainManager_.diagnosticsSnapshot(cameraPos);
 }
 
 void ChunkManager::Impl::writeLodDebugSnapshot(const std::filesystem::path& outputPath,
@@ -12999,6 +13449,11 @@ bool ChunkManager::startupEnabled() const noexcept
 StreamingStatusSnapshot ChunkManager::streamingStatusSnapshot() const noexcept
 {
     return impl_->streamingStatusSnapshot();
+}
+
+LodDiagnosticsSnapshot ChunkManager::lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const
+{
+    return impl_->lodDiagnosticsSnapshot(cameraPos);
 }
 
 RecentEditHoleDebugSnapshot ChunkManager::recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const

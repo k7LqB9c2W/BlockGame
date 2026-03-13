@@ -336,6 +336,73 @@ struct StreamingStatusSnapshot
     const char* blockingReason{"ready"};
 };
 
+struct LodDiagnosticsTileSnapshot
+{
+    int level{0};
+    glm::ivec2 tileCoord{0};
+    float distanceSq{0.0f};
+    bool active{false};
+    bool dirty{false};
+    bool inFlight{false};
+    bool pageNeedsResample{false};
+    std::uint32_t indexCount{0};
+    int gridCount{0};
+    int cellScaleBlocks{0};
+    glm::ivec3 worldMin{0};
+    glm::ivec3 worldMax{0};
+    int minY{0};
+    int maxY{0};
+    int selectedWindowScore{0};
+    int selectedWindowCandidateCount{0};
+    int selectedWindowSolidColumns{0};
+    int selectedWindowWaterColumns{0};
+    int selectedWindowStructureCount{0};
+    bool occupancyReady{false};
+    bool gpuProcessed{false};
+    bool gpuTerrainParityChecked{false};
+    bool gpuTerrainParityMatched{true};
+    bool faceMasksReady{false};
+    int gpuTerrainColumnMismatchCount{0};
+    int structureCount{0};
+    int structureVoxelCount{0};
+    int solidColumnCount{0};
+    int waterColumnCount{0};
+    int solidColumnsClippedByPage{0};
+    int waterColumnsClippedByPage{0};
+    int shellSolidColumnsMeshed{0};
+    int shellWaterColumnsMeshed{0};
+    int shellSkirtQuadsMeshed{0};
+    int shellStructureCellsMeshed{0};
+    int shellColumnsSkippedAboveWindow{0};
+    int shellColumnsSkippedBelowWindow{0};
+    int shellWaterColumnsSkippedAboveWindow{0};
+    int shellWaterColumnsSkippedBelowWindow{0};
+    int shellWaterColumnsSuppressedBySolid{0};
+    int shellSkirtsUsingColumnBottom{0};
+    int shellSkirtsUsingNeighborTop{0};
+    int shellMaxSkirtDropBlocks{0};
+    int shellMaxColumnBottomDropBlocks{0};
+    int solidTopMin{0};
+    int solidTopMax{0};
+    int solidBottomMin{0};
+    int solidBottomMax{0};
+    int waterTopMin{0};
+    int waterTopMax{0};
+};
+
+struct LodDiagnosticsSnapshot
+{
+    int activeTiles{0};
+    int readyTiles{0};
+    int dirtyTiles{0};
+    int inFlightTiles{0};
+    double averageBuildMs{0.0};
+    double averageGpuSynthesisMs{0.0};
+    double averageGpuStampMs{0.0};
+    double averageGpuFaceBuildMs{0.0};
+    std::vector<LodDiagnosticsTileSnapshot> tiles;
+};
+
 struct RecentEditHoleChunkInfo
 {
     glm::ivec3 coord{0};
@@ -439,6 +506,7 @@ public:
     void setStartupEnabled(bool enabled) noexcept;
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
+    LodDiagnosticsSnapshot lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const;
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
     void writeLodDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const;
 

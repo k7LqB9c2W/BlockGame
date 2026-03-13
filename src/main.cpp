@@ -3358,11 +3358,13 @@ int runGame()
         renderer.beginImGuiFrame();
 
         const double currentFpsEstimate = (fpsFrameCount > 0 && fpsTimer > 0.0)
-                                              ? static_cast<double>(fpsFrameCount) / fpsTimer
-                                              : fpsValue;
+                                             ? static_cast<double>(fpsFrameCount) / fpsTimer
+                                             : fpsValue;
         std::string debugOverlayText;
         std::string lightingSnapshotText;
         std::string holeDebugSnapshotText;
+        std::string lodDiagnosticsText;
+        const std::filesystem::path lodDiagnosticsDumpPath = std::filesystem::path("artifacts") / "repro_capture" / "f1_lod_diagnostics.json";
         std::string hitBlockSummary{"none"};
         std::string hitBlockType{"none"};
         glm::vec3 samplePosition = camera.position;
@@ -3542,6 +3544,8 @@ int runGame()
 
             const RecentEditHoleDebugSnapshot holeDebugSnapshot =
                 chunkManager.recentEditHoleDebugSnapshot(camera.position);
+            const LodDiagnosticsSnapshot lodDiagnosticsSnapshot =
+                chunkManager.lodDiagnosticsSnapshot(camera.position);
             std::ostringstream holeStream;
             holeStream.setf(std::ios::fixed, std::ios::floatfield);
             holeStream << std::setprecision(2);
@@ -3611,6 +3615,78 @@ int runGame()
                 }
             }
             holeDebugSnapshotText = holeStream.str();
+
+            std::ostringstream lodStream;
+            lodStream.setf(std::ios::fixed, std::ios::floatfield);
+            lodStream << std::setprecision(2);
+            lodStream << "LOD Shell\n";
+            lodStream << "Tiles: active=" << lodDiagnosticsSnapshot.activeTiles
+                      << " ready=" << lodDiagnosticsSnapshot.readyTiles
+                      << " dirty=" << lodDiagnosticsSnapshot.dirtyTiles
+                      << " inFlight=" << lodDiagnosticsSnapshot.inFlightTiles << '\n';
+            lodStream << "Build Avg ms: mesh=" << lodDiagnosticsSnapshot.averageBuildMs
+                      << " synth=" << lodDiagnosticsSnapshot.averageGpuSynthesisMs
+                      << " stamp=" << lodDiagnosticsSnapshot.averageGpuStampMs
+                      << " face=" << lodDiagnosticsSnapshot.averageGpuFaceBuildMs << '\n';
+
+            if (lodDiagnosticsSnapshot.tiles.empty())
+            {
+                lodStream << "No active LOD tiles near the camera.";
+            }
+            else
+            {
+                for (std::size_t i = 0; i < lodDiagnosticsSnapshot.tiles.size(); ++i)
+                {
+                    const LodDiagnosticsTileSnapshot& tile = lodDiagnosticsSnapshot.tiles[i];
+                    lodStream << '\n'
+                              << "#" << (i + 1)
+                              << " L" << tile.level
+                              << " [" << tile.tileCoord.x << ", " << tile.tileCoord.y << "]"
+                              << " d2=" << tile.distanceSq
+                              << " idx=" << tile.indexCount
+                              << " active=" << (tile.active ? "y" : "n")
+                              << " dirty=" << (tile.dirty ? "y" : "n")
+                              << " flight=" << (tile.inFlight ? "y" : "n") << '\n';
+                    lodStream << "  worldMin=[" << tile.worldMin.x << ", " << tile.worldMin.y << ", " << tile.worldMin.z
+                              << "] worldMax=[" << tile.worldMax.x << ", " << tile.worldMax.y << ", " << tile.worldMax.z
+                              << "] yRange=[" << tile.minY << ", " << tile.maxY << "]"
+                              << " cell=" << tile.cellScaleBlocks << '\n';
+                    lodStream << "  parity: gpu=" << (tile.gpuProcessed ? "y" : "n")
+                              << " checked=" << (tile.gpuTerrainParityChecked ? "y" : "n")
+                              << " matched=" << (tile.gpuTerrainParityMatched ? "y" : "n")
+                              << " mismatches=" << tile.gpuTerrainColumnMismatchCount
+                              << " occ=" << (tile.occupancyReady ? "y" : "n")
+                              << " faceMask=" << (tile.faceMasksReady ? "y" : "n") << '\n';
+                    lodStream << "  window: score=" << tile.selectedWindowScore
+                              << " candidates=" << tile.selectedWindowCandidateCount
+                              << " solid=" << tile.selectedWindowSolidColumns
+                              << " water=" << tile.selectedWindowWaterColumns
+                              << " structs=" << tile.selectedWindowStructureCount << '\n';
+                    lodStream << "  columns: solid=" << tile.solidColumnCount
+                              << " water=" << tile.waterColumnCount
+                              << " solidClipped=" << tile.solidColumnsClippedByPage
+                              << " waterClipped=" << tile.waterColumnsClippedByPage << '\n';
+                    lodStream << "  shell: top=" << tile.shellSolidColumnsMeshed
+                              << " water=" << tile.shellWaterColumnsMeshed
+                              << " skirts=" << tile.shellSkirtQuadsMeshed
+                              << " structs=" << tile.shellStructureCellsMeshed << '\n';
+                    lodStream << "  shell skips: solidAbove=" << tile.shellColumnsSkippedAboveWindow
+                              << " solidBelow=" << tile.shellColumnsSkippedBelowWindow
+                              << " waterAbove=" << tile.shellWaterColumnsSkippedAboveWindow
+                              << " waterBelow=" << tile.shellWaterColumnsSkippedBelowWindow
+                              << " waterSuppressed=" << tile.shellWaterColumnsSuppressedBySolid << '\n';
+                    lodStream << "  skirt sources: columnBottom=" << tile.shellSkirtsUsingColumnBottom
+                              << " neighborTop=" << tile.shellSkirtsUsingNeighborTop
+                              << " maxDrop=" << tile.shellMaxSkirtDropBlocks
+                              << " maxBottomDrop=" << tile.shellMaxColumnBottomDropBlocks << '\n';
+                    lodStream << "  ranges: top=[" << tile.solidTopMin << ", " << tile.solidTopMax
+                              << "] bottom=[" << tile.solidBottomMin << ", " << tile.solidBottomMax
+                              << "] waterTop=[" << tile.waterTopMin << ", " << tile.waterTopMax
+                              << "] structures=" << tile.structureCount
+                              << " voxels=" << tile.structureVoxelCount << '\n';
+                }
+            }
+            lodDiagnosticsText = lodStream.str();
         }
 
         if (inputContext.showDebugOverlay && !debugOverlayText.empty())
@@ -3637,7 +3713,7 @@ int runGame()
                 "Right Mouse: Place block\n"
                 "L: Toggle Grass / DebugLamp placement\n"
                 ". : Release or recapture mouse\n"
-                "F1: Debug overlay and lighting lab (base game default)\n"
+                "F1: Debug overlay, lighting lab, and LOD diagnostics\n"
                 "F2: Teleport dialog\n"
                 "N: Render distance dialog\n"
                 "H: Toggle this help\n"
@@ -3896,6 +3972,28 @@ int runGame()
             ImGui::TextWrapped("3. Use Exact Only to isolate near-chunk streaming behavior.");
             ImGui::TextWrapped("4. Use Sky Light or Block Light terrain debug to confirm whether the bad region is actually carrying broken light data.");
             ImGui::TextWrapped("5. Disable Fog Fallback with Aerial Perspective off. If the band still stays, it is world-side shading or geometry.");
+            ImGui::End();
+        }
+
+        if (inputContext.showDebugOverlay)
+        {
+            ImGui::SetNextWindowPos(ImVec2(462.0f, 260.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.85f);
+            ImGui::Begin("LOD Diagnostics", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::TextUnformatted("Nearest active far-page shell state. Use this before guessing at parity or mesher bugs.");
+            if (ImGui::Button("Copy LOD Snapshot"))
+            {
+                ImGui::SetClipboardText(lodDiagnosticsText.c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Write LOD JSON"))
+            {
+                chunkManager.writeLodDebugSnapshot(lodDiagnosticsDumpPath, camera.position);
+            }
+            ImGui::TextWrapped("JSON path: %s", lodDiagnosticsDumpPath.string().c_str());
+            ImGui::BeginChild("LodDiagnosticsSnapshot", ImVec2(520.0f, 420.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::TextUnformatted(lodDiagnosticsText.c_str());
+            ImGui::EndChild();
             ImGui::End();
         }
 

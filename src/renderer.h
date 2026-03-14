@@ -223,7 +223,22 @@ private:
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
         Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer;
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> transientResources;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullRecordsDefault;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullRecordsUpload;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullVisibleIndices;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullVisibleCount;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullCountUpload;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullIndirectArgs;
         std::byte* mappedConstants{nullptr};
+        std::byte* farCullRecordsUploadMapped{nullptr};
+        std::byte* farCullCountUploadMapped{nullptr};
+        std::uint64_t farCullRecordCapacityBytes{0};
+        std::uint64_t farCullVisibleIndexCapacityBytes{0};
+        std::uint64_t farCullIndirectCapacityBytes{0};
+        D3D12_RESOURCE_STATES farCullRecordsState{D3D12_RESOURCE_STATE_COPY_DEST};
+        D3D12_RESOURCE_STATES farCullVisibleIndicesState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        D3D12_RESOURCE_STATES farCullVisibleCountState{D3D12_RESOURCE_STATE_COPY_DEST};
+        D3D12_RESOURCE_STATES farCullIndirectArgsState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         UINT64 fenceValue{0};
     };
 
@@ -271,6 +286,10 @@ private:
     void createSceneColor();
     void destroySceneColor();
     void ensureScreenshotReadbackBuffer();
+    void ensureFarCullBuffers(FrameResource& frame,
+                              std::uint64_t recordBytes,
+                              std::uint64_t visibleIndexBytes,
+                              std::uint64_t indirectBytes);
     void writePendingScreenshot(const std::filesystem::path& path);
     void buildDepthPyramid();
     void renderFarBatchGpuCull(const ChunkRenderBatch& batch,

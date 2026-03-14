@@ -747,6 +747,17 @@ public:
         hasCommands_ = true;
     }
 
+    void waitForFence(ID3D12Fence* fence, UINT64 fenceValue)
+    {
+        if (!open_ || queue_ == nullptr || fence == nullptr || fenceValue == 0)
+        {
+            return;
+        }
+
+        throwIfFailedDx(queue_->Wait(fence, fenceValue), "failed to wait for external fence before upload");
+        hasCommands_ = true;
+    }
+
     void flush(FlushTimings* timings = nullptr)
     {
         if (!open_)
@@ -1224,6 +1235,11 @@ public:
     [[nodiscard]] UINT64 lastSubmittedFenceValue() const noexcept
     {
         return lastSubmittedFenceValue_;
+    }
+
+    [[nodiscard]] ID3D12Fence* fence() const noexcept
+    {
+        return fence_.Get();
     }
 
     [[nodiscard]] const std::byte* readbackMappedData() const noexcept
@@ -5342,7 +5358,22 @@ private:
         {
             if (!parity.copySubmitted)
             {
-                if (parity.computeFenceValue == 0 || parity.computeFenceValue > gpuContext_.completedFenceValue())
+                bool copyAlreadyPending = false;
+                for (const PendingGpuParityReadback& queuedParity : stillPending)
+                {
+                    if (queuedParity.copySubmitted)
+                    {
+                        copyAlreadyPending = true;
+                        break;
+                    }
+                }
+                if (copyAlreadyPending)
+                {
+                    stillPending.push_back(std::move(parity));
+                    continue;
+                }
+
+                if (parity.computeFenceValue == 0)
                 {
                     stillPending.push_back(std::move(parity));
                     continue;
@@ -5374,17 +5405,12 @@ private:
                     else
                     {
                         FarLodChunkRecord& chunk = it->second;
-                        uploadContext_.transition(chunk.gpu.voxelBuffer.Get(),
-                                                  chunk.gpu.voxelState,
-                                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        uploadContext_.waitForFence(gpuContext_.fence(), parity.computeFenceValue);
                         uploadContext_.copyBuffer(parityReadbackScratch_.Get(),
                                                   0,
                                                   chunk.gpu.voxelBuffer.Get(),
                                                   0,
                                                   static_cast<std::uint64_t>(kVoxelCount * sizeof(PackedFarLodVoxelGpu)));
-                        uploadContext_.transition(chunk.gpu.voxelBuffer.Get(),
-                                                  D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                                  chunk.gpu.voxelState);
                         submittedCopy = true;
                     }
                 }

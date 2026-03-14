@@ -1220,6 +1220,21 @@ void Renderer::createFrameResources()
         throwIfFailed(frame.constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&frame.mappedConstants)),
                       "failed to map frame constant buffer");
         frame.transientResources.clear();
+        frame.farCullRecordsDefault.Reset();
+        frame.farCullRecordsUpload.Reset();
+        frame.farCullVisibleIndices.Reset();
+        frame.farCullVisibleCount.Reset();
+        frame.farCullCountUpload.Reset();
+        frame.farCullIndirectArgs.Reset();
+        frame.farCullRecordsUploadMapped = nullptr;
+        frame.farCullCountUploadMapped = nullptr;
+        frame.farCullRecordCapacityBytes = 0;
+        frame.farCullVisibleIndexCapacityBytes = 0;
+        frame.farCullIndirectCapacityBytes = 0;
+        frame.farCullRecordsState = D3D12_RESOURCE_STATE_COPY_DEST;
+        frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
+        frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         frame.fenceValue = 0;
     }
 }
@@ -1229,10 +1244,121 @@ void Renderer::destroyFrameResources()
     for (auto& frame : frameResources_)
     {
         frame.transientResources.clear();
+        if (frame.farCullRecordsUpload != nullptr)
+        {
+            frame.farCullRecordsUpload->Unmap(0, nullptr);
+        }
+        if (frame.farCullCountUpload != nullptr)
+        {
+            frame.farCullCountUpload->Unmap(0, nullptr);
+        }
+        frame.farCullRecordsUploadMapped = nullptr;
+        frame.farCullCountUploadMapped = nullptr;
+        frame.farCullRecordsDefault.Reset();
+        frame.farCullRecordsUpload.Reset();
+        frame.farCullVisibleIndices.Reset();
+        frame.farCullVisibleCount.Reset();
+        frame.farCullCountUpload.Reset();
+        frame.farCullIndirectArgs.Reset();
+        frame.farCullRecordCapacityBytes = 0;
+        frame.farCullVisibleIndexCapacityBytes = 0;
+        frame.farCullIndirectCapacityBytes = 0;
         frame.mappedConstants = nullptr;
         frame.constantBuffer.Reset();
         frame.allocator.Reset();
         frame.fenceValue = 0;
+    }
+}
+
+void Renderer::ensureFarCullBuffers(FrameResource& frame,
+                                    std::uint64_t recordBytes,
+                                    std::uint64_t visibleIndexBytes,
+                                    std::uint64_t indirectBytes)
+{
+    const auto nextCapacity = [](std::uint64_t requiredBytes) noexcept
+    {
+        std::uint64_t capacity = 4096;
+        while (capacity < requiredBytes)
+        {
+            capacity *= 2;
+        }
+        return capacity;
+    };
+
+    auto createBuffer = [this](D3D12_HEAP_TYPE heapType,
+                               std::uint64_t sizeInBytes,
+                               D3D12_RESOURCE_STATES initialState,
+                               D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        const D3D12_HEAP_PROPERTIES heap = heapProps(heapType);
+        D3D12_RESOURCE_DESC desc = bufferDesc(std::max<std::uint64_t>(sizeInBytes, 4u));
+        desc.Flags = flags;
+        throwIfFailed(device_->CreateCommittedResource(&heap,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &desc,
+                                                       initialState,
+                                                       nullptr,
+                                                       IID_PPV_ARGS(&resource)),
+                      "failed to create reusable far cull buffer");
+        return resource;
+    };
+
+    if (frame.farCullRecordCapacityBytes < recordBytes)
+    {
+        if (frame.farCullRecordsUpload != nullptr)
+        {
+            frame.farCullRecordsUpload->Unmap(0, nullptr);
+        }
+        frame.farCullRecordCapacityBytes = nextCapacity(recordBytes);
+        frame.farCullRecordsDefault = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                                                   frame.farCullRecordCapacityBytes,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   D3D12_RESOURCE_FLAG_NONE);
+        frame.farCullRecordsUpload = createBuffer(D3D12_HEAP_TYPE_UPLOAD,
+                                                  frame.farCullRecordCapacityBytes,
+                                                  D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                  D3D12_RESOURCE_FLAG_NONE);
+        throwIfFailed(frame.farCullRecordsUpload->Map(0, nullptr,
+                                                      reinterpret_cast<void**>(&frame.farCullRecordsUploadMapped)),
+                      "failed to map reusable far cull record upload buffer");
+        frame.farCullRecordsState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+
+    if (frame.farCullVisibleIndexCapacityBytes < visibleIndexBytes)
+    {
+        frame.farCullVisibleIndexCapacityBytes = nextCapacity(visibleIndexBytes);
+        frame.farCullVisibleIndices = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                                                   frame.farCullVisibleIndexCapacityBytes,
+                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        frame.farCullVisibleCount = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                                                 sizeof(std::uint32_t),
+                                                 D3D12_RESOURCE_STATE_COPY_DEST,
+                                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (frame.farCullCountUpload != nullptr)
+        {
+            frame.farCullCountUpload->Unmap(0, nullptr);
+        }
+        frame.farCullCountUpload = createBuffer(D3D12_HEAP_TYPE_UPLOAD,
+                                                sizeof(std::uint32_t),
+                                                D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                D3D12_RESOURCE_FLAG_NONE);
+        throwIfFailed(frame.farCullCountUpload->Map(0, nullptr,
+                                                    reinterpret_cast<void**>(&frame.farCullCountUploadMapped)),
+                      "failed to map reusable far cull count upload buffer");
+        frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+
+    if (frame.farCullIndirectCapacityBytes < indirectBytes)
+    {
+        frame.farCullIndirectCapacityBytes = nextCapacity(indirectBytes);
+        frame.farCullIndirectArgs = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+                                                 frame.farCullIndirectCapacityBytes,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
 }
 
@@ -2261,73 +2387,67 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     const std::uint64_t visibleIndexBytes = std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u);
     const std::uint64_t countBytes = sizeof(std::uint32_t);
     const std::uint64_t indirectBytes = std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u);
+    ensureFarCullBuffers(frame, recordBytes, visibleIndexBytes, indirectBytes);
 
-    auto createBuffer = [this](D3D12_HEAP_TYPE heapType,
-                               std::uint64_t sizeInBytes,
-                               D3D12_RESOURCE_STATES initialState,
-                               D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
+    ID3D12Resource* recordsDefault = frame.farCullRecordsDefault.Get();
+    ID3D12Resource* recordsUpload = frame.farCullRecordsUpload.Get();
+    ID3D12Resource* visibleIndices = frame.farCullVisibleIndices.Get();
+    ID3D12Resource* visibleCount = frame.farCullVisibleCount.Get();
+    ID3D12Resource* countUpload = frame.farCullCountUpload.Get();
+    ID3D12Resource* indirectArgs = frame.farCullIndirectArgs.Get();
+
+    if (recordsDefault == nullptr || recordsUpload == nullptr ||
+        visibleIndices == nullptr || visibleCount == nullptr ||
+        countUpload == nullptr || indirectArgs == nullptr ||
+        frame.farCullRecordsUploadMapped == nullptr || frame.farCullCountUploadMapped == nullptr)
     {
-        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-        const D3D12_HEAP_PROPERTIES heap = heapProps(heapType);
-        D3D12_RESOURCE_DESC desc = bufferDesc(std::max<std::uint64_t>(sizeInBytes, 4u));
-        desc.Flags = flags;
-        throwIfFailed(device_->CreateCommittedResource(&heap,
-                                                       D3D12_HEAP_FLAG_NONE,
-                                                       &desc,
-                                                       initialState,
-                                                       nullptr,
-                                                       IID_PPV_ARGS(&resource)),
-                      "failed to create transient far cull buffer");
-        return resource;
-    };
+        throw std::runtime_error("Renderer: failed to prepare reusable far cull buffers");
+    }
 
-    Microsoft::WRL::ComPtr<ID3D12Resource> recordsDefault =
-        createBuffer(D3D12_HEAP_TYPE_DEFAULT, recordBytes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
-    Microsoft::WRL::ComPtr<ID3D12Resource> recordsUpload =
-        createBuffer(D3D12_HEAP_TYPE_UPLOAD, recordBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
-    Microsoft::WRL::ComPtr<ID3D12Resource> visibleIndices =
-        createBuffer(D3D12_HEAP_TYPE_DEFAULT,
-                     visibleIndexBytes,
-                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    Microsoft::WRL::ComPtr<ID3D12Resource> visibleCount =
-        createBuffer(D3D12_HEAP_TYPE_DEFAULT,
-                     countBytes,
-                     D3D12_RESOURCE_STATE_COPY_DEST,
-                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    Microsoft::WRL::ComPtr<ID3D12Resource> countUpload =
-        createBuffer(D3D12_HEAP_TYPE_UPLOAD, countBytes, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
-    Microsoft::WRL::ComPtr<ID3D12Resource> indirectArgs =
-        createBuffer(D3D12_HEAP_TYPE_DEFAULT,
-                     indirectBytes,
-                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-
-    frame.transientResources.push_back(recordsDefault);
-    frame.transientResources.push_back(recordsUpload);
-    frame.transientResources.push_back(visibleIndices);
-    frame.transientResources.push_back(visibleCount);
-    frame.transientResources.push_back(countUpload);
-    frame.transientResources.push_back(indirectArgs);
-
-    void* mappedRecords = nullptr;
-    throwIfFailed(recordsUpload->Map(0, nullptr, &mappedRecords), "failed to map far cull upload buffer");
-    std::memcpy(mappedRecords, batch.gpuCullRecords.data(), static_cast<std::size_t>(recordBytes));
-    recordsUpload->Unmap(0, nullptr);
-
-    void* mappedCount = nullptr;
-    throwIfFailed(countUpload->Map(0, nullptr, &mappedCount), "failed to map far cull count upload");
+    std::memcpy(frame.farCullRecordsUploadMapped, batch.gpuCullRecords.data(), static_cast<std::size_t>(recordBytes));
     const std::uint32_t zeroValue = 0;
-    std::memcpy(mappedCount, &zeroValue, sizeof(zeroValue));
-    countUpload->Unmap(0, nullptr);
+    std::memcpy(frame.farCullCountUploadMapped, &zeroValue, sizeof(zeroValue));
 
-    commandList_->CopyBufferRegion(recordsDefault.Get(), 0, recordsUpload.Get(), 0, recordBytes);
-    commandList_->CopyBufferRegion(visibleCount.Get(), 0, countUpload.Get(), 0, countBytes);
+    std::array<D3D12_RESOURCE_BARRIER, 4> preCopyBarriers{};
+    UINT preCopyBarrierCount = 0;
+    if (frame.farCullRecordsState != D3D12_RESOURCE_STATE_COPY_DEST)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(recordsDefault, frame.farCullRecordsState, D3D12_RESOURCE_STATE_COPY_DEST);
+        frame.farCullRecordsState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    if (frame.farCullVisibleCountState != D3D12_RESOURCE_STATE_COPY_DEST)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(visibleCount, frame.farCullVisibleCountState, D3D12_RESOURCE_STATE_COPY_DEST);
+        frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    if (frame.farCullVisibleIndicesState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(visibleIndices, frame.farCullVisibleIndicesState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (frame.farCullIndirectArgsState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(indirectArgs, frame.farCullIndirectArgsState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (preCopyBarrierCount > 0)
+    {
+        commandList_->ResourceBarrier(preCopyBarrierCount, preCopyBarriers.data());
+    }
+
+    commandList_->CopyBufferRegion(recordsDefault, 0, recordsUpload, 0, recordBytes);
+    commandList_->CopyBufferRegion(visibleCount, 0, countUpload, 0, countBytes);
 
     const D3D12_RESOURCE_BARRIER setupBarriers[] = {
-        transitionBarrier(recordsDefault.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-        transitionBarrier(visibleCount.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+        transitionBarrier(recordsDefault, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        transitionBarrier(visibleCount, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
     commandList_->ResourceBarrier(static_cast<UINT>(std::size(setupBarriers)), setupBarriers);
+    frame.farCullRecordsState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     struct CullRootConstants
     {
@@ -2366,13 +2486,14 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
 
     std::array<D3D12_RESOURCE_BARRIER, 3> cullBarriers{};
     cullBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    cullBarriers[0].UAV.pResource = visibleIndices.Get();
+    cullBarriers[0].UAV.pResource = visibleIndices;
     cullBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    cullBarriers[1].UAV.pResource = visibleCount.Get();
-    cullBarriers[2] = transitionBarrier(visibleIndices.Get(),
+    cullBarriers[1].UAV.pResource = visibleCount;
+    cullBarriers[2] = transitionBarrier(visibleIndices,
                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     commandList_->ResourceBarrier(static_cast<UINT>(cullBarriers.size()), cullBarriers.data());
+    frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     const auto indirectStart = std::chrono::steady_clock::now();
     renderDebugLog("renderFarBatchGpuCull: dispatch indirect build");
@@ -2389,16 +2510,18 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
 
     std::array<D3D12_RESOURCE_BARRIER, 4> indirectBarriers{};
     indirectBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    indirectBarriers[0].UAV.pResource = indirectArgs.Get();
+    indirectBarriers[0].UAV.pResource = indirectArgs;
     indirectBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    indirectBarriers[1].UAV.pResource = visibleCount.Get();
-    indirectBarriers[2] = transitionBarrier(indirectArgs.Get(),
+    indirectBarriers[1].UAV.pResource = visibleCount;
+    indirectBarriers[2] = transitionBarrier(indirectArgs,
                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-    indirectBarriers[3] = transitionBarrier(visibleCount.Get(),
+    indirectBarriers[3] = transitionBarrier(visibleCount,
                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     commandList_->ResourceBarrier(static_cast<UINT>(indirectBarriers.size()), indirectBarriers.data());
+    frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
 
     commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
     commandList_->SetPipelineState(farPipelineState_.Get());
@@ -2412,9 +2535,9 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     renderDebugLog("renderFarBatchGpuCull: execute indirect");
     commandList_->ExecuteIndirect(drawIndexedCommandSignature_.Get(),
                                   static_cast<UINT>(recordCount),
-                                  indirectArgs.Get(),
+                                  indirectArgs,
                                   0,
-                                  visibleCount.Get(),
+                                  visibleCount,
                                   0);
     renderDebugLog("renderFarBatchGpuCull: end");
 }

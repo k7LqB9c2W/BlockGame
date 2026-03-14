@@ -321,6 +321,8 @@ private:
     bool imguiFrameStarted_{false};
     bool debugLayerEnabled_{false};
     bool initialized_{false};
+    bool sceneColorClearLogged_{false};
+    std::uint64_t directCommandListSequence_{0};
 
     Microsoft::WRL::ComPtr<IDXGIFactory6> factory_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
@@ -350,6 +352,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
+    std::array<D3D12_RESOURCE_STATES, kBackBufferCount> backBufferStates_{
+        D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATE_PRESENT};
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> depthPyramid_;
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;

@@ -86,6 +86,8 @@ void shutdownSymbolHandler() noexcept;
 void startHangWatchdog();
 void stopHangWatchdog() noexcept;
 void shutdownCrashLogging() noexcept;
+void setProcessEnvironmentVariable(const char* name, const char* value);
+void applyLaunchDebugOptions(int argc, char** argv);
 #ifdef _WIN32
 void appendStackTrace(EXCEPTION_POINTERS* exceptionPointers = nullptr);
 void writeMiniDump(EXCEPTION_POINTERS* exceptionPointers);
@@ -159,6 +161,60 @@ void appendCrashLog(std::string message)
 #endif
     out << std::put_time(&timeInfo, "%Y-%m-%d %H:%M:%S") << " - " << message << '\n';
     out.flush();
+}
+
+void setProcessEnvironmentVariable(const char* name, const char* value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void applyLaunchDebugOptions(int argc, char** argv)
+{
+    bool enableGpuDebug = false;
+    bool enableGpuBreak = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (argv[i] == nullptr)
+        {
+            continue;
+        }
+
+        const std::string_view arg(argv[i]);
+        if (arg == "--d3d-debug" || arg == "--gpu-debug" || arg == "--debug-gpu")
+        {
+            enableGpuDebug = true;
+            continue;
+        }
+
+        if (arg == "--gpu-break" || arg == "--d3d-break")
+        {
+            enableGpuDebug = true;
+            enableGpuBreak = true;
+        }
+    }
+
+    if (!enableGpuDebug)
+    {
+        return;
+    }
+
+    setProcessEnvironmentVariable("BLOCKGAME_RENDER_DEBUG_LOG", "1");
+    setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DEBUG_LAYER", "1");
+    setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_GPU_VALIDATION", "1");
+    setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DRED", "1");
+    if (enableGpuBreak)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_BREAK_ON_D3D12_ERROR", "1");
+        std::cout << "Enabled D3D12 debug logging, GPU validation, DRED, and break-on-error for this run." << '\n';
+    }
+    else
+    {
+        std::cout << "Enabled D3D12 debug logging, GPU validation, and DRED for this run." << '\n';
+    }
 }
 
 [[nodiscard]] std::uint64_t steadyMicrosNow() noexcept
@@ -4170,6 +4226,8 @@ int runGame()
 
 int main(int argc, char** argv)
 {
+    applyLaunchDebugOptions(argc, argv);
+
     std::filesystem::path exePath;
     if (argc > 0 && argv[0] != nullptr)
     {

@@ -1,0 +1,1128 @@
+Enabled D3D12 debug logging and GPU validation for this run.
+Renderer direct command list close seq=0 reason=initial
+Renderer direct command list reset seq=1 reason=texture-upload
+Renderer direct command list close seq=1 reason=texture-upload
+Renderer execute command lists seq=1 reason=texture-upload
+Finding safe spawn position...
+Predicted spawn at height: 53.7 (feet at: 52)
+Player spawned at: (0, 53.7, 5)
+Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set exact/total render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit.
+Renderer direct command list reset seq=2 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+SceneColor clear consistency: creationClear=(0,0,0,0) clearCall=(0.470588,0.654902,1,1)
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=2 backBuffer=0
+Renderer execute command lists seq=2 backBuffer=0
+Renderer direct command list reset seq=3 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=3 backBuffer=1
+Renderer execute command lists seq=3 backBuffer=1
+Renderer direct command list reset seq=4 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=4 backBuffer=0
+Renderer execute command lists seq=4 backBuffer=0
+Renderer direct command list reset seq=5 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=5 backBuffer=1
+Renderer execute command lists seq=5 backBuffer=1
+Renderer direct command list reset seq=6 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=6 backBuffer=0
+Renderer execute command lists seq=6 backBuffer=0
+Renderer direct command list reset seq=7 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=7 backBuffer=1
+Renderer execute command lists seq=7 backBuffer=1
+Renderer direct command list reset seq=8 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=8 backBuffer=0
+Renderer execute command lists seq=8 backBuffer=0
+Renderer direct command list reset seq=9 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=9 backBuffer=1
+Renderer execute command lists seq=9 backBuffer=1
+Renderer direct command list reset seq=10 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=10 backBuffer=0
+Renderer execute command lists seq=10 backBuffer=0
+Renderer direct command list reset seq=11 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=11 backBuffer=1
+Renderer execute command lists seq=11 backBuffer=1
+Renderer direct command list reset seq=12 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=12 backBuffer=0
+Renderer execute command lists seq=12 backBuffer=0
+Renderer direct command list reset seq=13 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=13 backBuffer=1
+Renderer execute command lists seq=13 backBuffer=1
+Renderer direct command list reset seq=14 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=14 backBuffer=0
+Renderer execute command lists seq=14 backBuffer=0
+Renderer direct command list reset seq=15 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=15 backBuffer=1
+Renderer execute command lists seq=15 backBuffer=1
+Renderer direct command list reset seq=16 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=16 backBuffer=0
+Renderer execute command lists seq=16 backBuffer=0
+Renderer direct command list reset seq=17 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=17 backBuffer=1
+Renderer execute command lists seq=17 backBuffer=1
+Renderer direct command list reset seq=18 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=18 backBuffer=0
+Renderer execute command lists seq=18 backBuffer=0
+Renderer direct command list reset seq=19 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=19 backBuffer=1
+Renderer execute command lists seq=19 backBuffer=1
+Renderer direct command list reset seq=20 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=20 backBuffer=0
+Renderer execute command lists seq=20 backBuffer=0
+Renderer direct command list reset seq=21 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=21 backBuffer=1
+Renderer execute command lists seq=21 backBuffer=1
+Renderer direct command list reset seq=22 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=22 backBuffer=0
+Renderer execute command lists seq=22 backBuffer=0
+Renderer direct command list reset seq=23 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=23 backBuffer=1
+Renderer execute command lists seq=23 backBuffer=1
+Renderer direct command list reset seq=24 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=24 backBuffer=0
+Renderer execute command lists seq=24 backBuffer=0
+Renderer direct command list reset seq=25 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=25 backBuffer=1
+Renderer execute command lists seq=25 backBuffer=1
+Renderer direct command list reset seq=26 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=26 backBuffer=0
+Renderer execute command lists seq=26 backBuffer=0
+Renderer direct command list reset seq=27 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=27 backBuffer=1
+Renderer execute command lists seq=27 backBuffer=1
+Renderer direct command list reset seq=28 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=28 backBuffer=0
+Renderer execute command lists seq=28 backBuffer=0
+Renderer direct command list reset seq=29 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=29 backBuffer=1
+Renderer execute command lists seq=29 backBuffer=1
+Renderer direct command list reset seq=30 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=30 backBuffer=0
+Renderer execute command lists seq=30 backBuffer=0
+Renderer direct command list reset seq=31 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=31 backBuffer=1
+Renderer execute command lists seq=31 backBuffer=1
+Renderer direct command list reset seq=32 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=32 backBuffer=0
+Renderer execute command lists seq=32 backBuffer=0
+Renderer direct command list reset seq=33 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=33 backBuffer=1
+Renderer execute command lists seq=33 backBuffer=1
+Renderer direct command list reset seq=34 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=34 backBuffer=0
+Renderer execute command lists seq=34 backBuffer=0
+Renderer direct command list reset seq=35 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=35 backBuffer=1
+Renderer execute command lists seq=35 backBuffer=1
+Renderer direct command list reset seq=36 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=36 backBuffer=0
+Renderer execute command lists seq=36 backBuffer=0
+Renderer direct command list reset seq=37 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=37 backBuffer=1
+Renderer execute command lists seq=37 backBuffer=1
+Renderer direct command list reset seq=38 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=38 backBuffer=0
+Renderer execute command lists seq=38 backBuffer=0
+Renderer direct command list reset seq=39 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=39 backBuffer=1
+Renderer execute command lists seq=39 backBuffer=1
+Renderer direct command list reset seq=40 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=40 backBuffer=0
+Renderer execute command lists seq=40 backBuffer=0
+Renderer direct command list reset seq=41 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=41 backBuffer=1
+Renderer execute command lists seq=41 backBuffer=1
+Renderer direct command list reset seq=42 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=42 backBuffer=0
+Renderer execute command lists seq=42 backBuffer=0
+Renderer direct command list reset seq=43 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=43 backBuffer=1
+Renderer execute command lists seq=43 backBuffer=1
+Renderer direct command list reset seq=44 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=44 backBuffer=0
+Renderer execute command lists seq=44 backBuffer=0
+Renderer direct command list reset seq=45 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=45 backBuffer=1
+Renderer execute command lists seq=45 backBuffer=1
+Renderer direct command list reset seq=46 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=46 backBuffer=0
+Renderer execute command lists seq=46 backBuffer=0
+Renderer direct command list reset seq=47 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=47 backBuffer=1
+Renderer execute command lists seq=47 backBuffer=1
+Renderer direct command list reset seq=48 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=48 backBuffer=0
+Renderer execute command lists seq=48 backBuffer=0
+Renderer direct command list reset seq=49 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=49 backBuffer=1
+Renderer execute command lists seq=49 backBuffer=1
+Renderer direct command list reset seq=50 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=50 backBuffer=0
+Renderer execute command lists seq=50 backBuffer=0
+Renderer direct command list reset seq=51 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=51 backBuffer=1
+Renderer execute command lists seq=51 backBuffer=1
+Renderer direct command list reset seq=52 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=52 backBuffer=0
+Renderer execute command lists seq=52 backBuffer=0
+Renderer direct command list reset seq=53 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=53 backBuffer=1
+Renderer execute command lists seq=53 backBuffer=1
+Renderer direct command list reset seq=54 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=54 backBuffer=0
+Renderer execute command lists seq=54 backBuffer=0
+Renderer direct command list reset seq=55 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=55 backBuffer=1
+Renderer execute command lists seq=55 backBuffer=1
+Renderer direct command list reset seq=56 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=56 backBuffer=0
+Renderer execute command lists seq=56 backBuffer=0
+Renderer direct command list reset seq=57 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=57 backBuffer=1
+Renderer execute command lists seq=57 backBuffer=1
+Renderer direct command list reset seq=58 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=58 backBuffer=0
+Renderer execute command lists seq=58 backBuffer=0
+Renderer direct command list reset seq=59 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=59 backBuffer=1
+Renderer execute command lists seq=59 backBuffer=1
+Renderer direct command list reset seq=60 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=60 backBuffer=0
+Renderer execute command lists seq=60 backBuffer=0
+Renderer direct command list reset seq=61 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=61 backBuffer=1
+Renderer execute command lists seq=61 backBuffer=1
+Renderer direct command list reset seq=62 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=62 backBuffer=0
+Renderer execute command lists seq=62 backBuffer=0
+Renderer direct command list reset seq=63 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=63 backBuffer=1
+Renderer execute command lists seq=63 backBuffer=1
+Renderer direct command list reset seq=64 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=64 backBuffer=0
+Renderer execute command lists seq=64 backBuffer=0
+Renderer direct command list reset seq=65 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=65 backBuffer=1
+Renderer execute command lists seq=65 backBuffer=1
+Renderer direct command list reset seq=66 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=66 backBuffer=0
+Renderer execute command lists seq=66 backBuffer=0
+Renderer direct command list reset seq=67 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=67 backBuffer=1
+Renderer execute command lists seq=67 backBuffer=1
+Renderer direct command list reset seq=68 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=68 backBuffer=0
+Renderer execute command lists seq=68 backBuffer=0
+Renderer direct command list reset seq=69 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=69 backBuffer=1
+Renderer execute command lists seq=69 backBuffer=1
+Renderer direct command list reset seq=70 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=70 backBuffer=0
+Renderer execute command lists seq=70 backBuffer=0
+Renderer direct command list reset seq=71 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=71 backBuffer=1
+Renderer execute command lists seq=71 backBuffer=1
+Renderer direct command list reset seq=72 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=72 backBuffer=0
+Renderer execute command lists seq=72 backBuffer=0
+Renderer direct command list reset seq=73 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=73 backBuffer=1
+Renderer execute command lists seq=73 backBuffer=1
+Renderer direct command list reset seq=74 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=74 backBuffer=0
+Renderer execute command lists seq=74 backBuffer=0
+Renderer direct command list reset seq=75 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=75 backBuffer=1
+Renderer execute command lists seq=75 backBuffer=1
+Renderer direct command list reset seq=76 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=76 backBuffer=0
+Renderer execute command lists seq=76 backBuffer=0
+Renderer direct command list reset seq=77 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=77 backBuffer=1
+Renderer execute command lists seq=77 backBuffer=1
+Renderer direct command list reset seq=78 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=78 backBuffer=0
+Renderer execute command lists seq=78 backBuffer=0
+Renderer direct command list reset seq=79 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=79 backBuffer=1
+Renderer execute command lists seq=79 backBuffer=1
+Renderer direct command list reset seq=80 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=80 backBuffer=0
+Renderer execute command lists seq=80 backBuffer=0
+Renderer direct command list reset seq=81 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=81 backBuffer=1
+Renderer execute command lists seq=81 backBuffer=1
+Renderer direct command list reset seq=82 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=82 backBuffer=0
+Renderer execute command lists seq=82 backBuffer=0
+Renderer direct command list reset seq=83 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=83 backBuffer=1
+Renderer execute command lists seq=83 backBuffer=1
+Renderer direct command list reset seq=84 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=84 backBuffer=0
+Renderer execute command lists seq=84 backBuffer=0
+Renderer direct command list reset seq=85 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=85 backBuffer=1
+Renderer execute command lists seq=85 backBuffer=1
+Renderer direct command list reset seq=86 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=86 backBuffer=0
+Renderer execute command lists seq=86 backBuffer=0
+Renderer direct command list reset seq=87 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=87 backBuffer=1
+Renderer execute command lists seq=87 backBuffer=1
+Renderer direct command list reset seq=88 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=88 backBuffer=0
+Renderer execute command lists seq=88 backBuffer=0
+Renderer direct command list reset seq=89 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=89 backBuffer=1
+Renderer execute command lists seq=89 backBuffer=1
+Renderer direct command list reset seq=90 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=90 backBuffer=0
+Renderer execute command lists seq=90 backBuffer=0
+Renderer direct command list reset seq=91 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=91 backBuffer=1
+Renderer execute command lists seq=91 backBuffer=1
+Renderer direct command list reset seq=92 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=92 backBuffer=0
+Renderer execute command lists seq=92 backBuffer=0
+Renderer direct command list reset seq=93 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=93 backBuffer=1
+Renderer execute command lists seq=93 backBuffer=1
+Renderer direct command list reset seq=94 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=94 backBuffer=0
+Renderer execute command lists seq=94 backBuffer=0
+Renderer direct command list reset seq=95 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=95 backBuffer=1
+Renderer execute command lists seq=95 backBuffer=1
+Renderer direct command list reset seq=96 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=96 backBuffer=0
+Renderer execute command lists seq=96 backBuffer=0
+Renderer direct command list reset seq=97 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=97 backBuffer=1
+Renderer execute command lists seq=97 backBuffer=1
+Renderer direct command list reset seq=98 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=98 backBuffer=0
+Renderer execute command lists seq=98 backBuffer=0
+Renderer direct command list reset seq=99 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=99 backBuffer=1
+Renderer execute command lists seq=99 backBuffer=1
+Renderer direct command list reset seq=100 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=100 backBuffer=0
+Renderer execute command lists seq=100 backBuffer=0
+Renderer direct command list reset seq=101 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=101 backBuffer=1
+Renderer execute command lists seq=101 backBuffer=1
+Renderer direct command list reset seq=102 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=102 backBuffer=0
+Renderer execute command lists seq=102 backBuffer=0
+Renderer direct command list reset seq=103 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=103 backBuffer=1
+Renderer execute command lists seq=103 backBuffer=1
+Renderer direct command list reset seq=104 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=104 backBuffer=0
+Renderer execute command lists seq=104 backBuffer=0
+Renderer direct command list reset seq=105 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=105 backBuffer=1
+Renderer execute command lists seq=105 backBuffer=1
+Renderer direct command list reset seq=106 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=106 backBuffer=0
+Renderer execute command lists seq=106 backBuffer=0
+Renderer direct command list reset seq=107 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=107 backBuffer=1
+Renderer execute command lists seq=107 backBuffer=1
+Renderer direct command list reset seq=108 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=108 backBuffer=0
+Renderer execute command lists seq=108 backBuffer=0
+Renderer direct command list reset seq=109 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=109 backBuffer=1
+Renderer execute command lists seq=109 backBuffer=1
+Renderer direct command list reset seq=110 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=110 backBuffer=0
+Renderer execute command lists seq=110 backBuffer=0
+Renderer direct command list reset seq=111 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=111 backBuffer=1
+Renderer execute command lists seq=111 backBuffer=1
+Renderer direct command list reset seq=112 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=112 backBuffer=0
+Renderer execute command lists seq=112 backBuffer=0
+Renderer direct command list reset seq=113 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=113 backBuffer=1
+Renderer execute command lists seq=113 backBuffer=1
+Renderer direct command list reset seq=114 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=114 backBuffer=0
+Renderer execute command lists seq=114 backBuffer=0
+Renderer direct command list reset seq=115 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=115 backBuffer=1
+Renderer execute command lists seq=115 backBuffer=1
+Renderer direct command list reset seq=116 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=116 backBuffer=0
+Renderer execute command lists seq=116 backBuffer=0
+Renderer direct command list reset seq=117 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=117 backBuffer=1
+Renderer execute command lists seq=117 backBuffer=1
+Renderer direct command list reset seq=118 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=118 backBuffer=0
+Renderer execute command lists seq=118 backBuffer=0
+Renderer direct command list reset seq=119 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=119 backBuffer=1
+Renderer execute command lists seq=119 backBuffer=1
+Renderer direct command list reset seq=120 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=120 backBuffer=0
+Renderer execute command lists seq=120 backBuffer=0
+Renderer direct command list reset seq=121 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=121 backBuffer=1
+Renderer execute command lists seq=121 backBuffer=1
+Renderer direct command list reset seq=122 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=122 backBuffer=0
+Renderer execute command lists seq=122 backBuffer=0
+Renderer direct command list reset seq=123 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=123 backBuffer=1
+Renderer execute command lists seq=123 backBuffer=1
+Renderer direct command list reset seq=124 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=124 backBuffer=0
+Renderer execute command lists seq=124 backBuffer=0
+Renderer direct command list reset seq=125 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=125 backBuffer=1
+Renderer execute command lists seq=125 backBuffer=1
+Renderer direct command list reset seq=126 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=126 backBuffer=0
+Renderer execute command lists seq=126 backBuffer=0
+Renderer direct command list reset seq=127 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=127 backBuffer=1
+Renderer execute command lists seq=127 backBuffer=1
+Renderer direct command list reset seq=128 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=128 backBuffer=0
+Renderer execute command lists seq=128 backBuffer=0
+Renderer direct command list reset seq=129 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=129 backBuffer=1
+Renderer execute command lists seq=129 backBuffer=1
+Renderer direct command list reset seq=130 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=130 backBuffer=0
+Renderer execute command lists seq=130 backBuffer=0
+Renderer direct command list reset seq=131 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=131 backBuffer=1
+Renderer execute command lists seq=131 backBuffer=1
+Renderer direct command list reset seq=132 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=132 backBuffer=0
+Renderer execute command lists seq=132 backBuffer=0
+Renderer direct command list reset seq=133 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=133 backBuffer=1
+Renderer execute command lists seq=133 backBuffer=1
+Renderer direct command list reset seq=134 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=134 backBuffer=0
+Renderer execute command lists seq=134 backBuffer=0
+Renderer direct command list reset seq=135 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=135 backBuffer=1
+Renderer execute command lists seq=135 backBuffer=1
+Renderer direct command list reset seq=136 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=136 backBuffer=0
+Renderer execute command lists seq=136 backBuffer=0
+Renderer direct command list reset seq=137 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=137 backBuffer=1
+Renderer execute command lists seq=137 backBuffer=1
+Renderer direct command list reset seq=138 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=138 backBuffer=0
+Renderer execute command lists seq=138 backBuffer=0
+Renderer direct command list reset seq=139 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=139 backBuffer=1
+Renderer execute command lists seq=139 backBuffer=1
+Renderer direct command list reset seq=140 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=140 backBuffer=0
+Renderer execute command lists seq=140 backBuffer=0
+Renderer direct command list reset seq=141 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=141 backBuffer=1
+Renderer execute command lists seq=141 backBuffer=1
+Renderer direct command list reset seq=142 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=142 backBuffer=0
+Renderer execute command lists seq=142 backBuffer=0
+Renderer direct command list reset seq=143 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=143 backBuffer=1
+Renderer execute command lists seq=143 backBuffer=1
+Renderer direct command list reset seq=144 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=144 backBuffer=0
+Renderer execute command lists seq=144 backBuffer=0
+Renderer direct command list reset seq=145 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=145 backBuffer=1
+Renderer execute command lists seq=145 backBuffer=1
+Renderer direct command list reset seq=146 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=146 backBuffer=0
+Renderer execute command lists seq=146 backBuffer=0
+Renderer direct command list reset seq=147 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=147 backBuffer=1
+Renderer execute command lists seq=147 backBuffer=1
+Renderer direct command list reset seq=148 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=148 backBuffer=0
+Renderer execute command lists seq=148 backBuffer=0
+Renderer direct command list reset seq=149 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=149 backBuffer=1
+Renderer execute command lists seq=149 backBuffer=1
+Renderer direct command list reset seq=150 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=150 backBuffer=0
+Renderer execute command lists seq=150 backBuffer=0
+Renderer direct command list reset seq=151 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=151 backBuffer=1
+Renderer execute command lists seq=151 backBuffer=1
+Renderer direct command list reset seq=152 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=152 backBuffer=0
+Renderer execute command lists seq=152 backBuffer=0
+Renderer direct command list reset seq=153 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=153 backBuffer=1
+Renderer execute command lists seq=153 backBuffer=1
+Renderer direct command list reset seq=154 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=154 backBuffer=0
+Renderer execute command lists seq=154 backBuffer=0
+Renderer direct command list reset seq=155 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=155 backBuffer=1
+Renderer execute command lists seq=155 backBuffer=1
+Renderer direct command list reset seq=156 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=156 backBuffer=0
+Renderer execute command lists seq=156 backBuffer=0
+Renderer direct command list reset seq=157 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=157 backBuffer=1
+Renderer execute command lists seq=157 backBuffer=1
+Renderer direct command list reset seq=158 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=158 backBuffer=0
+Renderer execute command lists seq=158 backBuffer=0
+Renderer direct command list reset seq=159 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=159 backBuffer=1
+Renderer execute command lists seq=159 backBuffer=1
+Renderer direct command list reset seq=160 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=160 backBuffer=0
+Renderer execute command lists seq=160 backBuffer=0
+Renderer direct command list reset seq=161 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=161 backBuffer=1
+Renderer execute command lists seq=161 backBuffer=1
+Renderer direct command list reset seq=162 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=162 backBuffer=0
+Renderer execute command lists seq=162 backBuffer=0
+Renderer direct command list reset seq=163 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=163 backBuffer=1
+Renderer execute command lists seq=163 backBuffer=1
+Renderer direct command list reset seq=164 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=164 backBuffer=0
+Renderer execute command lists seq=164 backBuffer=0
+Renderer direct command list reset seq=165 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=165 backBuffer=1
+Renderer execute command lists seq=165 backBuffer=1
+Renderer direct command list reset seq=166 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=166 backBuffer=0
+Renderer execute command lists seq=166 backBuffer=0
+Renderer direct command list reset seq=167 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=167 backBuffer=1
+Renderer execute command lists seq=167 backBuffer=1
+Renderer direct command list reset seq=168 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=168 backBuffer=0
+Renderer execute command lists seq=168 backBuffer=0
+Renderer direct command list reset seq=169 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=169 backBuffer=1
+Renderer execute command lists seq=169 backBuffer=1
+Renderer direct command list reset seq=170 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=170 backBuffer=0
+Renderer execute command lists seq=170 backBuffer=0
+Renderer direct command list reset seq=171 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=171 backBuffer=1
+Renderer execute command lists seq=171 backBuffer=1
+Renderer direct command list reset seq=172 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=172 backBuffer=0
+Renderer execute command lists seq=172 backBuffer=0
+Renderer direct command list reset seq=173 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=173 backBuffer=1
+Renderer execute command lists seq=173 backBuffer=1
+Renderer direct command list reset seq=174 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=174 backBuffer=0
+Renderer execute command lists seq=174 backBuffer=0
+Renderer direct command list reset seq=175 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=175 backBuffer=1
+Renderer execute command lists seq=175 backBuffer=1
+Renderer direct command list reset seq=176 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=176 backBuffer=0
+Renderer execute command lists seq=176 backBuffer=0
+Renderer direct command list reset seq=177 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=177 backBuffer=1
+Renderer execute command lists seq=177 backBuffer=1
+Renderer direct command list reset seq=178 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=178 backBuffer=0
+Renderer execute command lists seq=178 backBuffer=0
+Renderer direct command list reset seq=179 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=179 backBuffer=1
+Renderer execute command lists seq=179 backBuffer=1
+Renderer direct command list reset seq=180 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=180 backBuffer=0
+Renderer execute command lists seq=180 backBuffer=0
+Renderer direct command list reset seq=181 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=181 backBuffer=1
+Renderer execute command lists seq=181 backBuffer=1
+Renderer direct command list reset seq=182 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=182 backBuffer=0
+Renderer execute command lists seq=182 backBuffer=0
+Renderer direct command list reset seq=183 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=183 backBuffer=1
+Renderer execute command lists seq=183 backBuffer=1
+Renderer direct command list reset seq=184 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=184 backBuffer=0
+Renderer execute command lists seq=184 backBuffer=0
+Renderer direct command list reset seq=185 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=185 backBuffer=1
+Renderer execute command lists seq=185 backBuffer=1
+Renderer direct command list reset seq=186 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=186 backBuffer=0
+Renderer execute command lists seq=186 backBuffer=0
+Renderer direct command list reset seq=187 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=187 backBuffer=1
+Renderer execute command lists seq=187 backBuffer=1
+Renderer direct command list reset seq=188 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=188 backBuffer=0
+Renderer execute command lists seq=188 backBuffer=0
+Renderer direct command list reset seq=189 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=189 backBuffer=1
+Renderer execute command lists seq=189 backBuffer=1
+Renderer direct command list reset seq=190 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=190 backBuffer=0
+Renderer execute command lists seq=190 backBuffer=0
+Renderer direct command list reset seq=191 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=191 backBuffer=1
+Renderer execute command lists seq=191 backBuffer=1
+Renderer direct command list reset seq=192 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=192 backBuffer=0
+Renderer execute command lists seq=192 backBuffer=0
+Renderer direct command list reset seq=193 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=193 backBuffer=1
+Renderer execute command lists seq=193 backBuffer=1
+Renderer direct command list reset seq=194 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=194 backBuffer=0
+Renderer execute command lists seq=194 backBuffer=0
+Renderer direct command list reset seq=195 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=195 backBuffer=1
+Renderer execute command lists seq=195 backBuffer=1
+Renderer direct command list reset seq=196 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=196 backBuffer=0
+Renderer execute command lists seq=196 backBuffer=0
+Renderer direct command list reset seq=197 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=197 backBuffer=1
+Renderer execute command lists seq=197 backBuffer=1
+Renderer direct command list reset seq=198 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=198 backBuffer=0
+Renderer execute command lists seq=198 backBuffer=0
+Renderer direct command list reset seq=199 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=199 backBuffer=1
+Renderer execute command lists seq=199 backBuffer=1
+Renderer direct command list reset seq=200 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=200 backBuffer=0
+Renderer execute command lists seq=200 backBuffer=0
+Renderer direct command list reset seq=201 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=201 backBuffer=1
+Renderer execute command lists seq=201 backBuffer=1
+Renderer direct command list reset seq=202 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=202 backBuffer=0
+Renderer execute command lists seq=202 backBuffer=0
+Renderer direct command list reset seq=203 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=203 backBuffer=1
+Renderer execute command lists seq=203 backBuffer=1
+Renderer direct command list reset seq=204 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=204 backBuffer=0
+Renderer execute command lists seq=204 backBuffer=0
+Renderer direct command list reset seq=205 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=205 backBuffer=1
+Renderer execute command lists seq=205 backBuffer=1
+Renderer direct command list reset seq=206 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=206 backBuffer=0
+Renderer execute command lists seq=206 backBuffer=0
+Renderer direct command list reset seq=207 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=207 backBuffer=1
+Renderer execute command lists seq=207 backBuffer=1
+Renderer direct command list reset seq=208 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=208 backBuffer=0
+Renderer execute command lists seq=208 backBuffer=0
+Renderer direct command list reset seq=209 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=209 backBuffer=1
+Renderer execute command lists seq=209 backBuffer=1
+Renderer direct command list reset seq=210 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=210 backBuffer=0
+Renderer execute command lists seq=210 backBuffer=0
+Renderer direct command list reset seq=211 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=211 backBuffer=1
+Renderer execute command lists seq=211 backBuffer=1
+Renderer direct command list reset seq=212 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=212 backBuffer=0
+Renderer execute command lists seq=212 backBuffer=0
+Renderer direct command list reset seq=213 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=213 backBuffer=1
+Renderer execute command lists seq=213 backBuffer=1
+Renderer direct command list reset seq=214 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=214 backBuffer=0
+Renderer execute command lists seq=214 backBuffer=0
+Renderer direct command list reset seq=215 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=215 backBuffer=1
+Renderer execute command lists seq=215 backBuffer=1
+Renderer direct command list reset seq=216 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=216 backBuffer=0
+Renderer execute command lists seq=216 backBuffer=0
+Renderer direct command list reset seq=217 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=217 backBuffer=1
+Renderer execute command lists seq=217 backBuffer=1
+Renderer direct command list reset seq=218 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=218 backBuffer=0
+Renderer execute command lists seq=218 backBuffer=0
+Renderer direct command list reset seq=219 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=219 backBuffer=1
+Renderer execute command lists seq=219 backBuffer=1
+Renderer direct command list reset seq=220 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=220 backBuffer=0
+Renderer execute command lists seq=220 backBuffer=0
+Renderer direct command list reset seq=221 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=221 backBuffer=1
+Renderer execute command lists seq=221 backBuffer=1
+Renderer direct command list reset seq=222 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=222 backBuffer=0
+Renderer execute command lists seq=222 backBuffer=0
+Renderer direct command list reset seq=223 backBuffer=1
+BackBuffer barrier beginFrame backBuffer=1 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=1 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=223 backBuffer=1
+Renderer execute command lists seq=223 backBuffer=1
+Renderer direct command list reset seq=224 backBuffer=0
+BackBuffer barrier beginFrame backBuffer=0 trackedBefore=COMMON|PRESENT requestedAfter=RENDER_TARGET
+BackBuffer barrier endFrame backBuffer=0 trackedBefore=RENDER_TARGET requestedAfter=COMMON|PRESENT
+Renderer direct command list close seq=224 backBuffer=0
+Renderer execute command lists seq=224 backBuffer=0
+Unhandled exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006); D3D12 debug messages:
+  [0] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+  [1] ID3D12CommandQueue::ExecuteCommandLists: Command lists must be closed before execution.

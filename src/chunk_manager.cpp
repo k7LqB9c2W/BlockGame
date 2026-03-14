@@ -1221,6 +1221,21 @@ public:
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
 
+    void waitForFence(UINT64 fenceValue)
+    {
+        if (fence_ == nullptr || fenceValue == 0)
+        {
+            return;
+        }
+        if (fence_->GetCompletedValue() >= fenceValue)
+        {
+            return;
+        }
+        throwIfFailedDx(fence_->SetEventOnCompletion(fenceValue, fenceEvent_),
+                        "failed to wait for far lod compute fence value");
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+
     [[nodiscard]] bool ready() const noexcept
     {
         return device_ != nullptr && queue_ != nullptr && allocator_ != nullptr && commandList_ != nullptr &&
@@ -3248,6 +3263,9 @@ public:
         const char* parityEnv = std::getenv("BLOCKGAME_ENABLE_LOD_GPU_PARITY");
         gpuParityEnabled_ =
             (parityEnv != nullptr && std::string_view(parityEnv) != "0" && std::string_view(parityEnv) != "false");
+        const char* gpuSynthEnv = std::getenv("BLOCKGAME_ENABLE_LOD_GPU_SYNTH");
+        gpuSynthesisEnabled_ =
+            (gpuSynthEnv == nullptr || (std::string_view(gpuSynthEnv) != "0" && std::string_view(gpuSynthEnv) != "false"));
     }
 
     ~FarTerrainManager()
@@ -4364,6 +4382,23 @@ private:
 
     void releaseChunkGpu(FarLodChunkRecord& chunk)
     {
+        if (chunk.gpu.voxelBuffer != nullptr && chunk.gpu.voxelFenceValue != 0)
+        {
+            const UINT64 completedFenceValue = gpuContext_.completedFenceValue();
+            if (completedFenceValue < chunk.gpu.voxelFenceValue)
+            {
+                gpuContext_.waitForFence(chunk.gpu.voxelFenceValue);
+            }
+        }
+        if (chunk.gpu.pageIndex != kInvalidChunkBufferPage)
+        {
+            const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+            const UINT64 submittedUploadFenceValue = uploadContext_.lastSubmittedFenceValue();
+            if (submittedUploadFenceValue != 0 && completedUploadFenceValue < submittedUploadFenceValue)
+            {
+                uploadContext_.waitForIdle();
+            }
+        }
         chunk.gpu.voxelBuffer.Reset();
         chunk.gpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.voxelFenceValue = 0;
@@ -4985,6 +5020,17 @@ private:
 
     void submitGpuSynthesisRequests(double budgetMs)
     {
+        if (!gpuSynthesisEnabled_)
+        {
+            lastAverageGpuSynthesisMs_ = 0.0;
+            lastAverageGpuStampMs_ = 0.0;
+            lastAverageGpuFaceBuildMs_ = 0.0;
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            gpuSynthesisRequests_.clear();
+            pendingGpuParityReadbacks_.clear();
+            return;
+        }
+
         std::deque<GpuSynthesisRequest> requests;
         {
             std::lock_guard<std::mutex> lock(gpuRequestMutex_);
@@ -5647,6 +5693,7 @@ private:
     std::unordered_map<int, int> levelActivationOuterRadiusChunks_;
     mutable std::mutex gpuRequestMutex_;
     bool gpuParityEnabled_{false};
+    bool gpuSynthesisEnabled_{false};
     std::uint32_t rollingGpuParityMismatchCount_{0};
 };
 

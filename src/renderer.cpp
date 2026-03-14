@@ -9,7 +9,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -34,6 +36,10 @@
 
 namespace
 {
+ID3D12Device* gRendererDebugDevice = nullptr;
+ID3D12InfoQueue* gRendererInfoQueue = nullptr;
+bool gRendererDredEnabled = false;
+
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthBufferResourceFormat = DXGI_FORMAT_R32_TYPELESS;
 constexpr DXGI_FORMAT kDepthBufferDsvFormat = DXGI_FORMAT_D32_FLOAT;
@@ -88,11 +94,176 @@ void renderDebugLog(const std::string& message)
            normalized != "no";
 }
 
+[[nodiscard]] std::string formatHRESULT(HRESULT hr)
+{
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::uppercase << static_cast<std::uint32_t>(hr);
+    return oss.str();
+}
+
+[[nodiscard]] std::string collectRendererInfoQueueMessages()
+{
+    if (gRendererInfoQueue == nullptr)
+    {
+        return {};
+    }
+
+    const UINT64 messageCount = gRendererInfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    if (messageCount == 0)
+    {
+        return {};
+    }
+
+    std::ostringstream oss;
+    const UINT64 firstMessage = messageCount > 12 ? messageCount - 12 : 0;
+    for (UINT64 i = firstMessage; i < messageCount; ++i)
+    {
+        SIZE_T messageSize = 0;
+        if (FAILED(gRendererInfoQueue->GetMessage(i, nullptr, &messageSize)) || messageSize == 0)
+        {
+            continue;
+        }
+
+        std::vector<std::byte> storage(messageSize);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(gRendererInfoQueue->GetMessage(i, message, &messageSize)))
+        {
+            continue;
+        }
+
+        oss << "\n  [" << i << "] " << message->pDescription;
+    }
+
+    gRendererInfoQueue->ClearStoredMessages();
+    return oss.str();
+}
+
+[[nodiscard]] const char* dredBreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) noexcept
+{
+    switch (op)
+    {
+        case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return "SetMarker";
+        case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return "BeginEvent";
+        case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return "EndEvent";
+        case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return "DrawInstanced";
+        case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return "DrawIndexedInstanced";
+        case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return "ExecuteIndirect";
+        case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return "Dispatch";
+        case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return "CopyBufferRegion";
+        case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return "CopyTextureRegion";
+        case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE: return "CopyResource";
+        case D3D12_AUTO_BREADCRUMB_OP_COPYTILES: return "CopyTiles";
+        case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE: return "ResolveSubresource";
+        case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return "ClearRenderTargetView";
+        case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return "ClearUnorderedAccessView";
+        case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return "ClearDepthStencilView";
+        case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return "ResourceBarrier";
+        case D3D12_AUTO_BREADCRUMB_OP_EXECUTEBUNDLE: return "ExecuteBundle";
+        case D3D12_AUTO_BREADCRUMB_OP_PRESENT: return "Present";
+        case D3D12_AUTO_BREADCRUMB_OP_RESOLVEQUERYDATA: return "ResolveQueryData";
+        case D3D12_AUTO_BREADCRUMB_OP_BEGINSUBMISSION: return "BeginSubmission";
+        case D3D12_AUTO_BREADCRUMB_OP_ENDSUBMISSION: return "EndSubmission";
+        case D3D12_AUTO_BREADCRUMB_OP_DISPATCHRAYS: return "DispatchRays";
+        case D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH: return "DispatchMesh";
+        default: return "Unknown";
+    }
+}
+
+[[nodiscard]] std::string collectRendererDredMessages()
+{
+    if (!gRendererDredEnabled || gRendererDebugDevice == nullptr)
+    {
+        return {};
+    }
+
+    const HRESULT removedReason = gRendererDebugDevice->GetDeviceRemovedReason();
+    if (!FAILED(removedReason))
+    {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+    if (FAILED(gRendererDebugDevice->QueryInterface(IID_PPV_ARGS(&dred))))
+    {
+        return {};
+    }
+
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs{};
+    D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault{};
+    dred->GetAutoBreadcrumbsOutput1(&breadcrumbs);
+    dred->GetPageFaultAllocationOutput1(&pageFault);
+
+    std::ostringstream oss;
+    if (breadcrumbs.pHeadAutoBreadcrumbNode != nullptr)
+    {
+        oss << "\n  autoBreadcrumbs:";
+        UINT nodeCount = 0;
+        for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+             node != nullptr && nodeCount < 8;
+             node = node->pNext, ++nodeCount)
+        {
+            const UINT lastCompleted =
+                node->pLastBreadcrumbValue != nullptr ? static_cast<UINT>(*node->pLastBreadcrumbValue) : 0u;
+            oss << "\n    node[" << nodeCount << "] cl="
+                << (node->pCommandListDebugNameA != nullptr ? node->pCommandListDebugNameA : "<unnamed>")
+                << " queue="
+                << (node->pCommandQueueDebugNameA != nullptr ? node->pCommandQueueDebugNameA : "<unnamed>")
+                << " completed=" << lastCompleted << "/" << node->BreadcrumbCount;
+            if (node->pCommandHistory != nullptr && node->BreadcrumbCount > 0)
+            {
+                const UINT historyIndex = lastCompleted < node->BreadcrumbCount ? lastCompleted : (node->BreadcrumbCount - 1u);
+                oss << " lastOp=" << dredBreadcrumbOpName(node->pCommandHistory[historyIndex]);
+            }
+        }
+    }
+
+    if (pageFault.PageFaultVA != 0)
+    {
+        oss << "\n  pageFault: va=0x" << std::hex << std::uppercase << pageFault.PageFaultVA << std::dec;
+        if (pageFault.pHeadExistingAllocationNode != nullptr)
+        {
+            const D3D12_DRED_ALLOCATION_NODE1* node = pageFault.pHeadExistingAllocationNode;
+            oss << " existingAllocation="
+                << (node->ObjectNameA != nullptr ? node->ObjectNameA : "<unnamed>")
+                << " type=" << static_cast<int>(node->AllocationType);
+        }
+        if (pageFault.pHeadRecentFreedAllocationNode != nullptr)
+        {
+            const D3D12_DRED_ALLOCATION_NODE1* node = pageFault.pHeadRecentFreedAllocationNode;
+            oss << " recentFreed="
+                << (node->ObjectNameA != nullptr ? node->ObjectNameA : "<unnamed>")
+                << " type=" << static_cast<int>(node->AllocationType);
+        }
+    }
+
+    return oss.str();
+}
+
 void throwIfFailed(HRESULT hr, const std::string& message)
 {
     if (FAILED(hr))
     {
-        throwRenderError(message);
+        std::ostringstream failure;
+        failure << message << " (hr=" << formatHRESULT(hr) << ")";
+        if (gRendererDebugDevice != nullptr)
+        {
+            const HRESULT removedReason = gRendererDebugDevice->GetDeviceRemovedReason();
+            if (FAILED(removedReason))
+            {
+                failure << " (removedReason=" << formatHRESULT(removedReason) << ")";
+            }
+        }
+        const std::string debugMessages = collectRendererInfoQueueMessages();
+        if (!debugMessages.empty())
+        {
+            failure << "; D3D12 debug messages:" << debugMessages;
+        }
+        const std::string dredMessages = collectRendererDredMessages();
+        if (!dredMessages.empty())
+        {
+            failure << "; DRED:" << dredMessages;
+        }
+        throwRenderError(failure.str());
     }
 }
 
@@ -439,6 +610,55 @@ struct FrustumPlane
     return barrier;
 }
 
+[[nodiscard]] const char* resourceStateName(D3D12_RESOURCE_STATES state) noexcept
+{
+    switch (state)
+    {
+        case D3D12_RESOURCE_STATE_COMMON:
+            return "COMMON|PRESENT";
+        case D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER:
+            return "VERTEX_AND_CONSTANT_BUFFER";
+        case D3D12_RESOURCE_STATE_INDEX_BUFFER:
+            return "INDEX_BUFFER";
+        case D3D12_RESOURCE_STATE_RENDER_TARGET:
+            return "RENDER_TARGET";
+        case D3D12_RESOURCE_STATE_UNORDERED_ACCESS:
+            return "UNORDERED_ACCESS";
+        case D3D12_RESOURCE_STATE_DEPTH_WRITE:
+            return "DEPTH_WRITE";
+        case D3D12_RESOURCE_STATE_DEPTH_READ:
+            return "DEPTH_READ";
+        case D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:
+            return "NON_PIXEL_SHADER_RESOURCE";
+        case D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE:
+            return "PIXEL_SHADER_RESOURCE";
+        case D3D12_RESOURCE_STATE_STREAM_OUT:
+            return "STREAM_OUT";
+        case D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT:
+            return "INDIRECT_ARGUMENT";
+        case D3D12_RESOURCE_STATE_COPY_DEST:
+            return "COPY_DEST";
+        case D3D12_RESOURCE_STATE_COPY_SOURCE:
+            return "COPY_SOURCE";
+        case D3D12_RESOURCE_STATE_RESOLVE_DEST:
+            return "RESOLVE_DEST";
+        case D3D12_RESOURCE_STATE_RESOLVE_SOURCE:
+            return "RESOLVE_SOURCE";
+        case D3D12_RESOURCE_STATE_GENERIC_READ:
+            return "GENERIC_READ";
+        default:
+            return "OTHER";
+    }
+}
+
+void setResourceDebugName(ID3D12Object* object, const std::wstring& name)
+{
+    if (object != nullptr)
+    {
+        object->SetName(name.c_str());
+    }
+}
+
 Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFile(const std::string& path,
                                                        const char* entryPoint,
                                                        const char* target)
@@ -702,6 +922,7 @@ void Renderer::AtmosphereRenderer::renderSky(Renderer& renderer,
 
     const auto start = std::chrono::steady_clock::now();
     const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = renderer.depthDsv_;
+    renderer.sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
     renderer.commandList_->OMSetRenderTargets(1, &renderer.sceneColorRtv_, FALSE, &depthHandle);
     renderer.commandList_->RSSetViewports(1, &renderer.viewport_);
     renderer.commandList_->RSSetScissorRects(1, &renderer.scissorRect_);
@@ -802,6 +1023,9 @@ void Renderer::shutdown()
     fence_.Reset();
     device_.Reset();
     factory_.Reset();
+    gRendererDebugDevice = nullptr;
+    gRendererInfoQueue = nullptr;
+    gRendererDredEnabled = false;
 
     if (fenceEvent_ != nullptr)
     {
@@ -879,6 +1103,17 @@ void Renderer::createFactory()
                     debugController1->SetEnableGPUBasedValidation(TRUE);
                 }
             }
+            if (envFlagEnabled("BLOCKGAME_ENABLE_D3D12_DRED"))
+            {
+                Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
+                if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings))))
+                {
+                    dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                    dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                    gRendererDredEnabled = true;
+                    renderDebugLog("Enabled D3D12 DRED for this run.");
+                }
+            }
             flags |= DXGI_CREATE_FACTORY_DEBUG;
             debugLayerEnabled_ = true;
         }
@@ -903,6 +1138,8 @@ void Renderer::createDevice()
     if (debugLayerEnabled_)
     {
         device_.As(&infoQueue_);
+        gRendererDebugDevice = device_.Get();
+        gRendererInfoQueue = infoQueue_.Get();
         if (infoQueue_ != nullptr)
         {
             if (envFlagEnabled("BLOCKGAME_BREAK_ON_D3D12_ERROR"))
@@ -912,6 +1149,11 @@ void Renderer::createDevice()
             }
             infoQueue_->ClearStoredMessages();
         }
+    }
+    else
+    {
+        gRendererDebugDevice = device_.Get();
+        gRendererInfoQueue = nullptr;
     }
 }
 
@@ -930,7 +1172,10 @@ void Renderer::createCommandObjects()
                                              nullptr,
                                              IID_PPV_ARGS(&commandList_)),
                   "failed to create command list");
+    setResourceDebugName(uploadCommandAllocator_.Get(), L"RendererUploadCommandAllocator");
+    setResourceDebugName(commandList_.Get(), L"RendererDirectCommandList");
     throwIfFailed(commandList_->Close(), "failed to close initial command list");
+    renderDebugLog("Renderer direct command list close seq=0 reason=initial");
 
     throwIfFailed(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)),
                   "failed to create fence");
@@ -1003,15 +1248,20 @@ void Renderer::createRenderTargets()
     {
         throwIfFailed(swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i])),
                       "failed to get back buffer");
+        std::wostringstream name;
+        name << L"SwapChainBackBuffer[" << i << L"]";
+        setResourceDebugName(renderTargets_[i].Get(), name.str());
         device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, i));
+        backBufferStates_[i] = D3D12_RESOURCE_STATE_PRESENT;
     }
 }
 
 void Renderer::destroyRenderTargets()
 {
-    for (auto& target : renderTargets_)
+    for (UINT i = 0; i < kBackBufferCount; ++i)
     {
-        target.Reset();
+        renderTargets_[i].Reset();
+        backBufferStates_[i] = D3D12_RESOURCE_STATE_PRESENT;
     }
 }
 
@@ -1285,22 +1535,57 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
         return capacity;
     };
 
-    auto createBuffer = [this](D3D12_HEAP_TYPE heapType,
-                               std::uint64_t sizeInBytes,
-                               D3D12_RESOURCE_STATES initialState,
-                               D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
+    auto heapTypeName = [](D3D12_HEAP_TYPE heapType) -> const char*
+    {
+        switch (heapType)
+        {
+            case D3D12_HEAP_TYPE_DEFAULT:
+                return "DEFAULT";
+            case D3D12_HEAP_TYPE_UPLOAD:
+                return "UPLOAD";
+            case D3D12_HEAP_TYPE_READBACK:
+                return "READBACK";
+            default:
+                return "OTHER";
+        }
+    };
+
+    auto createBuffer = [this, heapTypeName](const char* label,
+                                             D3D12_HEAP_TYPE heapType,
+                                             std::uint64_t sizeInBytes,
+                                             D3D12_RESOURCE_STATES initialState,
+                                             D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
     {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         const D3D12_HEAP_PROPERTIES heap = heapProps(heapType);
         D3D12_RESOURCE_DESC desc = bufferDesc(std::max<std::uint64_t>(sizeInBytes, 4u));
         desc.Flags = flags;
+        std::ostringstream allocationLog;
+        allocationLog << "ensureFarCullBuffers: creating " << label
+                      << " heap=" << heapTypeName(heapType)
+                      << " bytes=" << sizeInBytes
+                      << " state=" << static_cast<int>(initialState)
+                      << " flags=" << static_cast<unsigned int>(flags);
+        renderDebugLog(allocationLog.str());
         throwIfFailed(device_->CreateCommittedResource(&heap,
                                                        D3D12_HEAP_FLAG_NONE,
                                                        &desc,
                                                        initialState,
                                                        nullptr,
                                                        IID_PPV_ARGS(&resource)),
-                      "failed to create reusable far cull buffer");
+                      std::string("failed to create reusable far cull buffer '") + label + "'");
+        const char* labelText = label;
+        std::wstring wideLabel;
+        while (*labelText != '\0')
+        {
+            wideLabel.push_back(static_cast<wchar_t>(*labelText));
+            ++labelText;
+        }
+        setResourceDebugName(resource.Get(), wideLabel);
+        std::ostringstream successLog;
+        successLog << "ensureFarCullBuffers: created " << label
+                   << " finalBytes=" << desc.Width;
+        renderDebugLog(successLog.str());
         return resource;
     };
 
@@ -1310,29 +1595,34 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
         {
             frame.farCullRecordsUpload->Unmap(0, nullptr);
         }
-        frame.farCullRecordCapacityBytes = nextCapacity(recordBytes);
-        frame.farCullRecordsDefault = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
-                                                   frame.farCullRecordCapacityBytes,
+        const std::uint64_t nextRecordCapacity = nextCapacity(recordBytes);
+        frame.farCullRecordsDefault = createBuffer("farCullRecordsDefault",
+                                                   D3D12_HEAP_TYPE_DEFAULT,
+                                                   nextRecordCapacity,
                                                    D3D12_RESOURCE_STATE_COPY_DEST,
                                                    D3D12_RESOURCE_FLAG_NONE);
-        frame.farCullRecordsUpload = createBuffer(D3D12_HEAP_TYPE_UPLOAD,
-                                                  frame.farCullRecordCapacityBytes,
+        frame.farCullRecordsUpload = createBuffer("farCullRecordsUpload",
+                                                  D3D12_HEAP_TYPE_UPLOAD,
+                                                  nextRecordCapacity,
                                                   D3D12_RESOURCE_STATE_GENERIC_READ,
                                                   D3D12_RESOURCE_FLAG_NONE);
         throwIfFailed(frame.farCullRecordsUpload->Map(0, nullptr,
                                                       reinterpret_cast<void**>(&frame.farCullRecordsUploadMapped)),
                       "failed to map reusable far cull record upload buffer");
+        frame.farCullRecordCapacityBytes = nextRecordCapacity;
         frame.farCullRecordsState = D3D12_RESOURCE_STATE_COPY_DEST;
     }
 
     if (frame.farCullVisibleIndexCapacityBytes < visibleIndexBytes)
     {
-        frame.farCullVisibleIndexCapacityBytes = nextCapacity(visibleIndexBytes);
-        frame.farCullVisibleIndices = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
-                                                   frame.farCullVisibleIndexCapacityBytes,
+        const std::uint64_t nextVisibleIndexCapacity = nextCapacity(visibleIndexBytes);
+        frame.farCullVisibleIndices = createBuffer("farCullVisibleIndices",
+                                                   D3D12_HEAP_TYPE_DEFAULT,
+                                                   nextVisibleIndexCapacity,
                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        frame.farCullVisibleCount = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
+        frame.farCullVisibleCount = createBuffer("farCullVisibleCount",
+                                                 D3D12_HEAP_TYPE_DEFAULT,
                                                  sizeof(std::uint32_t),
                                                  D3D12_RESOURCE_STATE_COPY_DEST,
                                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -1340,24 +1630,28 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
         {
             frame.farCullCountUpload->Unmap(0, nullptr);
         }
-        frame.farCullCountUpload = createBuffer(D3D12_HEAP_TYPE_UPLOAD,
+        frame.farCullCountUpload = createBuffer("farCullCountUpload",
+                                                D3D12_HEAP_TYPE_UPLOAD,
                                                 sizeof(std::uint32_t),
                                                 D3D12_RESOURCE_STATE_GENERIC_READ,
                                                 D3D12_RESOURCE_FLAG_NONE);
         throwIfFailed(frame.farCullCountUpload->Map(0, nullptr,
                                                     reinterpret_cast<void**>(&frame.farCullCountUploadMapped)),
                       "failed to map reusable far cull count upload buffer");
+        frame.farCullVisibleIndexCapacityBytes = nextVisibleIndexCapacity;
         frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
     }
 
     if (frame.farCullIndirectCapacityBytes < indirectBytes)
     {
-        frame.farCullIndirectCapacityBytes = nextCapacity(indirectBytes);
-        frame.farCullIndirectArgs = createBuffer(D3D12_HEAP_TYPE_DEFAULT,
-                                                 frame.farCullIndirectCapacityBytes,
+        const std::uint64_t nextIndirectCapacity = nextCapacity(indirectBytes);
+        frame.farCullIndirectArgs = createBuffer("farCullIndirectArgs",
+                                                 D3D12_HEAP_TYPE_DEFAULT,
+                                                 nextIndirectCapacity,
                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        frame.farCullIndirectCapacityBytes = nextIndirectCapacity;
         frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
 }
@@ -1382,6 +1676,7 @@ void Renderer::createSceneColor()
                                                    &clearValue,
                                                    IID_PPV_ARGS(&sceneColor_)),
                   "failed to create HDR scene color");
+    setResourceDebugName(sceneColor_.Get(), L"SceneColorHDR");
 
     sceneColorRtv_ = rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, kRtvIndexSceneColor);
     device_->CreateRenderTargetView(sceneColor_.Get(), nullptr, sceneColorRtv_);
@@ -1398,6 +1693,7 @@ void Renderer::createSceneColor()
     srvDesc.Texture2D.MipLevels = 1;
     device_->CreateShaderResourceView(sceneColor_.Get(), &srvDesc, sceneColorSrvCpu_);
     sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    sceneColorClearLogged_ = false;
 }
 
 void Renderer::destroySceneColor()
@@ -1412,6 +1708,7 @@ void Renderer::destroySceneColor()
     sceneColorRtv_ = {};
     sceneColor_.Reset();
     sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    sceneColorClearLogged_ = false;
 }
 
 void Renderer::createPipelines()
@@ -2109,6 +2406,13 @@ LoadedTexture Renderer::loadTexture(const char* path)
     throwIfFailed(uploadCommandAllocator_->Reset(), "failed to reset upload allocator");
     throwIfFailed(commandList_->Reset(uploadCommandAllocator_.Get(), nullptr),
                   "failed to reset upload command list");
+    ++directCommandListSequence_;
+    {
+        std::ostringstream log;
+        log << "Renderer direct command list reset seq=" << directCommandListSequence_
+            << " reason=texture-upload";
+        renderDebugLog(log.str());
+    }
 
     for (UINT mipIndex = 0; mipIndex < texture.mipLevels; ++mipIndex)
     {
@@ -2128,7 +2432,19 @@ LoadedTexture Renderer::loadTexture(const char* path)
         transitionBarrier(texture.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     commandList_->ResourceBarrier(1, &barrier);
     throwIfFailed(commandList_->Close(), "failed to close upload command list");
+    {
+        std::ostringstream log;
+        log << "Renderer direct command list close seq=" << directCommandListSequence_
+            << " reason=texture-upload";
+        renderDebugLog(log.str());
+    }
     ID3D12CommandList* commandLists[] = {commandList_.Get()};
+    {
+        std::ostringstream log;
+        log << "Renderer execute command lists seq=" << directCommandListSequence_
+            << " reason=texture-upload";
+        renderDebugLog(log.str());
+    }
     commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(commandLists)), commandLists);
     waitForGpu();
 
@@ -2387,6 +2703,18 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     const std::uint64_t visibleIndexBytes = std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u);
     const std::uint64_t countBytes = sizeof(std::uint32_t);
     const std::uint64_t indirectBytes = std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u);
+    {
+        std::ostringstream sizeLog;
+        sizeLog << "renderFarBatchGpuCull: frame=" << currentBackBufferIndex_
+                << " recordCount=" << recordCount
+                << " recordBytes=" << recordBytes
+                << " visibleIndexBytes=" << visibleIndexBytes
+                << " indirectBytes=" << indirectBytes
+                << " existingRecordCapacity=" << frame.farCullRecordCapacityBytes
+                << " existingVisibleCapacity=" << frame.farCullVisibleIndexCapacityBytes
+                << " existingIndirectCapacity=" << frame.farCullIndirectCapacityBytes;
+        renderDebugLog(sizeLog.str());
+    }
     ensureFarCullBuffers(frame, recordBytes, visibleIndexBytes, indirectBytes);
 
     ID3D12Resource* recordsDefault = frame.farCullRecordsDefault.Get();
@@ -2401,6 +2729,17 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
         countUpload == nullptr || indirectArgs == nullptr ||
         frame.farCullRecordsUploadMapped == nullptr || frame.farCullCountUploadMapped == nullptr)
     {
+        std::ostringstream nullLog;
+        nullLog << "renderFarBatchGpuCull: invalid reusable far cull state"
+                << " recordsDefault=" << (recordsDefault != nullptr)
+                << " recordsUpload=" << (recordsUpload != nullptr)
+                << " visibleIndices=" << (visibleIndices != nullptr)
+                << " visibleCount=" << (visibleCount != nullptr)
+                << " countUpload=" << (countUpload != nullptr)
+                << " indirectArgs=" << (indirectArgs != nullptr)
+                << " recordsUploadMapped=" << (frame.farCullRecordsUploadMapped != nullptr)
+                << " countUploadMapped=" << (frame.farCullCountUploadMapped != nullptr);
+        renderDebugLog(nullLog.str());
         throw std::runtime_error("Renderer: failed to prepare reusable far cull buffers");
     }
 
@@ -2544,39 +2883,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
 
 std::string Renderer::collectDebugMessages() const
 {
-    if (infoQueue_ == nullptr)
-    {
-        return {};
-    }
-
-    const UINT64 messageCount = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
-    if (messageCount == 0)
-    {
-        return {};
-    }
-
-    std::ostringstream oss;
-    const UINT64 firstMessage = messageCount > 12 ? messageCount - 12 : 0;
-    for (UINT64 i = firstMessage; i < messageCount; ++i)
-    {
-        SIZE_T messageSize = 0;
-        if (FAILED(infoQueue_->GetMessage(i, nullptr, &messageSize)) || messageSize == 0)
-        {
-            continue;
-        }
-
-        std::vector<std::byte> storage(messageSize);
-        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-        if (FAILED(infoQueue_->GetMessage(i, message, &messageSize)))
-        {
-            continue;
-        }
-
-        oss << "\n  [" << i << "] " << message->pDescription;
-    }
-
-    infoQueue_->ClearStoredMessages();
-    return oss.str();
+    return collectRendererInfoQueueMessages();
 }
 
 void Renderer::ensureFrameStarted() const
@@ -2629,6 +2936,13 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
 
     throwIfFailed(frame.allocator->Reset(), "failed to reset frame allocator");
     throwIfFailed(commandList_->Reset(frame.allocator.Get(), nullptr), "failed to reset command list");
+    ++directCommandListSequence_;
+    {
+        std::ostringstream log;
+        log << "Renderer direct command list reset seq=" << directCommandListSequence_
+            << " backBuffer=" << currentBackBufferIndex_;
+        renderDebugLog(log.str());
+    }
     if (infoQueue_ != nullptr)
     {
         infoQueue_->ClearStoredMessages();
@@ -2649,9 +2963,22 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         syncPoint.consumedValue = std::max(syncPoint.consumedValue, syncPoint.value);
     }
 
-    const D3D12_RESOURCE_BARRIER backbufferBarrier =
-        transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    commandList_->ResourceBarrier(1, &backbufferBarrier);
+    if (backBufferStates_[currentBackBufferIndex_] != D3D12_RESOURCE_STATE_RENDER_TARGET)
+    {
+        {
+            std::ostringstream log;
+            log << "BackBuffer barrier beginFrame backBuffer=" << currentBackBufferIndex_
+                << " trackedBefore=" << resourceStateName(backBufferStates_[currentBackBufferIndex_])
+                << " requestedAfter=" << resourceStateName(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            renderDebugLog(log.str());
+        }
+        const D3D12_RESOURCE_BARRIER backbufferBarrier =
+            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                              backBufferStates_[currentBackBufferIndex_],
+                              D3D12_RESOURCE_STATE_RENDER_TARGET);
+        commandList_->ResourceBarrier(1, &backbufferBarrier);
+        backBufferStates_[currentBackBufferIndex_] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
 
     if (sceneColor_ != nullptr && sceneColorState_ != D3D12_RESOURCE_STATE_RENDER_TARGET)
     {
@@ -2670,6 +2997,14 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
     commandList_->ClearRenderTargetView(backbufferRtv, &clearColor.x, 0, nullptr);
     if (sceneColor_ != nullptr)
     {
+        if (!sceneColorClearLogged_)
+        {
+            std::ostringstream log;
+            log << "SceneColor clear consistency: creationClear=(0,0,0,0)"
+                << " clearCall=(" << clearColor.x << "," << clearColor.y << "," << clearColor.z << "," << clearColor.w << ")";
+            renderDebugLog(log.str());
+            sceneColorClearLogged_ = true;
+        }
         commandList_->ClearRenderTargetView(sceneColorRtv_, &clearColor.x, 0, nullptr);
     }
     commandList_->ClearDepthStencilView(depthHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
@@ -2782,6 +3117,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         skyConstants->sunColor = glm::vec4(sunColor, 0.0f);
 
         const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
+        sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
         commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
         commandList_->RSSetViewports(1, &viewport_);
         commandList_->RSSetScissorRects(1, &scissorRect_);
@@ -2797,6 +3133,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
     const auto worldStart = std::chrono::steady_clock::now();
     const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
+    sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
     commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
     commandList_->RSSetViewports(1, &viewport_);
     commandList_->RSSetScissorRects(1, &scissorRect_);
@@ -2907,6 +3244,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         cloudConstants->topColor = glm::vec4(cloudTopColor, 0.82f);
         cloudConstants->bottomColor = glm::vec4(cloudBottomColor, 0.72f);
 
+        sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
         commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
         commandList_->RSSetViewports(1, &viewport_);
         commandList_->RSSetScissorRects(1, &scissorRect_);
@@ -3104,11 +3442,20 @@ void Renderer::endFrame()
     {
         ensureScreenshotReadbackBuffer();
 
-        const D3D12_RESOURCE_BARRIER copyBarrier =
-            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
-                              D3D12_RESOURCE_STATE_RENDER_TARGET,
-                              D3D12_RESOURCE_STATE_COPY_SOURCE);
-        commandList_->ResourceBarrier(1, &copyBarrier);
+        if (backBufferStates_[currentBackBufferIndex_] != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        {
+            std::ostringstream log;
+            log << "BackBuffer barrier screenshot-copy backBuffer=" << currentBackBufferIndex_
+                << " trackedBefore=" << resourceStateName(backBufferStates_[currentBackBufferIndex_])
+                << " requestedAfter=" << resourceStateName(D3D12_RESOURCE_STATE_COPY_SOURCE);
+            renderDebugLog(log.str());
+            const D3D12_RESOURCE_BARRIER copyBarrier =
+                transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                                  backBufferStates_[currentBackBufferIndex_],
+                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
+            commandList_->ResourceBarrier(1, &copyBarrier);
+            backBufferStates_[currentBackBufferIndex_] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
 
         D3D12_TEXTURE_COPY_LOCATION src{};
         src.pResource = renderTargets_[currentBackBufferIndex_].Get();
@@ -3122,19 +3469,37 @@ void Renderer::endFrame()
 
         commandList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
-        const D3D12_RESOURCE_BARRIER presentBarrier =
-            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
-                              D3D12_RESOURCE_STATE_COPY_SOURCE,
-                              D3D12_RESOURCE_STATE_PRESENT);
-        commandList_->ResourceBarrier(1, &presentBarrier);
+        if (backBufferStates_[currentBackBufferIndex_] != D3D12_RESOURCE_STATE_PRESENT)
+        {
+            std::ostringstream log;
+            log << "BackBuffer barrier screenshot-present backBuffer=" << currentBackBufferIndex_
+                << " trackedBefore=" << resourceStateName(backBufferStates_[currentBackBufferIndex_])
+                << " requestedAfter=" << resourceStateName(D3D12_RESOURCE_STATE_PRESENT);
+            renderDebugLog(log.str());
+            const D3D12_RESOURCE_BARRIER presentBarrier =
+                transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                                  backBufferStates_[currentBackBufferIndex_],
+                                  D3D12_RESOURCE_STATE_PRESENT);
+            commandList_->ResourceBarrier(1, &presentBarrier);
+            backBufferStates_[currentBackBufferIndex_] = D3D12_RESOURCE_STATE_PRESENT;
+        }
     }
     else
     {
-        const D3D12_RESOURCE_BARRIER barrier =
-            transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
-                              D3D12_RESOURCE_STATE_RENDER_TARGET,
-                              D3D12_RESOURCE_STATE_PRESENT);
-        commandList_->ResourceBarrier(1, &barrier);
+        if (backBufferStates_[currentBackBufferIndex_] != D3D12_RESOURCE_STATE_PRESENT)
+        {
+            std::ostringstream log;
+            log << "BackBuffer barrier endFrame backBuffer=" << currentBackBufferIndex_
+                << " trackedBefore=" << resourceStateName(backBufferStates_[currentBackBufferIndex_])
+                << " requestedAfter=" << resourceStateName(D3D12_RESOURCE_STATE_PRESENT);
+            renderDebugLog(log.str());
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(renderTargets_[currentBackBufferIndex_].Get(),
+                                  backBufferStates_[currentBackBufferIndex_],
+                                  D3D12_RESOURCE_STATE_PRESENT);
+            commandList_->ResourceBarrier(1, &barrier);
+            backBufferStates_[currentBackBufferIndex_] = D3D12_RESOURCE_STATE_PRESENT;
+        }
     }
     const HRESULT closeHr = commandList_->Close();
     if (FAILED(closeHr))
@@ -3148,8 +3513,20 @@ void Renderer::endFrame()
         }
         throwRenderError(message.str());
     }
+    {
+        std::ostringstream log;
+        log << "Renderer direct command list close seq=" << directCommandListSequence_
+            << " backBuffer=" << currentBackBufferIndex_;
+        renderDebugLog(log.str());
+    }
 
     ID3D12CommandList* lists[] = {commandList_.Get()};
+    {
+        std::ostringstream log;
+        log << "Renderer execute command lists seq=" << directCommandListSequence_
+            << " backBuffer=" << currentBackBufferIndex_;
+        renderDebugLog(log.str());
+    }
     commandQueue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
     const auto presentStart = std::chrono::steady_clock::now();
     throwIfFailed(swapChain_->Present(1, 0), "failed to present swap chain");

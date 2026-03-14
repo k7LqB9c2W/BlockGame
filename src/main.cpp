@@ -176,6 +176,9 @@ void applyLaunchDebugOptions(int argc, char** argv)
 {
     bool enableGpuDebug = false;
     bool enableGpuBreak = false;
+    bool enableGpuValidation = false;
+    bool disableFarGpuCull = false;
+    bool disableLodGpuSynth = false;
     for (int i = 1; i < argc; ++i)
     {
         if (argv[i] == nullptr)
@@ -190,30 +193,97 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--gpu-validate" || arg == "--d3d-validate")
+        {
+            enableGpuDebug = true;
+            enableGpuValidation = true;
+            continue;
+        }
+
         if (arg == "--gpu-break" || arg == "--d3d-break")
         {
             enableGpuDebug = true;
+            enableGpuValidation = true;
             enableGpuBreak = true;
+            continue;
+        }
+
+        if (arg == "--no-far-gpu-cull")
+        {
+            disableFarGpuCull = true;
+            continue;
+        }
+
+        if (arg == "--no-lod-gpu-synth" || arg == "--no-gpu-synth")
+        {
+            disableLodGpuSynth = true;
         }
     }
 
-    if (!enableGpuDebug)
+    if (!enableGpuDebug && !disableFarGpuCull && !disableLodGpuSynth)
     {
         return;
     }
 
-    setProcessEnvironmentVariable("BLOCKGAME_RENDER_DEBUG_LOG", "1");
-    setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DEBUG_LAYER", "1");
-    setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_GPU_VALIDATION", "1");
-    setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DRED", "1");
-    if (enableGpuBreak)
+    if (enableGpuDebug)
     {
-        setProcessEnvironmentVariable("BLOCKGAME_BREAK_ON_D3D12_ERROR", "1");
-        std::cout << "Enabled D3D12 debug logging, GPU validation, DRED, and break-on-error for this run." << '\n';
+        setProcessEnvironmentVariable("BLOCKGAME_RENDER_DEBUG_LOG", "1");
+        setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DEBUG_LAYER", "1");
+        setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DRED", "1");
+        setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_GPU_VALIDATION",
+                                      enableGpuValidation ? "1" : "0");
+        if (enableGpuBreak)
+        {
+            setProcessEnvironmentVariable("BLOCKGAME_BREAK_ON_D3D12_ERROR", "1");
+        }
+        else
+        {
+            setProcessEnvironmentVariable("BLOCKGAME_BREAK_ON_D3D12_ERROR", "0");
+        }
     }
-    else
+
+    if (disableFarGpuCull)
     {
-        std::cout << "Enabled D3D12 debug logging, GPU validation, and DRED for this run." << '\n';
+        setProcessEnvironmentVariable("BLOCKGAME_DISABLE_LOD_GPU_CULL", "1");
+    }
+
+    if (disableLodGpuSynth)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_ENABLE_LOD_GPU_SYNTH", "0");
+    }
+
+    std::vector<std::string> enabledOptions;
+    if (enableGpuDebug)
+    {
+        enabledOptions.emplace_back("D3D12 debug logging");
+        enabledOptions.emplace_back("D3D12 debug layer");
+        enabledOptions.emplace_back("DRED");
+        if (enableGpuValidation)
+        {
+            enabledOptions.emplace_back("GPU validation");
+        }
+        if (enableGpuBreak)
+        {
+            enabledOptions.emplace_back("break-on-error");
+        }
+    }
+    if (disableFarGpuCull)
+    {
+        enabledOptions.emplace_back("far GPU cull disabled");
+    }
+    if (disableLodGpuSynth)
+    {
+        enabledOptions.emplace_back("LOD GPU synth disabled");
+    }
+
+    if (!enabledOptions.empty())
+    {
+        std::cout << "Enabled launch options for this run:";
+        for (std::size_t i = 0; i < enabledOptions.size(); ++i)
+        {
+            std::cout << (i == 0 ? " " : ", ") << enabledOptions[i];
+        }
+        std::cout << "." << '\n';
     }
 }
 

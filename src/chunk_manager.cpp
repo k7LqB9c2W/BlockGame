@@ -548,6 +548,12 @@ D3D12_RESOURCE_BARRIER transitionBarrier(ID3D12Resource* resource,
 class UploadContext
 {
 public:
+    struct FlushTimings
+    {
+        double waitMs{0.0};
+        double submitMs{0.0};
+    };
+
     ~UploadContext()
     {
         shutdown();
@@ -662,11 +668,16 @@ public:
         hasCommands_ = true;
     }
 
-    void flush()
+    void flush(FlushTimings* timings = nullptr)
     {
         if (!open_)
         {
             return;
+        }
+
+        if (timings != nullptr)
+        {
+            *timings = FlushTimings{};
         }
 
         throwIfFailedDx(commandList_->Close(), "failed to close upload command list");
@@ -676,16 +687,28 @@ public:
             // until the last submitted graphics work that referenced them has completed.
             if (graphicsFence_ != nullptr && graphicsFenceValue_ > 0)
             {
+                const SteadyClock::time_point waitStart = SteadyClock::now();
                 throwIfFailedDx(queue_->Wait(graphicsFence_, graphicsFenceValue_),
                                 "failed to wait for graphics fence before upload");
+                if (timings != nullptr)
+                {
+                    timings->waitMs =
+                        std::chrono::duration<double, std::milli>(SteadyClock::now() - waitStart).count();
+                }
             }
 
+            const SteadyClock::time_point submitStart = SteadyClock::now();
             ID3D12CommandList* lists[] = {commandList_.Get()};
             queue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
 
             ++fenceValue_;
             throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal upload fence");
             lastSubmittedFenceValue_ = fenceValue_;
+            if (timings != nullptr)
+            {
+                timings->submitMs =
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - submitStart).count();
+            }
         }
 
         open_ = false;
@@ -2620,6 +2643,20 @@ public:
         seaLevel_ = seaLevel;
     }
 
+    void setVisibility(const Frustum& frustum, const glm::vec3& cameraWorldPos) const
+    {
+        std::lock_guard<std::mutex> lock(configMutex_);
+        lastVisibilityFrustum_ = frustum;
+        lastVisibilityCameraPos_ = cameraWorldPos;
+        hasVisibilityFrustum_ = true;
+    }
+
+    void setBacklogPressure(int exactMissingChunks, std::size_t exactPendingUploads) noexcept
+    {
+        exactMissingChunks_ = std::max(exactMissingChunks, 0);
+        exactPendingUploads_ = exactPendingUploads;
+    }
+
     void update(const glm::ivec3& cameraChunk,
                 const glm::vec3& cameraForward,
                 int nearRadiusChunks,
@@ -2662,25 +2699,88 @@ public:
 
         auto touchLevel = [&](const FarLodLevelConfig& level)
         {
-            const int chunkMinX = floorDiv(cameraChunk.x - level.outerRadiusChunks, level.blockScale);
-            const int chunkMaxX = floorDiv(cameraChunk.x + level.outerRadiusChunks, level.blockScale);
-            const int chunkMinY = floorDiv(cameraChunk.y - level.outerRadiusChunks, level.blockScale);
-            const int chunkMaxY = floorDiv(cameraChunk.y + level.outerRadiusChunks, level.blockScale);
-            const int chunkMinZ = floorDiv(cameraChunk.z - level.outerRadiusChunks, level.blockScale);
-            const int chunkMaxZ = floorDiv(cameraChunk.z + level.outerRadiusChunks, level.blockScale);
+            constexpr int kFarActivationStepChunks = 6;
+            int& activationOuterRadiusChunks = levelActivationOuterRadiusChunks_[level.level];
+            activationOuterRadiusChunks = std::max(activationOuterRadiusChunks, level.innerRadiusChunks);
+            activationOuterRadiusChunks =
+                std::min(level.outerRadiusChunks, activationOuterRadiusChunks + kFarActivationStepChunks);
+            const int activeOuterRadiusChunks = activationOuterRadiusChunks;
 
-            for (int chunkY = chunkMinY; chunkY <= chunkMaxY; ++chunkY)
+            const int chunkMinX = floorDiv(cameraChunk.x - activeOuterRadiusChunks, level.blockScale);
+            const int chunkMaxX = floorDiv(cameraChunk.x + activeOuterRadiusChunks, level.blockScale);
+            constexpr int kFarVerticalHeadroomChunks = 6;
+            constexpr int kFarStructureHeadroomBlocks = 48;
+            const int verticalRadiusChunks =
+                std::max(gActiveVerticalRadius.load(std::memory_order_relaxed) + kFarVerticalHeadroomChunks, 8);
+            const int chunkMinY = floorDiv(cameraChunk.y - verticalRadiusChunks, level.blockScale);
+            const int chunkMaxY = floorDiv(cameraChunk.y + verticalRadiusChunks, level.blockScale);
+            const int chunkMinZ = floorDiv(cameraChunk.z - activeOuterRadiusChunks, level.blockScale);
+            const int chunkMaxZ = floorDiv(cameraChunk.z + activeOuterRadiusChunks, level.blockScale);
+            const int span = level.chunkSpanBlocks();
+            const int verticalBandMinWorldY = chunkMinY * span;
+            const int verticalBandMaxWorldY = ((chunkMaxY + 1) * span) - 1;
+
+            for (int chunkX = chunkMinX; chunkX <= chunkMaxX; ++chunkX)
             {
-                for (int chunkX = chunkMinX; chunkX <= chunkMaxX; ++chunkX)
+                for (int chunkZ = chunkMinZ; chunkZ <= chunkMaxZ; ++chunkZ)
                 {
-                    for (int chunkZ = chunkMinZ; chunkZ <= chunkMaxZ; ++chunkZ)
+                    const glm::ivec3 horizontalProbeCoord{chunkX, 0, chunkZ};
+                    if (!chunkIntersectsHorizontalRing(level, cameraChunk_, horizontalProbeCoord, activeOuterRadiusChunks))
+                    {
+                        continue;
+                    }
+
+                    const int worldMinX = chunkX * span;
+                    const int worldMaxX = worldMinX + span - 1;
+                    const int worldMinZ = chunkZ * span;
+                    const int worldMaxZ = worldMinZ + span - 1;
+                    const int worldMidX = (worldMinX + worldMaxX) / 2;
+                    const int worldMidZ = (worldMinZ + worldMaxZ) / 2;
+                    const std::array<glm::ivec2, 9> samplePoints{{
+                        {worldMinX, worldMinZ},
+                        {worldMaxX, worldMinZ},
+                        {worldMinX, worldMaxZ},
+                        {worldMaxX, worldMaxZ},
+                        {worldMidX, worldMinZ},
+                        {worldMidX, worldMaxZ},
+                        {worldMinX, worldMidZ},
+                        {worldMaxX, worldMidZ},
+                        {worldMidX, worldMidZ},
+                    }};
+
+                    int minSurfaceY = std::numeric_limits<int>::max();
+                    int maxSurfaceY = std::numeric_limits<int>::min();
+                    bool anyWaterFill = false;
+                    for (const glm::ivec2& samplePoint : samplePoints)
+                    {
+                        const ColumnSample sample =
+                            columnSampleFn(samplePoint.x, samplePoint.y, verticalBandMinWorldY, verticalBandMaxWorldY);
+                        minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
+                        maxSurfaceY = std::max(maxSurfaceY, sample.surfaceY);
+                        if (sample.dominantBiome != nullptr && sample.dominantBiome->terrainSettings.waterFill.enabled)
+                        {
+                            anyWaterFill = true;
+                        }
+                    }
+
+                    int relevantMinWorldY = minSurfaceY - level.blockScale;
+                    int relevantMaxWorldY = maxSurfaceY + level.blockScale + kFarStructureHeadroomBlocks;
+                    if (anyWaterFill)
+                    {
+                        relevantMinWorldY = std::min(relevantMinWorldY, seaLevel_ - level.blockScale);
+                        relevantMaxWorldY = std::max(relevantMaxWorldY, seaLevel_ + level.blockScale);
+                    }
+
+                    const int relevantChunkMinY = std::max(chunkMinY, floorDiv(relevantMinWorldY, span));
+                    const int relevantChunkMaxY = std::min(chunkMaxY, floorDiv(relevantMaxWorldY, span));
+                    if (relevantChunkMaxY < relevantChunkMinY)
+                    {
+                        continue;
+                    }
+
+                    for (int chunkY = relevantChunkMinY; chunkY <= relevantChunkMaxY; ++chunkY)
                     {
                         const glm::ivec3 chunkCoord{chunkX, chunkY, chunkZ};
-                        if (!chunkIntersectsRing(level, cameraChunk_, chunkCoord))
-                        {
-                            continue;
-                        }
-
                         FarLodChunkKey key{level.level, chunkCoord};
                         FarLodChunkRecord& chunk = chunks_[key];
                         chunk.key = key;
@@ -2735,6 +2835,8 @@ public:
     {
         std::lock_guard<std::mutex> lock(configMutex_);
         std::vector<ChunkRenderBatch> batches(bufferPages_.size());
+        lastRenderedFaceCount_ = 0;
+        lastRenderedVertexCount_ = 0;
         for (std::size_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
         {
             batches[pageIndex].vertexBufferView = bufferPages_[pageIndex].vertexView;
@@ -2769,6 +2871,8 @@ public:
                 static_cast<std::int32_t>(chunk.gpu.vertexOffset),
                 0u});
             batch.supportsGpuCull = true;
+            lastRenderedFaceCount_ += static_cast<std::size_t>(chunk.gpu.indexCount / 6u);
+            lastRenderedVertexCount_ += chunk.gpu.vertexCount;
         }
 
         auto emptyIt = std::remove_if(batches.begin(),
@@ -2823,12 +2927,21 @@ public:
         chunks_.clear();
         destroyBufferPages();
         builtTilesLastUpdate_ = 0;
+        skippedTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
-        lastAverageGpuSynthesisMs_ = 0.0;
-        lastAverageGpuStampMs_ = 0.0;
-        lastAverageGpuFaceBuildMs_ = 0.0;
+        lastAverageCpuTerrainSynthesisMs_ = 0.0;
+        lastAverageCpuStructureStampMs_ = 0.0;
+        lastAverageCpuMeshMs_ = 0.0;
+        lastAverageUploadWaitMs_ = 0.0;
+        lastAverageUploadCopyMs_ = 0.0;
         lastCollectMs_ = 0.0;
         lastUploadMs_ = 0.0;
+        lastBuiltFaceCount_ = 0;
+        lastBuiltVertexCount_ = 0;
+        lastBuiltIndexCount_ = 0;
+        lastRenderedFaceCount_ = 0;
+        lastRenderedVertexCount_ = 0;
+        levelActivationOuterRadiusChunks_.clear();
     }
 
     [[nodiscard]] int activeTileCount() const noexcept
@@ -2855,6 +2968,46 @@ public:
     [[nodiscard]] int builtTilesLastUpdate() const noexcept
     {
         return builtTilesLastUpdate_;
+    }
+
+    [[nodiscard]] int skippedTilesLastUpdate() const noexcept
+    {
+        return skippedTilesLastUpdate_;
+    }
+
+    [[nodiscard]] double averageCpuTerrainSynthesisMs() const noexcept
+    {
+        return lastAverageCpuTerrainSynthesisMs_;
+    }
+
+    [[nodiscard]] double averageCpuStructureStampMs() const noexcept
+    {
+        return lastAverageCpuStructureStampMs_;
+    }
+
+    [[nodiscard]] double averageCpuMeshMs() const noexcept
+    {
+        return lastAverageCpuMeshMs_;
+    }
+
+    [[nodiscard]] double averageUploadWaitMs() const noexcept
+    {
+        return lastAverageUploadWaitMs_;
+    }
+
+    [[nodiscard]] double averageUploadCopyMs() const noexcept
+    {
+        return lastAverageUploadCopyMs_;
+    }
+
+    [[nodiscard]] std::size_t renderedFaceCount() const noexcept
+    {
+        return lastRenderedFaceCount_;
+    }
+
+    [[nodiscard]] std::size_t renderedVertexCount() const noexcept
+    {
+        return lastRenderedVertexCount_;
     }
 
     [[nodiscard]] double lastCollectMs() const noexcept
@@ -2910,6 +3063,35 @@ private:
                 innerRadiusChunks,
                 outerRadiusChunks});
             previousOuterRadiusChunks = outerRadiusChunks;
+            if (outerRadiusChunks == totalRadiusChunks)
+            {
+                break;
+            }
+        }
+
+        std::unordered_set<int> activeLevelIds;
+        activeLevelIds.reserve(levels_.size());
+        for (const FarLodLevelConfig& level : levels_)
+        {
+            activeLevelIds.insert(level.level);
+            int& progress = levelActivationOuterRadiusChunks_[level.level];
+            if (progress < level.innerRadiusChunks)
+            {
+                progress = level.innerRadiusChunks;
+            }
+            progress = std::min(progress, level.outerRadiusChunks);
+        }
+
+        for (auto it = levelActivationOuterRadiusChunks_.begin(); it != levelActivationOuterRadiusChunks_.end();)
+        {
+            if (!activeLevelIds.contains(it->first))
+            {
+                it = levelActivationOuterRadiusChunks_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
 
@@ -2988,9 +3170,15 @@ private:
         FarLodChunkCpu cpu{};
         ChunkMesh mesh{};
         double buildMs{0.0};
-        double gpuSynthesisMs{0.0};
-        double gpuStampMs{0.0};
-        double gpuFaceBuildMs{0.0};
+        double cpuTerrainSynthesisMs{0.0};
+        double cpuStructureStampMs{0.0};
+        double cpuMeshMs{0.0};
+        double uploadWaitMs{0.0};
+        double uploadCopyMs{0.0};
+        std::size_t faceCount{0};
+        std::size_t vertexCount{0};
+        std::size_t indexCount{0};
+        bool skippedByRelevance{false};
     };
 
     struct BuildJob
@@ -2999,6 +3187,25 @@ private:
         FarLodLevelConfig level{};
         std::uint32_t buildVersion{0};
         std::uint64_t epoch{0};
+    };
+
+    struct VoxelFootprintClassification
+    {
+        FarLodVoxel voxel{};
+        int minSampledSurfaceY{std::numeric_limits<int>::max()};
+        int maxSampledSurfaceY{std::numeric_limits<int>::min()};
+    };
+
+    struct GreedyMaskCell
+    {
+        bool visible{false};
+        BlockId material{BlockId::Air};
+        std::uint8_t flags{0};
+
+        [[nodiscard]] bool mergeEquals(const GreedyMaskCell& other) const noexcept
+        {
+            return visible == other.visible && material == other.material && flags == other.flags;
+        }
     };
 
     static glm::vec2 projectTileCoord(const glm::vec3& position, const glm::vec3& normal) noexcept
@@ -3102,12 +3309,12 @@ private:
         return 0;
     }
 
-    [[nodiscard]] static bool chunkIntersectsRing(const FarLodLevelConfig& level,
-                                                  const glm::ivec3& cameraChunk,
-                                                  const glm::ivec3& chunkCoord) noexcept
+    [[nodiscard]] static bool chunkIntersectsHorizontalRing(const FarLodLevelConfig& level,
+                                                            const glm::ivec3& cameraChunk,
+                                                            const glm::ivec3& chunkCoord) noexcept
     {
-        const glm::ivec3 minCoord = chunkCoord * level.blockScale;
-        const glm::ivec3 maxCoord = minCoord + glm::ivec3(level.blockScale - 1);
+        const glm::ivec2 minCoord(chunkCoord.x * level.blockScale, chunkCoord.z * level.blockScale);
+        const glm::ivec2 maxCoord = minCoord + glm::ivec2(level.blockScale - 1);
         const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
         {
             if (center < minValue) return minValue - center;
@@ -3119,21 +3326,44 @@ private:
             return std::max(std::abs(center - minValue), std::abs(center - maxValue));
         };
 
-        const int minDistance = std::max({minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                          minAxisDistance(cameraChunk.y, minCoord.y, maxCoord.y),
-                                          minAxisDistance(cameraChunk.z, minCoord.z, maxCoord.z)});
-        const int maxDistance = std::max({maxAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                          maxAxisDistance(cameraChunk.y, minCoord.y, maxCoord.y),
-                                          maxAxisDistance(cameraChunk.z, minCoord.z, maxCoord.z)});
+        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
+                                         minAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
+        const int maxDistance = std::max(maxAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
+                                         maxAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
         return maxDistance > level.innerRadiusChunks && minDistance <= level.outerRadiusChunks;
     }
 
-    [[nodiscard]] static int chunkMinRingDistanceChunks(const FarLodLevelConfig& level,
-                                                        const glm::ivec3& cameraChunk,
-                                                        const glm::ivec3& chunkCoord) noexcept
+    [[nodiscard]] static bool chunkIntersectsHorizontalRing(const FarLodLevelConfig& level,
+                                                            const glm::ivec3& cameraChunk,
+                                                            const glm::ivec3& chunkCoord,
+                                                            int outerRadiusChunks) noexcept
     {
-        const glm::ivec3 minCoord = chunkCoord * level.blockScale;
-        const glm::ivec3 maxCoord = minCoord + glm::ivec3(level.blockScale - 1);
+        const glm::ivec2 minCoord(chunkCoord.x * level.blockScale, chunkCoord.z * level.blockScale);
+        const glm::ivec2 maxCoord = minCoord + glm::ivec2(level.blockScale - 1);
+        const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            if (center < minValue) return minValue - center;
+            if (center > maxValue) return center - maxValue;
+            return 0;
+        };
+        const auto maxAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            return std::max(std::abs(center - minValue), std::abs(center - maxValue));
+        };
+
+        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
+                                         minAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
+        const int maxDistance = std::max(maxAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
+                                         maxAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
+        return maxDistance > level.innerRadiusChunks && minDistance <= outerRadiusChunks;
+    }
+
+    [[nodiscard]] static int chunkMinHorizontalRingDistanceChunks(const FarLodLevelConfig& level,
+                                                                  const glm::ivec3& cameraChunk,
+                                                                  const glm::ivec3& chunkCoord) noexcept
+    {
+        const glm::ivec2 minCoord(chunkCoord.x * level.blockScale, chunkCoord.z * level.blockScale);
+        const glm::ivec2 maxCoord = minCoord + glm::ivec2(level.blockScale - 1);
         const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
         {
             if (center < minValue) return minValue - center;
@@ -3141,9 +3371,8 @@ private:
             return 0;
         };
 
-        const int minDistance = std::max({minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                          minAxisDistance(cameraChunk.y, minCoord.y, maxCoord.y),
-                                          minAxisDistance(cameraChunk.z, minCoord.z, maxCoord.z)});
+        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
+                                         minAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
         return std::max(0, minDistance - level.innerRadiusChunks);
     }
 
@@ -3398,17 +3627,17 @@ public:
 
     [[nodiscard]] double averageGpuSynthesisMs() const noexcept
     {
-        return lastAverageGpuSynthesisMs_;
+        return 0.0;
     }
 
     [[nodiscard]] double averageGpuStampMs() const noexcept
     {
-        return lastAverageGpuStampMs_;
+        return 0.0;
     }
 
     [[nodiscard]] double averageGpuFaceBuildMs() const noexcept
     {
-        return lastAverageGpuFaceBuildMs_;
+        return 0.0;
     }
 
     [[nodiscard]] LodDiagnosticsSnapshot diagnosticsSnapshot(const glm::vec3& cameraPos) const
@@ -3453,9 +3682,9 @@ public:
         }
 
         snapshot.averageBuildMs = lastAverageBuildMs_;
-        snapshot.averageGpuSynthesisMs = lastAverageGpuSynthesisMs_;
-        snapshot.averageGpuStampMs = lastAverageGpuStampMs_;
-        snapshot.averageGpuFaceBuildMs = lastAverageGpuFaceBuildMs_;
+        snapshot.averageGpuSynthesisMs = 0.0;
+        snapshot.averageGpuStampMs = 0.0;
+        snapshot.averageGpuFaceBuildMs = 0.0;
 
         std::sort(orderedRegions.begin(),
                   orderedRegions.end(),
@@ -3569,6 +3798,15 @@ public:
             << ",\n  \"ready_tiles\":" << readyTiles
             << ",\n  \"dirty_tiles\":" << dirtyTiles
             << ",\n  \"in_flight_tiles\":" << inFlightTiles
+            << ",\n  \"built_tiles_last_update\":" << builtTilesLastUpdate_
+            << ",\n  \"skipped_tiles_last_update\":" << skippedTilesLastUpdate_
+            << ",\n  \"average_cpu_terrain_synthesis_ms\":" << lastAverageCpuTerrainSynthesisMs_
+            << ",\n  \"average_cpu_structure_stamp_ms\":" << lastAverageCpuStructureStampMs_
+            << ",\n  \"average_cpu_mesh_ms\":" << lastAverageCpuMeshMs_
+            << ",\n  \"average_upload_wait_ms\":" << lastAverageUploadWaitMs_
+            << ",\n  \"average_upload_copy_ms\":" << lastAverageUploadCopyMs_
+            << ",\n  \"rendered_face_count\":" << lastRenderedFaceCount_
+            << ",\n  \"rendered_vertex_count\":" << lastRenderedVertexCount_
             << ",\n  \"tiles\":[\n";
 
         const std::size_t tileCount = std::min<std::size_t>(orderedRegions.size(), kMaxSnapshotTiles);
@@ -3683,11 +3921,36 @@ private:
             result.key = job.key;
             result.buildVersion = job.buildVersion;
             result.epoch = job.epoch;
-            result.cpu = synthesizeChunkCpu(job, columnSampleFn, structureQueryFn);
-            result.mesh = buildChunkMesh(result.cpu, uvLookupFn);
+            if (!chunkMayContainRenderableFarContent(job.level,
+                                                     job.key.coord,
+                                                     columnSampleFn,
+                                                     structureQueryFn,
+                                                     true))
+            {
+                result.skippedByRelevance = true;
+            }
+            else
+            {
+                const SteadyClock::time_point terrainStart = SteadyClock::now();
+                result.cpu = synthesizeChunkTerrainCpu(job, columnSampleFn);
+                result.cpuTerrainSynthesisMs =
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - terrainStart).count();
+
+                const SteadyClock::time_point structureStart = SteadyClock::now();
+                stampChunkStructuresCpu(result.cpu, job.level.level, structureQueryFn);
+                result.cpuStructureStampMs =
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - structureStart).count();
+
+                const SteadyClock::time_point meshStart = SteadyClock::now();
+                result.mesh = buildChunkMesh(result.cpu, job.level.level, columnSampleFn, structureQueryFn, uvLookupFn);
+                result.cpuMeshMs =
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - meshStart).count();
+                result.faceCount = result.mesh.indices.size() / 6u;
+                result.vertexCount = result.mesh.vertices.size();
+                result.indexCount = result.mesh.indices.size();
+            }
             result.buildMs =
                 std::chrono::duration<double, std::milli>(SteadyClock::now() - buildStart).count();
-            result.gpuSynthesisMs = result.buildMs;
 
             std::lock_guard<std::mutex> lock(completedMutex_);
             completedBuilds_.push_back(std::move(result));
@@ -3696,9 +3959,17 @@ private:
 
     void scheduleDirtyBuilds()
     {
-        std::vector<BuildJob> jobs;
+        std::vector<FarLodChunkKey> candidateKeys;
+        constexpr float kForwardDotThreshold = -0.35f;
+        const glm::vec2 forwardXZ = normalizePriorityForwardXZ(cameraForward_);
+        Frustum visibilityFrustum{};
+        glm::vec3 visibilityCameraPos{0.0f};
+        bool hasVisibilityFrustum = false;
         {
             std::lock_guard<std::mutex> lock(configMutex_);
+            visibilityFrustum = lastVisibilityFrustum_;
+            visibilityCameraPos = lastVisibilityCameraPos_;
+            hasVisibilityFrustum = hasVisibilityFrustum_;
             for (auto& [key, chunk] : chunks_)
             {
                 if (!chunk.active || !chunk.dirty || chunk.inFlight)
@@ -3709,12 +3980,64 @@ private:
                 {
                     continue;
                 }
-                chunk.inFlight = true;
+                const glm::vec3 center = (chunk.cpu.boundsMin + chunk.cpu.boundsMax) * 0.5f;
+                const glm::vec2 toChunk(center.x - static_cast<float>(cameraChunk_.x * kChunkSizeX),
+                                        center.z - static_cast<float>(cameraChunk_.z * kChunkSizeZ));
+                if (glm::dot(toChunk, toChunk) > kEpsilon)
+                {
+                    const float facing = glm::dot(glm::normalize(toChunk), forwardXZ);
+                    if (facing < kForwardDotThreshold)
+                    {
+                        continue;
+                    }
+                }
+                if (hasVisibilityFrustum &&
+                    !visibilityFrustum.intersectsAABB(chunk.cpu.boundsMin, chunk.cpu.boundsMax))
+                {
+                    const glm::vec3 toChunk3 = center - visibilityCameraPos;
+                    if (glm::dot(toChunk3, toChunk3) <=
+                        static_cast<float>(chunk.level.chunkSpanBlocks() * chunk.level.chunkSpanBlocks() * 4))
+                    {
+                        // keep near-frustum-edge work alive to avoid visible starvation on turns
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                }
+                candidateKeys.push_back(key);
+            }
+        }
+
+        if (candidateKeys.empty())
+        {
+            return;
+        }
+
+        std::vector<BuildJob> jobs;
+        jobs.reserve(candidateKeys.size());
+        {
+            std::lock_guard<std::mutex> lock(configMutex_);
+            const std::uint64_t epoch = buildEpoch_.load(std::memory_order_acquire);
+            for (const FarLodChunkKey& key : candidateKeys)
+            {
+                const auto it = chunks_.find(key);
+                if (it == chunks_.end())
+                {
+                    continue;
+                }
+
+                FarLodChunkRecord& chunk = it->second;
+                if (!chunk.active || !chunk.dirty || chunk.inFlight || queuedKeys_.contains(key))
+                {
+                    continue;
+                }
+
                 jobs.push_back(BuildJob{
                     key,
                     chunk.level,
                     chunk.buildVersion,
-                    buildEpoch_.load(std::memory_order_acquire)});
+                    epoch});
             }
         }
 
@@ -3726,8 +4049,8 @@ private:
                       {
                           return lhs.level.level < rhs.level.level;
                       }
-                      return chunkMinRingDistanceChunks(lhs.level, cameraChunk_, lhs.key.coord) <
-                             chunkMinRingDistanceChunks(rhs.level, cameraChunk_, rhs.key.coord);
+                      return chunkMinHorizontalRingDistanceChunks(lhs.level, cameraChunk_, lhs.key.coord) <
+                             chunkMinHorizontalRingDistanceChunks(rhs.level, cameraChunk_, rhs.key.coord);
                   });
 
         if (jobs.empty())
@@ -3735,12 +4058,60 @@ private:
             return;
         }
 
+        const std::size_t workerBudget = std::max<std::size_t>(workerCount_, 1);
+        const std::size_t exactBacklogPenalty =
+            (exactMissingChunks_.load(std::memory_order_relaxed) > 32 || exactPendingUploads_.load(std::memory_order_relaxed) > 24)
+                ? 8
+                : ((exactMissingChunks_.load(std::memory_order_relaxed) > 8 ||
+                    exactPendingUploads_.load(std::memory_order_relaxed) > 8)
+                       ? 16
+                       : 32);
+        const std::size_t maxQueuedPerUpdate = std::max<std::size_t>(workerBudget * 12, exactBacklogPenalty);
+        if (jobs.size() > maxQueuedPerUpdate)
+        {
+            jobs.resize(maxQueuedPerUpdate);
+        }
+
+        std::vector<BuildJob> readyJobs;
+        readyJobs.reserve(jobs.size());
+        {
+            std::lock_guard<std::mutex> lock(configMutex_);
+            for (const BuildJob& job : jobs)
+            {
+                auto it = chunks_.find(job.key);
+                if (it == chunks_.end())
+                {
+                    continue;
+                }
+
+                FarLodChunkRecord& chunk = it->second;
+                if (!chunk.active || !chunk.dirty || chunk.inFlight)
+                {
+                    continue;
+                }
+
+                chunk.inFlight = true;
+                readyJobs.push_back(job);
+            }
+        }
+
+        if (readyJobs.empty())
+        {
+            return;
+        }
+
         {
             std::lock_guard<std::mutex> lock(buildQueueMutex_);
-            for (const BuildJob& job : jobs)
+            for (const BuildJob& job : readyJobs)
             {
                 if (!queuedKeys_.insert(job.key).second)
                 {
+                    std::lock_guard<std::mutex> configLock(configMutex_);
+                    auto it = chunks_.find(job.key);
+                    if (it != chunks_.end())
+                    {
+                        it->second.inFlight = false;
+                    }
                     continue;
                 }
                 buildQueue_.push_back(job);
@@ -3759,10 +4130,16 @@ private:
         }
 
         builtTilesLastUpdate_ = 0;
+        skippedTilesLastUpdate_ = 0;
+        lastBuiltFaceCount_ = 0;
+        lastBuiltVertexCount_ = 0;
+        lastBuiltIndexCount_ = 0;
         lastAverageBuildMs_ = 0.0;
-        lastAverageGpuSynthesisMs_ = 0.0;
-        lastAverageGpuStampMs_ = 0.0;
-        lastAverageGpuFaceBuildMs_ = 0.0;
+        lastAverageCpuTerrainSynthesisMs_ = 0.0;
+        lastAverageCpuStructureStampMs_ = 0.0;
+        lastAverageCpuMeshMs_ = 0.0;
+        lastAverageUploadWaitMs_ = 0.0;
+        lastAverageUploadCopyMs_ = 0.0;
         if (completed.empty())
         {
             lastCollectMs_ =
@@ -3773,10 +4150,28 @@ private:
 
         const double uploadBudgetLimit = uploadBudgetMs <= 0.0 ? std::numeric_limits<double>::max() : uploadBudgetMs;
         const SteadyClock::time_point uploadStart = SteadyClock::now();
+        bool uploadOpened = false;
+        if (uploadContext_.ready())
+        {
+            if (!uploadContext_.begin())
+            {
+                std::lock_guard<std::mutex> lock(completedMutex_);
+                for (BuildResult& result : completed)
+                {
+                    completedBuilds_.push_back(std::move(result));
+                }
+                lastCollectMs_ =
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - collectStart).count();
+                lastUploadMs_ = 0.0;
+                return;
+            }
+            uploadOpened = true;
+        }
         double totalBuildMs = 0.0;
-        double totalGpuSynthesisMs = 0.0;
-        double totalGpuStampMs = 0.0;
-        double totalGpuFaceBuildMs = 0.0;
+        double totalCpuTerrainSynthesisMs = 0.0;
+        double totalCpuStructureStampMs = 0.0;
+        double totalCpuMeshMs = 0.0;
+        double totalUploadCopyMs = 0.0;
         std::size_t applied = 0;
 
         while (!completed.empty())
@@ -3803,15 +4198,33 @@ private:
                 continue;
             }
 
+            if (result.skippedByRelevance)
+            {
+                releaseChunkGpu(chunk);
+                chunk.cpu = FarLodChunkCpu{};
+                chunk.cpu.key = chunk.key;
+                chunk.cpu.blockScale = chunk.level.blockScale;
+                chunk.cpu.worldMin = chunk.key.coord * chunk.level.chunkSpanBlocks();
+                chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin);
+                chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin + glm::ivec3(chunk.level.chunkSpanBlocks()));
+                chunk.dirty = false;
+                ++skippedTilesLastUpdate_;
+                continue;
+            }
+
             chunk.cpu = std::move(result.cpu);
-            uploadBuiltChunk(chunk, result.mesh);
+            uploadBuiltChunk(chunk, result.mesh, result.uploadCopyMs);
             chunk.dirty = false;
             ++builtTilesLastUpdate_;
             ++applied;
             totalBuildMs += result.buildMs;
-            totalGpuSynthesisMs += result.gpuSynthesisMs;
-            totalGpuStampMs += result.gpuStampMs;
-            totalGpuFaceBuildMs += result.gpuFaceBuildMs;
+            totalCpuTerrainSynthesisMs += result.cpuTerrainSynthesisMs;
+            totalCpuStructureStampMs += result.cpuStructureStampMs;
+            totalCpuMeshMs += result.cpuMeshMs;
+            totalUploadCopyMs += result.uploadCopyMs;
+            lastBuiltFaceCount_ += result.faceCount;
+            lastBuiltVertexCount_ += result.vertexCount;
+            lastBuiltIndexCount_ += result.indexCount;
         }
 
         {
@@ -3825,9 +4238,10 @@ private:
         if (applied > 0)
         {
             lastAverageBuildMs_ = totalBuildMs / static_cast<double>(applied);
-            lastAverageGpuSynthesisMs_ = totalGpuSynthesisMs / static_cast<double>(applied);
-            lastAverageGpuStampMs_ = totalGpuStampMs / static_cast<double>(applied);
-            lastAverageGpuFaceBuildMs_ = totalGpuFaceBuildMs / static_cast<double>(applied);
+            lastAverageCpuTerrainSynthesisMs_ = totalCpuTerrainSynthesisMs / static_cast<double>(applied);
+            lastAverageCpuStructureStampMs_ = totalCpuStructureStampMs / static_cast<double>(applied);
+            lastAverageCpuMeshMs_ = totalCpuMeshMs / static_cast<double>(applied);
+            lastAverageUploadCopyMs_ = totalUploadCopyMs / static_cast<double>(applied);
             if (benchmarkMetrics_ != nullptr)
             {
                 benchmarkMetrics_->farBuildStage.recordMicros(
@@ -3835,22 +4249,52 @@ private:
             }
         }
 
+        if (uploadOpened)
+        {
+            UploadContext::FlushTimings flushTimings{};
+            uploadContext_.flush(&flushTimings);
+            if (applied > 0)
+            {
+                lastAverageUploadWaitMs_ = flushTimings.waitMs / static_cast<double>(applied);
+            }
+        }
         lastCollectMs_ = std::chrono::duration<double, std::milli>(SteadyClock::now() - collectStart).count();
         lastUploadMs_ = std::chrono::duration<double, std::milli>(SteadyClock::now() - uploadStart).count();
     }
 
-    [[nodiscard]] FarLodChunkCpu synthesizeChunkCpu(const BuildJob& job,
-                                                    const ColumnSampleFn& columnSampleFn,
-                                                    const StructureQueryFn& structureQueryFn) const;
-    [[nodiscard]] ChunkMesh buildChunkMesh(const FarLodChunkCpu& cpu, const UvLookupFn& uvLookupFn) const;
+    [[nodiscard]] VoxelFootprintClassification classifyTerrainVoxelFootprint(
+        const glm::ivec3& voxelMin,
+        int blockScale,
+        const ColumnSampleFn& columnSampleFn) const;
+    [[nodiscard]] FarLodVoxel sampleFarNeighborVoxelWorld(const glm::ivec3& worldVoxelMin,
+                                                          int blockScale,
+                                                          int lodLevel,
+                                                          const ColumnSampleFn& columnSampleFn,
+                                                          const StructureQueryFn& structureQueryFn) const;
+    [[nodiscard]] bool chunkMayContainRenderableFarContent(const FarLodLevelConfig& level,
+                                                           const glm::ivec3& chunkCoord,
+                                                           const ColumnSampleFn& columnSampleFn,
+                                                           const StructureQueryFn& structureQueryFn,
+                                                           bool allowStructureFallback) const;
+    [[nodiscard]] FarLodChunkCpu synthesizeChunkTerrainCpu(const BuildJob& job,
+                                                           const ColumnSampleFn& columnSampleFn) const;
+    void stampChunkStructuresCpu(FarLodChunkCpu& cpu,
+                                 int lodLevel,
+                                 const StructureQueryFn& structureQueryFn) const;
+    [[nodiscard]] ChunkMesh buildChunkMesh(const FarLodChunkCpu& cpu,
+                                           int lodLevel,
+                                           const ColumnSampleFn& columnSampleFn,
+                                           const StructureQueryFn& structureQueryFn,
+                                           const UvLookupFn& uvLookupFn) const;
 
     static constexpr std::uint8_t kFarLodVoxelWater = 0x01u;
     static constexpr std::uint8_t kFarLodVoxelStructure = 0x02u;
     static constexpr std::uint8_t kFarLodVoxelCutout = 0x04u;
     static constexpr std::uint8_t kFarLodVoxelTerrain = 0x08u;
 
-    void uploadBuiltChunk(FarLodChunkRecord& chunk, const ChunkMesh& mesh)
+    void uploadBuiltChunk(FarLodChunkRecord& chunk, const ChunkMesh& mesh, double& outCopyMs)
     {
+        outCopyMs = 0.0;
         releaseChunkGpu(chunk);
         chunk.cpu.boundsMin = mesh.boundsMin;
         chunk.cpu.boundsMax = mesh.boundsMax;
@@ -3875,6 +4319,7 @@ private:
         chunk.gpu.resident = true;
 
         BufferPage& page = bufferPages_[allocation.pageIndex];
+        const SteadyClock::time_point copyStart = SteadyClock::now();
         if (page.mappedVertexData != nullptr && !mesh.vertices.empty())
         {
             std::memcpy(page.mappedVertexData + chunk.gpu.vertexOffset * sizeof(Vertex),
@@ -3903,6 +4348,7 @@ private:
                                           static_cast<std::uint64_t>(mesh.indices.size() * sizeof(std::uint32_t)));
             }
         }
+        outCopyMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - copyStart).count();
     }
 
     bool enabled_{true};
@@ -3911,14 +4357,25 @@ private:
     int seaLevel_{20};
     glm::ivec3 cameraChunk_{0};
     glm::vec3 cameraForward_{0.0f, 0.0f, -1.0f};
+    mutable Frustum lastVisibilityFrustum_{};
+    mutable glm::vec3 lastVisibilityCameraPos_{0.0f};
+    mutable bool hasVisibilityFrustum_{false};
     std::uint64_t updateStamp_{0};
     int builtTilesLastUpdate_{0};
+    int skippedTilesLastUpdate_{0};
     double lastAverageBuildMs_{0.0};
-    double lastAverageGpuSynthesisMs_{0.0};
-    double lastAverageGpuStampMs_{0.0};
-    double lastAverageGpuFaceBuildMs_{0.0};
+    double lastAverageCpuTerrainSynthesisMs_{0.0};
+    double lastAverageCpuStructureStampMs_{0.0};
+    double lastAverageCpuMeshMs_{0.0};
+    double lastAverageUploadWaitMs_{0.0};
+    double lastAverageUploadCopyMs_{0.0};
     double lastCollectMs_{0.0};
     double lastUploadMs_{0.0};
+    std::size_t lastBuiltFaceCount_{0};
+    std::size_t lastBuiltVertexCount_{0};
+    std::size_t lastBuiltIndexCount_{0};
+    mutable std::size_t lastRenderedFaceCount_{0};
+    mutable std::size_t lastRenderedVertexCount_{0};
     std::vector<FarLodLevelConfig> levels_;
     std::vector<BufferPage> bufferPages_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
@@ -3938,12 +4395,196 @@ private:
     std::atomic<bool> stopWorkers_{false};
     std::atomic<std::uint64_t> buildEpoch_{1};
     std::size_t workerCount_{1};
+    std::atomic<int> exactMissingChunks_{0};
+    std::atomic<std::size_t> exactPendingUploads_{0};
     ChunkBenchmarkMetrics* benchmarkMetrics_{nullptr};
+    std::unordered_map<int, int> levelActivationOuterRadiusChunks_;
 };
 
-FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkCpu(const BuildJob& job,
-                                                                       const ColumnSampleFn& columnSampleFn,
-                                                                       const StructureQueryFn& structureQueryFn) const
+FarTerrainManager::VoxelFootprintClassification FarTerrainManager::classifyTerrainVoxelFootprint(
+    const glm::ivec3& voxelMin,
+    int blockScale,
+    const ColumnSampleFn& columnSampleFn) const
+{
+    VoxelFootprintClassification classification{};
+    const glm::ivec3 voxelMax = voxelMin + glm::ivec3(blockScale - 1);
+    const int minX = voxelMin.x;
+    const int maxX = voxelMax.x;
+    const int minZ = voxelMin.z;
+    const int maxZ = voxelMax.z;
+    const int centerX = (minX + maxX) / 2;
+    const int centerZ = (minZ + maxZ) / 2;
+    const std::array<glm::ivec2, 5> samplePoints{{
+        {minX, minZ},
+        {maxX, minZ},
+        {minX, maxZ},
+        {maxX, maxZ},
+        {centerX, centerZ},
+    }};
+
+    std::array<ColumnSample, 5> samples{};
+    int solidHitCount = 0;
+    int waterHitCount = 0;
+    int minWaterBottom = std::numeric_limits<int>::max();
+    for (std::size_t i = 0; i < samplePoints.size(); ++i)
+    {
+        samples[i] = columnSampleFn(samplePoints[i].x, samplePoints[i].y, voxelMin.y, voxelMax.y);
+        classification.minSampledSurfaceY = std::min(classification.minSampledSurfaceY, samples[i].surfaceY);
+        classification.maxSampledSurfaceY = std::max(classification.maxSampledSurfaceY, samples[i].surfaceY);
+        if (samples[i].dominantBiome != nullptr && samples[i].surfaceY >= voxelMin.y)
+        {
+            ++solidHitCount;
+        }
+
+        if (samples[i].dominantBiome != nullptr)
+        {
+            const auto& waterFill = samples[i].dominantBiome->terrainSettings.waterFill;
+            if (waterFill.enabled && samples[i].surfaceY < seaLevel_)
+            {
+                ++waterHitCount;
+                int waterBottom = samples[i].surfaceY + 1;
+                if (waterFill.maxDepth > 0)
+                {
+                    waterBottom = std::max(waterBottom, seaLevel_ - waterFill.maxDepth + 1);
+                }
+                minWaterBottom = std::min(minWaterBottom, waterBottom);
+            }
+        }
+    }
+
+    const ColumnSample& centerSample = samples.back();
+    if (centerSample.dominantBiome != nullptr && solidHitCount >= 3)
+    {
+        const terrain::TerrainColumnBlocks blocks =
+            terrain::resolveTerrainColumnBlocks(*centerSample.dominantBiome, centerSample, centerX, centerZ, seaLevel_);
+        classification.voxel.occupied = 1;
+        classification.voxel.material =
+            (classification.minSampledSurfaceY > voxelMax.y) ? blocks.fillerBlock : blocks.surfaceBlock;
+        classification.voxel.flags = kFarLodVoxelTerrain;
+        return classification;
+    }
+
+    if (centerSample.dominantBiome != nullptr)
+    {
+        const auto& waterFill = centerSample.dominantBiome->terrainSettings.waterFill;
+        if (waterFill.enabled && waterHitCount >= 3 && minWaterBottom != std::numeric_limits<int>::max() &&
+            intersectsRange(voxelMin.y, voxelMax.y, minWaterBottom, seaLevel_))
+        {
+            classification.voxel.occupied = 1;
+            classification.voxel.material = BlockId::Water;
+            classification.voxel.flags = kFarLodVoxelWater;
+        }
+    }
+
+    return classification;
+}
+
+FarTerrainManager::FarLodVoxel FarTerrainManager::sampleFarNeighborVoxelWorld(const glm::ivec3& worldVoxelMin,
+                                                                              int blockScale,
+                                                                              int lodLevel,
+                                                                              const ColumnSampleFn& columnSampleFn,
+                                                                              const StructureQueryFn& structureQueryFn) const
+{
+    FarLodVoxel voxel = classifyTerrainVoxelFootprint(worldVoxelMin, blockScale, columnSampleFn).voxel;
+    const glm::ivec3 queryMin = worldVoxelMin;
+    const glm::ivec3 queryMax = worldVoxelMin + glm::ivec3(blockScale - 1);
+    const std::vector<StructureInstance> structures = structureQueryFn(queryMin, queryMax, lodLevel);
+    for (const StructureInstance& structure : structures)
+    {
+        forEachStructureVoxel(structure,
+                              [&](int worldX, int worldY, int worldZ, BlockId block)
+                              {
+                                  if (worldX < queryMin.x || worldX > queryMax.x ||
+                                      worldY < queryMin.y || worldY > queryMax.y ||
+                                      worldZ < queryMin.z || worldZ > queryMax.z)
+                                  {
+                                      return false;
+                                  }
+
+                                  const int incomingPriority = structureMaterialPriority(block);
+                                  const int existingPriority = structureMaterialPriority(voxel.material);
+                                  if (incomingPriority < existingPriority)
+                                  {
+                                      return false;
+                                  }
+
+                                  voxel.occupied = 1;
+                                  voxel.material = block;
+                                  voxel.flags = kFarLodVoxelStructure;
+                                  if (isAlphaCutoutBlock(block))
+                                  {
+                                      voxel.flags |= kFarLodVoxelCutout;
+                                  }
+                                  return false;
+                              });
+    }
+
+    return voxel;
+}
+
+bool FarTerrainManager::chunkMayContainRenderableFarContent(const FarLodLevelConfig& level,
+                                                            const glm::ivec3& chunkCoord,
+                                                            const ColumnSampleFn& columnSampleFn,
+                                                            const StructureQueryFn& structureQueryFn,
+                                                            bool allowStructureFallback) const
+{
+    const int span = level.chunkSpanBlocks();
+    const glm::ivec3 chunkMin = chunkCoord * span;
+    const glm::ivec3 chunkMax = chunkMin + glm::ivec3(span - 1);
+    const int minX = chunkMin.x;
+    const int maxX = chunkMax.x;
+    const int minZ = chunkMin.z;
+    const int maxZ = chunkMax.z;
+    const int midX = (minX + maxX) / 2;
+    const int midZ = (minZ + maxZ) / 2;
+    const std::array<glm::ivec2, 9> samplePoints{{
+        {minX, minZ},
+        {maxX, minZ},
+        {minX, maxZ},
+        {maxX, maxZ},
+        {midX, minZ},
+        {midX, maxZ},
+        {minX, midZ},
+        {maxX, midZ},
+        {midX, midZ},
+    }};
+
+    int minSurfaceY = std::numeric_limits<int>::max();
+    int maxSurfaceY = std::numeric_limits<int>::min();
+    bool anyWaterFill = false;
+    for (const glm::ivec2& samplePoint : samplePoints)
+    {
+        const ColumnSample sample = columnSampleFn(samplePoint.x, samplePoint.y, chunkMin.y, chunkMax.y);
+        minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
+        maxSurfaceY = std::max(maxSurfaceY, sample.surfaceY);
+        if (sample.dominantBiome != nullptr && sample.dominantBiome->terrainSettings.waterFill.enabled)
+        {
+            anyWaterFill = true;
+        }
+    }
+
+    const bool terrainIntersects =
+        maxSurfaceY >= chunkMin.y - level.blockScale &&
+        minSurfaceY <= chunkMax.y + level.blockScale;
+    const bool waterIntersects =
+        anyWaterFill &&
+        seaLevel_ >= chunkMin.y - level.blockScale &&
+        seaLevel_ <= chunkMax.y + level.blockScale;
+    if (terrainIntersects || waterIntersects)
+    {
+        return true;
+    }
+
+    if (!allowStructureFallback)
+    {
+        return false;
+    }
+
+    return !structureQueryFn(chunkMin, chunkMax, level.level).empty();
+}
+
+FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(const BuildJob& job,
+                                                                              const ColumnSampleFn& columnSampleFn) const
 {
     FarLodChunkCpu cpu{};
     cpu.key = job.key;
@@ -3958,65 +4599,45 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkCpu(const Bu
         {
             for (int localX = 0; localX < kLogicalSize; ++localX)
             {
-                FarLodVoxel& voxel = cpu.voxels[voxelIndex(localX, localY, localZ)];
                 const glm::ivec3 voxelMin = cpu.worldMin + glm::ivec3(localX, localY, localZ) * cpu.blockScale;
-                const glm::ivec3 voxelMax = voxelMin + glm::ivec3(cpu.blockScale - 1);
-                const int sampleWorldX = voxelMin.x + cpu.blockScale / 2;
-                const int sampleWorldZ = voxelMin.z + cpu.blockScale / 2;
-                const ColumnSample columnSample =
-                    columnSampleFn(sampleWorldX, sampleWorldZ, voxelMin.y, voxelMax.y);
-
-                if (columnSample.dominantBiome != nullptr && columnSample.slabHasSolid)
+                FarLodVoxel& voxel = cpu.voxels[voxelIndex(localX, localY, localZ)];
+                voxel = classifyTerrainVoxelFootprint(voxelMin, cpu.blockScale, columnSampleFn).voxel;
+                if (!voxel.occupied || voxel.material == BlockId::Air)
                 {
-                    const terrain::TerrainColumnBlocks blocks =
-                        terrain::resolveTerrainColumnBlocks(*columnSample.dominantBiome,
-                                                            columnSample,
-                                                            sampleWorldX,
-                                                            sampleWorldZ,
-                                                            seaLevel_);
-                    voxel.occupied = 1;
-                    voxel.material = voxelMax.y < columnSample.surfaceY ? blocks.fillerBlock : blocks.surfaceBlock;
-                    voxel.flags = kFarLodVoxelTerrain;
-                    cpu.minOccupiedLocalY = std::min(cpu.minOccupiedLocalY, localY);
-                    cpu.maxOccupiedLocalY = std::max(cpu.maxOccupiedLocalY, localY);
+                    continue;
                 }
 
-                if (columnSample.dominantBiome != nullptr)
-                {
-                    const auto& waterFill = columnSample.dominantBiome->terrainSettings.waterFill;
-                    if (waterFill.enabled && columnSample.surfaceY < seaLevel_)
-                    {
-                        int waterBottom = columnSample.surfaceY + 1;
-                        if (waterFill.maxDepth > 0)
-                        {
-                            waterBottom = std::max(waterBottom, seaLevel_ - waterFill.maxDepth + 1);
-                        }
-                        if (intersectsRange(voxelMin.y, voxelMax.y, waterBottom, seaLevel_) && !voxel.occupied)
-                        {
-                            voxel.occupied = 1;
-                            voxel.material = BlockId::Water;
-                            voxel.flags = kFarLodVoxelWater;
-                            cpu.minOccupiedLocalY = std::min(cpu.minOccupiedLocalY, localY);
-                            cpu.maxOccupiedLocalY = std::max(cpu.maxOccupiedLocalY, localY);
-                        }
-                    }
-                }
+                cpu.minOccupiedLocalY = std::min(cpu.minOccupiedLocalY, localY);
+                cpu.maxOccupiedLocalY = std::max(cpu.maxOccupiedLocalY, localY);
             }
         }
     }
-    cpu.terrainReady = true;
 
+    cpu.terrainReady = true;
+    if (cpu.maxOccupiedLocalY < cpu.minOccupiedLocalY)
+    {
+        cpu.minOccupiedLocalY = 0;
+        cpu.maxOccupiedLocalY = -1;
+    }
+    return cpu;
+}
+
+void FarTerrainManager::stampChunkStructuresCpu(FarLodChunkCpu& cpu,
+                                                int lodLevel,
+                                                const StructureQueryFn& structureQueryFn) const
+{
     const glm::ivec3 queryMin = cpu.worldMin;
-    const glm::ivec3 queryMax = cpu.worldMin + glm::ivec3(job.level.chunkSpanBlocks() - 1);
-    const std::vector<StructureInstance> structures = structureQueryFn(queryMin, queryMax, job.level.level);
+    const glm::ivec3 queryMax = cpu.worldMin + glm::ivec3(kLogicalSize * cpu.blockScale - 1);
+    const std::vector<StructureInstance> structures = structureQueryFn(queryMin, queryMax, lodLevel);
     for (const StructureInstance& structure : structures)
     {
         forEachStructureVoxel(structure,
                               [&cpu](int worldX, int worldY, int worldZ, BlockId block)
                               {
-                                  const glm::ivec3 localWorld{worldX - cpu.worldMin.x,
-                                                              worldY - cpu.worldMin.y,
-                                                              worldZ - cpu.worldMin.z};
+                                  const glm::ivec3 localWorld{
+                                      worldX - cpu.worldMin.x,
+                                      worldY - cpu.worldMin.y,
+                                      worldZ - cpu.worldMin.z};
                                   if (localWorld.x < 0 || localWorld.y < 0 || localWorld.z < 0)
                                   {
                                       return false;
@@ -4040,7 +4661,7 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkCpu(const Bu
 
                                   voxel.occupied = 1;
                                   voxel.material = block;
-                                  voxel.flags = static_cast<std::uint8_t>(kFarLodVoxelStructure);
+                                  voxel.flags = kFarLodVoxelStructure;
                                   if (isAlphaCutoutBlock(block))
                                   {
                                       voxel.flags |= kFarLodVoxelCutout;
@@ -4051,108 +4672,204 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkCpu(const Bu
                               });
     }
     cpu.structuresReady = true;
-
     if (cpu.maxOccupiedLocalY < cpu.minOccupiedLocalY)
     {
         cpu.minOccupiedLocalY = 0;
         cpu.maxOccupiedLocalY = -1;
     }
-    return cpu;
 }
 
 FarTerrainManager::ChunkMesh FarTerrainManager::buildChunkMesh(const FarLodChunkCpu& cpu,
+                                                              int lodLevel,
+                                                              const ColumnSampleFn& columnSampleFn,
+                                                              const StructureQueryFn& structureQueryFn,
                                                               const UvLookupFn& uvLookupFn) const
 {
     ChunkMesh mesh{};
     mesh.boundsMin = cpu.boundsMin;
     mesh.boundsMax = cpu.boundsMax;
 
-    auto emitFace = [&](const glm::ivec3& localCoord, const glm::ivec3& normal, const FarLodVoxel& voxel)
+    auto isInsideChunk = [](const glm::ivec3& localCoord) noexcept
     {
-        const glm::vec3 base = glm::vec3(cpu.worldMin + localCoord * cpu.blockScale);
-        const float scale = static_cast<float>(cpu.blockScale);
-        const std::pair<glm::vec2, glm::vec2> uv = uvLookupFn(voxel.material, blockFaceForNormal(normal));
-        const std::uint8_t flags =
-            static_cast<std::uint8_t>(kVertexFlagFarLod | ((voxel.flags & kFarLodVoxelWater) ? kVertexFlagWater : 0));
+        return localCoord.x >= 0 && localCoord.x < kLogicalSize &&
+               localCoord.y >= 0 && localCoord.y < kLogicalSize &&
+               localCoord.z >= 0 && localCoord.z < kLogicalSize;
+    };
 
-        if (normal == glm::ivec3(1, 0, 0))
+    struct LocalCoordLess
+    {
+        bool operator()(const glm::ivec3& lhs, const glm::ivec3& rhs) const noexcept
         {
-            appendQuad(mesh.vertices, mesh.indices,
-                       base + glm::vec3(scale, 0.0f, 0.0f), base + glm::vec3(scale, 0.0f, scale),
-                       base + glm::vec3(scale, scale, scale), base + glm::vec3(scale, scale, 0.0f),
-                       glm::vec3(normal), uv, flags);
-        }
-        else if (normal == glm::ivec3(-1, 0, 0))
-        {
-            appendQuad(mesh.vertices, mesh.indices,
-                       base + glm::vec3(0.0f, 0.0f, scale), base + glm::vec3(0.0f, 0.0f, 0.0f),
-                       base + glm::vec3(0.0f, scale, 0.0f), base + glm::vec3(0.0f, scale, scale),
-                       glm::vec3(normal), uv, flags);
-        }
-        else if (normal == glm::ivec3(0, 1, 0))
-        {
-            appendQuad(mesh.vertices, mesh.indices,
-                       base + glm::vec3(0.0f, scale, 0.0f), base + glm::vec3(scale, scale, 0.0f),
-                       base + glm::vec3(scale, scale, scale), base + glm::vec3(0.0f, scale, scale),
-                       glm::vec3(normal), uv, flags);
-        }
-        else if (normal == glm::ivec3(0, -1, 0))
-        {
-            appendQuad(mesh.vertices, mesh.indices,
-                       base + glm::vec3(0.0f, 0.0f, scale), base + glm::vec3(scale, 0.0f, scale),
-                       base + glm::vec3(scale, 0.0f, 0.0f), base + glm::vec3(0.0f, 0.0f, 0.0f),
-                       glm::vec3(normal), uv, flags);
-        }
-        else if (normal == glm::ivec3(0, 0, 1))
-        {
-            appendQuad(mesh.vertices, mesh.indices,
-                       base + glm::vec3(scale, 0.0f, scale), base + glm::vec3(0.0f, 0.0f, scale),
-                       base + glm::vec3(0.0f, scale, scale), base + glm::vec3(scale, scale, scale),
-                       glm::vec3(normal), uv, flags);
-        }
-        else
-        {
-            appendQuad(mesh.vertices, mesh.indices,
-                       base + glm::vec3(0.0f, 0.0f, 0.0f), base + glm::vec3(scale, 0.0f, 0.0f),
-                       base + glm::vec3(scale, scale, 0.0f), base + glm::vec3(0.0f, scale, 0.0f),
-                       glm::vec3(normal), uv, flags);
+            if (lhs.x != rhs.x) return lhs.x < rhs.x;
+            if (lhs.y != rhs.y) return lhs.y < rhs.y;
+            return lhs.z < rhs.z;
         }
     };
 
-    static constexpr std::array<glm::ivec3, 6> kFaceNormals{{
-        {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
-    }};
-
-    for (int localY = 0; localY < kLogicalSize; ++localY)
+    std::map<glm::ivec3, FarLodVoxel, LocalCoordLess> neighborVoxelCache;
+    auto sampleVoxel = [&](const glm::ivec3& localCoord) -> FarLodVoxel
     {
-        for (int localZ = 0; localZ < kLogicalSize; ++localZ)
+        if (isInsideChunk(localCoord))
         {
-            for (int localX = 0; localX < kLogicalSize; ++localX)
+            return cpu.voxels[voxelIndex(localCoord.x, localCoord.y, localCoord.z)];
+        }
+
+        const auto cached = neighborVoxelCache.find(localCoord);
+        if (cached != neighborVoxelCache.end())
+        {
+            return cached->second;
+        }
+
+        const glm::ivec3 neighborWorldMin = cpu.worldMin + localCoord * cpu.blockScale;
+        const FarLodVoxel sampledVoxel =
+            sampleFarNeighborVoxelWorld(neighborWorldMin, cpu.blockScale, lodLevel, columnSampleFn, structureQueryFn);
+        neighborVoxelCache.emplace(localCoord, sampledVoxel);
+        return sampledVoxel;
+    };
+
+    auto emitGreedyQuad = [&](int axis, bool positiveFace, int slice, int bStart, int cStart, int bSize, int cSize, const GreedyMaskCell& cell)
+    {
+        glm::ivec3 normal{0};
+        normal[axis] = positiveFace ? 1 : -1;
+
+        glm::vec3 base = glm::vec3(cpu.worldMin);
+        base[axis] += static_cast<float>(slice * cpu.blockScale);
+        base[(axis + 1) % 3] += static_cast<float>(bStart * cpu.blockScale);
+        base[(axis + 2) % 3] += static_cast<float>(cStart * cpu.blockScale);
+
+        glm::vec3 du(0.0f);
+        du[(axis + 1) % 3] = static_cast<float>(bSize * cpu.blockScale);
+        glm::vec3 dv(0.0f);
+        dv[(axis + 2) % 3] = static_cast<float>(cSize * cpu.blockScale);
+
+        glm::vec3 p0 = base;
+        glm::vec3 p1 = base + du;
+        glm::vec3 p2 = base + du + dv;
+        glm::vec3 p3 = base + dv;
+        if (!positiveFace)
+        {
+            std::swap(p1, p3);
+        }
+
+        const std::pair<glm::vec2, glm::vec2> uv = uvLookupFn(cell.material, blockFaceForNormal(normal));
+        const std::uint8_t flags =
+            static_cast<std::uint8_t>(kVertexFlagFarLod | ((cell.flags & kFarLodVoxelWater) ? kVertexFlagWater : 0));
+        appendQuad(mesh.vertices, mesh.indices, p0, p1, p2, p3, glm::vec3(normal), uv, flags);
+    };
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const int sizeA = kLogicalSize;
+        const int sizeB = kLogicalSize;
+        const int sizeC = kLogicalSize;
+        std::vector<GreedyMaskCell> mask(static_cast<std::size_t>(sizeB * sizeC));
+        auto maskIndex = [sizeC](int bIndex, int cIndex) noexcept
+        {
+            return static_cast<std::size_t>(bIndex * sizeC + cIndex);
+        };
+
+        for (int dirIndex = 0; dirIndex < 2; ++dirIndex)
+        {
+            const bool positiveFace = (dirIndex == 0);
+            for (int slice = 0; slice <= sizeA; ++slice)
             {
-                const FarLodVoxel& voxel = cpu.voxels[voxelIndex(localX, localY, localZ)];
-                if (!voxel.occupied || voxel.material == BlockId::Air)
+                std::fill(mask.begin(), mask.end(), GreedyMaskCell{});
+
+                for (int bi = 0; bi < sizeB; ++bi)
                 {
-                    continue;
+                    for (int ci = 0; ci < sizeC; ++ci)
+                    {
+                        glm::ivec3 positiveLocal{0};
+                        glm::ivec3 negativeLocal{0};
+                        positiveLocal[axis] = slice;
+                        negativeLocal[axis] = slice - 1;
+                        positiveLocal[(axis + 1) % 3] = bi;
+                        positiveLocal[(axis + 2) % 3] = ci;
+                        negativeLocal[(axis + 1) % 3] = bi;
+                        negativeLocal[(axis + 2) % 3] = ci;
+
+                        const glm::ivec3 owningLocal = positiveFace ? negativeLocal : positiveLocal;
+                        if (!isInsideChunk(owningLocal))
+                        {
+                            continue;
+                        }
+
+                        const FarLodVoxel owningVoxel = sampleVoxel(owningLocal);
+                        if (!owningVoxel.occupied || owningVoxel.material == BlockId::Air)
+                        {
+                            continue;
+                        }
+
+                        const FarLodVoxel neighborVoxel = sampleVoxel(positiveFace ? positiveLocal : negativeLocal);
+                        if (!shouldRenderBlockFace(owningVoxel.material, neighborVoxel.material))
+                        {
+                            continue;
+                        }
+
+                        GreedyMaskCell& cell = mask[maskIndex(bi, ci)];
+                        cell.visible = true;
+                        cell.material = owningVoxel.material;
+                        cell.flags = static_cast<std::uint8_t>(owningVoxel.flags & (kFarLodVoxelWater |
+                                                                                   kFarLodVoxelStructure |
+                                                                                   kFarLodVoxelCutout));
+                    }
                 }
 
-                const glm::ivec3 localCoord{localX, localY, localZ};
-                for (const glm::ivec3& normal : kFaceNormals)
+                for (int bi = 0; bi < sizeB; ++bi)
                 {
-                    const glm::ivec3 neighbor = localCoord + normal;
-                    BlockId neighborMaterial = BlockId::Air;
-                    if (neighbor.x >= 0 && neighbor.x < kLogicalSize &&
-                        neighbor.y >= 0 && neighbor.y < kLogicalSize &&
-                        neighbor.z >= 0 && neighbor.z < kLogicalSize)
+                    int ci = 0;
+                    while (ci < sizeC)
                     {
-                        neighborMaterial = cpu.voxels[voxelIndex(neighbor.x, neighbor.y, neighbor.z)].material;
-                    }
+                        GreedyMaskCell& startCell = mask[maskIndex(bi, ci)];
+                        if (!startCell.visible)
+                        {
+                            ++ci;
+                            continue;
+                        }
 
-                    if (!shouldRenderBlockFace(voxel.material, neighborMaterial))
-                    {
-                        continue;
-                    }
+                        int runC = 1;
+                        while (ci + runC < sizeC)
+                        {
+                            const GreedyMaskCell& nextCell = mask[maskIndex(bi, ci + runC)];
+                            if (!nextCell.visible || !nextCell.mergeEquals(startCell))
+                            {
+                                break;
+                            }
+                            ++runC;
+                        }
 
-                    emitFace(localCoord, normal, voxel);
+                        int runB = 1;
+                        while (bi + runB < sizeB)
+                        {
+                            bool rowMatches = true;
+                            for (int offset = 0; offset < runC; ++offset)
+                            {
+                                const GreedyMaskCell& rowCell = mask[maskIndex(bi + runB, ci + offset)];
+                                if (!rowCell.visible || !rowCell.mergeEquals(startCell))
+                                {
+                                    rowMatches = false;
+                                    break;
+                                }
+                            }
+                            if (!rowMatches)
+                            {
+                                break;
+                            }
+                            ++runB;
+                        }
+
+                        emitGreedyQuad(axis, positiveFace, slice, bi, ci, runB, runC, startCell);
+
+                        for (int bOffset = 0; bOffset < runB; ++bOffset)
+                        {
+                            for (int cOffset = 0; cOffset < runC; ++cOffset)
+                            {
+                                mask[maskIndex(bi + bOffset, ci + cOffset)].visible = false;
+                            }
+                        }
+
+                        ci += runC;
+                    }
                 }
             }
         }
@@ -4671,6 +5388,7 @@ private:
     double smoothedFrameMs_{16.0};
     double lastUploadMsUsed_{0.0};
     int farWorkerCount_{1};
+    glm::vec3 lastCameraPosition_{0.0f};
     int lastLoggedGenerationBudget_{-1};
     int lastLoggedRingBudget_{-1};
     int lastLoggedColumnCap_{-1};
@@ -5271,7 +5989,7 @@ ChunkManager::Impl::Impl(unsigned seed)
     farTerrainManager_.setSeaLevel(globalSeaLevel_);
     farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
     const unsigned concurrency = std::max(2u, std::thread::hardware_concurrency());
-    farWorkerCount_ = static_cast<int>(std::clamp(concurrency / 2u, 2u, 8u));
+    farWorkerCount_ = static_cast<int>(std::clamp(concurrency / 3u, 1u, 4u));
     farTerrainManager_.setWorkerCount(static_cast<std::size_t>(farWorkerCount_));
     kFarPlane = computeFarPlaneForDistanceBlocks(chunksToBlocks(renderSettings_.exactChunks));
     startWorkerThreads();
@@ -5434,6 +6152,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cameraForward)
 {
     const auto updateStart = std::chrono::steady_clock::now();
+    lastCameraPosition_ = cameraPos;
     if (glm::dot(cameraForward, cameraForward) > kEpsilon)
     {
         lastCameraForward_ = glm::normalize(cameraForward);
@@ -5635,9 +6354,15 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (renderSettings_.totalChunks > renderSettings_.exactChunks)
     {
         const double lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.35, 0.35, 1.5);
+        const std::size_t exactPendingUploads = estimateUploadQueueSize();
+        const int farWorkerBudget =
+            (missingChunks > 32 || exactPendingUploads > 24) ? 1 :
+            ((missingChunks > 8 || exactPendingUploads > 8) ? std::min(farWorkerCount_, 2) : farWorkerCount_);
         farTerrainManager_.setEnabled(true);
         farTerrainManager_.setDistanceBlocks(chunksToBlocks(renderSettings_.totalChunks));
         farTerrainManager_.setSeaLevel(globalSeaLevel_);
+        farTerrainManager_.setWorkerCount(static_cast<std::size_t>(std::max(farWorkerBudget, 1)));
+        farTerrainManager_.setBacklogPressure(missingChunks, exactPendingUploads);
         farTerrainManager_.update(centerChunk,
                                   lastCameraForward_,
                                   targetViewDistance_,
@@ -5771,6 +6496,7 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     WorldRenderData renderData;
     renderData.highlightedBlock = highlightedBlock_;
     renderData.hasHighlight = hasHighlight_;
+    farTerrainManager_.setVisibility(frustum, lastCameraPosition_);
 
     std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
     {

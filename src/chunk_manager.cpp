@@ -2441,39 +2441,17 @@ private:
     std::unordered_map<glm::ivec2, ColumnData, ColumnHasher> columns_;
 };
 
-struct FarTerrainSurfaceSample
-{
-    int solidTopY{std::numeric_limits<int>::min()};
-    BlockId solidBlock{BlockId::Air};
-    int waterTopY{std::numeric_limits<int>::min()};
-    int waterBottomY{std::numeric_limits<int>::min()};
-    bool hasVisibleWater{false};
-    bool allowsTrees{false};
-    bool prefersSpruce{false};
-    int canopyBaseY{std::numeric_limits<int>::min()};
-    int canopyTopY{std::numeric_limits<int>::min()};
-    BlockId canopyBlock{BlockId::Air};
-    bool hasVisibleCanopy{false};
-    int trunkTopY{std::numeric_limits<int>::min()};
-    BlockId trunkBlock{BlockId::Air};
-    bool hasVisibleTrunk{false};
-};
-
 class FarTerrainManager
 {
 public:
     struct LevelConfig
     {
-        int id{0};
+        int level{0};
         int innerRadiusChunks{0};
         int outerRadiusChunks{0};
-        int tileSizeChunks{8};
-        int sampleStepBlocks{8};
-        int lodLevel{3};
-        int skirtDepthBlocks{32};
+        int regionSpanChunks{8};
     };
 
-    using SampleFn = std::function<FarTerrainSurfaceSample(int worldX, int worldZ, int lodLevel)>;
     using UvLookupFn = std::function<std::pair<glm::vec2, glm::vec2>(BlockId block, BlockFace face)>;
     using StructureQueryFn = std::function<std::vector<StructureInstance>(const glm::ivec3& minWorld,
                                                                           const glm::ivec3& maxWorld,
@@ -2481,11 +2459,11 @@ public:
 
     FarTerrainManager()
         : levels_{
-              LevelConfig{1, kDefaultNearRenderDistance, 72, 4, 2, 1, 6},
-              LevelConfig{2, 72, 128, 8, 4, 2, 12},
-              LevelConfig{3, 128, 192, 16, 8, 3, 24},
-              LevelConfig{4, 192, 320, 32, 16, 4, 48},
-              LevelConfig{5, 320, kMaxTotalRenderDistanceChunks, 64, 32, 5, 96}}
+              LevelConfig{1, kDefaultNearRenderDistance, 72, 4},
+              LevelConfig{2, 72, 128, 8},
+              LevelConfig{3, 128, 192, 16},
+              LevelConfig{4, 192, 320, 32},
+              LevelConfig{5, 320, kMaxTotalRenderDistanceChunks, 64}}
     {
     }
 
@@ -2584,7 +2562,6 @@ public:
                 int nearRadiusChunks,
                 int realDistanceBlocks,
                 double uploadBudgetMs,
-                const SampleFn& sampleFn,
                 const UvLookupFn& uvLookup,
                 const StructureQueryFn& structureQueryFn)
     {
@@ -2610,7 +2587,6 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(configMutex_);
-            sampleFn_ = sampleFn;
             uvLookupFn_ = uvLookup;
             structureQueryFn_ = structureQueryFn;
         }
@@ -2622,30 +2598,30 @@ public:
 
         auto touchLevel = [&](const LevelConfig& level)
         {
-            const int tileMinX = floorDiv(cameraChunk.x - level.outerRadiusChunks, level.tileSizeChunks);
-            const int tileMaxX = floorDiv(cameraChunk.x + level.outerRadiusChunks, level.tileSizeChunks);
-            const int tileMinZ = floorDiv(cameraChunk.z - level.outerRadiusChunks, level.tileSizeChunks);
-            const int tileMaxZ = floorDiv(cameraChunk.z + level.outerRadiusChunks, level.tileSizeChunks);
+            const int regionMinX = floorDiv(cameraChunk.x - level.outerRadiusChunks, level.regionSpanChunks);
+            const int regionMaxX = floorDiv(cameraChunk.x + level.outerRadiusChunks, level.regionSpanChunks);
+            const int regionMinZ = floorDiv(cameraChunk.z - level.outerRadiusChunks, level.regionSpanChunks);
+            const int regionMaxZ = floorDiv(cameraChunk.z + level.outerRadiusChunks, level.regionSpanChunks);
 
-            for (int tileX = tileMinX; tileX <= tileMaxX; ++tileX)
+            for (int regionX = regionMinX; regionX <= regionMaxX; ++regionX)
             {
-                for (int tileZ = tileMinZ; tileZ <= tileMaxZ; ++tileZ)
+                for (int regionZ = regionMinZ; regionZ <= regionMaxZ; ++regionZ)
                 {
-                    if (!tileIntersectsRing(level, cameraChunk_, tileX, tileZ))
+                    if (!regionIntersectsRing(level, cameraChunk_, regionX, regionZ))
                     {
                         continue;
                     }
 
-                    FarTileKey key{level.id, tileX, tileZ};
-                    FarTile& tile = tiles_[key];
-                    tile.key = key;
-                    tile.level = level;
-                    tile.lastTouchedStamp = updateStamp_;
-                    tile.active = true;
-                    if (!tile.initialized)
+                    FarRegionKey key{level.level, regionX, regionZ};
+                    FarRegionRecord& region = regions_[key];
+                    region.key = key;
+                    region.level = level;
+                    region.lastTouchedStamp = updateStamp_;
+                    region.active = true;
+                    if (!region.initialized)
                     {
-                        initializeTile(tile, level);
-                        tile.dirty = true;
+                        initializeRegion(region, level);
+                        region.dirty = true;
                     }
                 }
             }
@@ -2659,26 +2635,26 @@ public:
             }
         }
 
-        std::vector<FarTileKey> staleKeys;
-        staleKeys.reserve(tiles_.size());
-        for (const auto& [key, tile] : tiles_)
+        std::vector<FarRegionKey> staleKeys;
+        staleKeys.reserve(regions_.size());
+        for (const auto& [key, region] : regions_)
         {
-            if (tile.lastTouchedStamp != updateStamp_)
+            if (region.lastTouchedStamp != updateStamp_)
             {
                 staleKeys.push_back(key);
             }
         }
 
-        for (const FarTileKey& key : staleKeys)
+        for (const FarRegionKey& key : staleKeys)
         {
-            auto it = tiles_.find(key);
-            if (it == tiles_.end())
+            auto it = regions_.find(key);
+            if (it == regions_.end())
             {
                 continue;
             }
 
-            releaseTileGpu(it->second);
-            tiles_.erase(it);
+            releaseRegionGpu(it->second);
+            regions_.erase(it);
         }
     }
 
@@ -2690,21 +2666,21 @@ public:
 
     void invalidateWorldBlock(const glm::ivec3& worldPos)
     {
-        for (auto& [key, tile] : tiles_)
+        for (auto& [key, region] : regions_)
         {
             (void)key;
-            const int tileSpanBlocks = tile.level.tileSizeChunks * kChunkSizeX;
-            const int minX = tile.key.tileX * tileSpanBlocks;
-            const int minZ = tile.key.tileZ * tileSpanBlocks;
-            const int maxX = minX + tileSpanBlocks;
-            const int maxZ = minZ + tileSpanBlocks;
-            if (worldPos.x < minX - tileSpanBlocks || worldPos.x > maxX + tileSpanBlocks ||
-                worldPos.z < minZ - tileSpanBlocks || worldPos.z > maxZ + tileSpanBlocks)
+            const int regionSpanBlocks = region.level.regionSpanChunks * kChunkSizeX;
+            const int minX = region.key.regionX * regionSpanBlocks;
+            const int minZ = region.key.regionZ * regionSpanBlocks;
+            const int maxX = minX + regionSpanBlocks;
+            const int maxZ = minZ + regionSpanBlocks;
+            if (worldPos.x < minX - regionSpanBlocks || worldPos.x > maxX + regionSpanBlocks ||
+                worldPos.z < minZ - regionSpanBlocks || worldPos.z > maxZ + regionSpanBlocks)
             {
                 continue;
             }
 
-            markDirty(tile);
+            markDirty(region);
         }
     }
 
@@ -2720,13 +2696,13 @@ public:
             std::lock_guard<std::mutex> lock(completedMutex_);
             completedBuilds_.clear();
         }
-        for (auto& [key, tile] : tiles_)
+        for (auto& [key, region] : regions_)
         {
             (void)key;
-            releaseTileGpu(tile);
-            tile.inFlight = false;
+            releaseRegionGpu(region);
+            region.inFlight = false;
         }
-        tiles_.clear();
+        regions_.clear();
         destroyBufferPages();
         builtTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
@@ -2739,16 +2715,16 @@ public:
 
     [[nodiscard]] int activeTileCount() const noexcept
     {
-        return static_cast<int>(tiles_.size());
+        return static_cast<int>(regions_.size());
     }
 
     [[nodiscard]] int dirtyTileCount() const noexcept
     {
         int dirty = 0;
-        for (const auto& [key, tile] : tiles_)
+        for (const auto& [key, region] : regions_)
         {
             (void)key;
-            if (tile.active && tile.dirty)
+            if (region.active && region.dirty)
             {
                 ++dirty;
             }
@@ -2776,19 +2752,17 @@ private:
     {
         struct LevelTemplate
         {
-            int id;
+            int level;
             int outerRadiusChunks;
-            int tileSizeChunks;
-            int sampleStepBlocks;
-            int lodLevel;
+            int regionSpanChunks;
         };
 
         static constexpr std::array<LevelTemplate, 5> kLevelTemplates{{
-            {1, 72, 4, 2, 1},
-            {2, 128, 8, 4, 2},
-            {3, 192, 16, 8, 3},
-            {4, 320, 32, 16, 4},
-            {5, kMaxTotalRenderDistanceChunks, 64, 32, 5},
+            {1, 72, 4},
+            {2, 128, 8},
+            {3, 192, 16},
+            {4, 320, 32},
+            {5, kMaxTotalRenderDistanceChunks, 64},
         }};
 
         levels_.clear();
@@ -2804,43 +2778,40 @@ private:
             const int outerRadiusChunks = std::min(totalRadiusChunks, levelTemplate.outerRadiusChunks);
             const int innerRadiusChunks = levels_.empty()
                                               ? std::max(0, nearRadiusChunks - kExactOverlapChunks)
-                                              : std::max(0, previousOuterRadiusChunks - levelTemplate.tileSizeChunks);
+                                              : std::max(0, previousOuterRadiusChunks - levelTemplate.regionSpanChunks);
             if (outerRadiusChunks <= innerRadiusChunks)
             {
                 continue;
             }
 
             levels_.push_back(LevelConfig{
-                levelTemplate.id,
+                levelTemplate.level,
                 innerRadiusChunks,
                 outerRadiusChunks,
-                levelTemplate.tileSizeChunks,
-                levelTemplate.sampleStepBlocks,
-                levelTemplate.lodLevel,
-                std::max(levelTemplate.sampleStepBlocks * 2, 8)});
+                levelTemplate.regionSpanChunks});
             previousOuterRadiusChunks = outerRadiusChunks;
         }
     }
 
-    struct FarTileKey
+    struct FarRegionKey
     {
         int level{0};
-        int tileX{0};
-        int tileZ{0};
+        int regionX{0};
+        int regionZ{0};
 
-        bool operator==(const FarTileKey& other) const noexcept
+        bool operator==(const FarRegionKey& other) const noexcept
         {
-            return level == other.level && tileX == other.tileX && tileZ == other.tileZ;
+            return level == other.level && regionX == other.regionX && regionZ == other.regionZ;
         }
     };
 
-    struct FarTileKeyHasher
+    struct FarRegionKeyHasher
     {
-        std::size_t operator()(const FarTileKey& key) const noexcept
+        std::size_t operator()(const FarRegionKey& key) const noexcept
         {
             std::size_t hash = static_cast<std::size_t>(key.level) * 73856093u;
-            hash ^= static_cast<std::size_t>(key.tileX) * 19349663u;
-            hash ^= static_cast<std::size_t>(key.tileZ) * 83492791u;
+            hash ^= static_cast<std::size_t>(key.regionX) * 19349663u;
+            hash ^= static_cast<std::size_t>(key.regionZ) * 83492791u;
             return hash;
         }
     };
@@ -2878,9 +2849,9 @@ private:
         std::size_t indexOffset{0};
     };
 
-    struct FarTile
+    struct FarRegionRecord
     {
-        FarTileKey key{};
+        FarRegionKey key{};
         LevelConfig level{};
         glm::vec3 boundsMin{0.0f};
         glm::vec3 boundsMax{0.0f};
@@ -2907,7 +2878,7 @@ private:
 
     struct BuildResult
     {
-        FarTileKey key{};
+        FarRegionKey key{};
         std::uint32_t buildVersion{0};
         std::uint64_t epoch{0};
         TileMesh mesh{};
@@ -2919,7 +2890,7 @@ private:
 
     struct BuildJob
     {
-        FarTileKey key{};
+        FarRegionKey key{};
         LevelConfig level{};
         std::uint32_t buildVersion{0};
         std::uint64_t epoch{0};
@@ -2983,15 +2954,15 @@ private:
         return value + 1;
     }
 
-    [[nodiscard]] static bool tileIntersectsRing(const LevelConfig& level,
-                                                 const glm::ivec3& cameraChunk,
-                                                 int tileX,
-                                                 int tileZ) noexcept
+    [[nodiscard]] static bool regionIntersectsRing(const LevelConfig& level,
+                                                   const glm::ivec3& cameraChunk,
+                                                   int regionX,
+                                                   int regionZ) noexcept
     {
-        const int minX = tileX * level.tileSizeChunks;
-        const int maxX = minX + level.tileSizeChunks - 1;
-        const int minZ = tileZ * level.tileSizeChunks;
-        const int maxZ = minZ + level.tileSizeChunks - 1;
+        const int minX = regionX * level.regionSpanChunks;
+        const int maxX = minX + level.regionSpanChunks - 1;
+        const int minZ = regionZ * level.regionSpanChunks;
+        const int maxZ = minZ + level.regionSpanChunks - 1;
 
         const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
         {
@@ -3012,15 +2983,15 @@ private:
         return maxDistance > level.innerRadiusChunks && minDistance <= level.outerRadiusChunks;
     }
 
-    [[nodiscard]] static int tileMinRingDistanceChunks(const LevelConfig& level,
-                                                       const glm::ivec3& cameraChunk,
-                                                       int tileX,
-                                                       int tileZ) noexcept
+    [[nodiscard]] static int regionMinRingDistanceChunks(const LevelConfig& level,
+                                                         const glm::ivec3& cameraChunk,
+                                                         int regionX,
+                                                         int regionZ) noexcept
     {
-        const int minX = tileX * level.tileSizeChunks;
-        const int maxX = minX + level.tileSizeChunks - 1;
-        const int minZ = tileZ * level.tileSizeChunks;
-        const int maxZ = minZ + level.tileSizeChunks - 1;
+        const int minX = regionX * level.regionSpanChunks;
+        const int maxX = minX + level.regionSpanChunks - 1;
+        const int minZ = regionZ * level.regionSpanChunks;
+        const int maxZ = minZ + level.regionSpanChunks - 1;
 
         const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
         {
@@ -3034,26 +3005,26 @@ private:
         return std::max(0, minDistance - level.innerRadiusChunks);
     }
 
-    void initializeTile(FarTile& tile, const LevelConfig& level)
+    void initializeRegion(FarRegionRecord& region, const LevelConfig& level)
     {
-        const int tileSpanBlocks = level.tileSizeChunks * kChunkSizeX;
-        const float minX = static_cast<float>(tile.key.tileX * tileSpanBlocks);
-        const float minZ = static_cast<float>(tile.key.tileZ * tileSpanBlocks);
-        const float maxX = static_cast<float>((tile.key.tileX + 1) * tileSpanBlocks);
-        const float maxZ = static_cast<float>((tile.key.tileZ + 1) * tileSpanBlocks);
-        tile.level = level;
-        tile.boundsMin = glm::vec3(minX, 0.0f, minZ);
-        tile.boundsMax = glm::vec3(maxX, 1.0f, maxZ);
-        tile.initialized = true;
+        const int regionSpanBlocks = level.regionSpanChunks * kChunkSizeX;
+        const float minX = static_cast<float>(region.key.regionX * regionSpanBlocks);
+        const float minZ = static_cast<float>(region.key.regionZ * regionSpanBlocks);
+        const float maxX = static_cast<float>((region.key.regionX + 1) * regionSpanBlocks);
+        const float maxZ = static_cast<float>((region.key.regionZ + 1) * regionSpanBlocks);
+        region.level = level;
+        region.boundsMin = glm::vec3(minX, 0.0f, minZ);
+        region.boundsMax = glm::vec3(maxX, 1.0f, maxZ);
+        region.initialized = true;
     }
 
-    void markDirty(FarTile& tile)
+    void markDirty(FarRegionRecord& region)
     {
-        tile.dirty = true;
-        ++tile.buildVersion;
-        if (tile.buildVersion == 0)
+        region.dirty = true;
+        ++region.buildVersion;
+        if (region.buildVersion == 0)
         {
-            tile.buildVersion = 1;
+            region.buildVersion = 1;
         }
     }
 
@@ -3196,29 +3167,29 @@ private:
         return allocation;
     }
 
-    void releaseTileGpu(FarTile& tile)
+    void releaseRegionGpu(FarRegionRecord& region)
     {
-        if (tile.pageIndex == kInvalidChunkBufferPage)
+        if (region.pageIndex == kInvalidChunkBufferPage)
         {
-            tile.vertexOffset = 0;
-            tile.indexOffset = 0;
-            tile.vertexCount = 0;
-            tile.indexCount = 0;
+            region.vertexOffset = 0;
+            region.indexOffset = 0;
+            region.vertexCount = 0;
+            region.indexCount = 0;
             return;
         }
 
-        if (tile.pageIndex < bufferPages_.size())
+        if (region.pageIndex < bufferPages_.size())
         {
-            BufferPage& page = bufferPages_[tile.pageIndex];
-            mergeRange(page.freeVertices, tile.vertexOffset, tile.vertexCount);
-            mergeRange(page.freeIndices, tile.indexOffset, static_cast<std::size_t>(tile.indexCount));
+            BufferPage& page = bufferPages_[region.pageIndex];
+            mergeRange(page.freeVertices, region.vertexOffset, region.vertexCount);
+            mergeRange(page.freeIndices, region.indexOffset, static_cast<std::size_t>(region.indexCount));
         }
 
-        tile.pageIndex = kInvalidChunkBufferPage;
-        tile.vertexOffset = 0;
-        tile.indexOffset = 0;
-        tile.vertexCount = 0;
-        tile.indexCount = 0;
+        region.pageIndex = kInvalidChunkBufferPage;
+        region.vertexOffset = 0;
+        region.indexOffset = 0;
+        region.vertexCount = 0;
+        region.indexCount = 0;
     }
 
     void destroyBufferPages()
@@ -3235,53 +3206,11 @@ private:
         bufferPages_.clear();
     }
 
-    [[nodiscard]] static bool hasSolidSurface(const FarTerrainSurfaceSample& sample) noexcept
-    {
-        return sample.solidTopY != std::numeric_limits<int>::min() && sample.solidBlock != BlockId::Air;
-    }
-
-
-    [[nodiscard]] static bool isSubmergedSurface(const FarTerrainSurfaceSample& sample) noexcept
-    {
-        return sample.hasVisibleWater &&
-               sample.waterTopY != std::numeric_limits<int>::min() &&
-               hasSolidSurface(sample) &&
-               sample.solidTopY < sample.waterTopY;
-    }
-
-    [[nodiscard]] static bool hasCanopySurface(const FarTerrainSurfaceSample& sample) noexcept
-    {
-        return sample.hasVisibleCanopy &&
-               sample.canopyBlock != BlockId::Air &&
-               sample.canopyTopY != std::numeric_limits<int>::min() &&
-               sample.canopyBaseY != std::numeric_limits<int>::min() &&
-               sample.canopyTopY >= sample.canopyBaseY;
-    }
-
-    [[nodiscard]] static bool hasTrunkSurface(const FarTerrainSurfaceSample& sample) noexcept
-    {
-        return sample.hasVisibleTrunk &&
-               sample.trunkBlock != BlockId::Air &&
-               sample.trunkTopY != std::numeric_limits<int>::min() &&
-               hasSolidSurface(sample) &&
-               sample.trunkTopY > sample.solidTopY;
-    }
-
-    [[nodiscard]] static float blockTopY(int topBlockY) noexcept
-    {
-        return static_cast<float>(topBlockY + 1);
-    }
-
-    [[nodiscard]] static float blockBottomY(int blockY) noexcept
-    {
-        return static_cast<float>(blockY);
-    }
-
 public:
     [[nodiscard]] int readyTileCount() const noexcept
     {
         int ready = 0;
-        for (const auto& [key, tile] : tiles_)
+        for (const auto& [key, tile] : regions_)
         {
             (void)key;
             if (tile.active && tile.indexCount > 0)
@@ -3295,7 +3224,7 @@ public:
     [[nodiscard]] int queuedTileCount() const noexcept
     {
         int queued = 0;
-        for (const auto& [key, tile] : tiles_)
+        for (const auto& [key, tile] : regions_)
         {
             (void)key;
             if (tile.active && tile.inFlight)
@@ -3340,9 +3269,9 @@ public:
 
     [[nodiscard]] LodDiagnosticsSnapshot diagnosticsSnapshot(const glm::vec3& cameraPos) const
     {
-        struct OrderedTile
+        struct OrderedRegion
         {
-            const FarTile* tile{nullptr};
+            const FarRegionRecord* region{nullptr};
             float distanceSq{0.0f};
         };
 
@@ -3350,33 +3279,33 @@ public:
         LodDiagnosticsSnapshot snapshot{};
 
         std::lock_guard<std::mutex> lock(configMutex_);
-        std::vector<OrderedTile> orderedTiles;
-        orderedTiles.reserve(tiles_.size());
-        for (const auto& [key, tile] : tiles_)
+        std::vector<OrderedRegion> orderedRegions;
+        orderedRegions.reserve(regions_.size());
+        for (const auto& [key, region] : regions_)
         {
             (void)key;
-            if (!tile.active)
+            if (!region.active)
             {
                 continue;
             }
 
             ++snapshot.activeTiles;
-            if (tile.indexCount > 0)
+            if (region.indexCount > 0)
             {
                 ++snapshot.readyTiles;
             }
-            if (tile.dirty)
+            if (region.dirty)
             {
                 ++snapshot.dirtyTiles;
             }
-            if (tile.inFlight)
+            if (region.inFlight)
             {
                 ++snapshot.inFlightTiles;
             }
 
-            const glm::vec3 center = (tile.boundsMin + tile.boundsMax) * 0.5f;
+            const glm::vec3 center = (region.boundsMin + region.boundsMax) * 0.5f;
             const glm::vec3 delta = center - cameraPos;
-            orderedTiles.push_back(OrderedTile{&tile, glm::dot(delta, delta)});
+            orderedRegions.push_back(OrderedRegion{&region, glm::dot(delta, delta)});
         }
 
         snapshot.averageBuildMs = lastAverageBuildMs_;
@@ -3384,29 +3313,29 @@ public:
         snapshot.averageGpuStampMs = lastAverageGpuStampMs_;
         snapshot.averageGpuFaceBuildMs = lastAverageGpuFaceBuildMs_;
 
-        std::sort(orderedTiles.begin(),
-                  orderedTiles.end(),
-                  [](const OrderedTile& lhs, const OrderedTile& rhs)
+        std::sort(orderedRegions.begin(),
+                  orderedRegions.end(),
+                  [](const OrderedRegion& lhs, const OrderedRegion& rhs)
                   {
                       return lhs.distanceSq < rhs.distanceSq;
                   });
 
-        snapshot.tiles.reserve(std::min<std::size_t>(orderedTiles.size(), kMaxSnapshotTiles));
-        for (std::size_t tileIndex = 0; tileIndex < orderedTiles.size() && tileIndex < kMaxSnapshotTiles; ++tileIndex)
+        snapshot.tiles.reserve(std::min<std::size_t>(orderedRegions.size(), kMaxSnapshotTiles));
+        for (std::size_t tileIndex = 0; tileIndex < orderedRegions.size() && tileIndex < kMaxSnapshotTiles; ++tileIndex)
         {
-            const FarTile& tile = *orderedTiles[tileIndex].tile;
+            const FarRegionRecord& region = *orderedRegions[tileIndex].region;
             LodDiagnosticsTileSnapshot tileSnapshot{};
-            tileSnapshot.level = tile.key.level;
-            tileSnapshot.tileCoord = glm::ivec2(tile.key.tileX, tile.key.tileZ);
-            tileSnapshot.distanceSq = orderedTiles[tileIndex].distanceSq;
-            tileSnapshot.active = tile.active;
-            tileSnapshot.dirty = tile.dirty;
-            tileSnapshot.inFlight = tile.inFlight;
-            tileSnapshot.indexCount = tile.indexCount;
-            tileSnapshot.blockScaleBlocks = tile.level.sampleStepBlocks;
-            tileSnapshot.chunkSpanBlocks = tile.level.tileSizeChunks * kChunkSizeX;
-            tileSnapshot.worldMin = glm::ivec3(tile.boundsMin);
-            tileSnapshot.worldMax = glm::ivec3(tile.boundsMax);
+            tileSnapshot.level = region.key.level;
+            tileSnapshot.tileCoord = glm::ivec2(region.key.regionX, region.key.regionZ);
+            tileSnapshot.distanceSq = orderedRegions[tileIndex].distanceSq;
+            tileSnapshot.active = region.active;
+            tileSnapshot.dirty = region.dirty;
+            tileSnapshot.inFlight = region.inFlight;
+            tileSnapshot.indexCount = region.indexCount;
+            tileSnapshot.blockScaleBlocks = 0;
+            tileSnapshot.chunkSpanBlocks = region.level.regionSpanChunks * kChunkSizeX;
+            tileSnapshot.worldMin = glm::ivec3(region.boundsMin);
+            tileSnapshot.worldMax = glm::ivec3(region.boundsMax);
 
             snapshot.tiles.push_back(tileSnapshot);
         }
@@ -3416,9 +3345,9 @@ public:
 
     void writeDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const
     {
-        struct OrderedTile
+        struct OrderedRegion
         {
-            const FarTile* tile{nullptr};
+            const FarRegionRecord* region{nullptr};
             float distanceSq{0.0f};
         };
 
@@ -3432,44 +3361,44 @@ public:
             out << '[' << value.x << ',' << value.y << ',' << value.z << ']';
         };
         std::lock_guard<std::mutex> lock(configMutex_);
-        std::vector<OrderedTile> orderedTiles;
-        orderedTiles.reserve(tiles_.size());
+        std::vector<OrderedRegion> orderedRegions;
+        orderedRegions.reserve(regions_.size());
         int activeTiles = 0;
         int readyTiles = 0;
         int dirtyTiles = 0;
         int inFlightTiles = 0;
-        for (const auto& [key, tile] : tiles_)
+        for (const auto& [key, region] : regions_)
         {
             (void)key;
-            if (!tile.active)
+            if (!region.active)
             {
                 continue;
             }
 
             ++activeTiles;
-            if (tile.indexCount > 0)
+            if (region.indexCount > 0)
             {
                 ++readyTiles;
             }
-            if (tile.dirty)
+            if (region.dirty)
             {
                 ++dirtyTiles;
             }
-            if (tile.inFlight)
+            if (region.inFlight)
             {
                 ++inFlightTiles;
             }
 
-            const glm::vec3 center = (tile.boundsMin + tile.boundsMax) * 0.5f;
+            const glm::vec3 center = (region.boundsMin + region.boundsMax) * 0.5f;
             const glm::vec3 delta = center - cameraPos;
-            orderedTiles.push_back(OrderedTile{
-                &tile,
+            orderedRegions.push_back(OrderedRegion{
+                &region,
                 glm::dot(delta, delta)});
         }
 
-        std::sort(orderedTiles.begin(),
-                  orderedTiles.end(),
-                  [](const OrderedTile& lhs, const OrderedTile& rhs)
+        std::sort(orderedRegions.begin(),
+                  orderedRegions.end(),
+                  [](const OrderedRegion& lhs, const OrderedRegion& rhs)
                   {
                       return lhs.distanceSq < rhs.distanceSq;
                   });
@@ -3498,34 +3427,33 @@ public:
             << ",\n  \"in_flight_tiles\":" << inFlightTiles
             << ",\n  \"tiles\":[\n";
 
-        const std::size_t tileCount = std::min<std::size_t>(orderedTiles.size(), kMaxSnapshotTiles);
+        const std::size_t tileCount = std::min<std::size_t>(orderedRegions.size(), kMaxSnapshotTiles);
         for (std::size_t tileIndex = 0; tileIndex < tileCount; ++tileIndex)
         {
-            const FarTile& tile = *orderedTiles[tileIndex].tile;
+            const FarRegionRecord& region = *orderedRegions[tileIndex].region;
             if (tileIndex > 0)
             {
                 out << ",\n";
             }
 
             out << "    {\n";
-            out << "      \"level\":" << tile.key.level
-                << ",\n      \"tile_x\":" << tile.key.tileX
-                << ",\n      \"tile_z\":" << tile.key.tileZ
-                << ",\n      \"distance_sq\":" << orderedTiles[tileIndex].distanceSq
+            out << "      \"level\":" << region.key.level
+                << ",\n      \"region_x\":" << region.key.regionX
+                << ",\n      \"region_z\":" << region.key.regionZ
+                << ",\n      \"distance_sq\":" << orderedRegions[tileIndex].distanceSq
                 << ",\n      \"active\":";
-            writeBool(out, tile.active);
+            writeBool(out, region.active);
             out << ",\n      \"dirty\":";
-            writeBool(out, tile.dirty);
+            writeBool(out, region.dirty);
             out << ",\n      \"in_flight\":";
-            writeBool(out, tile.inFlight);
-            out << ",\n      \"vertex_count\":" << tile.vertexCount
-                << ",\n      \"index_count\":" << tile.indexCount
-                << ",\n      \"block_scale_blocks\":" << tile.level.sampleStepBlocks
-                << ",\n      \"chunk_span_blocks\":" << (tile.level.tileSizeChunks * kChunkSizeX)
+            writeBool(out, region.inFlight);
+            out << ",\n      \"vertex_count\":" << region.vertexCount
+                << ",\n      \"index_count\":" << region.indexCount
+                << ",\n      \"chunk_span_blocks\":" << (region.level.regionSpanChunks * kChunkSizeX)
                 << ",\n      \"bounds_min\":";
-            writeVec3(out, tile.boundsMin);
+            writeVec3(out, region.boundsMin);
             out << ",\n      \"bounds_max\":";
-            writeVec3(out, tile.boundsMax);
+            writeVec3(out, region.boundsMax);
 
             out << "\n    }";
         }
@@ -3594,11 +3522,11 @@ private:
         lastUploadMs_ = 0.0;
     }
 
-    void uploadBuiltTile(FarTile& tile, const TileMesh& mesh)
+    void uploadBuiltRegion(FarRegionRecord& region, const TileMesh& mesh)
     {
-        releaseTileGpu(tile);
-        tile.boundsMin = mesh.boundsMin;
-        tile.boundsMax = mesh.boundsMax;
+        releaseRegionGpu(region);
+        region.boundsMin = mesh.boundsMin;
+        region.boundsMax = mesh.boundsMax;
 
         if (mesh.vertices.empty() || mesh.indices.empty())
         {
@@ -3611,38 +3539,38 @@ private:
             return;
         }
 
-        tile.pageIndex = allocation.pageIndex;
-        tile.vertexOffset = allocation.vertexOffset;
-        tile.indexOffset = allocation.indexOffset;
-        tile.vertexCount = mesh.vertices.size();
-        tile.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+        region.pageIndex = allocation.pageIndex;
+        region.vertexOffset = allocation.vertexOffset;
+        region.indexOffset = allocation.indexOffset;
+        region.vertexCount = mesh.vertices.size();
+        region.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
 
         BufferPage& page = bufferPages_[allocation.pageIndex];
         if (page.mappedVertexData != nullptr && !mesh.vertices.empty())
         {
-            std::memcpy(page.mappedVertexData + tile.vertexOffset * sizeof(Vertex),
+            std::memcpy(page.mappedVertexData + region.vertexOffset * sizeof(Vertex),
                         mesh.vertices.data(),
                         mesh.vertices.size() * sizeof(Vertex));
             if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
             {
                 uploadContext_.copyBuffer(page.vertexBuffer.Get(),
-                                          static_cast<std::uint64_t>(tile.vertexOffset * sizeof(Vertex)),
+                                          static_cast<std::uint64_t>(region.vertexOffset * sizeof(Vertex)),
                                           page.vertexUploadBuffer.Get(),
-                                          static_cast<std::uint64_t>(tile.vertexOffset * sizeof(Vertex)),
+                                          static_cast<std::uint64_t>(region.vertexOffset * sizeof(Vertex)),
                                           static_cast<std::uint64_t>(mesh.vertices.size() * sizeof(Vertex)));
             }
         }
         if (page.mappedIndexData != nullptr && !mesh.indices.empty())
         {
-            std::memcpy(page.mappedIndexData + tile.indexOffset * sizeof(std::uint32_t),
+            std::memcpy(page.mappedIndexData + region.indexOffset * sizeof(std::uint32_t),
                         mesh.indices.data(),
                         mesh.indices.size() * sizeof(std::uint32_t));
             if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
             {
                 uploadContext_.copyBuffer(page.indexBuffer.Get(),
-                                          static_cast<std::uint64_t>(tile.indexOffset * sizeof(std::uint32_t)),
+                                          static_cast<std::uint64_t>(region.indexOffset * sizeof(std::uint32_t)),
                                           page.indexUploadBuffer.Get(),
-                                          static_cast<std::uint64_t>(tile.indexOffset * sizeof(std::uint32_t)),
+                                          static_cast<std::uint64_t>(region.indexOffset * sizeof(std::uint32_t)),
                                           static_cast<std::uint64_t>(mesh.indices.size() * sizeof(std::uint32_t)));
             }
         }
@@ -3665,15 +3593,14 @@ private:
     std::vector<BufferPage> bufferPages_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     UploadContext uploadContext_{};
-    std::unordered_map<FarTileKey, FarTile, FarTileKeyHasher> tiles_;
+    std::unordered_map<FarRegionKey, FarRegionRecord, FarRegionKeyHasher> regions_;
     mutable std::mutex configMutex_;
-    SampleFn sampleFn_{};
     UvLookupFn uvLookupFn_{};
     StructureQueryFn structureQueryFn_{};
     mutable std::mutex buildQueueMutex_;
     std::condition_variable buildQueueCv_;
     std::deque<BuildJob> buildQueue_;
-    std::unordered_set<FarTileKey, FarTileKeyHasher> queuedKeys_;
+    std::unordered_set<FarRegionKey, FarRegionKeyHasher> queuedKeys_;
     mutable std::mutex completedMutex_;
     std::deque<BuildResult> completedBuilds_;
     std::vector<std::thread> workerThreads_;
@@ -3950,7 +3877,6 @@ private:
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
                               int slabMaxWorldY = std::numeric_limits<int>::max()) const;
-    FarTerrainSurfaceSample sampleFarTerrainSurfaceLod(int worldX, int worldZ, int lodLevel) const;
     int ensureColumnHeightCached(const glm::ivec2& column, int worldX, int worldZ) const;
     bool tryGetCachedColumnHeight(const glm::ivec2& column, int worldX, int worldZ, int& outHeight) const;
     bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
@@ -4948,61 +4874,6 @@ std::pair<glm::vec2, glm::vec2> ChunkManager::Impl::atlasUvFor(BlockId block, Bl
     return {uv.base, uv.size};
 }
 
-FarTerrainSurfaceSample ChunkManager::Impl::sampleFarTerrainSurfaceLod(int worldX, int worldZ, int lodLevel) const
-{
-    FarTerrainSurfaceSample visual{};
-    if (!surfaceMap_ || !climateMap_)
-    {
-        return visual;
-    }
-
-    const terrain::SurfaceColumn& surfaceColumn = surfaceMap_->column(worldX, worldZ, lodLevel);
-    const terrain::ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
-    if (!surfaceColumn.dominantBiome)
-    {
-        return visual;
-    }
-
-    const BiomeDefinition& biome = *surfaceColumn.dominantBiome;
-    ColumnSample resolvedSample{};
-    resolvedSample.surfaceY = surfaceColumn.surfaceY;
-    resolvedSample.distanceToShore = std::isfinite(climateSample.distanceToCoast)
-                                         ? climateSample.distanceToCoast
-                                         : std::numeric_limits<float>::infinity();
-    const terrain::TerrainColumnBlocks resolvedBlocks =
-        terrain::resolveTerrainColumnBlocks(biome, resolvedSample, worldX, worldZ, globalSeaLevel_);
-
-    visual.solidTopY = surfaceColumn.surfaceY;
-    visual.solidBlock = resolvedBlocks.surfaceBlock;
-    const int cachedTop = columnManager_.highestSolidBlock(worldX, worldZ);
-    const int cacheTolerance = std::max(1 << std::clamp(lodLevel, 0, 6), 12);
-    if (cachedTop != ColumnManager::kNoHeight &&
-        std::abs(cachedTop - surfaceColumn.surfaceY) <= cacheTolerance)
-    {
-        visual.solidTopY = cachedTop;
-    }
-
-    const auto& waterFill = biome.terrainSettings.waterFill;
-    if (waterFill.enabled && surfaceColumn.surfaceY < globalSeaLevel_)
-    {
-        visual.waterTopY = globalSeaLevel_;
-        // Mirror the exact-terrain water depth envelope on the shared CPU/GPU macro rules. The old
-        // shallow top-only band produced giant hollow lids over deep water because the hybrid page
-        // stores only a single Y slice per tile.
-        int waterBottomY = surfaceColumn.surfaceY + 1;
-        if (waterFill.maxDepth > 0)
-        {
-            waterBottomY = std::max(waterBottomY, globalSeaLevel_ - waterFill.maxDepth + 1);
-        }
-        visual.waterBottomY = waterBottomY;
-        visual.hasVisibleWater = (visual.waterBottomY <= visual.waterTopY);
-    }
-    visual.allowsTrees = biome.generatesTrees && surfaceColumn.surfaceY > 2;
-    visual.prefersSpruce = terrain::isTaigaBiome(biome);
-
-    return visual;
-}
-
 void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 {
     update(cameraPos, lastCameraForward_);
@@ -5219,10 +5090,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                   targetViewDistance_,
                                   chunksToBlocks(renderSettings_.totalChunks),
                                   lodUploadBudgetMs,
-                                  [this](int lodWorldX, int lodWorldZ, int lodLevel)
-                                  {
-                                      return sampleFarTerrainSurfaceLod(lodWorldX, lodWorldZ, lodLevel);
-                                  },
                                   [this](BlockId block, BlockFace face)
                                   {
                                       return atlasUvFor(block, face);

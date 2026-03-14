@@ -1103,12 +1103,9 @@ public:
     void dispatchSynth(const glm::ivec3& worldMin,
                        int blockScale,
                        int seaLevel,
-                       ID3D12Resource* sampleBuffer,
-                       std::uint64_t sampleOffsetBytes,
-                       std::uint32_t sampleCount,
                        ID3D12Resource* voxelBuffer)
     {
-        if (!open_ || sampleBuffer == nullptr || voxelBuffer == nullptr || sampleCount == 0)
+        if (!open_ || voxelBuffer == nullptr)
         {
             return;
         }
@@ -1119,13 +1116,8 @@ public:
             static_cast<std::uint32_t>(worldMin.z),
             static_cast<std::uint32_t>(blockScale),
             static_cast<std::uint32_t>(seaLevel)};
-        const UINT descriptorIndex = allocateDescriptorRange(2);
-        writeStructuredSrvDescriptor(descriptorIndex,
-                                     sampleBuffer,
-                                     sampleOffsetBytes,
-                                     sampleCount,
-                                     kGpuContextTerrainSampleStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 1u,
+        const UINT descriptorIndex = allocateDescriptorRange(1);
+        writeStructuredUavDescriptor(descriptorIndex,
                                      voxelBuffer,
                                      0,
                                      kGpuContextVoxelCount,
@@ -1135,12 +1127,9 @@ public:
         commandList_->SetPipelineState(synthPipelineState_.Get());
         commandList_->SetComputeRootSignature(synthRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
+        uavHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(1, uavHandle);
         commandList_->Dispatch(4, 4, 4);
         hasCommands_ = true;
     }
@@ -1265,7 +1254,6 @@ public:
 private:
     static constexpr std::uint32_t kGpuContextLogicalSize = 16u;
     static constexpr std::uint32_t kGpuContextVoxelCount = kGpuContextLogicalSize * kGpuContextLogicalSize * kGpuContextLogicalSize;
-    static constexpr std::uint32_t kGpuContextTerrainSampleStrideBytes = 20u;
     static constexpr std::uint32_t kGpuContextStampEntryStrideBytes = 8u;
     static constexpr std::uint32_t kGpuContextPackedVoxelStrideBytes = 4u;
     static constexpr UINT kDescriptorHeapDescriptorCount = 512u;
@@ -1361,27 +1349,19 @@ private:
                             createMessage.c_str());
         };
 
-        D3D12_DESCRIPTOR_RANGE synthSrvRange{};
-        synthSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        synthSrvRange.NumDescriptors = 1;
-        synthSrvRange.BaseShaderRegister = 0;
-        synthSrvRange.OffsetInDescriptorsFromTableStart = 0;
         D3D12_DESCRIPTOR_RANGE synthUavRange{};
         synthUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
         synthUavRange.NumDescriptors = 1;
         synthUavRange.BaseShaderRegister = 0;
         synthUavRange.OffsetInDescriptorsFromTableStart = 0;
 
-        std::array<D3D12_ROOT_PARAMETER, 3> synthParams{};
+        std::array<D3D12_ROOT_PARAMETER, 2> synthParams{};
         synthParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         synthParams[0].Constants.ShaderRegister = 0;
         synthParams[0].Constants.Num32BitValues = 5;
         synthParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         synthParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        synthParams[1].DescriptorTable.pDescriptorRanges = &synthSrvRange;
-        synthParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        synthParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        synthParams[2].DescriptorTable.pDescriptorRanges = &synthUavRange;
+        synthParams[1].DescriptorTable.pDescriptorRanges = &synthUavRange;
         D3D12_ROOT_SIGNATURE_DESC synthDesc{};
         synthDesc.NumParameters = static_cast<UINT>(synthParams.size());
         synthDesc.pParameters = synthParams.data();
@@ -3203,15 +3183,6 @@ public:
 
     using PackedFarLodVoxelGpu = std::uint32_t;
 
-    struct GpuTerrainFootprintSample
-    {
-        std::int32_t surfaceY{0};
-        std::int32_t waterBottomY{0};
-        std::uint32_t surfaceBlock{0};
-        std::uint32_t fillerBlock{0};
-        std::uint32_t flags{0};
-    };
-
     struct FarLodChunkCpu
     {
         static constexpr int logicalSize = kLogicalSize;
@@ -3947,7 +3918,6 @@ private:
         glm::ivec3 worldMin{0};
         int blockScale{1};
         int lodLevel{0};
-        std::vector<GpuTerrainFootprintSample> terrainSamples;
         std::vector<GpuStructureStampEntry> stampEntries;
         std::shared_ptr<std::array<PackedFarLodVoxelGpu, kVoxelCount>> cpuPackedParityVoxels;
         bool parityRequested{false};
@@ -4803,9 +4773,8 @@ private:
             }
             else
             {
-                std::vector<GpuTerrainFootprintSample> gpuTerrainSamples;
                 const SteadyClock::time_point terrainStart = SteadyClock::now();
-                result.cpu = synthesizeChunkTerrainCpu(job, columnSampleFn, &gpuTerrainSamples);
+                result.cpu = synthesizeChunkTerrainCpu(job, columnSampleFn);
                 result.cpuTerrainSynthesisMs =
                     std::chrono::duration<double, std::milli>(SteadyClock::now() - terrainStart).count();
 
@@ -4822,7 +4791,6 @@ private:
                 gpuRequest.worldMin = result.cpu.worldMin;
                 gpuRequest.blockScale = result.cpu.blockScale;
                 gpuRequest.lodLevel = job.level.level;
-                gpuRequest.terrainSamples = std::move(gpuTerrainSamples);
                 gpuRequest.stampEntries = buildGpuStructureStampEntries(result.cpu, structures);
                 gpuRequest.parityRequested = gpuParityEnabled_;
                 if (gpuRequest.parityRequested)
@@ -5100,18 +5068,6 @@ private:
                 continue;
             }
 
-            const auto sampleUpload = gpuContext_.allocateUpload(
-                static_cast<std::uint64_t>(request.terrainSamples.size() * sizeof(GpuTerrainFootprintSample)),
-                alignof(std::uint32_t));
-            if (sampleUpload.resource == nullptr)
-            {
-                requests.push_front(std::move(request));
-                break;
-            }
-            std::memcpy(sampleUpload.cpuPtr,
-                        request.terrainSamples.data(),
-                        request.terrainSamples.size() * sizeof(GpuTerrainFootprintSample));
-
             FarLodGpuContext::ScratchAllocation stampUpload{};
             if (!request.stampEntries.empty())
             {
@@ -5136,9 +5092,6 @@ private:
             gpuContext_.dispatchSynth(request.worldMin,
                                       request.blockScale,
                                       seaLevel_,
-                                      sampleUpload.resource,
-                                      sampleUpload.offset,
-                                      static_cast<std::uint32_t>(request.terrainSamples.size()),
                                       chunk.gpu.voxelBuffer.Get());
             gpuContext_.uavBarrier(chunk.gpu.voxelBuffer.Get());
             totalGpuSynthesisMs +=
@@ -5556,8 +5509,7 @@ private:
                                                            const StructureQueryFn& structureQueryFn,
                                                            bool allowStructureFallback) const;
     [[nodiscard]] FarLodChunkCpu synthesizeChunkTerrainCpu(const BuildJob& job,
-                                                           const ColumnSampleFn& columnSampleFn,
-                                                           std::vector<GpuTerrainFootprintSample>* gpuSamples) const;
+                                                           const ColumnSampleFn& columnSampleFn) const;
     [[nodiscard]] std::vector<StructureInstance> queryChunkStructures(const BuildJob& job,
                                                                       const StructureQueryFn& structureQueryFn) const;
     void stampChunkStructuresCpu(FarLodChunkCpu& cpu,
@@ -5881,8 +5833,7 @@ bool FarTerrainManager::chunkMayContainRenderableFarContent(const FarLodLevelCon
 
 FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(
     const BuildJob& job,
-    const ColumnSampleFn& columnSampleFn,
-    std::vector<GpuTerrainFootprintSample>* gpuSamples) const
+    const ColumnSampleFn& columnSampleFn) const
 {
     FarLodChunkCpu cpu{};
     cpu.key = job.key;
@@ -5890,11 +5841,6 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(
     cpu.worldMin = job.key.coord * job.level.chunkSpanBlocks();
     cpu.boundsMin = glm::vec3(cpu.worldMin);
     cpu.boundsMax = glm::vec3(cpu.worldMin + glm::ivec3(job.level.chunkSpanBlocks()));
-    if (gpuSamples != nullptr)
-    {
-        gpuSamples->clear();
-        gpuSamples->reserve(kVoxelCount * 5u);
-    }
 
     for (int localY = 0; localY < kLogicalSize; ++localY)
     {
@@ -5904,55 +5850,6 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(
             {
                 const glm::ivec3 voxelMin = cpu.worldMin + glm::ivec3(localX, localY, localZ) * cpu.blockScale;
                 FarLodVoxel& voxel = cpu.voxels[voxelIndex(localX, localY, localZ)];
-                const glm::ivec3 voxelMax = voxelMin + glm::ivec3(cpu.blockScale - 1);
-                const int minX = voxelMin.x;
-                const int maxX = voxelMax.x;
-                const int minZ = voxelMin.z;
-                const int maxZ = voxelMax.z;
-                const int centerX = (minX + maxX) / 2;
-                const int centerZ = (minZ + maxZ) / 2;
-                const std::array<glm::ivec2, 5> samplePoints{{
-                    {minX, minZ},
-                    {maxX, minZ},
-                    {minX, maxZ},
-                    {maxX, maxZ},
-                    {centerX, centerZ},
-                }};
-                for (const glm::ivec2& samplePoint : samplePoints)
-                {
-                    const ColumnSample sample =
-                        columnSampleFn(samplePoint.x, samplePoint.y, voxelMin.y, voxelMax.y);
-                    GpuTerrainFootprintSample gpuSample{};
-                    gpuSample.surfaceY = sample.surfaceY;
-                    gpuSample.waterBottomY = sample.surfaceY + 1;
-                    if (sample.dominantBiome != nullptr)
-                    {
-                        const terrain::TerrainColumnBlocks blocks =
-                            terrain::resolveTerrainColumnBlocks(*sample.dominantBiome,
-                                                                sample,
-                                                                samplePoint.x,
-                                                                samplePoint.y,
-                                                                seaLevel_);
-                        gpuSample.surfaceBlock = static_cast<std::uint32_t>(toIndex(blocks.surfaceBlock));
-                        gpuSample.fillerBlock = static_cast<std::uint32_t>(toIndex(blocks.fillerBlock));
-                        gpuSample.flags |= 0x1u;
-                        const auto& waterFill = sample.dominantBiome->terrainSettings.waterFill;
-                        if (waterFill.enabled)
-                        {
-                            gpuSample.flags |= 0x2u;
-                            if (waterFill.maxDepth > 0)
-                            {
-                                gpuSample.waterBottomY = std::max(gpuSample.waterBottomY,
-                                                                  seaLevel_ - waterFill.maxDepth + 1);
-                            }
-                        }
-                    }
-                    if (gpuSamples != nullptr)
-                    {
-                        gpuSamples->push_back(gpuSample);
-                    }
-                }
-
                 voxel = classifyTerrainVoxelFootprint(voxelMin, cpu.blockScale, columnSampleFn).voxel;
                 if (!voxel.occupied || voxel.material == BlockId::Air)
                 {

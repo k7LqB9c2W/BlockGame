@@ -2715,8 +2715,12 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                 << " existingIndirectCapacity=" << frame.farCullIndirectCapacityBytes;
         renderDebugLog(sizeLog.str());
     }
-    ensureFarCullBuffers(frame, recordBytes, visibleIndexBytes, indirectBytes);
-
+    if (frame.farCullRecordCapacityBytes < recordBytes ||
+        frame.farCullVisibleIndexCapacityBytes < visibleIndexBytes ||
+        frame.farCullIndirectCapacityBytes < indirectBytes)
+    {
+        throwRenderError("far cull buffers were not pre-sized before batch recording");
+    }
     ID3D12Resource* recordsDefault = frame.farCullRecordsDefault.Get();
     ID3D12Resource* recordsUpload = frame.farCullRecordsUpload.Get();
     ID3D12Resource* visibleIndices = frame.farCullVisibleIndices.Get();
@@ -3174,6 +3178,38 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         }
         if (shouldUseGpuFarCull)
         {
+            std::uint64_t maxRecordBytes = 0;
+            std::uint64_t maxVisibleIndexBytes = 0;
+            std::uint64_t maxIndirectBytes = 0;
+            for (const ChunkRenderBatch& batch : renderData.farBatches)
+            {
+                if (gpuFarCullDisabled || !batch.supportsGpuCull || batch.gpuCullRecords.empty())
+                {
+                    continue;
+                }
+
+                const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecords.size());
+                maxRecordBytes = std::max(maxRecordBytes,
+                                          recordCount * sizeof(ChunkRenderBatch::GpuCullRecord));
+                maxVisibleIndexBytes = std::max(maxVisibleIndexBytes,
+                                                std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u));
+                maxIndirectBytes = std::max(maxIndirectBytes,
+                                            std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u));
+            }
+
+            if (maxRecordBytes > 0)
+            {
+                FrameResource& frame = frameResources_[currentBackBufferIndex_];
+                std::ostringstream log;
+                log << "renderWorld: ensure far cull buffers once per frame"
+                    << " backBuffer=" << currentBackBufferIndex_
+                    << " maxRecordBytes=" << maxRecordBytes
+                    << " maxVisibleIndexBytes=" << maxVisibleIndexBytes
+                    << " maxIndirectBytes=" << maxIndirectBytes;
+                renderDebugLog(log.str());
+                ensureFarCullBuffers(frame, maxRecordBytes, maxVisibleIndexBytes, maxIndirectBytes);
+            }
+
             buildDepthPyramid();
         }
 

@@ -498,7 +498,8 @@ Microsoft::WRL::ComPtr<ID3D12Resource> createUploadBuffer(ID3D12Device* device,
 
 Microsoft::WRL::ComPtr<ID3D12Resource> createDefaultBuffer(ID3D12Device* device,
                                                            std::uint64_t sizeInBytes,
-                                                           D3D12_RESOURCE_STATES initialState)
+                                                           D3D12_RESOURCE_STATES initialState,
+                                                           D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE)
 {
     if (device == nullptr || sizeInBytes == 0)
     {
@@ -520,6 +521,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> createDefaultBuffer(ID3D12Device* device,
     desc.MipLevels = 1;
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = flags;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     throwIfFailedDx(device->CreateCommittedResource(&heapProps,
@@ -530,6 +532,83 @@ Microsoft::WRL::ComPtr<ID3D12Resource> createDefaultBuffer(ID3D12Device* device,
                                                     IID_PPV_ARGS(&resource)),
                     "failed to create default buffer");
     return resource;
+}
+
+Microsoft::WRL::ComPtr<ID3D12Resource> createReadbackBuffer(ID3D12Device* device,
+                                                            std::uint64_t sizeInBytes,
+                                                            std::byte*& mappedData)
+{
+    mappedData = nullptr;
+    if (device == nullptr || sizeInBytes == 0)
+    {
+        return {};
+    }
+
+    D3D12_HEAP_PROPERTIES heapProps{};
+    heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProps.CreationNodeMask = 1;
+    heapProps.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = sizeInBytes;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    throwIfFailedDx(device->CreateCommittedResource(&heapProps,
+                                                    D3D12_HEAP_FLAG_NONE,
+                                                    &desc,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST,
+                                                    nullptr,
+                                                    IID_PPV_ARGS(&resource)),
+                    "failed to create readback buffer");
+
+    void* mapped = nullptr;
+    throwIfFailedDx(resource->Map(0, nullptr, &mapped), "failed to map readback buffer");
+    mappedData = static_cast<std::byte*>(mapped);
+    return resource;
+}
+
+Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFileLocal(const std::string& path,
+                                                            const char* entryPoint,
+                                                            const char* target)
+{
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+#ifndef NDEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    const std::wstring widePath = std::filesystem::path(path).wstring();
+    const HRESULT hr = D3DCompileFromFile(widePath.c_str(),
+                                          nullptr,
+                                          D3D_COMPILE_STANDARD_FILE_INCLUDE,
+                                          entryPoint,
+                                          target,
+                                          flags,
+                                          0,
+                                          &bytecode,
+                                          &errors);
+    if (FAILED(hr))
+    {
+        std::string message = "shader compilation failed for " + path;
+        if (errors)
+        {
+            message += ": ";
+            message.append(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
+        }
+        throw std::runtime_error(message);
+    }
+
+    return bytecode;
 }
 
 D3D12_RESOURCE_BARRIER transitionBarrier(ID3D12Resource* resource,
@@ -730,6 +809,11 @@ public:
         return lastSubmittedFenceValue_;
     }
 
+    [[nodiscard]] UINT64 completedFenceValue() const noexcept
+    {
+        return (fence_ != nullptr) ? fence_->GetCompletedValue() : 0;
+    }
+
     void waitForIdle()
     {
         if (fence_ == nullptr || lastSubmittedFenceValue_ == 0)
@@ -758,6 +842,588 @@ private:
     UINT64 graphicsFenceValue_{0};
     bool open_{false};
     bool hasCommands_{false};
+};
+
+class FarLodGpuContext
+{
+public:
+    struct ScratchAllocation
+    {
+        ID3D12Resource* resource{nullptr};
+        std::byte* cpuPtr{nullptr};
+        D3D12_GPU_VIRTUAL_ADDRESS gpuAddress{0};
+        std::uint64_t offset{0};
+        std::uint64_t size{0};
+    };
+
+    struct FlushResult
+    {
+        UINT64 fenceValue{0};
+    };
+
+    ~FarLodGpuContext()
+    {
+        shutdown();
+    }
+
+    void initialize(ID3D12Device* device)
+    {
+        shutdown();
+        if (device == nullptr)
+        {
+            return;
+        }
+
+        device_ = device;
+
+        D3D12_COMMAND_QUEUE_DESC queueDesc{};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        throwIfFailedDx(device_->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue_)),
+                        "failed to create far lod compute queue");
+        throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&allocator_)),
+                        "failed to create far lod compute allocator");
+        throwIfFailedDx(device_->CreateCommandList(0,
+                                                   D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                                   allocator_.Get(),
+                                                   nullptr,
+                                                   IID_PPV_ARGS(&commandList_)),
+                        "failed to create far lod compute command list");
+        throwIfFailedDx(commandList_->Close(), "failed to close initial far lod compute command list");
+        throwIfFailedDx(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)),
+                        "failed to create far lod compute fence");
+        fenceEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (fenceEvent_ == nullptr)
+        {
+            throw std::runtime_error("failed to create far lod compute fence event");
+        }
+
+        uploadScratch_ = createUploadBuffer(device_.Get(), kUploadScratchSizeBytes, uploadScratchMapped_);
+        compileShaders();
+        createDescriptorHeap();
+        createPipelines();
+    }
+
+    void shutdown()
+    {
+        waitForIdle();
+        if (readbackScratch_ != nullptr)
+        {
+            readbackScratch_->Unmap(0, nullptr);
+        }
+        if (uploadScratch_ != nullptr)
+        {
+            uploadScratch_->Unmap(0, nullptr);
+        }
+        if (fenceEvent_ != nullptr)
+        {
+            CloseHandle(fenceEvent_);
+            fenceEvent_ = nullptr;
+        }
+
+        synthPipelineState_.Reset();
+        stampPipelineState_.Reset();
+        synthRootSignature_.Reset();
+        stampRootSignature_.Reset();
+        descriptorHeap_.Reset();
+        synthShader_.Reset();
+        stampShader_.Reset();
+        readbackScratch_.Reset();
+        uploadScratch_.Reset();
+        commandList_.Reset();
+        allocator_.Reset();
+        queue_.Reset();
+        fence_.Reset();
+        device_.Reset();
+        uploadScratchMapped_ = nullptr;
+        readbackScratchMapped_ = nullptr;
+        open_ = false;
+        hasCommands_ = false;
+        readbackEnabled_ = false;
+        uploadCursor_ = 0;
+        readbackCursor_ = 0;
+        lastSubmittedFenceValue_ = 0;
+        fenceValue_ = 0;
+    }
+
+    void setReadbackEnabled(bool enabled)
+    {
+        if (device_ == nullptr)
+        {
+            readbackEnabled_ = enabled;
+            return;
+        }
+        if (enabled == readbackEnabled_)
+        {
+            return;
+        }
+        waitForIdle();
+        if (enabled)
+        {
+            readbackScratch_ = createReadbackBuffer(device_.Get(), kReadbackScratchSizeBytes, readbackScratchMapped_);
+        }
+        else
+        {
+            if (readbackScratch_ != nullptr)
+            {
+                readbackScratch_->Unmap(0, nullptr);
+            }
+            readbackScratch_.Reset();
+            readbackScratchMapped_ = nullptr;
+        }
+        readbackEnabled_ = enabled;
+        readbackCursor_ = 0;
+    }
+
+    [[nodiscard]] bool begin()
+    {
+        if (device_ == nullptr)
+        {
+            return false;
+        }
+        if (open_)
+        {
+            return true;
+        }
+        if (fence_ != nullptr && fenceValue_ > 0 && fence_->GetCompletedValue() < fenceValue_)
+        {
+            return false;
+        }
+
+        throwIfFailedDx(allocator_->Reset(), "failed to reset far lod compute allocator");
+        throwIfFailedDx(commandList_->Reset(allocator_.Get(), nullptr), "failed to reset far lod compute command list");
+        open_ = true;
+        hasCommands_ = false;
+        uploadCursor_ = 0;
+        readbackCursor_ = 0;
+        descriptorCursor_ = 0;
+        return true;
+    }
+
+    [[nodiscard]] ScratchAllocation allocateUpload(std::uint64_t sizeInBytes,
+                                                   std::uint64_t alignment = 16u)
+    {
+        ScratchAllocation allocation{};
+        if (!open_ || uploadScratch_ == nullptr || sizeInBytes == 0)
+        {
+            return allocation;
+        }
+
+        const std::uint64_t alignedOffset = (uploadCursor_ + alignment - 1u) / alignment * alignment;
+        if (alignedOffset + sizeInBytes > kUploadScratchSizeBytes)
+        {
+            return allocation;
+        }
+
+        allocation.resource = uploadScratch_.Get();
+        allocation.cpuPtr = uploadScratchMapped_ + alignedOffset;
+        allocation.gpuAddress = uploadScratch_->GetGPUVirtualAddress() + alignedOffset;
+        allocation.offset = alignedOffset;
+        allocation.size = sizeInBytes;
+        uploadCursor_ = alignedOffset + sizeInBytes;
+        return allocation;
+    }
+
+    [[nodiscard]] ScratchAllocation allocateReadback(std::uint64_t sizeInBytes,
+                                                     std::uint64_t alignment = 16u)
+    {
+        ScratchAllocation allocation{};
+        if (!open_ || readbackScratch_ == nullptr || sizeInBytes == 0)
+        {
+            return allocation;
+        }
+
+        const std::uint64_t alignedOffset = (readbackCursor_ + alignment - 1u) / alignment * alignment;
+        if (alignedOffset + sizeInBytes > kReadbackScratchSizeBytes)
+        {
+            return allocation;
+        }
+
+        allocation.resource = readbackScratch_.Get();
+        allocation.cpuPtr = readbackScratchMapped_ + alignedOffset;
+        allocation.gpuAddress = readbackScratch_->GetGPUVirtualAddress() + alignedOffset;
+        allocation.offset = alignedOffset;
+        allocation.size = sizeInBytes;
+        readbackCursor_ = alignedOffset + sizeInBytes;
+        return allocation;
+    }
+
+    void transition(ID3D12Resource* resource,
+                    D3D12_RESOURCE_STATES before,
+                    D3D12_RESOURCE_STATES after)
+    {
+        if (!open_ || resource == nullptr || before == after)
+        {
+            return;
+        }
+
+        const D3D12_RESOURCE_BARRIER barrier = transitionBarrier(resource, before, after);
+        commandList_->ResourceBarrier(1, &barrier);
+        hasCommands_ = true;
+    }
+
+    void uavBarrier(ID3D12Resource* resource)
+    {
+        if (!open_ || resource == nullptr)
+        {
+            return;
+        }
+
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = resource;
+        commandList_->ResourceBarrier(1, &barrier);
+        hasCommands_ = true;
+    }
+
+    void copyBuffer(ID3D12Resource* destination,
+                    std::uint64_t destinationOffset,
+                    ID3D12Resource* source,
+                    std::uint64_t sourceOffset,
+                    std::uint64_t sizeInBytes)
+    {
+        if (!open_ || destination == nullptr || source == nullptr || sizeInBytes == 0)
+        {
+            return;
+        }
+        commandList_->CopyBufferRegion(destination, destinationOffset, source, sourceOffset, sizeInBytes);
+        hasCommands_ = true;
+    }
+
+    void dispatchSynth(const glm::ivec3& worldMin,
+                       int blockScale,
+                       int seaLevel,
+                       ID3D12Resource* sampleBuffer,
+                       std::uint64_t sampleOffsetBytes,
+                       std::uint32_t sampleCount,
+                       ID3D12Resource* voxelBuffer)
+    {
+        if (!open_ || sampleBuffer == nullptr || voxelBuffer == nullptr || sampleCount == 0)
+        {
+            return;
+        }
+
+        std::array<std::uint32_t, 5> constants{
+            static_cast<std::uint32_t>(worldMin.x),
+            static_cast<std::uint32_t>(worldMin.y),
+            static_cast<std::uint32_t>(worldMin.z),
+            static_cast<std::uint32_t>(blockScale),
+            static_cast<std::uint32_t>(seaLevel)};
+        const UINT descriptorIndex = allocateDescriptorRange(2);
+        writeStructuredSrvDescriptor(descriptorIndex,
+                                     sampleBuffer,
+                                     sampleOffsetBytes,
+                                     sampleCount,
+                                     kGpuContextTerrainSampleStrideBytes);
+        writeStructuredUavDescriptor(descriptorIndex + 1u,
+                                     voxelBuffer,
+                                     0,
+                                     kGpuContextVoxelCount,
+                                     kGpuContextPackedVoxelStrideBytes);
+        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
+        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
+        commandList_->SetPipelineState(synthPipelineState_.Get());
+        commandList_->SetComputeRootSignature(synthRootSignature_.Get());
+        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
+        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
+        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
+        uavHandle.ptr += descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
+        commandList_->Dispatch(4, 4, 4);
+        hasCommands_ = true;
+    }
+
+    void dispatchStamp(std::uint32_t stampCount,
+                       ID3D12Resource* stampBuffer,
+                       std::uint64_t stampOffsetBytes,
+                       ID3D12Resource* voxelBuffer)
+    {
+        if (!open_ || stampCount == 0 || stampBuffer == nullptr || voxelBuffer == nullptr)
+        {
+            return;
+        }
+
+        std::array<std::uint32_t, 1> constants{stampCount};
+        const UINT descriptorIndex = allocateDescriptorRange(2);
+        writeStructuredSrvDescriptor(descriptorIndex,
+                                     stampBuffer,
+                                     stampOffsetBytes,
+                                     stampCount,
+                                     kGpuContextStampEntryStrideBytes);
+        writeStructuredUavDescriptor(descriptorIndex + 1u,
+                                     voxelBuffer,
+                                     0,
+                                     kGpuContextVoxelCount,
+                                     kGpuContextPackedVoxelStrideBytes);
+        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
+        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
+        commandList_->SetPipelineState(stampPipelineState_.Get());
+        commandList_->SetComputeRootSignature(stampRootSignature_.Get());
+        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
+        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
+        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
+        uavHandle.ptr += descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
+        commandList_->Dispatch((stampCount + 63u) / 64u, 1, 1);
+        hasCommands_ = true;
+    }
+
+    [[nodiscard]] FlushResult flush()
+    {
+        FlushResult result{};
+        if (!open_)
+        {
+            return result;
+        }
+
+        throwIfFailedDx(commandList_->Close(), "failed to close far lod compute command list");
+        if (hasCommands_)
+        {
+            ID3D12CommandList* lists[] = {commandList_.Get()};
+            queue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
+            ++fenceValue_;
+            throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal far lod compute fence");
+            lastSubmittedFenceValue_ = fenceValue_;
+            result.fenceValue = fenceValue_;
+        }
+
+        open_ = false;
+        hasCommands_ = false;
+        return result;
+    }
+
+    void waitForIdle()
+    {
+        if (fence_ == nullptr || lastSubmittedFenceValue_ == 0)
+        {
+            return;
+        }
+        if (fence_->GetCompletedValue() >= lastSubmittedFenceValue_)
+        {
+            return;
+        }
+        throwIfFailedDx(fence_->SetEventOnCompletion(lastSubmittedFenceValue_, fenceEvent_),
+                        "failed to wait for far lod compute fence");
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+
+    [[nodiscard]] bool ready() const noexcept
+    {
+        return device_ != nullptr && queue_ != nullptr && allocator_ != nullptr && commandList_ != nullptr &&
+               synthPipelineState_ != nullptr && stampPipelineState_ != nullptr;
+    }
+
+    [[nodiscard]] UINT64 completedFenceValue() const noexcept
+    {
+        return (fence_ != nullptr) ? fence_->GetCompletedValue() : 0;
+    }
+
+    [[nodiscard]] UINT64 lastSubmittedFenceValue() const noexcept
+    {
+        return lastSubmittedFenceValue_;
+    }
+
+    [[nodiscard]] const std::byte* readbackMappedData() const noexcept
+    {
+        return readbackScratchMapped_;
+    }
+
+private:
+    static constexpr std::uint32_t kGpuContextLogicalSize = 16u;
+    static constexpr std::uint32_t kGpuContextVoxelCount = kGpuContextLogicalSize * kGpuContextLogicalSize * kGpuContextLogicalSize;
+    static constexpr std::uint32_t kGpuContextTerrainSampleStrideBytes = 20u;
+    static constexpr std::uint32_t kGpuContextStampEntryStrideBytes = 8u;
+    static constexpr std::uint32_t kGpuContextPackedVoxelStrideBytes = 4u;
+    static constexpr UINT kDescriptorHeapDescriptorCount = 512u;
+
+    void createDescriptorHeap()
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heapDesc.NumDescriptors = kDescriptorHeapDescriptorCount;
+        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        throwIfFailedDx(device_->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&descriptorHeap_)),
+                        "failed to create far lod compute descriptor heap");
+        descriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+
+    [[nodiscard]] UINT allocateDescriptorRange(UINT descriptorCount)
+    {
+        if (descriptorCursor_ + descriptorCount > kDescriptorHeapDescriptorCount)
+        {
+            throw std::runtime_error("far lod compute descriptor heap exhausted");
+        }
+        const UINT baseIndex = descriptorCursor_;
+        descriptorCursor_ += descriptorCount;
+        return baseIndex;
+    }
+
+    void writeStructuredSrvDescriptor(std::uint32_t descriptorIndex,
+                                      ID3D12Resource* resource,
+                                      std::uint64_t byteOffset,
+                                      std::uint32_t elementCount,
+                                      std::uint32_t strideBytes)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+        srvDesc.Buffer.FirstElement = byteOffset / strideBytes;
+        srvDesc.Buffer.NumElements = elementCount;
+        srvDesc.Buffer.StructureByteStride = strideBytes;
+        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = descriptorHeap_->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(descriptorIndex) * descriptorSize_;
+        device_->CreateShaderResourceView(resource, &srvDesc, handle);
+    }
+
+    void writeStructuredUavDescriptor(std::uint32_t descriptorIndex,
+                                      ID3D12Resource* resource,
+                                      std::uint64_t byteOffset,
+                                      std::uint32_t elementCount,
+                                      std::uint32_t strideBytes)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.Buffer.FirstElement = byteOffset / strideBytes;
+        uavDesc.Buffer.NumElements = elementCount;
+        uavDesc.Buffer.StructureByteStride = strideBytes;
+        uavDesc.Buffer.CounterOffsetInBytes = 0;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = descriptorHeap_->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(descriptorIndex) * descriptorSize_;
+        device_->CreateUnorderedAccessView(resource, nullptr, &uavDesc, handle);
+    }
+
+    void compileShaders()
+    {
+        const std::filesystem::path shaderRoot = std::filesystem::current_path() / "assets" / "shaders";
+        synthShader_ =
+            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_synth_cs.hlsl").string(), "FarLodChunkSynthMain", "cs_5_0");
+        stampShader_ =
+            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_stamp_cs.hlsl").string(), "FarLodChunkStampMain", "cs_5_0");
+    }
+
+    void createPipelines()
+    {
+        auto createRootSignature = [this](const D3D12_ROOT_SIGNATURE_DESC& desc,
+                                          Microsoft::WRL::ComPtr<ID3D12RootSignature>& rootSignature,
+                                          const char* label)
+        {
+            Microsoft::WRL::ComPtr<ID3DBlob> serialized;
+            Microsoft::WRL::ComPtr<ID3DBlob> rootErrors;
+            const std::string serializeMessage = std::string("failed to serialize ") + label;
+            const std::string createMessage = std::string("failed to create ") + label;
+            throwIfFailedDx(D3D12SerializeRootSignature(&desc,
+                                                        D3D_ROOT_SIGNATURE_VERSION_1,
+                                                        &serialized,
+                                                        &rootErrors),
+                            serializeMessage.c_str());
+            throwIfFailedDx(device_->CreateRootSignature(0,
+                                                         serialized->GetBufferPointer(),
+                                                         serialized->GetBufferSize(),
+                                                         IID_PPV_ARGS(&rootSignature)),
+                            createMessage.c_str());
+        };
+
+        D3D12_DESCRIPTOR_RANGE synthSrvRange{};
+        synthSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        synthSrvRange.NumDescriptors = 1;
+        synthSrvRange.BaseShaderRegister = 0;
+        synthSrvRange.OffsetInDescriptorsFromTableStart = 0;
+        D3D12_DESCRIPTOR_RANGE synthUavRange{};
+        synthUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        synthUavRange.NumDescriptors = 1;
+        synthUavRange.BaseShaderRegister = 0;
+        synthUavRange.OffsetInDescriptorsFromTableStart = 0;
+
+        std::array<D3D12_ROOT_PARAMETER, 3> synthParams{};
+        synthParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        synthParams[0].Constants.ShaderRegister = 0;
+        synthParams[0].Constants.Num32BitValues = 5;
+        synthParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        synthParams[1].DescriptorTable.NumDescriptorRanges = 1;
+        synthParams[1].DescriptorTable.pDescriptorRanges = &synthSrvRange;
+        synthParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        synthParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        synthParams[2].DescriptorTable.pDescriptorRanges = &synthUavRange;
+        D3D12_ROOT_SIGNATURE_DESC synthDesc{};
+        synthDesc.NumParameters = static_cast<UINT>(synthParams.size());
+        synthDesc.pParameters = synthParams.data();
+        createRootSignature(synthDesc, synthRootSignature_, "far lod synth root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC synthPso{};
+        synthPso.pRootSignature = synthRootSignature_.Get();
+        synthPso.CS = {synthShader_->GetBufferPointer(), synthShader_->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&synthPso, IID_PPV_ARGS(&synthPipelineState_)),
+                        "failed to create far lod synth pipeline");
+
+        D3D12_DESCRIPTOR_RANGE stampSrvRange{};
+        stampSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        stampSrvRange.NumDescriptors = 1;
+        stampSrvRange.BaseShaderRegister = 0;
+        stampSrvRange.OffsetInDescriptorsFromTableStart = 0;
+        D3D12_DESCRIPTOR_RANGE stampUavRange{};
+        stampUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        stampUavRange.NumDescriptors = 1;
+        stampUavRange.BaseShaderRegister = 0;
+        stampUavRange.OffsetInDescriptorsFromTableStart = 0;
+
+        std::array<D3D12_ROOT_PARAMETER, 3> stampParams{};
+        stampParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        stampParams[0].Constants.ShaderRegister = 0;
+        stampParams[0].Constants.Num32BitValues = 1;
+        stampParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        stampParams[1].DescriptorTable.NumDescriptorRanges = 1;
+        stampParams[1].DescriptorTable.pDescriptorRanges = &stampSrvRange;
+        stampParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        stampParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        stampParams[2].DescriptorTable.pDescriptorRanges = &stampUavRange;
+        D3D12_ROOT_SIGNATURE_DESC stampDesc{};
+        stampDesc.NumParameters = static_cast<UINT>(stampParams.size());
+        stampDesc.pParameters = stampParams.data();
+        createRootSignature(stampDesc, stampRootSignature_, "far lod stamp root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC stampPso{};
+        stampPso.pRootSignature = stampRootSignature_.Get();
+        stampPso.CS = {stampShader_->GetBufferPointer(), stampShader_->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&stampPso, IID_PPV_ARGS(&stampPipelineState_)),
+                        "failed to create far lod stamp pipeline");
+    }
+
+    static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
+    static constexpr std::uint64_t kReadbackScratchSizeBytes = 4ull * 1024ull * 1024ull;
+
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    HANDLE fenceEvent_{nullptr};
+    UINT64 fenceValue_{0};
+    UINT64 lastSubmittedFenceValue_{0};
+    Microsoft::WRL::ComPtr<ID3DBlob> synthShader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> stampShader_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> synthRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> stampRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> synthPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> stampPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptorHeap_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> uploadScratch_;
+    std::byte* uploadScratchMapped_{nullptr};
+    Microsoft::WRL::ComPtr<ID3D12Resource> readbackScratch_;
+    std::byte* readbackScratchMapped_{nullptr};
+    std::uint64_t uploadCursor_{0};
+    std::uint64_t readbackCursor_{0};
+    UINT descriptorSize_{0};
+    UINT descriptorCursor_{0};
+    bool open_{false};
+    bool hasCommands_{false};
+    bool readbackEnabled_{false};
 };
 
 inline int floorDiv(int value, int divisor) noexcept
@@ -2504,6 +3170,17 @@ public:
         std::uint8_t flags{0};
     };
 
+    using PackedFarLodVoxelGpu = std::uint32_t;
+
+    struct GpuTerrainFootprintSample
+    {
+        std::int32_t surfaceY{0};
+        std::int32_t waterBottomY{0};
+        std::uint32_t surfaceBlock{0};
+        std::uint32_t fillerBlock{0};
+        std::uint32_t flags{0};
+    };
+
     struct FarLodChunkCpu
     {
         static constexpr int logicalSize = kLogicalSize;
@@ -2523,6 +3200,12 @@ public:
 
     struct FarLodChunkGpuState
     {
+        Microsoft::WRL::ComPtr<ID3D12Resource> voxelBuffer;
+        D3D12_RESOURCE_STATES voxelState{D3D12_RESOURCE_STATE_COMMON};
+        UINT64 voxelFenceValue{0};
+        bool voxelReady{false};
+        std::uint32_t parityMismatchCount{0};
+        bool parityValidated{false};
         std::uint32_t pageIndex{kInvalidChunkBufferPage};
         std::size_t vertexOffset{0};
         std::size_t indexOffset{0};
@@ -2546,6 +3229,9 @@ public:
               FarLodLevelConfig{4, 16, 192, 320},
               FarLodLevelConfig{5, 32, 320, kMaxTotalRenderDistanceChunks}}
     {
+        const char* parityEnv = std::getenv("BLOCKGAME_ENABLE_LOD_GPU_PARITY");
+        gpuParityEnabled_ =
+            (parityEnv != nullptr && std::string_view(parityEnv) != "0" && std::string_view(parityEnv) != "false");
     }
 
     ~FarTerrainManager()
@@ -2558,6 +3244,13 @@ public:
         stopWorkers();
         clear();
         uploadContext_.shutdown();
+        gpuContext_.shutdown();
+        if (parityReadbackScratch_ != nullptr)
+        {
+            parityReadbackScratch_->Unmap(0, nullptr);
+        }
+        parityReadbackScratch_.Reset();
+        parityReadbackMapped_ = nullptr;
     }
 
     void setEnabled(bool enabled)
@@ -2615,6 +3308,20 @@ public:
     {
         device_ = device;
         uploadContext_.initialize(device_.Get());
+        gpuContext_.initialize(device_.Get());
+        gpuContext_.setReadbackEnabled(false);
+        if (parityReadbackScratch_ != nullptr)
+        {
+            parityReadbackScratch_->Unmap(0, nullptr);
+        }
+        parityReadbackScratch_.Reset();
+        parityReadbackMapped_ = nullptr;
+        if (gpuParityEnabled_)
+        {
+            parityReadbackScratch_ = createReadbackBuffer(device_.Get(),
+                                                          static_cast<std::uint64_t>(kVoxelCount * sizeof(PackedFarLodVoxelGpu)),
+                                                          parityReadbackMapped_);
+        }
         clear();
     }
 
@@ -2828,7 +3535,9 @@ public:
         }
 
         scheduleDirtyBuilds();
+        submitGpuSynthesisRequests(uploadBudgetMs);
         collectCompletedBuilds(uploadBudgetMs);
+        pollGpuParityResults();
     }
 
     [[nodiscard]] std::vector<ChunkRenderBatch> buildRenderBatches(const Frustum& frustum) const
@@ -2917,6 +3626,11 @@ public:
             std::lock_guard<std::mutex> lock(completedMutex_);
             completedBuilds_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            gpuSynthesisRequests_.clear();
+            pendingGpuParityReadbacks_.clear();
+        }
         std::lock_guard<std::mutex> lock(configMutex_);
         for (auto& [key, chunk] : chunks_)
         {
@@ -2929,6 +3643,9 @@ public:
         builtTilesLastUpdate_ = 0;
         skippedTilesLastUpdate_ = 0;
         lastAverageBuildMs_ = 0.0;
+        lastAverageGpuSynthesisMs_ = 0.0;
+        lastAverageGpuStampMs_ = 0.0;
+        lastAverageGpuFaceBuildMs_ = 0.0;
         lastAverageCpuTerrainSynthesisMs_ = 0.0;
         lastAverageCpuStructureStampMs_ = 0.0;
         lastAverageCpuMeshMs_ = 0.0;
@@ -2941,6 +3658,7 @@ public:
         lastBuiltIndexCount_ = 0;
         lastRenderedFaceCount_ = 0;
         lastRenderedVertexCount_ = 0;
+        rollingGpuParityMismatchCount_ = 0;
         levelActivationOuterRadiusChunks_.clear();
     }
 
@@ -3181,6 +3899,38 @@ private:
         bool skippedByRelevance{false};
     };
 
+    struct GpuStructureStampEntry
+    {
+        std::uint32_t voxelIndex{0};
+        PackedFarLodVoxelGpu packedVoxel{0};
+    };
+
+    struct GpuSynthesisRequest
+    {
+        FarLodChunkKey key{};
+        std::uint32_t buildVersion{0};
+        std::uint64_t epoch{0};
+        glm::ivec3 worldMin{0};
+        int blockScale{1};
+        int lodLevel{0};
+        std::vector<GpuTerrainFootprintSample> terrainSamples;
+        std::vector<GpuStructureStampEntry> stampEntries;
+        std::shared_ptr<std::array<PackedFarLodVoxelGpu, kVoxelCount>> cpuPackedParityVoxels;
+        bool parityRequested{false};
+    };
+
+    struct PendingGpuParityReadback
+    {
+        FarLodChunkKey key{};
+        std::uint32_t buildVersion{0};
+        std::uint64_t epoch{0};
+        UINT64 computeFenceValue{0};
+        UINT64 copyFenceValue{0};
+        std::shared_ptr<std::array<PackedFarLodVoxelGpu, kVoxelCount>> cpuPackedParityVoxels;
+        bool parityRequested{false};
+        bool copySubmitted{false};
+    };
+
     struct BuildJob
     {
         FarLodChunkKey key{};
@@ -3271,6 +4021,57 @@ private:
         return (static_cast<std::size_t>(localY) * kLogicalSize + static_cast<std::size_t>(localZ)) *
                    kLogicalSize +
                static_cast<std::size_t>(localX);
+    }
+
+    [[nodiscard]] static PackedFarLodVoxelGpu packGpuVoxel(const FarLodVoxel& voxel) noexcept
+    {
+        PackedFarLodVoxelGpu packed = 0u;
+        if (voxel.occupied)
+        {
+            packed |= 0x1u;
+        }
+        if ((voxel.flags & 0x01u) != 0u)
+        {
+            packed |= 0x2u;
+        }
+        if ((voxel.flags & 0x02u) != 0u)
+        {
+            packed |= 0x4u;
+        }
+        if ((voxel.flags & 0x04u) != 0u)
+        {
+            packed |= 0x8u;
+        }
+        if ((voxel.flags & 0x08u) != 0u)
+        {
+            packed |= 0x10u;
+        }
+        packed |= (static_cast<PackedFarLodVoxelGpu>(toIndex(voxel.material) & 0xffu) << 8u);
+        return packed;
+    }
+
+    [[nodiscard]] static FarLodVoxel unpackGpuVoxel(PackedFarLodVoxelGpu packed) noexcept
+    {
+        FarLodVoxel voxel{};
+        voxel.occupied = (packed & 0x1u) ? 1u : 0u;
+        voxel.material = static_cast<BlockId>((packed >> 8u) & 0xffu);
+        if ((packed & 0x2u) != 0u)
+        {
+            voxel.flags |= 0x01u;
+        }
+        if ((packed & 0x4u) != 0u)
+        {
+            voxel.flags |= 0x02u;
+        }
+        if ((packed & 0x8u) != 0u)
+        {
+            voxel.flags |= 0x04u;
+        }
+        if ((packed & 0x10u) != 0u)
+        {
+            voxel.flags |= 0x08u;
+        }
+        return voxel;
     }
 
     [[nodiscard]] static bool intersectsRange(int minA, int maxA, int minB, int maxB) noexcept
@@ -3384,6 +4185,15 @@ private:
         chunk.cpu.worldMin = chunk.key.coord * level.chunkSpanBlocks();
         chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin);
         chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin + glm::ivec3(level.chunkSpanBlocks()));
+        chunk.gpu.voxelBuffer = createDefaultBuffer(device_.Get(),
+                                                    static_cast<std::uint64_t>(kVoxelCount * sizeof(PackedFarLodVoxelGpu)),
+                                                    D3D12_RESOURCE_STATE_COMMON,
+                                                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        chunk.gpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+        chunk.gpu.voxelFenceValue = 0;
+        chunk.gpu.voxelReady = false;
+        chunk.gpu.parityMismatchCount = 0;
+        chunk.gpu.parityValidated = false;
         chunk.initialized = true;
     }
 
@@ -3538,6 +4348,12 @@ private:
 
     void releaseChunkGpu(FarLodChunkRecord& chunk)
     {
+        chunk.gpu.voxelBuffer.Reset();
+        chunk.gpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+        chunk.gpu.voxelFenceValue = 0;
+        chunk.gpu.voxelReady = false;
+        chunk.gpu.parityMismatchCount = 0;
+        chunk.gpu.parityValidated = false;
         if (chunk.gpu.pageIndex == kInvalidChunkBufferPage)
         {
             chunk.gpu.vertexOffset = 0;
@@ -3627,17 +4443,17 @@ public:
 
     [[nodiscard]] double averageGpuSynthesisMs() const noexcept
     {
-        return 0.0;
+        return lastAverageGpuSynthesisMs_;
     }
 
     [[nodiscard]] double averageGpuStampMs() const noexcept
     {
-        return 0.0;
+        return lastAverageGpuStampMs_;
     }
 
     [[nodiscard]] double averageGpuFaceBuildMs() const noexcept
     {
-        return 0.0;
+        return lastAverageGpuFaceBuildMs_;
     }
 
     [[nodiscard]] LodDiagnosticsSnapshot diagnosticsSnapshot(const glm::vec3& cameraPos) const
@@ -3682,9 +4498,9 @@ public:
         }
 
         snapshot.averageBuildMs = lastAverageBuildMs_;
-        snapshot.averageGpuSynthesisMs = 0.0;
-        snapshot.averageGpuStampMs = 0.0;
-        snapshot.averageGpuFaceBuildMs = 0.0;
+        snapshot.averageGpuSynthesisMs = lastAverageGpuSynthesisMs_;
+        snapshot.averageGpuStampMs = lastAverageGpuStampMs_;
+        snapshot.averageGpuFaceBuildMs = lastAverageGpuFaceBuildMs_;
 
         std::sort(orderedRegions.begin(),
                   orderedRegions.end(),
@@ -3878,6 +4694,11 @@ private:
             std::lock_guard<std::mutex> lock(completedMutex_);
             completedBuilds_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            gpuSynthesisRequests_.clear();
+            pendingGpuParityReadbacks_.clear();
+        }
     }
 
     void workerThreadLoop()
@@ -3931,15 +4752,41 @@ private:
             }
             else
             {
+                std::vector<GpuTerrainFootprintSample> gpuTerrainSamples;
                 const SteadyClock::time_point terrainStart = SteadyClock::now();
-                result.cpu = synthesizeChunkTerrainCpu(job, columnSampleFn);
+                result.cpu = synthesizeChunkTerrainCpu(job, columnSampleFn, &gpuTerrainSamples);
                 result.cpuTerrainSynthesisMs =
                     std::chrono::duration<double, std::milli>(SteadyClock::now() - terrainStart).count();
 
+                const std::vector<StructureInstance> structures = queryChunkStructures(job, structureQueryFn);
                 const SteadyClock::time_point structureStart = SteadyClock::now();
-                stampChunkStructuresCpu(result.cpu, job.level.level, structureQueryFn);
+                stampChunkStructuresCpu(result.cpu, structures);
                 result.cpuStructureStampMs =
                     std::chrono::duration<double, std::milli>(SteadyClock::now() - structureStart).count();
+
+                GpuSynthesisRequest gpuRequest{};
+                gpuRequest.key = job.key;
+                gpuRequest.buildVersion = job.buildVersion;
+                gpuRequest.epoch = job.epoch;
+                gpuRequest.worldMin = result.cpu.worldMin;
+                gpuRequest.blockScale = result.cpu.blockScale;
+                gpuRequest.lodLevel = job.level.level;
+                gpuRequest.terrainSamples = std::move(gpuTerrainSamples);
+                gpuRequest.stampEntries = buildGpuStructureStampEntries(result.cpu, structures);
+                gpuRequest.parityRequested = gpuParityEnabled_;
+                if (gpuRequest.parityRequested)
+                {
+                    gpuRequest.cpuPackedParityVoxels =
+                        std::make_shared<std::array<PackedFarLodVoxelGpu, kVoxelCount>>();
+                    for (std::size_t voxelIdx = 0; voxelIdx < kVoxelCount; ++voxelIdx)
+                    {
+                        (*gpuRequest.cpuPackedParityVoxels)[voxelIdx] = packGpuVoxel(result.cpu.voxels[voxelIdx]);
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> gpuLock(gpuRequestMutex_);
+                    gpuSynthesisRequests_.push_back(std::move(gpuRequest));
+                }
 
                 const SteadyClock::time_point meshStart = SteadyClock::now();
                 result.mesh = buildChunkMesh(result.cpu, job.level.level, columnSampleFn, structureQueryFn, uvLookupFn);
@@ -4120,6 +4967,221 @@ private:
         buildQueueCv_.notify_all();
     }
 
+    void submitGpuSynthesisRequests(double budgetMs)
+    {
+        std::deque<GpuSynthesisRequest> requests;
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            requests.swap(gpuSynthesisRequests_);
+        }
+
+        lastAverageGpuSynthesisMs_ = 0.0;
+        lastAverageGpuStampMs_ = 0.0;
+        lastAverageGpuFaceBuildMs_ = 0.0;
+        if (requests.empty() || !gpuContext_.ready())
+        {
+            if (!requests.empty())
+            {
+                std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+                for (GpuSynthesisRequest& request : requests)
+                {
+                    gpuSynthesisRequests_.push_back(std::move(request));
+                }
+            }
+            return;
+        }
+
+        gpuContext_.setReadbackEnabled(false);
+        if (!gpuContext_.begin())
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            for (GpuSynthesisRequest& request : requests)
+            {
+                gpuSynthesisRequests_.push_back(std::move(request));
+            }
+            return;
+        }
+
+        std::vector<PendingGpuParityReadback> pendingReadbacks;
+        std::vector<FarLodChunkKey> submittedKeys;
+        const double budgetLimit = budgetMs <= 0.0 ? std::numeric_limits<double>::max() : budgetMs;
+        const SteadyClock::time_point submitStart = SteadyClock::now();
+        double totalGpuSynthesisMs = 0.0;
+        double totalGpuStampMs = 0.0;
+        std::size_t submittedCount = 0;
+
+        while (!requests.empty())
+        {
+            if (gpuParityEnabled_ && submittedCount >= 1)
+            {
+                break;
+            }
+            if (std::chrono::duration<double, std::milli>(SteadyClock::now() - submitStart).count() >= budgetLimit)
+            {
+                break;
+            }
+
+            GpuSynthesisRequest request = std::move(requests.front());
+            requests.pop_front();
+
+            std::lock_guard<std::mutex> lock(configMutex_);
+            auto it = chunks_.find(request.key);
+            if (it == chunks_.end())
+            {
+                continue;
+            }
+
+            FarLodChunkRecord& chunk = it->second;
+            if (!chunk.active || request.epoch != buildEpoch_.load(std::memory_order_acquire) ||
+                request.buildVersion != chunk.buildVersion || chunk.gpu.voxelBuffer == nullptr)
+            {
+                continue;
+            }
+
+            const auto sampleUpload = gpuContext_.allocateUpload(
+                static_cast<std::uint64_t>(request.terrainSamples.size() * sizeof(GpuTerrainFootprintSample)),
+                alignof(std::uint32_t));
+            if (sampleUpload.resource == nullptr)
+            {
+                requests.push_front(std::move(request));
+                break;
+            }
+            std::memcpy(sampleUpload.cpuPtr,
+                        request.terrainSamples.data(),
+                        request.terrainSamples.size() * sizeof(GpuTerrainFootprintSample));
+
+            FarLodGpuContext::ScratchAllocation stampUpload{};
+            if (!request.stampEntries.empty())
+            {
+                stampUpload = gpuContext_.allocateUpload(
+                    static_cast<std::uint64_t>(request.stampEntries.size() * sizeof(GpuStructureStampEntry)),
+                    alignof(std::uint32_t));
+                if (stampUpload.resource == nullptr)
+                {
+                    requests.push_front(std::move(request));
+                    break;
+                }
+                std::memcpy(stampUpload.cpuPtr,
+                            request.stampEntries.data(),
+                            request.stampEntries.size() * sizeof(GpuStructureStampEntry));
+            }
+
+            const SteadyClock::time_point synthStart = SteadyClock::now();
+            gpuContext_.transition(chunk.gpu.voxelBuffer.Get(),
+                                   chunk.gpu.voxelState,
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            chunk.gpu.voxelState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            gpuContext_.dispatchSynth(request.worldMin,
+                                      request.blockScale,
+                                      seaLevel_,
+                                      sampleUpload.resource,
+                                      sampleUpload.offset,
+                                      static_cast<std::uint32_t>(request.terrainSamples.size()),
+                                      chunk.gpu.voxelBuffer.Get());
+            gpuContext_.uavBarrier(chunk.gpu.voxelBuffer.Get());
+            totalGpuSynthesisMs +=
+                std::chrono::duration<double, std::milli>(SteadyClock::now() - synthStart).count();
+
+            if (!request.stampEntries.empty())
+            {
+                const SteadyClock::time_point stampStart = SteadyClock::now();
+                gpuContext_.dispatchStamp(static_cast<std::uint32_t>(request.stampEntries.size()),
+                                         stampUpload.resource,
+                                         stampUpload.offset,
+                                         chunk.gpu.voxelBuffer.Get());
+                gpuContext_.uavBarrier(chunk.gpu.voxelBuffer.Get());
+                totalGpuStampMs +=
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - stampStart).count();
+            }
+
+            if (request.parityRequested)
+            {
+                gpuContext_.transition(chunk.gpu.voxelBuffer.Get(),
+                                       chunk.gpu.voxelState,
+                                       D3D12_RESOURCE_STATE_COMMON);
+                chunk.gpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+                PendingGpuParityReadback pending{};
+                pending.key = request.key;
+                pending.buildVersion = request.buildVersion;
+                pending.epoch = request.epoch;
+                pending.cpuPackedParityVoxels = std::move(request.cpuPackedParityVoxels);
+                pending.parityRequested = true;
+                pending.copySubmitted = false;
+                pendingReadbacks.push_back(std::move(pending));
+            }
+            else
+            {
+                gpuContext_.transition(chunk.gpu.voxelBuffer.Get(),
+                                       chunk.gpu.voxelState,
+                                       D3D12_RESOURCE_STATE_COMMON);
+                chunk.gpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+            }
+
+            submittedKeys.push_back(request.key);
+            ++submittedCount;
+        }
+
+        const FarLodGpuContext::FlushResult flushResult = gpuContext_.flush();
+        for (PendingGpuParityReadback& pending : pendingReadbacks)
+        {
+            pending.computeFenceValue = flushResult.fenceValue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(configMutex_);
+            for (const PendingGpuParityReadback& pending : pendingReadbacks)
+            {
+                auto it = chunks_.find(pending.key);
+                if (it == chunks_.end())
+                {
+                    continue;
+                }
+                it->second.gpu.voxelFenceValue = flushResult.fenceValue;
+                it->second.gpu.voxelReady = (flushResult.fenceValue == 0);
+                it->second.gpu.parityValidated = false;
+            }
+            if (!gpuParityEnabled_)
+            {
+                for (const FarLodChunkKey& key : submittedKeys)
+                {
+                    auto it = chunks_.find(key);
+                    if (it == chunks_.end())
+                    {
+                        continue;
+                    }
+                    it->second.gpu.voxelFenceValue = flushResult.fenceValue;
+                    it->second.gpu.voxelReady = true;
+                    it->second.gpu.parityValidated = false;
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            for (GpuSynthesisRequest& request : requests)
+            {
+                gpuSynthesisRequests_.push_back(std::move(request));
+            }
+            for (PendingGpuParityReadback& pending : pendingReadbacks)
+            {
+                pendingGpuParityReadbacks_.push_back(std::move(pending));
+            }
+        }
+
+        if (submittedCount > 0)
+        {
+            lastAverageGpuSynthesisMs_ = totalGpuSynthesisMs / static_cast<double>(submittedCount);
+            lastAverageGpuStampMs_ = totalGpuStampMs / static_cast<double>(submittedCount);
+            if (benchmarkMetrics_ != nullptr)
+            {
+                benchmarkMetrics_->lodGpuSynthesisStage.recordMicros(
+                    static_cast<std::uint64_t>(std::max(lastAverageGpuSynthesisMs_, 0.0) * 1000.0));
+                benchmarkMetrics_->lodGpuStampStage.recordMicros(
+                    static_cast<std::uint64_t>(std::max(lastAverageGpuStampMs_, 0.0) * 1000.0));
+            }
+        }
+    }
+
     void collectCompletedBuilds(double uploadBudgetMs)
     {
         const SteadyClock::time_point collectStart = SteadyClock::now();
@@ -4262,6 +5324,151 @@ private:
         lastUploadMs_ = std::chrono::duration<double, std::milli>(SteadyClock::now() - uploadStart).count();
     }
 
+    void pollGpuParityResults()
+    {
+        std::deque<PendingGpuParityReadback> pending;
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            pending.swap(pendingGpuParityReadbacks_);
+        }
+
+        if (pending.empty())
+        {
+            return;
+        }
+
+        std::deque<PendingGpuParityReadback> stillPending;
+        for (PendingGpuParityReadback& parity : pending)
+        {
+            if (!parity.copySubmitted)
+            {
+                if (parity.computeFenceValue == 0 || parity.computeFenceValue > gpuContext_.completedFenceValue())
+                {
+                    stillPending.push_back(std::move(parity));
+                    continue;
+                }
+
+                if (parityReadbackScratch_ == nullptr || parityReadbackMapped_ == nullptr || !uploadContext_.ready())
+                {
+                    stillPending.push_back(std::move(parity));
+                    continue;
+                }
+
+                if (!uploadContext_.begin())
+                {
+                    stillPending.push_back(std::move(parity));
+                    continue;
+                }
+
+                bool submittedCopy = false;
+                {
+                    std::lock_guard<std::mutex> configLock(configMutex_);
+                    auto it = chunks_.find(parity.key);
+                    if (it == chunks_.end() ||
+                        parity.epoch != buildEpoch_.load(std::memory_order_acquire) ||
+                        parity.buildVersion != it->second.buildVersion ||
+                        it->second.gpu.voxelBuffer == nullptr)
+                    {
+                        // No longer relevant; drop it.
+                    }
+                    else
+                    {
+                        FarLodChunkRecord& chunk = it->second;
+                        uploadContext_.transition(chunk.gpu.voxelBuffer.Get(),
+                                                  chunk.gpu.voxelState,
+                                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        uploadContext_.copyBuffer(parityReadbackScratch_.Get(),
+                                                  0,
+                                                  chunk.gpu.voxelBuffer.Get(),
+                                                  0,
+                                                  static_cast<std::uint64_t>(kVoxelCount * sizeof(PackedFarLodVoxelGpu)));
+                        uploadContext_.transition(chunk.gpu.voxelBuffer.Get(),
+                                                  D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                  chunk.gpu.voxelState);
+                        submittedCopy = true;
+                    }
+                }
+
+                if (!submittedCopy)
+                {
+                    uploadContext_.flush(nullptr);
+                    continue;
+                }
+
+                uploadContext_.flush(nullptr);
+                parity.copyFenceValue = uploadContext_.lastSubmittedFenceValue();
+                parity.copySubmitted = true;
+                stillPending.push_back(std::move(parity));
+                continue;
+            }
+
+            if (parity.copyFenceValue == 0 || parity.copyFenceValue > uploadContext_.completedFenceValue())
+            {
+                stillPending.push_back(std::move(parity));
+                continue;
+            }
+
+            const auto* gpuReadback = reinterpret_cast<const PackedFarLodVoxelGpu*>(parityReadbackMapped_);
+            if (!parity.cpuPackedParityVoxels)
+            {
+                continue;
+            }
+            std::uint32_t mismatchCount = 0;
+            std::size_t firstMismatchIndex = kVoxelCount;
+            PackedFarLodVoxelGpu cpuValue = 0;
+            PackedFarLodVoxelGpu gpuValue = 0;
+            for (std::size_t voxelIdx = 0; voxelIdx < kVoxelCount; ++voxelIdx)
+            {
+                if ((*parity.cpuPackedParityVoxels)[voxelIdx] == gpuReadback[voxelIdx])
+                {
+                    continue;
+                }
+
+                if (firstMismatchIndex == kVoxelCount)
+                {
+                    firstMismatchIndex = voxelIdx;
+                    cpuValue = (*parity.cpuPackedParityVoxels)[voxelIdx];
+                    gpuValue = gpuReadback[voxelIdx];
+                }
+                ++mismatchCount;
+            }
+
+            std::lock_guard<std::mutex> configLock(configMutex_);
+            auto it = chunks_.find(parity.key);
+            if (it == chunks_.end())
+            {
+                continue;
+            }
+
+            FarLodChunkRecord& chunk = it->second;
+            if (parity.epoch != buildEpoch_.load(std::memory_order_acquire) || parity.buildVersion != chunk.buildVersion)
+            {
+                continue;
+            }
+
+            chunk.gpu.voxelReady = true;
+            chunk.gpu.parityValidated = parity.parityRequested;
+            chunk.gpu.parityMismatchCount = mismatchCount;
+            rollingGpuParityMismatchCount_ += mismatchCount;
+            if (mismatchCount > 0 && firstMismatchIndex < kVoxelCount)
+            {
+                std::cerr << "Far LOD GPU parity mismatch chunk level=" << parity.key.level
+                          << " coord=[" << parity.key.coord.x << "," << parity.key.coord.y << "," << parity.key.coord.z
+                          << "] firstVoxel=" << firstMismatchIndex
+                          << " cpu=" << cpuValue
+                          << " gpu=" << gpuValue << std::endl;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            for (PendingGpuParityReadback& parity : stillPending)
+            {
+                pendingGpuParityReadbacks_.push_back(std::move(parity));
+            }
+        }
+    }
+
     [[nodiscard]] VoxelFootprintClassification classifyTerrainVoxelFootprint(
         const glm::ivec3& voxelMin,
         int blockScale,
@@ -4277,10 +5484,15 @@ private:
                                                            const StructureQueryFn& structureQueryFn,
                                                            bool allowStructureFallback) const;
     [[nodiscard]] FarLodChunkCpu synthesizeChunkTerrainCpu(const BuildJob& job,
-                                                           const ColumnSampleFn& columnSampleFn) const;
+                                                           const ColumnSampleFn& columnSampleFn,
+                                                           std::vector<GpuTerrainFootprintSample>* gpuSamples) const;
+    [[nodiscard]] std::vector<StructureInstance> queryChunkStructures(const BuildJob& job,
+                                                                      const StructureQueryFn& structureQueryFn) const;
     void stampChunkStructuresCpu(FarLodChunkCpu& cpu,
-                                 int lodLevel,
-                                 const StructureQueryFn& structureQueryFn) const;
+                                 const std::vector<StructureInstance>& structures) const;
+    [[nodiscard]] std::vector<GpuStructureStampEntry> buildGpuStructureStampEntries(
+        const FarLodChunkCpu& cpu,
+        const std::vector<StructureInstance>& structures) const;
     [[nodiscard]] ChunkMesh buildChunkMesh(const FarLodChunkCpu& cpu,
                                            int lodLevel,
                                            const ColumnSampleFn& columnSampleFn,
@@ -4364,6 +5576,9 @@ private:
     int builtTilesLastUpdate_{0};
     int skippedTilesLastUpdate_{0};
     double lastAverageBuildMs_{0.0};
+    double lastAverageGpuSynthesisMs_{0.0};
+    double lastAverageGpuStampMs_{0.0};
+    double lastAverageGpuFaceBuildMs_{0.0};
     double lastAverageCpuTerrainSynthesisMs_{0.0};
     double lastAverageCpuStructureStampMs_{0.0};
     double lastAverageCpuMeshMs_{0.0};
@@ -4380,6 +5595,9 @@ private:
     std::vector<BufferPage> bufferPages_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     UploadContext uploadContext_{};
+    FarLodGpuContext gpuContext_{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> parityReadbackScratch_;
+    std::byte* parityReadbackMapped_{nullptr};
     std::unordered_map<FarLodChunkKey, FarLodChunkRecord, FarLodChunkKeyHasher> chunks_;
     mutable std::mutex configMutex_;
     ColumnSampleFn columnSampleFn_{};
@@ -4391,6 +5609,8 @@ private:
     std::unordered_set<FarLodChunkKey, FarLodChunkKeyHasher> queuedKeys_;
     mutable std::mutex completedMutex_;
     std::deque<BuildResult> completedBuilds_;
+    std::deque<GpuSynthesisRequest> gpuSynthesisRequests_;
+    std::deque<PendingGpuParityReadback> pendingGpuParityReadbacks_;
     std::vector<std::thread> workerThreads_;
     std::atomic<bool> stopWorkers_{false};
     std::atomic<std::uint64_t> buildEpoch_{1};
@@ -4399,6 +5619,9 @@ private:
     std::atomic<std::size_t> exactPendingUploads_{0};
     ChunkBenchmarkMetrics* benchmarkMetrics_{nullptr};
     std::unordered_map<int, int> levelActivationOuterRadiusChunks_;
+    mutable std::mutex gpuRequestMutex_;
+    bool gpuParityEnabled_{false};
+    std::uint32_t rollingGpuParityMismatchCount_{0};
 };
 
 FarTerrainManager::VoxelFootprintClassification FarTerrainManager::classifyTerrainVoxelFootprint(
@@ -4583,8 +5806,10 @@ bool FarTerrainManager::chunkMayContainRenderableFarContent(const FarLodLevelCon
     return !structureQueryFn(chunkMin, chunkMax, level.level).empty();
 }
 
-FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(const BuildJob& job,
-                                                                              const ColumnSampleFn& columnSampleFn) const
+FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(
+    const BuildJob& job,
+    const ColumnSampleFn& columnSampleFn,
+    std::vector<GpuTerrainFootprintSample>* gpuSamples) const
 {
     FarLodChunkCpu cpu{};
     cpu.key = job.key;
@@ -4592,6 +5817,11 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(c
     cpu.worldMin = job.key.coord * job.level.chunkSpanBlocks();
     cpu.boundsMin = glm::vec3(cpu.worldMin);
     cpu.boundsMax = glm::vec3(cpu.worldMin + glm::ivec3(job.level.chunkSpanBlocks()));
+    if (gpuSamples != nullptr)
+    {
+        gpuSamples->clear();
+        gpuSamples->reserve(kVoxelCount * 5u);
+    }
 
     for (int localY = 0; localY < kLogicalSize; ++localY)
     {
@@ -4601,6 +5831,55 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(c
             {
                 const glm::ivec3 voxelMin = cpu.worldMin + glm::ivec3(localX, localY, localZ) * cpu.blockScale;
                 FarLodVoxel& voxel = cpu.voxels[voxelIndex(localX, localY, localZ)];
+                const glm::ivec3 voxelMax = voxelMin + glm::ivec3(cpu.blockScale - 1);
+                const int minX = voxelMin.x;
+                const int maxX = voxelMax.x;
+                const int minZ = voxelMin.z;
+                const int maxZ = voxelMax.z;
+                const int centerX = (minX + maxX) / 2;
+                const int centerZ = (minZ + maxZ) / 2;
+                const std::array<glm::ivec2, 5> samplePoints{{
+                    {minX, minZ},
+                    {maxX, minZ},
+                    {minX, maxZ},
+                    {maxX, maxZ},
+                    {centerX, centerZ},
+                }};
+                for (const glm::ivec2& samplePoint : samplePoints)
+                {
+                    const ColumnSample sample =
+                        columnSampleFn(samplePoint.x, samplePoint.y, voxelMin.y, voxelMax.y);
+                    GpuTerrainFootprintSample gpuSample{};
+                    gpuSample.surfaceY = sample.surfaceY;
+                    gpuSample.waterBottomY = sample.surfaceY + 1;
+                    if (sample.dominantBiome != nullptr)
+                    {
+                        const terrain::TerrainColumnBlocks blocks =
+                            terrain::resolveTerrainColumnBlocks(*sample.dominantBiome,
+                                                                sample,
+                                                                samplePoint.x,
+                                                                samplePoint.y,
+                                                                seaLevel_);
+                        gpuSample.surfaceBlock = static_cast<std::uint32_t>(toIndex(blocks.surfaceBlock));
+                        gpuSample.fillerBlock = static_cast<std::uint32_t>(toIndex(blocks.fillerBlock));
+                        gpuSample.flags |= 0x1u;
+                        const auto& waterFill = sample.dominantBiome->terrainSettings.waterFill;
+                        if (waterFill.enabled)
+                        {
+                            gpuSample.flags |= 0x2u;
+                            if (waterFill.maxDepth > 0)
+                            {
+                                gpuSample.waterBottomY = std::max(gpuSample.waterBottomY,
+                                                                  seaLevel_ - waterFill.maxDepth + 1);
+                            }
+                        }
+                    }
+                    if (gpuSamples != nullptr)
+                    {
+                        gpuSamples->push_back(gpuSample);
+                    }
+                }
+
                 voxel = classifyTerrainVoxelFootprint(voxelMin, cpu.blockScale, columnSampleFn).voxel;
                 if (!voxel.occupied || voxel.material == BlockId::Air)
                 {
@@ -4622,13 +5901,18 @@ FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(c
     return cpu;
 }
 
-void FarTerrainManager::stampChunkStructuresCpu(FarLodChunkCpu& cpu,
-                                                int lodLevel,
-                                                const StructureQueryFn& structureQueryFn) const
+std::vector<StructureInstance> FarTerrainManager::queryChunkStructures(const BuildJob& job,
+                                                                       const StructureQueryFn& structureQueryFn) const
 {
-    const glm::ivec3 queryMin = cpu.worldMin;
-    const glm::ivec3 queryMax = cpu.worldMin + glm::ivec3(kLogicalSize * cpu.blockScale - 1);
-    const std::vector<StructureInstance> structures = structureQueryFn(queryMin, queryMax, lodLevel);
+    const glm::ivec3 worldMin = job.key.coord * job.level.chunkSpanBlocks();
+    const glm::ivec3 queryMin = worldMin;
+    const glm::ivec3 queryMax = worldMin + glm::ivec3(kLogicalSize * job.level.blockScale - 1);
+    return structureQueryFn(queryMin, queryMax, job.level.level);
+}
+
+void FarTerrainManager::stampChunkStructuresCpu(FarLodChunkCpu& cpu,
+                                                const std::vector<StructureInstance>& structures) const
+{
     for (const StructureInstance& structure : structures)
     {
         forEachStructureVoxel(structure,
@@ -4677,6 +5961,71 @@ void FarTerrainManager::stampChunkStructuresCpu(FarLodChunkCpu& cpu,
         cpu.minOccupiedLocalY = 0;
         cpu.maxOccupiedLocalY = -1;
     }
+}
+
+std::vector<FarTerrainManager::GpuStructureStampEntry> FarTerrainManager::buildGpuStructureStampEntries(
+    const FarLodChunkCpu& cpu,
+    const std::vector<StructureInstance>& structures) const
+{
+    std::array<FarLodVoxel, kVoxelCount> stagedVoxels{};
+    std::array<int, kVoxelCount> priorities{};
+    priorities.fill(-1);
+
+    for (const StructureInstance& structure : structures)
+    {
+        forEachStructureVoxel(structure,
+                              [&](int worldX, int worldY, int worldZ, BlockId block)
+                              {
+                                  const glm::ivec3 localWorld{
+                                      worldX - cpu.worldMin.x,
+                                      worldY - cpu.worldMin.y,
+                                      worldZ - cpu.worldMin.z};
+                                  if (localWorld.x < 0 || localWorld.y < 0 || localWorld.z < 0)
+                                  {
+                                      return false;
+                                  }
+
+                                  const glm::ivec3 localCoord = localWorld / cpu.blockScale;
+                                  if (localCoord.x < 0 || localCoord.x >= kLogicalSize ||
+                                      localCoord.y < 0 || localCoord.y >= kLogicalSize ||
+                                      localCoord.z < 0 || localCoord.z >= kLogicalSize)
+                                  {
+                                      return false;
+                                  }
+
+                                  const std::size_t idx = voxelIndex(localCoord.x, localCoord.y, localCoord.z);
+                                  const int incomingPriority = structureMaterialPriority(block);
+                                  if (incomingPriority < priorities[idx])
+                                  {
+                                      return false;
+                                  }
+
+                                  priorities[idx] = incomingPriority;
+                                  FarLodVoxel& voxel = stagedVoxels[idx];
+                                  voxel.occupied = 1;
+                                  voxel.material = block;
+                                  voxel.flags = kFarLodVoxelStructure;
+                                  if (isAlphaCutoutBlock(block))
+                                  {
+                                      voxel.flags |= kFarLodVoxelCutout;
+                                  }
+                                  return false;
+                              });
+    }
+
+    std::vector<GpuStructureStampEntry> entries;
+    entries.reserve(structures.size() * 4u);
+    for (std::size_t idx = 0; idx < kVoxelCount; ++idx)
+    {
+        if (!stagedVoxels[idx].occupied)
+        {
+            continue;
+        }
+        entries.push_back(GpuStructureStampEntry{
+            static_cast<std::uint32_t>(idx),
+            packGpuVoxel(stagedVoxels[idx])});
+    }
+    return entries;
 }
 
 FarTerrainManager::ChunkMesh FarTerrainManager::buildChunkMesh(const FarLodChunkCpu& cpu,

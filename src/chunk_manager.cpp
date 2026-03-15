@@ -5486,16 +5486,6 @@ private:
                     gpuSynthesisRequests_.push_back(std::move(gpuRequest));
                 }
 
-                if (!gpuSynthesisEnabled_ || !gpuContext_.ready())
-                {
-                    const SteadyClock::time_point meshStart = SteadyClock::now();
-                    result.mesh = buildChunkMesh(result.cpu, job.level.level, columnSampleFn, structureQueryFn, uvLookupFn);
-                    result.cpuMeshMs =
-                        std::chrono::duration<double, std::milli>(SteadyClock::now() - meshStart).count();
-                    result.faceCount = result.mesh.indices.size() / 6u;
-                    result.vertexCount = result.mesh.vertices.size();
-                    result.indexCount = result.mesh.indices.size();
-                }
             }
             result.buildMs =
                 std::chrono::duration<double, std::milli>(SteadyClock::now() - buildStart).count();
@@ -6190,19 +6180,10 @@ private:
                 continue;
             }
 
+            releaseChunkGpu(chunk);
             chunk.cpu = std::move(result.cpu);
-            uploadBuiltChunk(chunk, result.mesh, result.uploadCopyMs);
+            chunk.cpu.meshReady = false;
             chunk.dirty = false;
-            ++builtTilesLastUpdate_;
-            ++applied;
-            totalBuildMs += result.buildMs;
-            totalCpuTerrainSynthesisMs += result.cpuTerrainSynthesisMs;
-            totalCpuStructureStampMs += result.cpuStructureStampMs;
-            totalCpuMeshMs += result.cpuMeshMs;
-            totalUploadCopyMs += result.uploadCopyMs;
-            lastBuiltFaceCount_ += result.faceCount;
-            lastBuiltVertexCount_ += result.vertexCount;
-            lastBuiltIndexCount_ += result.indexCount;
         }
 
         if (applied > 0)

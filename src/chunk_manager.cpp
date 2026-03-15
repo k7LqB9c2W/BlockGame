@@ -5430,18 +5430,13 @@ private:
             result.key = job.key;
             result.buildVersion = job.buildVersion;
             result.epoch = job.epoch;
-            if (!chunkMayContainRenderableFarContent(job.level,
-                                                     job.key.coord,
-                                                     columnSampleFn,
-                                                     structureQueryFn,
-                                                     true))
-            {
-                result.skippedByRelevance = true;
-            }
-            else
             {
                 const SteadyClock::time_point terrainStart = SteadyClock::now();
-                result.cpu = synthesizeChunkTerrainCpu(job, columnSampleFn);
+                result.cpu.key = job.key;
+                result.cpu.blockScale = job.level.blockScale;
+                result.cpu.worldMin = job.key.coord * job.level.chunkSpanBlocks();
+                result.cpu.boundsMin = glm::vec3(result.cpu.worldMin);
+                result.cpu.boundsMax = glm::vec3(result.cpu.worldMin + glm::ivec3(job.level.chunkSpanBlocks()));
                 result.cpuTerrainSynthesisMs =
                     std::chrono::duration<double, std::milli>(SteadyClock::now() - terrainStart).count();
 
@@ -6490,25 +6485,8 @@ private:
         }
     }
 
-    [[nodiscard]] VoxelFootprintClassification classifyTerrainVoxelFootprint(
-        const glm::ivec3& voxelMin,
-        int blockScale,
-        const ColumnSampleFn& columnSampleFn) const;
     [[nodiscard]] GpuTerrainColumnDescriptor buildGpuTerrainColumnDescriptor(const glm::ivec3& voxelMin,
                                                                              int blockScale) const;
-    [[nodiscard]] terrain::FarLodColumnSample sampleFarLodColumnWorld(int worldX, int worldZ) const;
-    [[nodiscard]] FarLodVoxel sampleFarNeighborVoxelWorld(const glm::ivec3& worldVoxelMin,
-                                                          int blockScale,
-                                                          int lodLevel,
-                                                          const ColumnSampleFn& columnSampleFn,
-                                                          const StructureQueryFn& structureQueryFn) const;
-    [[nodiscard]] bool chunkMayContainRenderableFarContent(const FarLodLevelConfig& level,
-                                                           const glm::ivec3& chunkCoord,
-                                                           const ColumnSampleFn& columnSampleFn,
-                                                           const StructureQueryFn& structureQueryFn,
-                                                           bool allowStructureFallback) const;
-    [[nodiscard]] FarLodChunkCpu synthesizeChunkTerrainCpu(const BuildJob& job,
-                                                           const ColumnSampleFn& columnSampleFn) const;
     [[nodiscard]] std::vector<StructureInstance> queryChunkStructures(const BuildJob& job,
                                                                       const StructureQueryFn& structureQueryFn) const;
     void stampChunkStructuresCpu(FarLodChunkCpu& cpu,
@@ -6738,306 +6716,16 @@ private:
     std::uint32_t rollingGpuParityMismatchCount_{0};
 };
 
-terrain::FarLodColumnSample FarTerrainManager::sampleFarLodColumnWorld(int worldX, int worldZ) const
-{
-    return terrain::evaluateFarLodColumn(worldgenTables_.header, worldgenTables_.biomes, worldX, worldZ);
-}
-
 FarTerrainManager::GpuTerrainColumnDescriptor FarTerrainManager::buildGpuTerrainColumnDescriptor(
     const glm::ivec3& voxelMin,
     int blockScale) const
 {
+    (void)voxelMin;
+    (void)blockScale;
     GpuTerrainColumnDescriptor descriptor{};
-    const glm::ivec3 voxelMax = voxelMin + glm::ivec3(blockScale - 1);
-    const int minX = voxelMin.x;
-    const int maxX = voxelMax.x;
-    const int minZ = voxelMin.z;
-    const int maxZ = voxelMax.z;
-    const int centerX = (minX + maxX) / 2;
-    const int centerZ = (minZ + maxZ) / 2;
-    const std::array<glm::ivec2, 5> samplePoints{{
-        {minX, minZ},
-        {maxX, minZ},
-        {minX, maxZ},
-        {maxX, maxZ},
-        {centerX, centerZ},
-    }};
-
-    int minSurfaceY = std::numeric_limits<int>::max();
-    int minWaterBottomY = std::numeric_limits<int>::max();
-    int waterHitCount = 0;
-    std::array<terrain::FarLodColumnSample, 5> samples{};
-
-    for (std::size_t i = 0; i < samplePoints.size(); ++i)
-    {
-        const terrain::FarLodColumnSample sample = sampleFarLodColumnWorld(samplePoints[i].x, samplePoints[i].y);
-        samples[i] = sample;
-        minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
-        if (sample.waterEnabled && sample.surfaceY < seaLevel_)
-        {
-            ++waterHitCount;
-            minWaterBottomY = std::min(minWaterBottomY, sample.waterBottomY);
-        }
-
-        if (i == samplePoints.size() - 1)
-        {
-            descriptor.centerHasSolid = sample.hasSolid ? 1u : 0u;
-            descriptor.centerWaterEnabled = sample.waterEnabled ? 1u : 0u;
-            descriptor.centerSurfaceY = sample.surfaceY;
-            descriptor.centerWaterBottomY = sample.waterBottomY;
-            descriptor.centerSurfaceBlock = static_cast<std::uint32_t>(toIndex(sample.surfaceBlock));
-            descriptor.centerFillerBlock = static_cast<std::uint32_t>(toIndex(sample.fillerBlock));
-        }
-    }
-
-    const terrain::FarLodColumnSample& centerSample = samples.back();
-    for (int localY = 0; localY < static_cast<int>(kLogicalSize); ++localY)
-    {
-        const int voxelMinYForLayer = voxelMin.y + localY * blockScale;
-        const int voxelMaxYForLayer = voxelMinYForLayer + (blockScale - 1);
-        int solidHitCount = 0;
-        for (const terrain::FarLodColumnSample& sample : samples)
-        {
-            if (sample.hasSolid && sample.surfaceY >= voxelMinYForLayer)
-            {
-                ++solidHitCount;
-            }
-        }
-
-        const std::uint32_t bit = (1u << static_cast<std::uint32_t>(localY));
-        if (centerSample.hasSolid && solidHitCount >= 3)
-        {
-            if (minSurfaceY > voxelMaxYForLayer)
-            {
-                descriptor.terrainFillerMask |= bit;
-            }
-            else
-            {
-                descriptor.terrainSurfaceMask |= bit;
-            }
-        }
-        else if (centerSample.waterEnabled &&
-                 waterHitCount >= 3 &&
-                 minWaterBottomY != std::numeric_limits<int>::max() &&
-                 intersectsRange(voxelMinYForLayer, voxelMaxYForLayer, minWaterBottomY, seaLevel_))
-        {
-            descriptor.waterMask |= bit;
-        }
-    }
+    descriptor.centerSurfaceBlock = static_cast<std::uint32_t>(toIndex(BlockId::Air));
+    descriptor.centerFillerBlock = static_cast<std::uint32_t>(toIndex(BlockId::Air));
     return descriptor;
-}
-
-FarTerrainManager::VoxelFootprintClassification FarTerrainManager::classifyTerrainVoxelFootprint(
-    const glm::ivec3& voxelMin,
-    int blockScale,
-    const ColumnSampleFn& columnSampleFn) const
-{
-    (void)columnSampleFn;
-    VoxelFootprintClassification classification{};
-    const glm::ivec3 voxelMax = voxelMin + glm::ivec3(blockScale - 1);
-    const int minX = voxelMin.x;
-    const int maxX = voxelMax.x;
-    const int minZ = voxelMin.z;
-    const int maxZ = voxelMax.z;
-    const int centerX = (minX + maxX) / 2;
-    const int centerZ = (minZ + maxZ) / 2;
-    const std::array<glm::ivec2, 5> samplePoints{{
-        {minX, minZ},
-        {maxX, minZ},
-        {minX, maxZ},
-        {maxX, maxZ},
-        {centerX, centerZ},
-    }};
-
-    std::array<terrain::FarLodColumnSample, 5> samples{};
-    int solidHitCount = 0;
-    int waterHitCount = 0;
-    int minWaterBottom = std::numeric_limits<int>::max();
-    for (std::size_t i = 0; i < samplePoints.size(); ++i)
-    {
-        samples[i] = sampleFarLodColumnWorld(samplePoints[i].x, samplePoints[i].y);
-        classification.minSampledSurfaceY = std::min(classification.minSampledSurfaceY, samples[i].surfaceY);
-        classification.maxSampledSurfaceY = std::max(classification.maxSampledSurfaceY, samples[i].surfaceY);
-        if (samples[i].hasSolid && samples[i].surfaceY >= voxelMin.y)
-        {
-            ++solidHitCount;
-        }
-
-        if (samples[i].waterEnabled && samples[i].surfaceY < seaLevel_)
-        {
-            ++waterHitCount;
-            minWaterBottom = std::min(minWaterBottom, samples[i].waterBottomY);
-        }
-    }
-
-    const terrain::FarLodColumnSample& centerSample = samples.back();
-    if (centerSample.hasSolid && solidHitCount >= 3)
-    {
-        classification.voxel.occupied = 1;
-        classification.voxel.material =
-            (classification.minSampledSurfaceY > voxelMax.y) ? centerSample.fillerBlock : centerSample.surfaceBlock;
-        classification.voxel.flags = kFarLodVoxelTerrain;
-        return classification;
-    }
-
-    if (centerSample.waterEnabled)
-    {
-        if (waterHitCount >= 3 && minWaterBottom != std::numeric_limits<int>::max() &&
-            intersectsRange(voxelMin.y, voxelMax.y, minWaterBottom, seaLevel_))
-        {
-            classification.voxel.occupied = 1;
-            classification.voxel.material = BlockId::Water;
-            classification.voxel.flags = kFarLodVoxelWater;
-        }
-    }
-
-    return classification;
-}
-
-FarTerrainManager::FarLodVoxel FarTerrainManager::sampleFarNeighborVoxelWorld(const glm::ivec3& worldVoxelMin,
-                                                                              int blockScale,
-                                                                              int lodLevel,
-                                                                              const ColumnSampleFn& columnSampleFn,
-                                                                              const StructureQueryFn& structureQueryFn) const
-{
-    (void)columnSampleFn;
-    FarLodVoxel voxel = classifyTerrainVoxelFootprint(worldVoxelMin, blockScale, columnSampleFn).voxel;
-    const glm::ivec3 queryMin = worldVoxelMin;
-    const glm::ivec3 queryMax = worldVoxelMin + glm::ivec3(blockScale - 1);
-    const std::vector<StructureInstance> structures = structureQueryFn(queryMin, queryMax, lodLevel);
-    for (const StructureInstance& structure : structures)
-    {
-        forEachStructureVoxel(structure,
-                              [&](int worldX, int worldY, int worldZ, BlockId block)
-                              {
-                                  if (worldX < queryMin.x || worldX > queryMax.x ||
-                                      worldY < queryMin.y || worldY > queryMax.y ||
-                                      worldZ < queryMin.z || worldZ > queryMax.z)
-                                  {
-                                      return false;
-                                  }
-
-                                  const int incomingPriority = structureMaterialPriority(block);
-                                  const int existingPriority = structureMaterialPriority(voxel.material);
-                                  if (incomingPriority < existingPriority)
-                                  {
-                                      return false;
-                                  }
-
-                                  voxel.occupied = 1;
-                                  voxel.material = block;
-                                  voxel.flags = kFarLodVoxelStructure;
-                                  if (isAlphaCutoutBlock(block))
-                                  {
-                                      voxel.flags |= kFarLodVoxelCutout;
-                                  }
-                                  return false;
-                              });
-    }
-
-    return voxel;
-}
-
-bool FarTerrainManager::chunkMayContainRenderableFarContent(const FarLodLevelConfig& level,
-                                                            const glm::ivec3& chunkCoord,
-                                                            const ColumnSampleFn& columnSampleFn,
-                                                            const StructureQueryFn& structureQueryFn,
-                                                            bool allowStructureFallback) const
-{
-    (void)columnSampleFn;
-    const int span = level.chunkSpanBlocks();
-    const glm::ivec3 chunkMin = chunkCoord * span;
-    const glm::ivec3 chunkMax = chunkMin + glm::ivec3(span - 1);
-    const int minX = chunkMin.x;
-    const int maxX = chunkMax.x;
-    const int minZ = chunkMin.z;
-    const int maxZ = chunkMax.z;
-    const int midX = (minX + maxX) / 2;
-    const int midZ = (minZ + maxZ) / 2;
-    const std::array<glm::ivec2, 9> samplePoints{{
-        {minX, minZ},
-        {maxX, minZ},
-        {minX, maxZ},
-        {maxX, maxZ},
-        {midX, minZ},
-        {midX, maxZ},
-        {minX, midZ},
-        {maxX, midZ},
-        {midX, midZ},
-    }};
-
-    int minSurfaceY = std::numeric_limits<int>::max();
-    int maxSurfaceY = std::numeric_limits<int>::min();
-    bool anyWaterFill = false;
-    for (const glm::ivec2& samplePoint : samplePoints)
-    {
-        const terrain::FarLodColumnSample sample = sampleFarLodColumnWorld(samplePoint.x, samplePoint.y);
-        minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
-        maxSurfaceY = std::max(maxSurfaceY, sample.surfaceY);
-        if (sample.waterEnabled)
-        {
-            anyWaterFill = true;
-        }
-    }
-
-    const bool terrainIntersects =
-        maxSurfaceY >= chunkMin.y - level.blockScale &&
-        minSurfaceY <= chunkMax.y + level.blockScale;
-    const bool waterIntersects =
-        anyWaterFill &&
-        seaLevel_ >= chunkMin.y - level.blockScale &&
-        seaLevel_ <= chunkMax.y + level.blockScale;
-    if (terrainIntersects || waterIntersects)
-    {
-        return true;
-    }
-
-    if (!allowStructureFallback)
-    {
-        return false;
-    }
-
-    return !structureQueryFn(chunkMin, chunkMax, level.level).empty();
-}
-
-FarTerrainManager::FarLodChunkCpu FarTerrainManager::synthesizeChunkTerrainCpu(
-    const BuildJob& job,
-    const ColumnSampleFn& columnSampleFn) const
-{
-    FarLodChunkCpu cpu{};
-    cpu.key = job.key;
-    cpu.blockScale = job.level.blockScale;
-    cpu.worldMin = job.key.coord * job.level.chunkSpanBlocks();
-    cpu.boundsMin = glm::vec3(cpu.worldMin);
-    cpu.boundsMax = glm::vec3(cpu.worldMin + glm::ivec3(job.level.chunkSpanBlocks()));
-
-    for (int localY = 0; localY < kLogicalSize; ++localY)
-    {
-        for (int localZ = 0; localZ < kLogicalSize; ++localZ)
-        {
-            for (int localX = 0; localX < kLogicalSize; ++localX)
-            {
-                const glm::ivec3 voxelMin = cpu.worldMin + glm::ivec3(localX, localY, localZ) * cpu.blockScale;
-                FarLodVoxel& voxel = cpu.voxels[voxelIndex(localX, localY, localZ)];
-                voxel = classifyTerrainVoxelFootprint(voxelMin, cpu.blockScale, columnSampleFn).voxel;
-                if (!voxel.occupied || voxel.material == BlockId::Air)
-                {
-                    continue;
-                }
-
-                cpu.minOccupiedLocalY = std::min(cpu.minOccupiedLocalY, localY);
-                cpu.maxOccupiedLocalY = std::max(cpu.maxOccupiedLocalY, localY);
-            }
-        }
-    }
-
-    cpu.terrainReady = true;
-    if (cpu.maxOccupiedLocalY < cpu.minOccupiedLocalY)
-    {
-        cpu.minOccupiedLocalY = 0;
-        cpu.maxOccupiedLocalY = -1;
-    }
-    return cpu;
 }
 
 std::vector<StructureInstance> FarTerrainManager::queryChunkStructures(const BuildJob& job,
@@ -7173,6 +6861,9 @@ FarTerrainManager::ChunkMesh FarTerrainManager::buildChunkMesh(const FarLodChunk
                                                               const StructureQueryFn& structureQueryFn,
                                                               const UvLookupFn& uvLookupFn) const
 {
+    (void)lodLevel;
+    (void)columnSampleFn;
+    (void)structureQueryFn;
     ChunkMesh mesh{};
     mesh.boundsMin = cpu.boundsMin;
     mesh.boundsMax = cpu.boundsMax;
@@ -7208,9 +6899,7 @@ FarTerrainManager::ChunkMesh FarTerrainManager::buildChunkMesh(const FarLodChunk
             return cached->second;
         }
 
-        const glm::ivec3 neighborWorldMin = cpu.worldMin + localCoord * cpu.blockScale;
-        const FarLodVoxel sampledVoxel =
-            sampleFarNeighborVoxelWorld(neighborWorldMin, cpu.blockScale, lodLevel, columnSampleFn, structureQueryFn);
+        const FarLodVoxel sampledVoxel{};
         neighborVoxelCache.emplace(localCoord, sampledVoxel);
         return sampledVoxel;
     };

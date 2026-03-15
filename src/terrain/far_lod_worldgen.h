@@ -88,9 +88,4 @@ struct FarLodColumnSample
                                                              const WorldgenProfile& worldgenProfile,
                                                              unsigned seed);
 
-[[nodiscard]] FarLodColumnSample evaluateFarLodColumn(const FarLodGpuWorldgenHeader& header,
-                                                      std::span<const FarLodGpuBiome> biomes,
-                                                      int worldX,
-                                                      int worldZ);
-
 } // namespace terrain

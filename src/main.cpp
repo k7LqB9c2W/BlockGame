@@ -4020,7 +4020,7 @@ int runGame()
                             streamingStatus.farDirtyTiles);
                 ImGui::TextWrapped("Only the inner Exact Radius streams real chunks. The outer %d chunks are LOD-only visual terrain until you move closer.",
                                    std::max(renderSettings.totalChunks - renderSettings.exactChunks, 0));
-                ImGui::TextWrapped("CPU-backed distant terrain is active beyond the Exact Radius. Exact chunks still own gameplay, collision, and edits.");
+                ImGui::TextWrapped("GPU-backed distant terrain is active beyond the Exact Radius. Exact chunks still own gameplay, collision, and edits.");
             }
             ImGui::Separator();
             ImGui::TextUnformatted("View Diagnostics");

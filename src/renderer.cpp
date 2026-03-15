@@ -75,6 +75,36 @@ void renderDebugLog(const std::string& message)
     std::cout << message << std::endl;
 }
 
+[[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept
+{
+    static const bool enabled = []()
+    {
+        const char* value = std::getenv("BLOCKGAME_LOD_VIS_DEBUG");
+        return value != nullptr && std::string_view(value) != "0" && std::string_view(value) != "false";
+    }();
+    return enabled;
+}
+
+void lodVisibilityDebugLog(const std::string& message)
+{
+    if (!lodVisibilityDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    std::cout << message << std::endl;
+
+    const char* fileValue = std::getenv("BLOCKGAME_LOD_VIS_DEBUG_FILE");
+    const std::filesystem::path logPath =
+        (fileValue != nullptr && *fileValue != '\0') ? std::filesystem::path(fileValue)
+                                                     : std::filesystem::path("loddebug.log");
+    std::ofstream out(logPath, std::ios::app);
+    if (out)
+    {
+        out << message << '\n';
+    }
+}
+
 [[nodiscard]] bool envFlagEnabled(const char* name)
 {
     const char* value = std::getenv(name);
@@ -2714,6 +2744,10 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                 << " existingVisibleCapacity=" << frame.farCullVisibleIndexCapacityBytes
                 << " existingIndirectCapacity=" << frame.farCullIndirectCapacityBytes;
         renderDebugLog(sizeLog.str());
+        if (lodVisibilityDebugLoggingEnabled())
+        {
+            lodVisibilityDebugLog("lodvis cull_begin " + sizeLog.str());
+        }
     }
     if (frame.farCullRecordCapacityBytes < recordBytes ||
         frame.farCullVisibleIndexCapacityBytes < visibleIndexBytes ||
@@ -2883,6 +2917,14 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                                   visibleCount,
                                   0);
     renderDebugLog("renderFarBatchGpuCull: end");
+    if (lodVisibilityDebugLoggingEnabled())
+    {
+        std::ostringstream stream;
+        stream << "lodvis cull_execute frame=" << currentBackBufferIndex_
+               << " recordCount=" << recordCount
+               << " dispatchGroups=" << dispatchGroups;
+        lodVisibilityDebugLog(stream.str());
+    }
 }
 
 std::string Renderer::collectDebugMessages() const
@@ -3168,13 +3210,28 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
         const bool gpuFarCullDisabled = std::getenv("BLOCKGAME_DISABLE_LOD_GPU_CULL") != nullptr;
         bool shouldUseGpuFarCull = false;
+        std::size_t farBatchCount = 0;
+        std::size_t farCullEligibleBatchCount = 0;
+        std::size_t farCullEligibleRecordCount = 0;
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
+            ++farBatchCount;
             if (!gpuFarCullDisabled && batch.supportsGpuCull && !batch.gpuCullRecords.empty())
             {
                 shouldUseGpuFarCull = true;
-                break;
+                ++farCullEligibleBatchCount;
+                farCullEligibleRecordCount += batch.gpuCullRecords.size();
             }
+        }
+        if (lodVisibilityDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "lodvis render_world far_batches=" << farBatchCount
+                   << " gpu_cull_disabled=" << (gpuFarCullDisabled ? "y" : "n")
+                   << " gpu_cull_enabled=" << (shouldUseGpuFarCull ? "y" : "n")
+                   << " cull_eligible_batches=" << farCullEligibleBatchCount
+                   << " cull_eligible_records=" << farCullEligibleRecordCount;
+            lodVisibilityDebugLog(stream.str());
         }
         if (shouldUseGpuFarCull)
         {

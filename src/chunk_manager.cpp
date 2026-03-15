@@ -452,6 +452,8 @@ inline constexpr double kChunkPoolUploadPressureDivisor = 32.0;
 
 [[nodiscard]] bool chunkManagerDebugLoggingEnabled() noexcept;
 void chunkManagerDebugLog(const std::string& message);
+[[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept;
+void lodVisibilityDebugLog(const std::string& message);
 [[nodiscard]] std::string hexU32(std::uint32_t value);
 [[nodiscard]] std::string hexHr(HRESULT hr);
 [[nodiscard]] const char* resourceStateName(D3D12_RESOURCE_STATES state) noexcept;
@@ -574,6 +576,36 @@ void chunkManagerDebugLog(const std::string& message)
         return;
     }
     std::cerr << message << std::endl;
+}
+
+[[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept
+{
+    static const bool enabled = []()
+    {
+        const char* value = std::getenv("BLOCKGAME_LOD_VIS_DEBUG");
+        return value != nullptr && std::string_view(value) != "0" && std::string_view(value) != "false";
+    }();
+    return enabled;
+}
+
+void lodVisibilityDebugLog(const std::string& message)
+{
+    if (!lodVisibilityDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    std::cerr << message << std::endl;
+
+    const char* fileValue = std::getenv("BLOCKGAME_LOD_VIS_DEBUG_FILE");
+    const std::filesystem::path logPath =
+        (fileValue != nullptr && *fileValue != '\0') ? std::filesystem::path(fileValue)
+                                                     : std::filesystem::path("loddebug.log");
+    std::ofstream out(logPath, std::ios::app);
+    if (out)
+    {
+        out << message << '\n';
+    }
 }
 
 [[nodiscard]] std::string hexU32(std::uint32_t value)
@@ -3879,11 +3911,18 @@ public:
             }
         }
 
+        static constexpr std::uint64_t kFarTileUntouchedGraceUpdates = 12u;
         std::vector<FarLodChunkKey> staleKeys;
         staleKeys.reserve(chunks_.size());
         for (const auto& [key, chunk] : chunks_)
         {
-            if (chunk.lastTouchedStamp != updateStamp_)
+            if (chunk.lastTouchedStamp == updateStamp_)
+            {
+                continue;
+            }
+
+            const std::uint64_t untouchedUpdates = updateStamp_ - chunk.lastTouchedStamp;
+            if (untouchedUpdates > kFarTileUntouchedGraceUpdates)
             {
                 staleKeys.push_back(key);
             }
@@ -3901,6 +3940,44 @@ public:
             chunks_.erase(it);
         }
 
+        if (lodVisibilityDebugLoggingEnabled())
+        {
+            std::size_t touchedCount = 0;
+            std::size_t activeCount = 0;
+            std::size_t residentCount = 0;
+            std::size_t dirtyCount = 0;
+            for (const auto& [key, chunk] : chunks_)
+            {
+                (void)key;
+                if (chunk.lastTouchedStamp == updateStamp_)
+                {
+                    ++touchedCount;
+                }
+                if (chunk.active)
+                {
+                    ++activeCount;
+                }
+                if (chunk.gpu.resident && chunk.gpu.indexCount > 0)
+                {
+                    ++residentCount;
+                }
+                if (chunk.dirty)
+                {
+                    ++dirtyCount;
+                }
+            }
+
+            std::ostringstream stream;
+            stream << "lodvis update stamp=" << updateStamp_
+                   << " chunks=" << chunks_.size()
+                   << " touched=" << touchedCount
+                   << " active=" << activeCount
+                   << " resident=" << residentCount
+                   << " dirty=" << dirtyCount
+                   << " stale_erased=" << staleKeys.size();
+            lodVisibilityDebugLog(stream.str());
+        }
+
         scheduleDirtyBuilds();
         submitGpuSynthesisRequests(uploadBudgetMs);
         collectCompletedBuilds(uploadBudgetMs);
@@ -3913,6 +3990,12 @@ public:
         std::vector<ChunkRenderBatch> batches(bufferPages_.size());
         lastRenderedFaceCount_ = 0;
         lastRenderedVertexCount_ = 0;
+        std::size_t skippedInactive = 0;
+        std::size_t skippedNonResident = 0;
+        std::size_t skippedNoIndices = 0;
+        std::size_t skippedInvalidPage = 0;
+        std::size_t skippedFrustum = 0;
+        std::size_t emittedChunks = 0;
         for (std::size_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
         {
             batches[pageIndex].vertexBufferView = bufferPages_[pageIndex].vertexView;
@@ -3922,16 +4005,29 @@ public:
         for (const auto& [key, chunk] : chunks_)
         {
             (void)key;
-            if (!chunk.active || !chunk.gpu.resident || chunk.gpu.indexCount == 0)
+            if (!chunk.active)
             {
+                ++skippedInactive;
+                continue;
+            }
+            if (!chunk.gpu.resident)
+            {
+                ++skippedNonResident;
+                continue;
+            }
+            if (chunk.gpu.indexCount == 0)
+            {
+                ++skippedNoIndices;
                 continue;
             }
             if (chunk.gpu.pageIndex == kInvalidChunkBufferPage || chunk.gpu.pageIndex >= batches.size())
             {
+                ++skippedInvalidPage;
                 continue;
             }
             if (!frustum.intersectsAABB(chunk.cpu.boundsMin, chunk.cpu.boundsMax))
             {
+                ++skippedFrustum;
                 continue;
             }
 
@@ -3947,6 +4043,7 @@ public:
                 static_cast<std::int32_t>(chunk.gpu.vertexOffset),
                 0u});
             batch.supportsGpuCull = true;
+            ++emittedChunks;
             lastRenderedFaceCount_ += static_cast<std::size_t>(chunk.gpu.indexCount / 6u);
             lastRenderedVertexCount_ += chunk.gpu.vertexCount;
         }
@@ -3958,6 +4055,18 @@ public:
                                           return batch.indexCounts.empty();
                                       });
         batches.erase(emptyIt, batches.end());
+        if (lodVisibilityDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "lodvis batches emitted_chunks=" << emittedChunks
+                   << " batch_count=" << batches.size()
+                   << " skipped_inactive=" << skippedInactive
+                   << " skipped_nonresident=" << skippedNonResident
+                   << " skipped_noindices=" << skippedNoIndices
+                   << " skipped_invalidpage=" << skippedInvalidPage
+                   << " skipped_frustum=" << skippedFrustum;
+            lodVisibilityDebugLog(stream.str());
+        }
         return batches;
     }
 
@@ -4232,6 +4341,7 @@ private:
         FarLodLevelConfig level{};
         FarLodChunkCpu cpu{};
         FarLodChunkGpuState gpu{};
+        std::uint64_t seamSignature{0};
         std::uint64_t lastTouchedStamp{0};
         std::uint32_t buildVersion{1};
         bool active{false};
@@ -4449,6 +4559,51 @@ private:
         return (static_cast<std::size_t>(localY) * kLogicalSize + static_cast<std::size_t>(localZ)) *
                    kLogicalSize +
                static_cast<std::size_t>(localX);
+    }
+
+    [[nodiscard]] static std::uint64_t computeSeamSignature(const FarLodChunkCpu& cpu) noexcept
+    {
+        constexpr std::uint64_t kOffsetBasis = 1469598103934665603ull;
+        constexpr std::uint64_t kPrime = 1099511628211ull;
+
+        auto hashVoxel = [](std::uint64_t hash, const FarLodVoxel& voxel, std::uint8_t faceId) noexcept
+        {
+            const std::uint32_t packed =
+                static_cast<std::uint32_t>(voxel.occupied) |
+                (static_cast<std::uint32_t>(voxel.flags) << 8u) |
+                (static_cast<std::uint32_t>(toIndex(voxel.material)) << 16u) |
+                (static_cast<std::uint32_t>(faceId) << 24u);
+            hash ^= static_cast<std::uint64_t>(packed);
+            hash *= kPrime;
+            return hash;
+        };
+
+        std::uint64_t hash = kOffsetBasis;
+        for (int localY = 0; localY < kLogicalSize; ++localY)
+        {
+            for (int localZ = 0; localZ < kLogicalSize; ++localZ)
+            {
+                hash = hashVoxel(hash, cpu.voxels[voxelIndex(0, localY, localZ)], 0u);
+                hash = hashVoxel(hash, cpu.voxels[voxelIndex(kLogicalSize - 1, localY, localZ)], 1u);
+            }
+        }
+        for (int localY = 0; localY < kLogicalSize; ++localY)
+        {
+            for (int localX = 0; localX < kLogicalSize; ++localX)
+            {
+                hash = hashVoxel(hash, cpu.voxels[voxelIndex(localX, localY, 0)], 2u);
+                hash = hashVoxel(hash, cpu.voxels[voxelIndex(localX, localY, kLogicalSize - 1)], 3u);
+            }
+        }
+        for (int localZ = 0; localZ < kLogicalSize; ++localZ)
+        {
+            for (int localX = 0; localX < kLogicalSize; ++localX)
+            {
+                hash = hashVoxel(hash, cpu.voxels[voxelIndex(localX, 0, localZ)], 4u);
+                hash = hashVoxel(hash, cpu.voxels[voxelIndex(localX, kLogicalSize - 1, localZ)], 5u);
+            }
+        }
+        return hash;
     }
 
     [[nodiscard]] static PackedFarLodVoxelGpu packGpuVoxel(const FarLodVoxel& voxel) noexcept
@@ -4669,6 +4824,39 @@ private:
         }
     }
 
+    void markSameLevelNeighborSeamsDirty(const FarLodChunkKey& key)
+    {
+        static constexpr std::array<glm::ivec3, 6> kNeighborOffsets{{
+            glm::ivec3( 1,  0,  0),
+            glm::ivec3(-1,  0,  0),
+            glm::ivec3( 0,  1,  0),
+            glm::ivec3( 0, -1,  0),
+            glm::ivec3( 0,  0,  1),
+            glm::ivec3( 0,  0, -1),
+        }};
+
+        for (const glm::ivec3& offset : kNeighborOffsets)
+        {
+            const FarLodChunkKey neighborKey{key.level, key.coord + offset};
+            const auto it = chunks_.find(neighborKey);
+            if (it == chunks_.end())
+            {
+                continue;
+            }
+
+            FarLodChunkRecord& neighbor = it->second;
+            if (!neighbor.initialized || !neighbor.active)
+            {
+                continue;
+            }
+
+            if (!neighbor.dirty)
+            {
+                markDirty(neighbor);
+            }
+        }
+    }
+
     BufferPage createBufferPage(std::size_t vertexCount, std::size_t indexCount)
     {
         static constexpr std::size_t kDefaultVertexCapacity = 131072;
@@ -4808,6 +4996,40 @@ private:
         return allocation;
     }
 
+    void releaseChunkRenderAllocation(FarLodChunkRecord& chunk)
+    {
+        if (chunk.gpu.pageIndex == kInvalidChunkBufferPage)
+        {
+            chunk.gpu.vertexOffset = 0;
+            chunk.gpu.indexOffset = 0;
+            chunk.gpu.vertexCount = 0;
+            chunk.gpu.indexCount = 0;
+            chunk.gpu.resident = false;
+            return;
+        }
+
+        const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+        const UINT64 submittedUploadFenceValue = uploadContext_.lastSubmittedFenceValue();
+        if (submittedUploadFenceValue != 0 && completedUploadFenceValue < submittedUploadFenceValue)
+        {
+            uploadContext_.waitForIdle();
+        }
+
+        if (chunk.gpu.pageIndex < bufferPages_.size())
+        {
+            BufferPage& page = bufferPages_[chunk.gpu.pageIndex];
+            mergeRange(page.freeVertices, chunk.gpu.vertexOffset, chunk.gpu.vertexCount);
+            mergeRange(page.freeIndices, chunk.gpu.indexOffset, static_cast<std::size_t>(chunk.gpu.indexCount));
+        }
+
+        chunk.gpu.pageIndex = kInvalidChunkBufferPage;
+        chunk.gpu.vertexOffset = 0;
+        chunk.gpu.indexOffset = 0;
+        chunk.gpu.vertexCount = 0;
+        chunk.gpu.indexCount = 0;
+        chunk.gpu.resident = false;
+    }
+
     void releaseChunkGpu(FarLodChunkRecord& chunk)
     {
         if ((chunk.gpu.voxelBuffer != nullptr || chunk.gpu.columnBuffer != nullptr) && chunk.gpu.voxelFenceValue != 0)
@@ -4816,15 +5038,6 @@ private:
             if (completedFenceValue < chunk.gpu.voxelFenceValue)
             {
                 gpuContext_.waitForFence(chunk.gpu.voxelFenceValue);
-            }
-        }
-        if (chunk.gpu.pageIndex != kInvalidChunkBufferPage)
-        {
-            const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
-            const UINT64 submittedUploadFenceValue = uploadContext_.lastSubmittedFenceValue();
-            if (submittedUploadFenceValue != 0 && completedUploadFenceValue < submittedUploadFenceValue)
-            {
-                uploadContext_.waitForIdle();
             }
         }
         if (chunk.gpu.readbackFenceValue != 0)
@@ -4844,29 +5057,7 @@ private:
         chunk.gpu.voxelReady = false;
         chunk.gpu.parityMismatchCount = 0;
         chunk.gpu.parityValidated = false;
-        if (chunk.gpu.pageIndex == kInvalidChunkBufferPage)
-        {
-            chunk.gpu.vertexOffset = 0;
-            chunk.gpu.indexOffset = 0;
-            chunk.gpu.vertexCount = 0;
-            chunk.gpu.indexCount = 0;
-            chunk.gpu.resident = false;
-            return;
-        }
-
-        if (chunk.gpu.pageIndex < bufferPages_.size())
-        {
-            BufferPage& page = bufferPages_[chunk.gpu.pageIndex];
-            mergeRange(page.freeVertices, chunk.gpu.vertexOffset, chunk.gpu.vertexCount);
-            mergeRange(page.freeIndices, chunk.gpu.indexOffset, static_cast<std::size_t>(chunk.gpu.indexCount));
-        }
-
-        chunk.gpu.pageIndex = kInvalidChunkBufferPage;
-        chunk.gpu.vertexOffset = 0;
-        chunk.gpu.indexOffset = 0;
-        chunk.gpu.vertexCount = 0;
-        chunk.gpu.indexCount = 0;
-        chunk.gpu.resident = false;
+        releaseChunkRenderAllocation(chunk);
     }
 
     [[nodiscard]] glm::ivec2 computeAtlasSizeCells(const FarLodLevelConfig& level) const noexcept
@@ -6069,13 +6260,30 @@ private:
                 std::chrono::duration<double, std::milli>(SteadyClock::now() - faceBuildStart).count();
             ++gpuFaceBuildSamples;
 
+            const std::uint64_t previousSeamSignature = chunk.seamSignature;
             chunk.cpu = std::move(gpuCpu);
+            chunk.seamSignature = computeSeamSignature(chunk.cpu);
             if (chunk.gpu.readbackFenceValue == pending.copyFenceValue)
             {
                 chunk.gpu.readbackFenceValue = 0;
             }
             uploadBuiltChunk(chunk, mesh, pending.result.uploadCopyMs);
             chunk.dirty = false;
+            if (chunk.seamSignature != previousSeamSignature)
+            {
+                markSameLevelNeighborSeamsDirty(chunk.key);
+            }
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis apply_gpu_visual level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " resident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " indexCount=" << chunk.gpu.indexCount
+                       << " vertexCount=" << chunk.gpu.vertexCount
+                       << " seam_changed=" << ((chunk.seamSignature != previousSeamSignature) ? "y" : "n");
+                lodVisibilityDebugLog(stream.str());
+            }
             ++builtTilesLastUpdate_;
             ++applied;
             totalBuildMs += pending.result.buildMs;
@@ -6115,6 +6323,7 @@ private:
 
             if (result.skippedByRelevance)
             {
+                const std::uint64_t previousSeamSignature = chunk.seamSignature;
                 releaseChunkGpu(chunk);
                 chunk.cpu = FarLodChunkCpu{};
                 chunk.cpu.key = chunk.key;
@@ -6122,7 +6331,20 @@ private:
                 chunk.cpu.worldMin = chunk.key.coord * chunk.level.chunkSpanBlocks();
                 chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin);
                 chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin + glm::ivec3(chunk.level.chunkSpanBlocks()));
+                chunk.seamSignature = computeSeamSignature(chunk.cpu);
                 chunk.dirty = false;
+                if (chunk.seamSignature != previousSeamSignature)
+                {
+                    markSameLevelNeighborSeamsDirty(chunk.key);
+                }
+                if (lodVisibilityDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "lodvis cleared_by_relevance level=" << chunk.key.level
+                           << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                           << " seam_changed=" << ((chunk.seamSignature != previousSeamSignature) ? "y" : "n");
+                    lodVisibilityDebugLog(stream.str());
+                }
                 ++skippedTilesLastUpdate_;
                 continue;
             }
@@ -6176,6 +6398,7 @@ private:
             }
 
             releaseChunkGpu(chunk);
+            chunk.seamSignature = 0;
             chunk.cpu = std::move(result.cpu);
             chunk.cpu.meshReady = false;
             chunk.dirty = false;
@@ -6593,22 +6816,43 @@ private:
     void uploadBuiltChunk(FarLodChunkRecord& chunk, const ChunkMesh& mesh, double& outCopyMs)
     {
         outCopyMs = 0.0;
-        releaseChunkGpu(chunk);
-        chunk.cpu.boundsMin = mesh.boundsMin;
-        chunk.cpu.boundsMax = mesh.boundsMax;
-        chunk.cpu.meshReady = !mesh.indices.empty();
-
         if (mesh.vertices.empty() || mesh.indices.empty())
         {
+            chunk.cpu.meshReady = false;
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis preserve_resident_empty_mesh level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " hadResident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " oldIndexCount=" << chunk.gpu.indexCount;
+                lodVisibilityDebugLog(stream.str());
+            }
             return;
         }
 
         Allocation allocation = acquireAllocation(mesh.vertices.size(), mesh.indices.size());
         if (allocation.pageIndex == kInvalidChunkBufferPage || allocation.pageIndex >= bufferPages_.size())
         {
+            chunk.cpu.meshReady = false;
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis preserve_resident_allocation_failed level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " hadResident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " oldIndexCount=" << chunk.gpu.indexCount
+                       << " requestedVertices=" << mesh.vertices.size()
+                       << " requestedIndices=" << mesh.indices.size();
+                lodVisibilityDebugLog(stream.str());
+            }
             return;
         }
 
+        releaseChunkRenderAllocation(chunk);
+        chunk.cpu.boundsMin = mesh.boundsMin;
+        chunk.cpu.boundsMax = mesh.boundsMax;
+        chunk.cpu.meshReady = true;
         chunk.gpu.pageIndex = allocation.pageIndex;
         chunk.gpu.vertexOffset = allocation.vertexOffset;
         chunk.gpu.indexOffset = allocation.indexOffset;
@@ -6899,7 +7143,36 @@ FarTerrainManager::ChunkMesh FarTerrainManager::buildChunkMesh(const FarLodChunk
             return cached->second;
         }
 
-        const FarLodVoxel sampledVoxel{};
+        const glm::ivec3 chunkOffset{
+            floorDiv(localCoord.x, kLogicalSize),
+            floorDiv(localCoord.y, kLogicalSize),
+            floorDiv(localCoord.z, kLogicalSize)
+        };
+
+        const glm::ivec3 wrappedLocal{
+            wrapIndex(localCoord.x, kLogicalSize),
+            wrapIndex(localCoord.y, kLogicalSize),
+            wrapIndex(localCoord.z, kLogicalSize)
+        };
+
+        FarLodVoxel sampledVoxel{};
+
+        const FarLodChunkKey neighborKey{
+            cpu.key.level,
+            cpu.key.coord + chunkOffset
+        };
+
+        const auto neighborIt = chunks_.find(neighborKey);
+        if (neighborIt != chunks_.end())
+        {
+            const FarLodChunkRecord& neighborChunk = neighborIt->second;
+            if (neighborChunk.cpu.blockScale == cpu.blockScale)
+            {
+                sampledVoxel = neighborChunk.cpu.voxels[
+                    voxelIndex(wrappedLocal.x, wrappedLocal.y, wrappedLocal.z)];
+            }
+        }
+
         neighborVoxelCache.emplace(localCoord, sampledVoxel);
         return sampledVoxel;
     };

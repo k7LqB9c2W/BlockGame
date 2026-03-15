@@ -177,6 +177,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableGpuDebug = false;
     bool enableGpuBreak = false;
     bool enableGpuValidation = false;
+    bool enableLodVisibilityDebug = false;
     bool disableFarGpuCull = false;
     bool disableLodGpuSynth = false;
     for (int i = 1; i < argc; ++i)
@@ -208,6 +209,12 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--lod-visibility-debug" || arg == "--lod-debug")
+        {
+            enableLodVisibilityDebug = true;
+            continue;
+        }
+
         if (arg == "--no-far-gpu-cull")
         {
             disableFarGpuCull = true;
@@ -220,7 +227,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
         }
     }
 
-    if (!enableGpuDebug && !disableFarGpuCull && !disableLodGpuSynth)
+    if (!enableGpuDebug && !enableLodVisibilityDebug && !disableFarGpuCull && !disableLodGpuSynth)
     {
         return;
     }
@@ -252,6 +259,18 @@ void applyLaunchDebugOptions(int argc, char** argv)
         setProcessEnvironmentVariable("BLOCKGAME_ENABLE_LOD_GPU_SYNTH", "0");
     }
 
+    if (enableLodVisibilityDebug)
+    {
+        constexpr const char* kLodDebugLogPath = "loddebug.log";
+        setProcessEnvironmentVariable("BLOCKGAME_LOD_VIS_DEBUG", "1");
+        setProcessEnvironmentVariable("BLOCKGAME_LOD_VIS_DEBUG_FILE", kLodDebugLogPath);
+        std::ofstream lodDebugOut(kLodDebugLogPath, std::ios::trunc);
+        if (lodDebugOut)
+        {
+            lodDebugOut << "lod visibility debug enabled\n";
+        }
+    }
+
     std::vector<std::string> enabledOptions;
     if (enableGpuDebug)
     {
@@ -274,6 +293,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (disableLodGpuSynth)
     {
         enabledOptions.emplace_back("LOD GPU synth disabled");
+    }
+    if (enableLodVisibilityDebug)
+    {
+        enabledOptions.emplace_back("LOD visibility debug (loddebug.log)");
     }
 
     if (!enabledOptions.empty())

@@ -3804,6 +3804,53 @@ public:
                                                   static_cast<float>(farDistanceBlocks_) / static_cast<float>(kChunkSizeX)));
         refreshLevels(nearRadiusChunks, realRadiusChunks);
 
+        auto nextCoarserLevel = [this](int levelId) -> const FarLodLevelConfig*
+        {
+            for (std::size_t i = 0; i < levels_.size(); ++i)
+            {
+                if (levels_[i].level == levelId)
+                {
+                    return (i + 1 < levels_.size()) ? &levels_[i + 1] : nullptr;
+                }
+            }
+            return nullptr;
+        };
+
+        auto touchFallbackParent = [&](const FarLodLevelConfig& childLevel, const glm::ivec3& childCoord)
+        {
+            const FarLodLevelConfig* parentLevel = nextCoarserLevel(childLevel.level);
+            if (parentLevel == nullptr)
+            {
+                return;
+            }
+
+            const glm::ivec3 baseMin = childCoord * childLevel.blockScale;
+            const glm::ivec3 parentCoord{
+                floorDiv(baseMin.x, parentLevel->blockScale),
+                floorDiv(baseMin.y, parentLevel->blockScale),
+                floorDiv(baseMin.z, parentLevel->blockScale)};
+            FarLodChunkKey parentKey{parentLevel->level, parentCoord};
+            FarLodChunkRecord& parent = chunks_[parentKey];
+            const bool alreadyTouchedThisUpdate = (parent.lastTouchedStamp == updateStamp_);
+            parent.key = parentKey;
+            parent.level = *parentLevel;
+            parent.lastTouchedStamp = updateStamp_;
+            parent.active = true;
+            if (!(alreadyTouchedThisUpdate && !parent.fallbackOnly))
+            {
+                parent.fallbackOnly = true;
+            }
+            if (!parent.initialized)
+            {
+                initializeChunk(parent, *parentLevel);
+                parent.dirty = true;
+            }
+            else if (!(parent.gpu.resident && parent.gpu.indexCount > 0) && !parent.dirty)
+            {
+                markDirty(parent);
+            }
+        };
+
         auto touchLevel = [&](const FarLodLevelConfig& level)
         {
             constexpr int kFarActivationStepChunks = 6;
@@ -3894,10 +3941,18 @@ public:
                         chunk.level = level;
                         chunk.lastTouchedStamp = updateStamp_;
                         chunk.active = true;
+                        chunk.fallbackOnly = false;
                         if (!chunk.initialized)
                         {
                             initializeChunk(chunk, level);
                             chunk.dirty = true;
+                        }
+
+                        const bool needsFallback =
+                            !(chunk.gpu.resident && chunk.gpu.indexCount > 0);
+                        if (needsFallback)
+                        {
+                            touchFallbackParent(level, chunkCoord);
                         }
                     }
                 }
@@ -3913,17 +3968,26 @@ public:
         }
 
         static constexpr std::uint64_t kFarTileUntouchedGraceUpdates = 12u;
+        static constexpr std::uint64_t kFarFallbackUntouchedGraceUpdates = 2u;
         std::vector<FarLodChunkKey> staleKeys;
         staleKeys.reserve(chunks_.size());
-        for (const auto& [key, chunk] : chunks_)
+        for (auto& [key, chunk] : chunks_)
         {
             if (chunk.lastTouchedStamp == updateStamp_)
             {
                 continue;
             }
 
+            if (chunk.fallbackOnly)
+            {
+                // Fallback parents are temporary: stop drawing them as soon as they are no longer needed,
+                // then retire their residency quickly so they don't hang around as redundant coverage.
+                chunk.active = false;
+            }
+
             const std::uint64_t untouchedUpdates = updateStamp_ - chunk.lastTouchedStamp;
-            if (untouchedUpdates > kFarTileUntouchedGraceUpdates)
+            const std::uint64_t graceUpdates = chunk.fallbackOnly ? kFarFallbackUntouchedGraceUpdates : kFarTileUntouchedGraceUpdates;
+            if (untouchedUpdates > graceUpdates)
             {
                 staleKeys.push_back(key);
             }
@@ -4366,6 +4430,7 @@ private:
         glm::vec3 residentBoundsMin{0.0f};
         glm::vec3 residentBoundsMax{1.0f};
         PendingRenderMesh pendingMesh{};
+        bool fallbackOnly{false};
         std::uint64_t seamSignature{0};
         std::uint64_t lastTouchedStamp{0};
         std::uint32_t buildVersion{1};
@@ -4476,6 +4541,9 @@ private:
         FarLodLevelConfig level{};
         std::uint32_t buildVersion{0};
         std::uint64_t epoch{0};
+        int ringDistanceChunks{0};
+        bool hadResidentMesh{false};
+        bool fallbackOnly{false};
     };
 
     struct AtlasUpdateRect
@@ -4796,6 +4864,7 @@ private:
         chunk.residentBoundsMin = chunk.cpu.boundsMin;
         chunk.residentBoundsMax = chunk.cpu.boundsMax;
         chunk.pendingMesh = {};
+        chunk.fallbackOnly = false;
         chunk.gpu.columnBuffer = createDefaultBuffer(device_.Get(),
                                                      static_cast<std::uint64_t>(kLogicalSize * kLogicalSize *
                                                                                 sizeof(GpuTerrainColumnDescriptor)),
@@ -5857,7 +5926,10 @@ private:
                     key,
                     chunk.level,
                     chunk.buildVersion,
-                    epoch});
+                    epoch,
+                    chunkMinHorizontalRingDistanceChunks(chunk.level, cameraChunk_, key.coord),
+                    (chunk.gpu.resident && chunk.gpu.indexCount > 0),
+                    chunk.fallbackOnly});
             }
         }
 
@@ -5865,31 +5937,97 @@ private:
                   jobs.end(),
                   [this](const BuildJob& lhs, const BuildJob& rhs)
                   {
-                      if (lhs.level.level != rhs.level.level)
+                      const int lhsTier = !lhs.hadResidentMesh ? (lhs.fallbackOnly ? 1 : 0) : 2;
+                      const int rhsTier = !rhs.hadResidentMesh ? (rhs.fallbackOnly ? 1 : 0) : 2;
+                      if (lhsTier != rhsTier)
                       {
-                          return lhs.level.level < rhs.level.level;
+                          return lhsTier < rhsTier;
                       }
-                      return chunkMinHorizontalRingDistanceChunks(lhs.level, cameraChunk_, lhs.key.coord) <
-                             chunkMinHorizontalRingDistanceChunks(rhs.level, cameraChunk_, rhs.key.coord);
+                      if (lhs.hadResidentMesh != rhs.hadResidentMesh)
+                      {
+                          return rhs.hadResidentMesh;
+                      }
+                      if (!lhs.hadResidentMesh && !rhs.hadResidentMesh)
+                      {
+                          if (lhs.level.level != rhs.level.level)
+                          {
+                              // Fill broad coverage first: coarser (higher level) tiles can cover holes sooner.
+                              return lhs.level.level > rhs.level.level;
+                          }
+                      }
+                      else
+                      {
+                          if (lhs.level.level != rhs.level.level)
+                          {
+                              // Refinement: once something is resident, prefer finer (lower level) updates.
+                              return lhs.level.level < rhs.level.level;
+                          }
+                      }
+                      return lhs.ringDistanceChunks < rhs.ringDistanceChunks;
                   });
+
+        {
+            // Make sure fallback parents don't starve, but also can't dominate the queue.
+            static constexpr std::size_t kFallbackReservation = 2;
+            const std::size_t workerBudget = std::max<std::size_t>(workerCount_, 1);
+            const std::size_t exactBacklogPenalty =
+                (exactMissingChunks_.load(std::memory_order_relaxed) > 32 || exactPendingUploads_.load(std::memory_order_relaxed) > 24)
+                    ? 8
+                    : ((exactMissingChunks_.load(std::memory_order_relaxed) > 8 ||
+                        exactPendingUploads_.load(std::memory_order_relaxed) > 8)
+                           ? 16
+                           : 32);
+            const std::size_t maxQueuedPerUpdate = std::max<std::size_t>(workerBudget * 12, exactBacklogPenalty);
+            if (jobs.size() > maxQueuedPerUpdate)
+            {
+                std::vector<BuildJob> trimmed;
+                trimmed.reserve(maxQueuedPerUpdate);
+                std::size_t fallbackAdded = 0;
+                const std::size_t desiredFallback = std::min(kFallbackReservation, maxQueuedPerUpdate);
+                for (const BuildJob& job : jobs)
+                {
+                    if (trimmed.size() >= maxQueuedPerUpdate)
+                    {
+                        break;
+                    }
+                    if (job.fallbackOnly)
+                    {
+                        continue;
+                    }
+                    const std::size_t remaining = maxQueuedPerUpdate - trimmed.size();
+                    if (remaining <= (desiredFallback - fallbackAdded))
+                    {
+                        break;
+                    }
+                    trimmed.push_back(job);
+                }
+                if (trimmed.size() < maxQueuedPerUpdate && fallbackAdded < desiredFallback)
+                {
+                    for (const BuildJob& job : jobs)
+                    {
+                        if (!job.fallbackOnly)
+                        {
+                            continue;
+                        }
+                        if (trimmed.size() >= maxQueuedPerUpdate)
+                        {
+                            break;
+                        }
+                        trimmed.push_back(job);
+                        ++fallbackAdded;
+                        if (fallbackAdded >= desiredFallback)
+                        {
+                            break;
+                        }
+                    }
+                }
+                jobs.swap(trimmed);
+            }
+        }
 
         if (jobs.empty())
         {
             return;
-        }
-
-        const std::size_t workerBudget = std::max<std::size_t>(workerCount_, 1);
-        const std::size_t exactBacklogPenalty =
-            (exactMissingChunks_.load(std::memory_order_relaxed) > 32 || exactPendingUploads_.load(std::memory_order_relaxed) > 24)
-                ? 8
-                : ((exactMissingChunks_.load(std::memory_order_relaxed) > 8 ||
-                    exactPendingUploads_.load(std::memory_order_relaxed) > 8)
-                       ? 16
-                       : 32);
-        const std::size_t maxQueuedPerUpdate = std::max<std::size_t>(workerBudget * 12, exactBacklogPenalty);
-        if (jobs.size() > maxQueuedPerUpdate)
-        {
-            jobs.resize(maxQueuedPerUpdate);
         }
 
         std::vector<BuildJob> readyJobs;

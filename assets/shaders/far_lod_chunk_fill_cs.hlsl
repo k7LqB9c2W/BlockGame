@@ -3,6 +3,10 @@ cbuffer ChunkParams : register(b0)
     int3 gWorldMin;
     int gBlockScale;
     int gSeaLevel;
+    int gAtlasOriginCellX;
+    int gAtlasOriginCellZ;
+    int gAtlasSizeX;
+    int gAtlasSizeZ;
 };
 
 struct GpuTerrainColumnDescriptor
@@ -13,10 +17,10 @@ struct GpuTerrainColumnDescriptor
     int centerWaterBottomY;
     uint centerSurfaceBlock;
     uint centerFillerBlock;
-    int minSurfaceY;
-    int maxSurfaceY;
-    uint waterHitCount;
-    int minWaterBottomY;
+    uint terrainSurfaceMask;
+    uint terrainFillerMask;
+    uint waterMask;
+    uint reserved;
 };
 
 StructuredBuffer<GpuTerrainColumnDescriptor> gColumnBuffer : register(t0);
@@ -64,32 +68,17 @@ void FarLodChunkFillMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         const uint3 localCoord = uint3(localX, localY, localZ);
         const uint flatVoxelIndex = voxelIndex(localCoord);
-        const int voxelMinY = gWorldMin.y + int(localY) * gBlockScale;
-        const int voxelMaxY = voxelMinY + (gBlockScale - 1);
-
-        uint solidHitCount = 0u;
-        if (descriptor.centerHasSolid != 0u)
-        {
-            if (descriptor.maxSurfaceY >= voxelMinY && descriptor.minSurfaceY >= voxelMinY)
-            {
-                solidHitCount = 5u;
-            }
-            else if (descriptor.maxSurfaceY >= voxelMinY)
-            {
-                solidHitCount = 3u;
-            }
-        }
-
+        const uint bit = (1u << localY);
         uint packed = packVoxel(false, 0u, 0u);
-        if (descriptor.centerHasSolid != 0u && solidHitCount >= 3u)
+        if ((descriptor.terrainSurfaceMask & bit) != 0u)
         {
-            const uint material = (descriptor.minSurfaceY > voxelMaxY) ? descriptor.centerFillerBlock : descriptor.centerSurfaceBlock;
-            packed = packVoxel(true, material, kFlagTerrain);
+            packed = packVoxel(true, descriptor.centerSurfaceBlock, kFlagTerrain);
         }
-        else if (descriptor.centerWaterEnabled != 0u &&
-                 descriptor.waterHitCount >= 3u &&
-                 descriptor.minWaterBottomY <= voxelMaxY &&
-                 gSeaLevel >= voxelMinY)
+        else if ((descriptor.terrainFillerMask & bit) != 0u)
+        {
+            packed = packVoxel(true, descriptor.centerFillerBlock, kFlagTerrain);
+        }
+        else if ((descriptor.waterMask & bit) != 0u)
         {
             packed = packVoxel(true, 5u, kFlagWater);
         }

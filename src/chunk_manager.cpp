@@ -5704,6 +5704,19 @@ private:
                 {
                     continue;
                 }
+
+                const bool keepResidentStable = chunk.gpu.resident && chunk.gpu.indexCount > 0;
+                const int ringDistanceChunks =
+                    chunkMinHorizontalRingDistanceChunks(chunk.level, cameraChunk_, key.coord);
+                const int nearBuildGraceChunks = std::max(2, chunk.level.blockScale * 2);
+                const bool keepNearbyStable = ringDistanceChunks <= nearBuildGraceChunks;
+
+                if (keepResidentStable || keepNearbyStable)
+                {
+                    candidateKeys.push_back(key);
+                    continue;
+                }
+
                 const glm::vec3 center = (chunk.cpu.boundsMin + chunk.cpu.boundsMax) * 0.5f;
                 const glm::vec2 toChunk(center.x - static_cast<float>(cameraChunk_.x * kChunkSizeX),
                                         center.z - static_cast<float>(cameraChunk_.z * kChunkSizeZ));

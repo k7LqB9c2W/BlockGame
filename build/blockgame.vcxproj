@@ -502,6 +502,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\biome_database.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\climate_map.cpp" />
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\far_lod_worldgen.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\surface_map.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\terrain_generator.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\worldgen_profile.cpp" />

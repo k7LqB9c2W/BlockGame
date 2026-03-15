@@ -38,6 +38,7 @@ set(BLOCKGAME_SOURCES
     ${SRC_ROOT}/renderer.cpp
     ${SRC_ROOT}/terrain/biome_database.cpp
     ${SRC_ROOT}/terrain/climate_map.cpp
+    ${SRC_ROOT}/terrain/far_lod_worldgen.cpp
     ${SRC_ROOT}/terrain/surface_map.cpp
     ${SRC_ROOT}/terrain/terrain_generator.cpp
     ${SRC_ROOT}/terrain/worldgen_profile.cpp

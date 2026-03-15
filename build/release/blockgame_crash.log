@@ -403,3 +403,762 @@
   [61] frame/end_frame
   [62] frame/presented
   [63] shutdown/chunk_manager
+2026-03-14 13:55:56 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(254,54): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(255,24-29): error X3000: syntax error: unexpected token 'return'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(256,54): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(257,24-29): error X3000: syntax error: unexpected token 'return'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(258,35): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(262,1): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,46-54): error X3004: undeclared identifier 'gSeaLevel'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,31-55): error X3013: 'abs': no matching 1 parameter intrinsic function
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,31-55): error X3013: Possible intrinsic functions are:
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,31-55): error X3013:     abs(float|half|double|min10float|min16float|int|uint|min12int|min16int|min16uint)
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,16-55): error X3012: 'nearSeaLevel': missing initial value
+
+2026-03-14 13:55:56 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=124.95
+2026-03-14 13:55:56 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-14 13:56:54 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(254,54): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(255,24-29): error X3000: syntax error: unexpected token 'return'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(256,54): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(257,24-29): error X3000: syntax error: unexpected token 'return'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(258,35): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(262,1): error X3000: syntax error: unexpected token '{'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,46-54): error X3004: undeclared identifier 'gSeaLevel'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,31-55): error X3013: 'abs': no matching 1 parameter intrinsic function
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,31-55): error X3013: Possible intrinsic functions are:
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,31-55): error X3013:     abs(float|half|double|min10float|min16float|int|uint|min12int|min16int|min16uint)
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(341,16-55): error X3012: 'nearSeaLevel': missing initial value
+
+2026-03-14 13:56:54 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=122.94
+2026-03-14 13:56:54 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-14 13:57:25 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006)
+2026-03-14 13:57:25 - diagnostics: uncaught exception | phase=frame/end_frame | frame=2 | heartbeat_age_ms=150.83
+2026-03-14 13:57:25 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+  [4] frame/start
+  [5] frame/poll_events
+  [6] frame/input
+  [7] frame/chunk_update
+  [8] frame/render_begin
+  [9] frame/ui
+  [10] frame/end_frame
+  [11] frame/presented
+  [12] frame/start
+  [13] frame/poll_events
+  [14] frame/input
+  [15] frame/chunk_update
+  [16] frame/render_begin
+  [17] frame/ui
+  [18] frame/end_frame
+2026-03-14 13:57:51 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006)
+2026-03-14 13:57:51 - diagnostics: uncaught exception | phase=frame/end_frame | frame=2 | heartbeat_age_ms=151.97
+2026-03-14 13:57:51 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+  [4] frame/start
+  [5] frame/poll_events
+  [6] frame/input
+  [7] frame/chunk_update
+  [8] frame/render_begin
+  [9] frame/ui
+  [10] frame/end_frame
+  [11] frame/presented
+  [12] frame/start
+  [13] frame/poll_events
+  [14] frame/input
+  [15] frame/chunk_update
+  [16] frame/render_begin
+  [17] frame/ui
+  [18] frame/end_frame
+2026-03-14 13:58:16 - uncaught exception: failed to create default buffer
+2026-03-14 13:58:16 - diagnostics: uncaught exception | phase=frame/chunk_update | frame=2 | heartbeat_age_ms=5484.23
+2026-03-14 13:58:16 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+  [4] frame/start
+  [5] frame/poll_events
+  [6] frame/input
+  [7] frame/chunk_update
+  [8] frame/render_begin
+  [9] frame/ui
+  [10] frame/end_frame
+  [11] frame/presented
+  [12] frame/start
+  [13] frame/poll_events
+  [14] frame/input
+  [15] frame/chunk_update
+2026-03-14 14:25:12 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006); D3D12 debug messages:
+  [0] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+  [1] ID3D12Device::RemoveDevice: Device removal has been triggered for the following reason (DXGI_ERROR_DEVICE_HUNG: The Device took an unreasonable amount of time to execute its commands, or the hardware crashed/hung. As a result, the TDR (Timeout Detection and Recovery) mechanism has been triggered. The current Device Context was executing commands when the hang occurred. The application may want to respawn and fallback to less aggressive use of the display hardware).; DRED:
+  autoBreadcrumbs:
+    node[0] cl=<unnamed> queue=<unnamed> completed=7/7 lastOp=ResourceBarrier
+    node[1] cl=<unnamed> queue=<unnamed> completed=1/44 lastOp=Dispatch
+    node[2] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[3] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[4] cl=<unnamed> queue=<unnamed> completed=410/410 lastOp=ResourceBarrier
+    node[5] cl=<unnamed> queue=<unnamed> completed=0/410 lastOp=ResourceBarrier
+2026-03-14 14:25:12 - diagnostics: uncaught exception | phase=frame/end_frame | frame=1091 | heartbeat_age_ms=1233.67
+2026-03-14 14:25:12 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-14 18:03:03 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006); D3D12 debug messages:
+  [0] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.; DRED:
+  autoBreadcrumbs:
+    node[0] cl=<unnamed> queue=<unnamed> completed=7/7 lastOp=ResourceBarrier
+    node[1] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[2] cl=<unnamed> queue=<unnamed> completed=494/494 lastOp=ResourceBarrier
+    node[3] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[4] cl=<unnamed> queue=<unnamed> completed=1/4 lastOp=Dispatch
+    node[5] cl=<unnamed> queue=<unnamed> completed=494/494 lastOp=ResourceBarrier
+2026-03-14 18:03:03 - diagnostics: uncaught exception | phase=frame/end_frame | frame=1951 | heartbeat_age_ms=402.53
+2026-03-14 18:03:03 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-14 18:10:33 - uncaught exception: failed to create default buffer
+2026-03-14 18:10:33 - diagnostics: uncaught exception | phase=frame/chunk_update | frame=332 | heartbeat_age_ms=7360.77
+2026-03-14 18:10:33 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-14 18:15:33 - uncaught exception: failed to create default buffer
+2026-03-14 18:15:33 - diagnostics: uncaught exception | phase=frame/chunk_update | frame=638 | heartbeat_age_ms=6905.44
+2026-03-14 18:15:33 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-14 18:17:49 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(576,25-41): warning X3556: integer divides may be much slower, try using uints if possible.
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(577,25-41): warning X3556: integer divides may be much slower, try using uints if possible.
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(268,5): warning X4000: use of potentially uninitialized variable (coastProfileSettings)
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(641,5-37): error X4026: thread sync operation must be in non-varying flow control, due to a potential race condition this sync is illegal, consider adding a sync after reading any values controlling shader execution at this point
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(618,85-118): error X4026: this variable dependent on potentially varying data: dispatchThreadId
+
+2026-03-14 18:17:49 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=1746.12
+2026-03-14 18:17:49 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-14 18:17:54 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(576,25-41): warning X3556: integer divides may be much slower, try using uints if possible.
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(577,25-41): warning X3556: integer divides may be much slower, try using uints if possible.
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(268,5): warning X4000: use of potentially uninitialized variable (coastProfileSettings)
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(641,5-37): error X4026: thread sync operation must be in non-varying flow control, due to a potential race condition this sync is illegal, consider adding a sync after reading any values controlling shader execution at this point
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chunk_synth_cs.hlsl(618,85-118): error X4026: this variable dependent on potentially varying data: dispatchThreadId
+
+2026-03-14 18:17:54 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=1685.36
+2026-03-14 18:17:54 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-14 18:19:14 - uncaught exception: failed to create default buffer
+2026-03-14 18:19:14 - diagnostics: uncaught exception | phase=frame/chunk_update | frame=728 | heartbeat_age_ms=5538.23
+2026-03-14 18:19:14 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-14 18:21:38 - uncaught exception: failed to create default buffer
+2026-03-14 18:21:38 - diagnostics: uncaught exception | phase=frame/chunk_update | frame=236 | heartbeat_age_ms=5175.59
+2026-03-14 18:21:38 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-14 18:31:45 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006); D3D12 debug messages:
+  [0] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.; DRED:
+  autoBreadcrumbs:
+    node[0] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[1] cl=<unnamed> queue=<unnamed> completed=7/7 lastOp=ResourceBarrier
+    node[2] cl=<unnamed> queue=<unnamed> completed=420/420 lastOp=ResourceBarrier
+    node[3] cl=<unnamed> queue=<unnamed> completed=2/9 lastOp=Dispatch
+    node[4] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[5] cl=<unnamed> queue=<unnamed> completed=420/420 lastOp=ResourceBarrier
+2026-03-14 18:31:45 - diagnostics: uncaught exception | phase=frame/end_frame | frame=638 | heartbeat_age_ms=495.28
+2026-03-14 18:31:45 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-14 18:35:17 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006); D3D12 debug messages:
+  [0] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.; DRED:
+  autoBreadcrumbs:
+    node[0] cl=<unnamed> queue=<unnamed> completed=418/418 lastOp=ResourceBarrier
+    node[1] cl=<unnamed> queue=<unnamed> completed=7/7 lastOp=ResourceBarrier
+    node[2] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[3] cl=<unnamed> queue=<unnamed> completed=0/0
+    node[4] cl=<unnamed> queue=<unnamed> completed=2/8 lastOp=Dispatch
+    node[5] cl=<unnamed> queue=<unnamed> completed=418/418 lastOp=ResourceBarrier
+2026-03-14 18:35:17 - diagnostics: uncaught exception | phase=frame/end_frame | frame=1150 | heartbeat_age_ms=531.18
+2026-03-14 18:35:17 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-14 18:46:10 - uncaught exception: failed to create default buffer
+2026-03-14 18:46:10 - diagnostics: uncaught exception | phase=frame/chunk_update | frame=249 | heartbeat_age_ms=5353.68
+2026-03-14 18:46:10 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update

@@ -4282,6 +4282,9 @@ int runGame()
         std::_Exit(exitCode);
     }
 
+    noteDiagnosticPhase("shutdown/detach_sync");
+    renderer.setUploadSynchronization(nullptr, 0, nullptr, 0);
+    chunkManager.setRenderSynchronization(nullptr, 0);
     noteDiagnosticPhase("shutdown/chunk_manager");
     }
     noteDiagnosticPhase("shutdown/renderer");

@@ -3783,6 +3783,7 @@ public:
             startWorkers();
         }
 
+        commitPendingMeshUploads();
         farDistanceBlocks_ = std::max(realDistanceBlocks, 256);
         ++updateStamp_;
         cameraChunk_ = cameraChunk;
@@ -4025,7 +4026,9 @@ public:
                 ++skippedInvalidPage;
                 continue;
             }
-            if (!frustum.intersectsAABB(chunk.cpu.boundsMin, chunk.cpu.boundsMax))
+            const glm::vec3 boundsMin = chunkDrawBoundsMin(chunk);
+            const glm::vec3 boundsMax = chunkDrawBoundsMax(chunk);
+            if (!frustum.intersectsAABB(boundsMin, boundsMax))
             {
                 ++skippedFrustum;
                 continue;
@@ -4036,8 +4039,8 @@ public:
             batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(chunk.gpu.indexOffset));
             batch.baseVertices.push_back(static_cast<std::int32_t>(chunk.gpu.vertexOffset));
             batch.gpuCullRecords.push_back(ChunkRenderBatch::GpuCullRecord{
-                glm::vec4(chunk.cpu.boundsMin, 1.0f),
-                glm::vec4(chunk.cpu.boundsMax, 1.0f),
+                glm::vec4(boundsMin, 1.0f),
+                glm::vec4(boundsMax, 1.0f),
                 chunk.gpu.indexCount,
                 static_cast<std::uint32_t>(chunk.gpu.indexOffset),
                 static_cast<std::int32_t>(chunk.gpu.vertexOffset),
@@ -4337,10 +4340,32 @@ private:
 
     struct FarLodChunkRecord
     {
+        struct PendingRenderMesh
+        {
+            std::uint32_t pageIndex{kInvalidChunkBufferPage};
+            std::size_t vertexOffset{0};
+            std::size_t indexOffset{0};
+            std::size_t vertexCount{0};
+            std::uint32_t indexCount{0};
+            glm::vec3 boundsMin{0.0f};
+            glm::vec3 boundsMax{1.0f};
+            UINT64 uploadFenceValue{0};
+            std::uint32_t buildVersion{0};
+            std::uint64_t epoch{0};
+
+            [[nodiscard]] bool valid() const noexcept
+            {
+                return pageIndex != kInvalidChunkBufferPage;
+            }
+        };
+
         FarLodChunkKey key{};
         FarLodLevelConfig level{};
         FarLodChunkCpu cpu{};
         FarLodChunkGpuState gpu{};
+        glm::vec3 residentBoundsMin{0.0f};
+        glm::vec3 residentBoundsMax{1.0f};
+        PendingRenderMesh pendingMesh{};
         std::uint64_t seamSignature{0};
         std::uint64_t lastTouchedStamp{0};
         std::uint32_t buildVersion{1};
@@ -4768,6 +4793,9 @@ private:
         chunk.cpu.worldMin = chunk.key.coord * level.chunkSpanBlocks();
         chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin);
         chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin + glm::ivec3(level.chunkSpanBlocks()));
+        chunk.residentBoundsMin = chunk.cpu.boundsMin;
+        chunk.residentBoundsMax = chunk.cpu.boundsMax;
+        chunk.pendingMesh = {};
         chunk.gpu.columnBuffer = createDefaultBuffer(device_.Get(),
                                                      static_cast<std::uint64_t>(kLogicalSize * kLogicalSize *
                                                                                 sizeof(GpuTerrainColumnDescriptor)),
@@ -4996,6 +5024,49 @@ private:
         return allocation;
     }
 
+    void releaseAllocationRange(std::uint32_t pageIndex,
+                                std::size_t vertexOffset,
+                                std::size_t vertexCount,
+                                std::size_t indexOffset,
+                                std::uint32_t indexCount) noexcept
+    {
+        if (pageIndex == kInvalidChunkBufferPage)
+        {
+            return;
+        }
+        if (pageIndex >= bufferPages_.size())
+        {
+            return;
+        }
+        BufferPage& page = bufferPages_[pageIndex];
+        mergeRange(page.freeVertices, vertexOffset, vertexCount);
+        mergeRange(page.freeIndices, indexOffset, static_cast<std::size_t>(indexCount));
+    }
+
+    void releasePendingMeshAllocation(FarLodChunkRecord& chunk)
+    {
+        if (!chunk.pendingMesh.valid())
+        {
+            return;
+        }
+
+        if (chunk.pendingMesh.uploadFenceValue != 0)
+        {
+            const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+            if (completedUploadFenceValue < chunk.pendingMesh.uploadFenceValue)
+            {
+                uploadContext_.waitForIdle();
+            }
+        }
+
+        releaseAllocationRange(chunk.pendingMesh.pageIndex,
+                               chunk.pendingMesh.vertexOffset,
+                               chunk.pendingMesh.vertexCount,
+                               chunk.pendingMesh.indexOffset,
+                               chunk.pendingMesh.indexCount);
+        chunk.pendingMesh = {};
+    }
+
     void releaseChunkRenderAllocation(FarLodChunkRecord& chunk)
     {
         if (chunk.gpu.pageIndex == kInvalidChunkBufferPage)
@@ -5032,6 +5103,7 @@ private:
 
     void releaseChunkGpu(FarLodChunkRecord& chunk)
     {
+        releasePendingMeshAllocation(chunk);
         if ((chunk.gpu.voxelBuffer != nullptr || chunk.gpu.columnBuffer != nullptr) && chunk.gpu.voxelFenceValue != 0)
         {
             const UINT64 completedFenceValue = gpuContext_.completedFenceValue();
@@ -5370,7 +5442,7 @@ public:
                 ++snapshot.inFlightTiles;
             }
 
-            const glm::vec3 center = (chunk.cpu.boundsMin + chunk.cpu.boundsMax) * 0.5f;
+            const glm::vec3 center = (chunkDrawBoundsMin(chunk) + chunkDrawBoundsMax(chunk)) * 0.5f;
             const glm::vec3 delta = center - cameraPos;
             orderedRegions.push_back(OrderedRegion{&chunk, glm::dot(delta, delta)});
         }
@@ -5456,7 +5528,7 @@ public:
                 ++inFlightTiles;
             }
 
-            const glm::vec3 center = (chunk.cpu.boundsMin + chunk.cpu.boundsMax) * 0.5f;
+            const glm::vec3 center = (chunkDrawBoundsMin(chunk) + chunkDrawBoundsMax(chunk)) * 0.5f;
             const glm::vec3 delta = center - cameraPos;
             orderedRegions.push_back(OrderedRegion{
                 &chunk,
@@ -5529,9 +5601,9 @@ public:
                 << ",\n      \"block_scale\":" << chunk.level.blockScale
                 << ",\n      \"chunk_span_blocks\":" << chunk.level.chunkSpanBlocks()
                 << ",\n      \"bounds_min\":";
-            writeVec3(out, chunk.cpu.boundsMin);
+            writeVec3(out, chunkDrawBoundsMin(chunk));
             out << ",\n      \"bounds_max\":";
-            writeVec3(out, chunk.cpu.boundsMax);
+            writeVec3(out, chunkDrawBoundsMax(chunk));
 
             out << "\n    }";
         }
@@ -5681,6 +5753,16 @@ private:
         }
     }
 
+    [[nodiscard]] static glm::vec3 chunkDrawBoundsMin(const FarLodChunkRecord& chunk) noexcept
+    {
+        return (chunk.gpu.resident && chunk.gpu.indexCount > 0) ? chunk.residentBoundsMin : chunk.cpu.boundsMin;
+    }
+
+    [[nodiscard]] static glm::vec3 chunkDrawBoundsMax(const FarLodChunkRecord& chunk) noexcept
+    {
+        return (chunk.gpu.resident && chunk.gpu.indexCount > 0) ? chunk.residentBoundsMax : chunk.cpu.boundsMax;
+    }
+
     void scheduleDirtyBuilds()
     {
         std::vector<FarLodChunkKey> candidateKeys;
@@ -5717,7 +5799,9 @@ private:
                     continue;
                 }
 
-                const glm::vec3 center = (chunk.cpu.boundsMin + chunk.cpu.boundsMax) * 0.5f;
+                const glm::vec3 boundsMin = chunkDrawBoundsMin(chunk);
+                const glm::vec3 boundsMax = chunkDrawBoundsMax(chunk);
+                const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
                 const glm::vec2 toChunk(center.x - static_cast<float>(cameraChunk_.x * kChunkSizeX),
                                         center.z - static_cast<float>(cameraChunk_.z * kChunkSizeZ));
                 if (glm::dot(toChunk, toChunk) > kEpsilon)
@@ -5728,8 +5812,7 @@ private:
                         continue;
                     }
                 }
-                if (hasVisibilityFrustum &&
-                    !visibilityFrustum.intersectsAABB(chunk.cpu.boundsMin, chunk.cpu.boundsMax))
+                if (hasVisibilityFrustum && !visibilityFrustum.intersectsAABB(boundsMin, boundsMax))
                 {
                     const glm::vec3 toChunk3 = center - visibilityCameraPos;
                     if (glm::dot(toChunk3, toChunk3) <=
@@ -5907,6 +5990,7 @@ private:
 
         std::vector<PendingGpuParityReadback> pendingReadbacks;
         std::vector<FarLodChunkKey> submittedKeys;
+        static constexpr std::size_t kMaxGpuSynthSubmitsPerUpdate = 4;
         const double budgetLimit = budgetMs <= 0.0 ? std::numeric_limits<double>::max() : budgetMs;
         const SteadyClock::time_point submitStart = SteadyClock::now();
         double totalGpuSynthesisMs = 0.0;
@@ -5915,7 +5999,7 @@ private:
 
         while (!requests.empty())
         {
-            if (submittedCount >= 1)
+            if (submittedCount >= kMaxGpuSynthSubmitsPerUpdate)
             {
                 break;
             }
@@ -6190,6 +6274,24 @@ private:
             }
             uploadOpened = true;
         }
+        if (!uploadOpened)
+        {
+            // Far LOD follows "old stays until new is committed": if we can't open an upload pass,
+            // don't mutate residency; keep all work queued for a later frame.
+            std::lock_guard<std::mutex> lock(completedMutex_);
+            for (BuildResult& result : completed)
+            {
+                completedBuilds_.push_back(std::move(result));
+            }
+            for (PendingGpuVisualReadback& pending : pendingVisualReadbacks)
+            {
+                pendingGpuVisualReadbacks_.push_back(std::move(pending));
+            }
+            lastCollectMs_ =
+                std::chrono::duration<double, std::milli>(SteadyClock::now() - collectStart).count();
+            lastUploadMs_ = 0.0;
+            return;
+        }
         double totalBuildMs = 0.0;
         double totalCpuTerrainSynthesisMs = 0.0;
         double totalCpuStructureStampMs = 0.0;
@@ -6201,6 +6303,8 @@ private:
         std::deque<BuildResult> stillPendingCompleted;
         std::deque<PendingGpuVisualReadback> stillPendingVisualReadbacks;
         std::deque<PendingGpuVisualReadback> newlyQueuedVisualReadbacks;
+        std::vector<FarLodChunkKey> stagedMeshKeys;
+        stagedMeshKeys.reserve(pendingVisualReadbacks.size() + completed.size());
 
         while (!pendingVisualReadbacks.empty())
         {
@@ -6280,33 +6384,56 @@ private:
             {
                 chunk.gpu.readbackFenceValue = 0;
             }
-            uploadBuiltChunk(chunk, mesh, pending.result.uploadCopyMs);
-            chunk.dirty = false;
-            if (chunk.seamSignature != previousSeamSignature)
+            const bool staged = stageBuiltChunkForCommit(chunk,
+                                                         mesh,
+                                                         pending.result.buildVersion,
+                                                         pending.result.epoch,
+                                                         pending.result.uploadCopyMs);
+            if (staged)
             {
-                markSameLevelNeighborSeamsDirty(chunk.key);
+                chunk.dirty = false;
+                if (chunk.seamSignature != previousSeamSignature)
+                {
+                    markSameLevelNeighborSeamsDirty(chunk.key);
+                }
+                stagedMeshKeys.push_back(chunk.key);
+                if (lodVisibilityDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "lodvis apply_gpu_visual_staged level=" << chunk.key.level
+                           << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                           << " resident=" << (chunk.gpu.resident ? "y" : "n")
+                           << " oldIndexCount=" << chunk.gpu.indexCount
+                           << " pendingIndexCount=" << chunk.pendingMesh.indexCount
+                           << " seam_changed=" << ((chunk.seamSignature != previousSeamSignature) ? "y" : "n");
+                    lodVisibilityDebugLog(stream.str());
+                }
+                ++builtTilesLastUpdate_;
+                ++applied;
+                totalBuildMs += pending.result.buildMs;
+                totalCpuTerrainSynthesisMs += pending.result.cpuTerrainSynthesisMs;
+                totalCpuStructureStampMs += pending.result.cpuStructureStampMs;
+                totalCpuMeshMs += pending.result.cpuMeshMs;
+                totalUploadCopyMs += pending.result.uploadCopyMs;
+                lastBuiltFaceCount_ += mesh.indices.size() / 6u;
+                lastBuiltVertexCount_ += mesh.vertices.size();
+                lastBuiltIndexCount_ += mesh.indices.size();
             }
-            if (lodVisibilityDebugLoggingEnabled())
+            else
             {
-                std::ostringstream stream;
-                stream << "lodvis apply_gpu_visual level=" << chunk.key.level
-                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
-                       << " resident=" << (chunk.gpu.resident ? "y" : "n")
-                       << " indexCount=" << chunk.gpu.indexCount
-                       << " vertexCount=" << chunk.gpu.vertexCount
-                       << " seam_changed=" << ((chunk.seamSignature != previousSeamSignature) ? "y" : "n");
-                lodVisibilityDebugLog(stream.str());
+                // Keep the old resident allocation alive; this chunk remains dirty until a replacement commits.
+                chunk.dirty = true;
+                ++skippedTilesLastUpdate_;
+                if (lodVisibilityDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "lodvis apply_gpu_visual_deferred level=" << chunk.key.level
+                           << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                           << " resident=" << (chunk.gpu.resident ? "y" : "n")
+                           << " oldIndexCount=" << chunk.gpu.indexCount;
+                    lodVisibilityDebugLog(stream.str());
+                }
             }
-            ++builtTilesLastUpdate_;
-            ++applied;
-            totalBuildMs += pending.result.buildMs;
-            totalCpuTerrainSynthesisMs += pending.result.cpuTerrainSynthesisMs;
-            totalCpuStructureStampMs += pending.result.cpuStructureStampMs;
-            totalCpuMeshMs += pending.result.cpuMeshMs;
-            totalUploadCopyMs += pending.result.uploadCopyMs;
-            lastBuiltFaceCount_ += mesh.indices.size() / 6u;
-            lastBuiltVertexCount_ += mesh.vertices.size();
-            lastBuiltIndexCount_ += mesh.indices.size();
             releasePendingGpuVisualReadback(pending);
         }
 
@@ -6336,28 +6463,16 @@ private:
 
             if (result.skippedByRelevance)
             {
-                const std::uint64_t previousSeamSignature = chunk.seamSignature;
-                releaseChunkGpu(chunk);
-                chunk.cpu = FarLodChunkCpu{};
-                chunk.cpu.key = chunk.key;
-                chunk.cpu.blockScale = chunk.level.blockScale;
-                chunk.cpu.worldMin = chunk.key.coord * chunk.level.chunkSpanBlocks();
-                chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin);
-                chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin + glm::ivec3(chunk.level.chunkSpanBlocks()));
-                chunk.seamSignature = computeSeamSignature(chunk.cpu);
-                chunk.dirty = false;
-                if (chunk.seamSignature != previousSeamSignature)
-                {
-                    markSameLevelNeighborSeamsDirty(chunk.key);
-                }
                 if (lodVisibilityDebugLoggingEnabled())
                 {
                     std::ostringstream stream;
-                    stream << "lodvis cleared_by_relevance level=" << chunk.key.level
+                    stream << "lodvis skipped_by_relevance_preserve_resident level=" << chunk.key.level
                            << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
-                           << " seam_changed=" << ((chunk.seamSignature != previousSeamSignature) ? "y" : "n");
+                           << " resident=" << (chunk.gpu.resident ? "y" : "n")
+                           << " indexCount=" << chunk.gpu.indexCount;
                     lodVisibilityDebugLog(stream.str());
                 }
+                chunk.dirty = true;
                 ++skippedTilesLastUpdate_;
                 continue;
             }
@@ -6410,11 +6525,18 @@ private:
                 continue;
             }
 
-            releaseChunkGpu(chunk);
-            chunk.seamSignature = 0;
-            chunk.cpu = std::move(result.cpu);
-            chunk.cpu.meshReady = false;
-            chunk.dirty = false;
+            // Can't apply a new build right now; keep any resident allocation alive until we can commit a replacement.
+            chunk.dirty = true;
+            ++skippedTilesLastUpdate_;
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis apply_deferred_no_gpu_visual level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " resident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " indexCount=" << chunk.gpu.indexCount;
+                lodVisibilityDebugLog(stream.str());
+            }
         }
 
         if (applied > 0)
@@ -6448,6 +6570,21 @@ private:
             if (submittedFenceValue != 0)
             {
                 std::lock_guard<std::mutex> lock(configMutex_);
+                for (const FarLodChunkKey& key : stagedMeshKeys)
+                {
+                    auto it = chunks_.find(key);
+                    if (it == chunks_.end())
+                    {
+                        continue;
+                    }
+                    FarLodChunkRecord& chunk = it->second;
+                    if (chunk.pendingMesh.valid() && chunk.pendingMesh.uploadFenceValue == 0 &&
+                        chunk.pendingMesh.epoch == buildEpoch_.load(std::memory_order_acquire) &&
+                        chunk.pendingMesh.buildVersion == chunk.buildVersion)
+                    {
+                        chunk.pendingMesh.uploadFenceValue = submittedFenceValue;
+                    }
+                }
                 for (PendingGpuVisualReadback& pending : newlyQueuedVisualReadbacks)
                 {
                     pending.copyFenceValue = submittedFenceValue;
@@ -6464,19 +6601,29 @@ private:
                     it->second.gpu.readbackFenceValue = submittedFenceValue;
                 }
             }
+            else if (!stagedMeshKeys.empty())
+            {
+                // Defensive: if we staged mesh replacements but got no submission fence, drop the pending allocations.
+                std::lock_guard<std::mutex> lock(configMutex_);
+                for (const FarLodChunkKey& key : stagedMeshKeys)
+                {
+                    auto it = chunks_.find(key);
+                    if (it == chunks_.end())
+                    {
+                        continue;
+                    }
+                    FarLodChunkRecord& chunk = it->second;
+                    if (chunk.pendingMesh.valid() && chunk.pendingMesh.uploadFenceValue == 0)
+                    {
+                        releasePendingMeshAllocation(chunk);
+                        chunk.dirty = true;
+                    }
+                }
+            }
             if (applied > 0)
             {
                 lastAverageUploadWaitMs_ = flushTimings.waitMs / static_cast<double>(applied);
             }
-        }
-        else
-        {
-            for (PendingGpuVisualReadback& pending : newlyQueuedVisualReadbacks)
-            {
-                releasePendingGpuVisualReadback(pending);
-                stillPendingCompleted.push_back(std::move(pending.result));
-            }
-            newlyQueuedVisualReadbacks.clear();
         }
 
         {
@@ -6826,12 +6973,28 @@ private:
     static constexpr std::uint8_t kFarLodVoxelCutout = 0x04u;
     static constexpr std::uint8_t kFarLodVoxelTerrain = 0x08u;
 
-    void uploadBuiltChunk(FarLodChunkRecord& chunk, const ChunkMesh& mesh, double& outCopyMs)
+    [[nodiscard]] bool stageBuiltChunkForCommit(FarLodChunkRecord& chunk,
+                                                const ChunkMesh& mesh,
+                                                std::uint32_t buildVersion,
+                                                std::uint64_t epoch,
+                                                double& outCopyMs)
     {
         outCopyMs = 0.0;
+        if (chunk.pendingMesh.valid())
+        {
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis preserve_resident_pending_replacement level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " hadResident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " oldIndexCount=" << chunk.gpu.indexCount;
+                lodVisibilityDebugLog(stream.str());
+            }
+            return false;
+        }
         if (mesh.vertices.empty() || mesh.indices.empty())
         {
-            chunk.cpu.meshReady = false;
             if (lodVisibilityDebugLoggingEnabled())
             {
                 std::ostringstream stream;
@@ -6841,13 +7004,26 @@ private:
                        << " oldIndexCount=" << chunk.gpu.indexCount;
                 lodVisibilityDebugLog(stream.str());
             }
-            return;
+            return false;
+        }
+
+        if (!uploadContext_.ready())
+        {
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis preserve_resident_upload_not_ready level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " hadResident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " oldIndexCount=" << chunk.gpu.indexCount;
+                lodVisibilityDebugLog(stream.str());
+            }
+            return false;
         }
 
         Allocation allocation = acquireAllocation(mesh.vertices.size(), mesh.indices.size());
         if (allocation.pageIndex == kInvalidChunkBufferPage || allocation.pageIndex >= bufferPages_.size())
         {
-            chunk.cpu.meshReady = false;
             if (lodVisibilityDebugLoggingEnabled())
             {
                 std::ostringstream stream;
@@ -6859,51 +7035,123 @@ private:
                        << " requestedIndices=" << mesh.indices.size();
                 lodVisibilityDebugLog(stream.str());
             }
-            return;
+            return false;
         }
-
-        releaseChunkRenderAllocation(chunk);
-        chunk.cpu.boundsMin = mesh.boundsMin;
-        chunk.cpu.boundsMax = mesh.boundsMax;
-        chunk.cpu.meshReady = true;
-        chunk.gpu.pageIndex = allocation.pageIndex;
-        chunk.gpu.vertexOffset = allocation.vertexOffset;
-        chunk.gpu.indexOffset = allocation.indexOffset;
-        chunk.gpu.vertexCount = mesh.vertices.size();
-        chunk.gpu.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
-        chunk.gpu.resident = true;
 
         BufferPage& page = bufferPages_[allocation.pageIndex];
-        const SteadyClock::time_point copyStart = SteadyClock::now();
-        if (page.mappedVertexData != nullptr && !mesh.vertices.empty())
+        if (page.mappedVertexData == nullptr || page.mappedIndexData == nullptr ||
+            page.vertexUploadBuffer == nullptr || page.indexUploadBuffer == nullptr ||
+            page.vertexBuffer == nullptr || page.indexBuffer == nullptr)
         {
-            std::memcpy(page.mappedVertexData + chunk.gpu.vertexOffset * sizeof(Vertex),
+            releaseAllocationRange(allocation.pageIndex,
+                                   allocation.vertexOffset,
+                                   mesh.vertices.size(),
+                                   allocation.indexOffset,
+                                   static_cast<std::uint32_t>(mesh.indices.size()));
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "lodvis preserve_resident_upload_buffers_missing level=" << chunk.key.level
+                       << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                       << " hadResident=" << (chunk.gpu.resident ? "y" : "n")
+                       << " oldIndexCount=" << chunk.gpu.indexCount;
+                lodVisibilityDebugLog(stream.str());
+            }
+            return false;
+        }
+
+        const SteadyClock::time_point copyStart = SteadyClock::now();
+        if (!mesh.vertices.empty())
+        {
+            std::memcpy(page.mappedVertexData + allocation.vertexOffset * sizeof(Vertex),
                         mesh.vertices.data(),
                         mesh.vertices.size() * sizeof(Vertex));
-            if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
-            {
-                uploadContext_.copyBuffer(page.vertexBuffer.Get(),
-                                          static_cast<std::uint64_t>(chunk.gpu.vertexOffset * sizeof(Vertex)),
-                                          page.vertexUploadBuffer.Get(),
-                                          static_cast<std::uint64_t>(chunk.gpu.vertexOffset * sizeof(Vertex)),
-                                          static_cast<std::uint64_t>(mesh.vertices.size() * sizeof(Vertex)));
-            }
+            uploadContext_.copyBuffer(page.vertexBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.vertexOffset * sizeof(Vertex)),
+                                      page.vertexUploadBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.vertexOffset * sizeof(Vertex)),
+                                      static_cast<std::uint64_t>(mesh.vertices.size() * sizeof(Vertex)));
         }
-        if (page.mappedIndexData != nullptr && !mesh.indices.empty())
+        if (!mesh.indices.empty())
         {
-            std::memcpy(page.mappedIndexData + chunk.gpu.indexOffset * sizeof(std::uint32_t),
+            std::memcpy(page.mappedIndexData + allocation.indexOffset * sizeof(std::uint32_t),
                         mesh.indices.data(),
                         mesh.indices.size() * sizeof(std::uint32_t));
-            if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
-            {
-                uploadContext_.copyBuffer(page.indexBuffer.Get(),
-                                          static_cast<std::uint64_t>(chunk.gpu.indexOffset * sizeof(std::uint32_t)),
-                                          page.indexUploadBuffer.Get(),
-                                          static_cast<std::uint64_t>(chunk.gpu.indexOffset * sizeof(std::uint32_t)),
-                                          static_cast<std::uint64_t>(mesh.indices.size() * sizeof(std::uint32_t)));
-            }
+            uploadContext_.copyBuffer(page.indexBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.indexOffset * sizeof(std::uint32_t)),
+                                      page.indexUploadBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.indexOffset * sizeof(std::uint32_t)),
+                                      static_cast<std::uint64_t>(mesh.indices.size() * sizeof(std::uint32_t)));
         }
         outCopyMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - copyStart).count();
+
+        chunk.pendingMesh.pageIndex = allocation.pageIndex;
+        chunk.pendingMesh.vertexOffset = allocation.vertexOffset;
+        chunk.pendingMesh.indexOffset = allocation.indexOffset;
+        chunk.pendingMesh.vertexCount = mesh.vertices.size();
+        chunk.pendingMesh.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+        chunk.pendingMesh.boundsMin = mesh.boundsMin;
+        chunk.pendingMesh.boundsMax = mesh.boundsMax;
+        chunk.pendingMesh.uploadFenceValue = 0;
+        chunk.pendingMesh.buildVersion = buildVersion;
+        chunk.pendingMesh.epoch = epoch;
+
+        if (lodVisibilityDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "lodvis staged_replacement level=" << chunk.key.level
+                   << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                   << " hadResident=" << (chunk.gpu.resident ? "y" : "n")
+                   << " oldIndexCount=" << chunk.gpu.indexCount
+                   << " newIndexCount=" << chunk.pendingMesh.indexCount;
+            lodVisibilityDebugLog(stream.str());
+        }
+        return true;
+    }
+
+    void commitPendingMeshUploads()
+    {
+        const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+        const std::uint64_t epoch = buildEpoch_.load(std::memory_order_acquire);
+
+        std::lock_guard<std::mutex> lock(configMutex_);
+        for (auto& [key, chunk] : chunks_)
+        {
+            (void)key;
+            if (!chunk.pendingMesh.valid() || chunk.pendingMesh.uploadFenceValue == 0)
+            {
+                continue;
+            }
+            if (completedUploadFenceValue < chunk.pendingMesh.uploadFenceValue)
+            {
+                continue;
+            }
+
+            if (chunk.pendingMesh.epoch != epoch || chunk.pendingMesh.buildVersion != chunk.buildVersion)
+            {
+                releasePendingMeshAllocation(chunk);
+                continue;
+            }
+
+            const std::uint32_t oldPageIndex = chunk.gpu.pageIndex;
+            const std::size_t oldVertexOffset = chunk.gpu.vertexOffset;
+            const std::size_t oldIndexOffset = chunk.gpu.indexOffset;
+            const std::size_t oldVertexCount = chunk.gpu.vertexCount;
+            const std::uint32_t oldIndexCount = chunk.gpu.indexCount;
+
+            chunk.gpu.pageIndex = chunk.pendingMesh.pageIndex;
+            chunk.gpu.vertexOffset = chunk.pendingMesh.vertexOffset;
+            chunk.gpu.indexOffset = chunk.pendingMesh.indexOffset;
+            chunk.gpu.vertexCount = chunk.pendingMesh.vertexCount;
+            chunk.gpu.indexCount = chunk.pendingMesh.indexCount;
+            chunk.gpu.resident = (chunk.gpu.indexCount > 0);
+            chunk.residentBoundsMin = chunk.pendingMesh.boundsMin;
+            chunk.residentBoundsMax = chunk.pendingMesh.boundsMax;
+            chunk.cpu.meshReady = chunk.gpu.resident && chunk.gpu.indexCount > 0;
+
+            chunk.pendingMesh = {};
+            releaseAllocationRange(oldPageIndex, oldVertexOffset, oldVertexCount, oldIndexOffset, oldIndexCount);
+        }
     }
 
     bool enabled_{true};

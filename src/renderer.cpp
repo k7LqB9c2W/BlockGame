@@ -1527,7 +1527,7 @@ void Renderer::createFrameResources()
         frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
         frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        frame.farCullVisibleCountReadbackValid = false;
+        frame.farCullVisibleCountReadbackEntryCount = 0;
         frame.fenceValue = 0;
     }
 }
@@ -1562,7 +1562,7 @@ void Renderer::destroyFrameResources()
         frame.farCullRecordCapacityBytes = 0;
         frame.farCullVisibleIndexCapacityBytes = 0;
         frame.farCullIndirectCapacityBytes = 0;
-        frame.farCullVisibleCountReadbackValid = false;
+        frame.farCullVisibleCountReadbackEntryCount = 0;
         frame.mappedConstants = nullptr;
         frame.constantBuffer.Reset();
         frame.allocator.Reset();
@@ -1690,7 +1690,7 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
                       "failed to map reusable far cull count upload buffer");
         frame.farCullVisibleCountReadback = createBuffer("farCullVisibleCountReadback",
                                                          D3D12_HEAP_TYPE_READBACK,
-                                                         sizeof(std::uint32_t),
+                                                         static_cast<std::uint64_t>(FrameResource::kFarCullVisibleCountReadbackMaxEntries) * sizeof(std::uint32_t),
                                                          D3D12_RESOURCE_STATE_COPY_DEST,
                                                          D3D12_RESOURCE_FLAG_NONE);
         throwIfFailed(frame.farCullVisibleCountReadback->Map(0, nullptr,
@@ -1699,7 +1699,7 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
         frame.farCullVisibleIndexCapacityBytes = nextVisibleIndexCapacity;
         frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
-        frame.farCullVisibleCountReadbackValid = false;
+        frame.farCullVisibleCountReadbackEntryCount = 0;
     }
 
     if (frame.farCullIndirectCapacityBytes < indirectBytes)
@@ -2933,14 +2933,24 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                                   0);
     if (frame.farCullVisibleCountReadback != nullptr)
     {
-        const D3D12_RESOURCE_BARRIER readbackBarrier =
-            transitionBarrier(visibleCount,
-                              frame.farCullVisibleCountState,
-                              D3D12_RESOURCE_STATE_COPY_SOURCE);
-        commandList_->ResourceBarrier(1, &readbackBarrier);
-        frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        commandList_->CopyBufferRegion(frame.farCullVisibleCountReadback.Get(), 0, visibleCount, 0, sizeof(std::uint32_t));
-        frame.farCullVisibleCountReadbackValid = true;
+        if (frame.farCullVisibleCountReadbackEntryCount < FrameResource::kFarCullVisibleCountReadbackMaxEntries)
+        {
+            const std::uint32_t entryIndex = frame.farCullVisibleCountReadbackEntryCount++;
+            frame.farCullVisibleCountReadbackPageIndices[entryIndex] = batch.debugPageIndex;
+            frame.farCullVisibleCountReadbackRecordCounts[entryIndex] = static_cast<std::uint32_t>(recordCount);
+
+            const D3D12_RESOURCE_BARRIER readbackBarrier =
+                transitionBarrier(visibleCount,
+                                  frame.farCullVisibleCountState,
+                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
+            commandList_->ResourceBarrier(1, &readbackBarrier);
+            frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            commandList_->CopyBufferRegion(frame.farCullVisibleCountReadback.Get(),
+                                           static_cast<std::uint64_t>(entryIndex) * sizeof(std::uint32_t),
+                                           visibleCount,
+                                           0,
+                                           sizeof(std::uint32_t));
+        }
     }
     renderDebugLog("renderFarBatchGpuCull: end");
     if (lodVisibilityDebugLoggingEnabled())
@@ -3005,17 +3015,24 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
     if (std::getenv("BLOCKGAME_RENDER_DEBUG_LOG") != nullptr &&
-        frame.farCullVisibleCountReadbackValid &&
+        frame.farCullVisibleCountReadbackEntryCount > 0 &&
         frame.farCullVisibleCountReadbackMapped != nullptr)
     {
-        const std::uint32_t visibleCount =
-            *reinterpret_cast<const std::uint32_t*>(frame.farCullVisibleCountReadbackMapped);
-        std::ostringstream log;
-        log << "renderFarBatchGpuCull: readback frame=" << currentBackBufferIndex_
-            << " visibleCount=" << visibleCount;
-        renderDebugLog(log.str());
+        const std::uint32_t count = frame.farCullVisibleCountReadbackEntryCount;
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const std::uint32_t visibleCount =
+                *reinterpret_cast<const std::uint32_t*>(frame.farCullVisibleCountReadbackMapped + i * sizeof(std::uint32_t));
+            std::ostringstream log;
+            log << "renderFarBatchGpuCull: readback frame=" << currentBackBufferIndex_
+                << " entry=" << i
+                << " page=" << frame.farCullVisibleCountReadbackPageIndices[i]
+                << " recordCount=" << frame.farCullVisibleCountReadbackRecordCounts[i]
+                << " visibleCount=" << visibleCount;
+            renderDebugLog(log.str());
+        }
     }
-    frame.farCullVisibleCountReadbackValid = false;
+    frame.farCullVisibleCountReadbackEntryCount = 0;
     frame.transientResources.clear();
 
     throwIfFailed(frame.allocator->Reset(), "failed to reset frame allocator");

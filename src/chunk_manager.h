@@ -183,6 +183,7 @@ struct ChunkRenderBatch
     ID3D12Resource* gpuCullRecordBuffer{nullptr};
     std::uint32_t gpuCullRecordCount{0};
     bool supportsGpuCull{false};
+    std::uint32_t debugPageIndex{0};
 };
 
 struct WorldRenderData

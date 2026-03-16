@@ -1,9 +1,9 @@
 cbuffer FaceEmitParams : register(b0)
 {
-    uint gWorldMinX;
-    uint gWorldMinY;
-    uint gWorldMinZ;
-    uint gBlockScale;
+    int gWorldMinX;
+    int gWorldMinY;
+    int gWorldMinZ;
+    int gBlockScale;
     uint gVertexBase;
     uint gIndexBase;
     uint gRecordIndex;

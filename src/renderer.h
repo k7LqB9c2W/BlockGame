@@ -220,6 +220,8 @@ private:
 
     struct FrameResource
     {
+        static constexpr std::uint32_t kFarCullVisibleCountReadbackMaxEntries = 512u;
+
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
         Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer;
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> transientResources;
@@ -237,11 +239,13 @@ private:
         std::uint64_t farCullRecordCapacityBytes{0};
         std::uint64_t farCullVisibleIndexCapacityBytes{0};
         std::uint64_t farCullIndirectCapacityBytes{0};
+        std::uint32_t farCullVisibleCountReadbackEntryCount{0};
+        std::array<std::uint32_t, kFarCullVisibleCountReadbackMaxEntries> farCullVisibleCountReadbackPageIndices{};
+        std::array<std::uint32_t, kFarCullVisibleCountReadbackMaxEntries> farCullVisibleCountReadbackRecordCounts{};
         D3D12_RESOURCE_STATES farCullRecordsState{D3D12_RESOURCE_STATE_COPY_DEST};
         D3D12_RESOURCE_STATES farCullVisibleIndicesState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         D3D12_RESOURCE_STATES farCullVisibleCountState{D3D12_RESOURCE_STATE_COPY_DEST};
         D3D12_RESOURCE_STATES farCullIndirectArgsState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
-        bool farCullVisibleCountReadbackValid{false};
         UINT64 fenceValue{0};
     };
 

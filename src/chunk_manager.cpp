@@ -4660,6 +4660,7 @@ public:
             batch.gpuCullRecordBuffer = page.drawRecordBuffer.Get();
             batch.gpuCullRecordCount = static_cast<std::uint32_t>(page.recordActiveCount);
             batch.supportsGpuCull = (batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0);
+            batch.debugPageIndex = static_cast<std::uint32_t>(pageIndex);
             if (batch.supportsGpuCull)
             {
                 ++emittedPages;

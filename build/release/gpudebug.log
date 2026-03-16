@@ -1,0 +1,10 @@
+Enabled D3D12 DRED for this run.
+Renderer direct command list close seq=0 reason=initial
+Renderer direct command list reset seq=1 reason=texture-upload
+Renderer direct command list close seq=1 reason=texture-upload
+Renderer execute command lists seq=1 reason=texture-upload
+Enabled D3D12 DRED for this run.
+Renderer direct command list close seq=0 reason=initial
+Renderer direct command list reset seq=1 reason=texture-upload
+Renderer direct command list close seq=1 reason=texture-upload
+Renderer execute command lists seq=1 reason=texture-upload

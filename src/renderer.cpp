@@ -115,6 +115,11 @@ void lodVisibilityDebugLog(const std::string& message)
     }
 }
 
+[[nodiscard]] bool farCullVisibleCountReadbackEnabled() noexcept
+{
+    return std::getenv("BLOCKGAME_RENDER_DEBUG_LOG") != nullptr || lodVisibilityDebugLoggingEnabled();
+}
+
 [[nodiscard]] bool envFlagEnabled(const char* name)
 {
     const char* value = std::getenv(name);
@@ -1701,6 +1706,28 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
         frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
         frame.farCullVisibleCountReadbackEntryCount = 0;
     }
+    else if (!farCullVisibleCountReadbackEnabled())
+    {
+        if (frame.farCullVisibleCountReadback != nullptr)
+        {
+            frame.farCullVisibleCountReadback->Unmap(0, nullptr);
+        }
+        frame.farCullVisibleCountReadback.Reset();
+        frame.farCullVisibleCountReadbackMapped = nullptr;
+        frame.farCullVisibleCountReadbackEntryCount = 0;
+    }
+    else if (farCullVisibleCountReadbackEnabled() && frame.farCullVisibleCountReadback == nullptr)
+    {
+        frame.farCullVisibleCountReadback = createBuffer("farCullVisibleCountReadback",
+                                                         D3D12_HEAP_TYPE_READBACK,
+                                                         static_cast<std::uint64_t>(FrameResource::kFarCullVisibleCountReadbackMaxEntries) * sizeof(std::uint32_t),
+                                                         D3D12_RESOURCE_STATE_COPY_DEST,
+                                                         D3D12_RESOURCE_FLAG_NONE);
+        throwIfFailed(frame.farCullVisibleCountReadback->Map(0, nullptr,
+                                                             reinterpret_cast<void**>(&frame.farCullVisibleCountReadbackMapped)),
+                      "failed to map reusable far cull visible-count readback buffer");
+        frame.farCullVisibleCountReadbackEntryCount = 0;
+    }
 
     if (frame.farCullIndirectCapacityBytes < indirectBytes)
     {
@@ -2931,7 +2958,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                                   0,
                                   visibleCount,
                                   0);
-    if (frame.farCullVisibleCountReadback != nullptr)
+    if (farCullVisibleCountReadbackEnabled() && frame.farCullVisibleCountReadback != nullptr)
     {
         if (frame.farCullVisibleCountReadbackEntryCount < FrameResource::kFarCullVisibleCountReadbackMaxEntries)
         {
@@ -3014,8 +3041,7 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         throwIfFailed(fence_->SetEventOnCompletion(frame.fenceValue, fenceEvent_), "failed to wait for frame fence");
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
-    if (std::getenv("BLOCKGAME_RENDER_DEBUG_LOG") != nullptr &&
-        frame.farCullVisibleCountReadbackEntryCount > 0 &&
+    if (frame.farCullVisibleCountReadbackEntryCount > 0 &&
         frame.farCullVisibleCountReadbackMapped != nullptr)
     {
         const std::uint32_t count = frame.farCullVisibleCountReadbackEntryCount;
@@ -3023,13 +3049,26 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         {
             const std::uint32_t visibleCount =
                 *reinterpret_cast<const std::uint32_t*>(frame.farCullVisibleCountReadbackMapped + i * sizeof(std::uint32_t));
-            std::ostringstream log;
-            log << "renderFarBatchGpuCull: readback frame=" << currentBackBufferIndex_
-                << " entry=" << i
-                << " page=" << frame.farCullVisibleCountReadbackPageIndices[i]
-                << " recordCount=" << frame.farCullVisibleCountReadbackRecordCounts[i]
-                << " visibleCount=" << visibleCount;
-            renderDebugLog(log.str());
+            if (std::getenv("BLOCKGAME_RENDER_DEBUG_LOG") != nullptr)
+            {
+                std::ostringstream log;
+                log << "renderFarBatchGpuCull: readback frame=" << currentBackBufferIndex_
+                    << " entry=" << i
+                    << " page=" << frame.farCullVisibleCountReadbackPageIndices[i]
+                    << " recordCount=" << frame.farCullVisibleCountReadbackRecordCounts[i]
+                    << " visibleCount=" << visibleCount;
+                renderDebugLog(log.str());
+            }
+            if (lodVisibilityDebugLoggingEnabled())
+            {
+                std::ostringstream log;
+                log << "lodvis cull_readback frame=" << currentBackBufferIndex_
+                    << " entry=" << i
+                    << " page=" << frame.farCullVisibleCountReadbackPageIndices[i]
+                    << " recordCount=" << frame.farCullVisibleCountReadbackRecordCounts[i]
+                    << " visibleCount=" << visibleCount;
+                lodVisibilityDebugLog(log.str());
+            }
         }
     }
     frame.farCullVisibleCountReadbackEntryCount = 0;

@@ -1267,11 +1267,13 @@ public:
                             ID3D12Resource* worldgenHeaderBuffer,
                             ID3D12Resource* worldgenBiomeBuffer,
                             std::uint32_t biomeCount,
+                            ID3D12Resource* canonicalSampleBuffer,
+                            std::uint32_t canonicalSampleCount,
                             ID3D12Resource* atlasBuffer,
                             std::uint32_t atlasElementCount)
     {
         if (!open_ || worldgenHeaderBuffer == nullptr || worldgenBiomeBuffer == nullptr ||
-            atlasBuffer == nullptr || updateSizeCells.x <= 0 || updateSizeCells.y <= 0)
+            canonicalSampleBuffer == nullptr || atlasBuffer == nullptr || updateSizeCells.x <= 0 || updateSizeCells.y <= 0)
         {
             return;
         }
@@ -1287,7 +1289,7 @@ public:
             static_cast<std::uint32_t>(updateSizeCells.y),
             static_cast<std::uint32_t>(blockScale),
             static_cast<std::uint32_t>(seaLevel)};
-        const UINT descriptorIndex = allocateDescriptorRange(3);
+        const UINT descriptorIndex = allocateDescriptorRange(4);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      worldgenHeaderBuffer,
                                      0,
@@ -1298,7 +1300,12 @@ public:
                                      0,
                                      biomeCount,
                                      static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuBiome)));
-        writeStructuredUavDescriptor(descriptorIndex + 2u,
+        writeStructuredSrvDescriptor(descriptorIndex + 2u,
+                                     canonicalSampleBuffer,
+                                     0,
+                                     canonicalSampleCount,
+                                     kGpuContextAtlasSampleStrideBytes);
+        writeStructuredUavDescriptor(descriptorIndex + 3u,
                                      atlasBuffer,
                                      0,
                                      atlasElementCount,
@@ -1312,7 +1319,7 @@ public:
         srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
         commandList_->SetComputeRootDescriptorTable(1, srvHandle);
         D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 2u;
+        uavHandle.ptr += descriptorSize_ * 3u;
         commandList_->SetComputeRootDescriptorTable(2, uavHandle);
         if (chunkManagerDebugLoggingEnabled())
         {
@@ -1888,7 +1895,7 @@ private:
     {
         const std::filesystem::path shaderRoot = std::filesystem::current_path() / "assets" / "shaders";
         atlasUpdateShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_column_atlas_update_cs.hlsl").string(), "FarLodColumnAtlasUpdateMain", "cs_5_0");
+            compileShaderFromFileLocal((shaderRoot / "far_lod_column_atlas_update_canonical_cs.hlsl").string(), "FarLodColumnAtlasUpdateMain", "cs_5_0");
         synthColumnShader_ =
             compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_synth_cs.hlsl").string(), "FarLodChunkSynthMain", "cs_5_0");
         synthFillShader_ =
@@ -1931,7 +1938,7 @@ private:
 
         D3D12_DESCRIPTOR_RANGE atlasSrvRange{};
         atlasSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        atlasSrvRange.NumDescriptors = 2;
+        atlasSrvRange.NumDescriptors = 3;
         atlasSrvRange.BaseShaderRegister = 0;
         atlasSrvRange.OffsetInDescriptorsFromTableStart = 0;
         D3D12_DESCRIPTOR_RANGE atlasUavRange{};
@@ -5139,6 +5146,9 @@ private:
         glm::ivec2 originCell{0};
         Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+        Microsoft::WRL::ComPtr<ID3D12Resource> canonicalUpdateBuffer;
+        D3D12_RESOURCE_STATES canonicalUpdateState{D3D12_RESOURCE_STATE_COMMON};
+        std::uint32_t canonicalUpdateCapacity{0};
         bool initialized{false};
 
         [[nodiscard]] std::uint32_t elementCount() const noexcept
@@ -5968,6 +5978,15 @@ private:
             setDebugObjectName(atlas.buffer.Get(), name.str());
         }
         atlas.state = D3D12_RESOURCE_STATE_COMMON;
+        atlas.canonicalUpdateBuffer = createDefaultBuffer(device_.Get(), bufferBytes, D3D12_RESOURCE_STATE_COMMON);
+        if (atlas.canonicalUpdateBuffer != nullptr)
+        {
+            std::wostringstream name;
+            name << L"FarLodAtlasCanonicalUpdate_L" << level.level;
+            setDebugObjectName(atlas.canonicalUpdateBuffer.Get(), name.str());
+        }
+        atlas.canonicalUpdateState = D3D12_RESOURCE_STATE_COMMON;
+        atlas.canonicalUpdateCapacity = atlas.elementCount();
         atlas.originCell = computeDesiredAtlasOriginCell(level);
         atlas.initialized = false;
     }
@@ -6027,6 +6046,93 @@ private:
         return rects;
     }
 
+    [[nodiscard]] GpuTerrainAtlasSample buildCanonicalAtlasSample(const StructureSampleColumnFn& sampleColumnFn,
+                                                                  int worldX,
+                                                                  int worldZ) const
+    {
+        GpuTerrainAtlasSample sampleOut{};
+        if (!sampleColumnFn)
+        {
+            return sampleOut;
+        }
+
+        const ColumnSample sample = sampleColumnFn(worldX, worldZ);
+        if (!sample.dominantBiome)
+        {
+            return sampleOut;
+        }
+
+        const terrain::BiomeDefinition& biome = *sample.dominantBiome;
+        sampleOut.hasSolid = 1u;
+        sampleOut.surfaceY = sample.surfaceY;
+        const terrain::TerrainColumnBlocks blocks =
+            terrain::resolveTerrainColumnBlocks(biome, sample, worldX, worldZ, seaLevel_);
+        sampleOut.surfaceBlock = static_cast<std::uint32_t>(static_cast<std::uint8_t>(blocks.surfaceBlock));
+        sampleOut.fillerBlock = static_cast<std::uint32_t>(static_cast<std::uint8_t>(blocks.fillerBlock));
+
+        const auto& waterFill = biome.terrainSettings.waterFill;
+        sampleOut.waterEnabled = waterFill.enabled ? 1u : 0u;
+        int waterBottom = sampleOut.surfaceY + 1;
+        if (waterFill.enabled && sampleOut.surfaceY < seaLevel_ && waterFill.maxDepth > 0)
+        {
+            waterBottom = std::max(waterBottom, seaLevel_ - waterFill.maxDepth + 1);
+        }
+        sampleOut.waterBottomY = waterBottom;
+        return sampleOut;
+    }
+
+    bool uploadCanonicalAtlasUpdateRect(FarLodLevelAtlasState& atlas,
+                                        const FarLodLevelConfig& level,
+                                        const AtlasUpdateRect& rect,
+                                        const StructureSampleColumnFn& sampleColumnFn)
+    {
+        if (atlas.canonicalUpdateBuffer == nullptr ||
+            rect.sizeCells.x <= 0 || rect.sizeCells.y <= 0 ||
+            level.blockScale <= 0 || !sampleColumnFn)
+        {
+            return false;
+        }
+
+        const std::uint32_t elementCount =
+            static_cast<std::uint32_t>(rect.sizeCells.x * rect.sizeCells.y);
+        if (elementCount == 0u || elementCount > atlas.canonicalUpdateCapacity)
+        {
+            return false;
+        }
+
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(elementCount) * sizeof(GpuTerrainAtlasSample);
+        const auto upload = gpuContext_.allocateUpload(bytes, 16u);
+        if (upload.resource == nullptr || upload.cpuPtr == nullptr || upload.size < bytes)
+        {
+            return false;
+        }
+
+        auto* dst = reinterpret_cast<GpuTerrainAtlasSample*>(upload.cpuPtr);
+        std::uint32_t writeIndex = 0u;
+        for (int dz = 0; dz < rect.sizeCells.y; ++dz)
+        {
+            for (int dx = 0; dx < rect.sizeCells.x; ++dx)
+            {
+                const glm::ivec2 cellCoord(rect.originCell.x + dx, rect.originCell.y + dz);
+                const int worldX = cellCoord.x * level.blockScale;
+                const int worldZ = cellCoord.y * level.blockScale;
+                dst[writeIndex++] = buildCanonicalAtlasSample(sampleColumnFn, worldX, worldZ);
+            }
+        }
+
+        gpuContext_.transition(atlas.canonicalUpdateBuffer.Get(),
+                               atlas.canonicalUpdateState,
+                               D3D12_RESOURCE_STATE_COPY_DEST);
+        atlas.canonicalUpdateState = D3D12_RESOURCE_STATE_COPY_DEST;
+        gpuContext_.copyBuffer(atlas.canonicalUpdateBuffer.Get(), 0, upload.resource, upload.offset, bytes);
+        gpuContext_.transition(atlas.canonicalUpdateBuffer.Get(),
+                               atlas.canonicalUpdateState,
+                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        atlas.canonicalUpdateState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        return true;
+    }
+
     void appendAtlasUpdates(const std::deque<GpuSynthesisRequest>& requests)
     {
         std::unordered_set<int> requestedLevels;
@@ -6059,6 +6165,10 @@ private:
             {
                 continue;
             }
+            if (atlas.canonicalUpdateBuffer == nullptr)
+            {
+                continue;
+            }
 
             const std::vector<AtlasUpdateRect> rects = prepareAtlasUpdateRects(atlas, level);
             if (rects.empty())
@@ -6066,10 +6176,20 @@ private:
                 continue;
             }
 
+            StructureSampleColumnFn sampleColumnFn;
+            {
+                std::lock_guard<std::mutex> lock(structureRegionMutex_);
+                sampleColumnFn = structureSampleColumnFn_;
+            }
+
             gpuContext_.transition(atlas.buffer.Get(), atlas.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             atlas.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             for (const AtlasUpdateRect& rect : rects)
             {
+                if (!uploadCanonicalAtlasUpdateRect(atlas, level, rect, sampleColumnFn))
+                {
+                    continue;
+                }
                 gpuContext_.dispatchAtlasUpdate(atlas.originCell,
                                                 atlas.atlasSizeCells,
                                                 rect.originCell,
@@ -6079,6 +6199,8 @@ private:
                                                 worldgenHeaderBuffer_.Get(),
                                                 worldgenBiomeBuffer_.Get(),
                                                 worldgenTables_.header.biomeCount,
+                                                atlas.canonicalUpdateBuffer.Get(),
+                                                static_cast<std::uint32_t>(rect.sizeCells.x * rect.sizeCells.y),
                                                 atlas.buffer.Get(),
                                                 atlas.elementCount());
             }

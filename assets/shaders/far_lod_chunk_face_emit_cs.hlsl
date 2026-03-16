@@ -49,6 +49,7 @@ RWStructuredBuffer<GpuCullRecord> gDrawRecords : register(u2);
 
 static const uint kLogicalSize = 16u;
 static const uint kVoxelCount = 4096u;
+static const uint kSliceCount = 96u;
 static const uint kNegativeNeighborX = 0x1u;
 static const uint kNegativeNeighborY = 0x2u;
 static const uint kNegativeNeighborZ = 0x4u;
@@ -216,6 +217,22 @@ bool faceVisible(uint faceId, uint x, uint y, uint z, uint packedVoxel)
     return shouldRenderBlockFace(material, (x > 0u) ? gVoxelBuffer[voxelIndex(x - 1u, y, z)] : 0u);
 }
 
+uint faceMergeKey(uint faceId, uint x, uint y, uint z, uint packedVoxel)
+{
+    if (!isOccupied(packedVoxel))
+    {
+        return 0u;
+    }
+    if (!faceVisible(faceId, x, y, z, packedVoxel))
+    {
+        return 0u;
+    }
+
+    // Merge only when material + voxel flags match exactly (water/structure/cutout/terrain).
+    // Exclude occupancy so "0" can be used as the sentinel for non-emitting cells.
+    return packedVoxel & 0xFF1Eu;
+}
+
 void faceVertices(uint faceId,
                   float3 minCorner,
                   out float3 p0,
@@ -280,7 +297,95 @@ void faceVertices(uint faceId,
     normal = float3(-1.0f, 0.0f, 0.0f);
 }
 
-void emitFace(uint faceId, uint packedVoxel, uint x, uint y, uint z, uint emittedFaceIndex)
+void faceVerticesMerged(uint faceId,
+                        float3 minCorner,
+                        uint width,
+                        uint height,
+                        out float3 p0,
+                        out float3 p1,
+                        out float3 p2,
+                        out float3 p3,
+                        out float3 normal)
+{
+    const float scale = (float)gBlockScale;
+    float3 maxCorner = minCorner + float3(scale, scale, scale);
+
+    // width/height are defined in the 2D slice plane for the selected face.
+    if (faceId == kFaceTop || faceId == kFaceBottom)
+    {
+        maxCorner = minCorner + float3(scale * (float)width, scale, scale * (float)height);
+    }
+    else if (faceId == kFaceNorth || faceId == kFaceSouth)
+    {
+        maxCorner = minCorner + float3(scale * (float)width, scale * (float)height, scale);
+    }
+    else
+    {
+        // East/West: width spans Z, height spans Y.
+        maxCorner = minCorner + float3(scale, scale * (float)height, scale * (float)width);
+    }
+
+    if (faceId == kFaceTop)
+    {
+        p0 = float3(minCorner.x, maxCorner.y, minCorner.z);
+        p1 = float3(maxCorner.x, maxCorner.y, minCorner.z);
+        p2 = float3(maxCorner.x, maxCorner.y, maxCorner.z);
+        p3 = float3(minCorner.x, maxCorner.y, maxCorner.z);
+        normal = float3(0.0f, 1.0f, 0.0f);
+        return;
+    }
+    if (faceId == kFaceBottom)
+    {
+        p0 = float3(minCorner.x, minCorner.y, minCorner.z);
+        p1 = float3(minCorner.x, minCorner.y, maxCorner.z);
+        p2 = float3(maxCorner.x, minCorner.y, maxCorner.z);
+        p3 = float3(maxCorner.x, minCorner.y, minCorner.z);
+        normal = float3(0.0f, -1.0f, 0.0f);
+        return;
+    }
+    if (faceId == kFaceNorth)
+    {
+        p0 = float3(minCorner.x, minCorner.y, minCorner.z);
+        p1 = float3(maxCorner.x, minCorner.y, minCorner.z);
+        p2 = float3(maxCorner.x, maxCorner.y, minCorner.z);
+        p3 = float3(minCorner.x, maxCorner.y, minCorner.z);
+        normal = float3(0.0f, 0.0f, -1.0f);
+        return;
+    }
+    if (faceId == kFaceSouth)
+    {
+        p0 = float3(minCorner.x, minCorner.y, maxCorner.z);
+        p1 = float3(minCorner.x, maxCorner.y, maxCorner.z);
+        p2 = float3(maxCorner.x, maxCorner.y, maxCorner.z);
+        p3 = float3(maxCorner.x, minCorner.y, maxCorner.z);
+        normal = float3(0.0f, 0.0f, 1.0f);
+        return;
+    }
+    if (faceId == kFaceEast)
+    {
+        p0 = float3(maxCorner.x, minCorner.y, minCorner.z);
+        p1 = float3(maxCorner.x, minCorner.y, maxCorner.z);
+        p2 = float3(maxCorner.x, maxCorner.y, maxCorner.z);
+        p3 = float3(maxCorner.x, maxCorner.y, minCorner.z);
+        normal = float3(1.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    p0 = float3(minCorner.x, minCorner.y, minCorner.z);
+    p1 = float3(minCorner.x, maxCorner.y, minCorner.z);
+    p2 = float3(minCorner.x, maxCorner.y, maxCorner.z);
+    p3 = float3(minCorner.x, minCorner.y, maxCorner.z);
+    normal = float3(-1.0f, 0.0f, 0.0f);
+}
+
+void emitMergedFace(uint faceId,
+                    uint packedVoxel,
+                    uint x,
+                    uint y,
+                    uint z,
+                    uint width,
+                    uint height,
+                    uint emittedFaceIndex)
 {
     const uint material = voxelMaterial(packedVoxel);
     const uint localVertexOffset = emittedFaceIndex * 4u;
@@ -295,7 +400,7 @@ void emitFace(uint faceId, uint packedVoxel, uint x, uint y, uint z, uint emitte
     float3 p2;
     float3 p3;
     float3 normal;
-    faceVertices(faceId, minCorner, p0, p1, p2, p3, normal);
+    faceVerticesMerged(faceId, minCorner, width, height, p0, p1, p2, p3, normal);
 
     const uint lightingData = packLightingData(packedVoxel);
 
@@ -332,6 +437,152 @@ void emitFace(uint faceId, uint packedVoxel, uint x, uint y, uint z, uint emitte
     gIndices[indexOffset + 5u] = localVertexOffset + 3u;
 }
 
+void decodeSlice(uint sliceIndex, out uint faceId, out uint slice)
+{
+    faceId = sliceIndex / kLogicalSize;
+    slice = sliceIndex - faceId * kLogicalSize;
+}
+
+void voxelCoordsForSliceCell(uint faceId, uint slice, uint u, uint v, out uint x, out uint y, out uint z)
+{
+    if (faceId == kFaceTop || faceId == kFaceBottom)
+    {
+        x = u;
+        y = slice;
+        z = v;
+        return;
+    }
+    if (faceId == kFaceNorth || faceId == kFaceSouth)
+    {
+        x = u;
+        y = v;
+        z = slice;
+        return;
+    }
+    x = slice;
+    y = v;
+    z = u;
+}
+
+void emitGreedySlice(uint sliceIndex)
+{
+    if (sliceIndex >= kSliceCount)
+    {
+        return;
+    }
+
+    const uint sliceCount = gFaceCounts[sliceIndex];
+    if (sliceCount == 0u)
+    {
+        return;
+    }
+
+    uint faceId;
+    uint slice;
+    decodeSlice(sliceIndex, faceId, slice);
+
+    uint keys[256];
+    uint visitedMask[16];
+    for (uint initRow = 0u; initRow < 16u; ++initRow)
+    {
+        visitedMask[initRow] = 0u;
+    }
+
+    for (uint vFill = 0u; vFill < 16u; ++vFill)
+    {
+        for (uint uFill = 0u; uFill < 16u; ++uFill)
+        {
+            uint x;
+            uint y;
+            uint z;
+            voxelCoordsForSliceCell(faceId, slice, uFill, vFill, x, y, z);
+            const uint packedVoxel = gVoxelBuffer[voxelIndex(x, y, z)];
+            keys[vFill * 16u + uFill] = faceMergeKey(faceId, x, y, z, packedVoxel);
+        }
+    }
+
+    uint emitted = 0u;
+    const uint faceBase = gFacePrefixes[sliceIndex];
+    for (uint vScan = 0u; vScan < 16u; ++vScan)
+    {
+        for (uint uScan = 0u; uScan < 16u; ++uScan)
+        {
+            const uint bit = 1u << uScan;
+            if ((visitedMask[vScan] & bit) != 0u)
+            {
+                continue;
+            }
+
+            const uint key = keys[vScan * 16u + uScan];
+            if (key == 0u)
+            {
+                visitedMask[vScan] |= bit;
+                continue;
+            }
+
+            uint width = 1u;
+            for (uint uNext = uScan + 1u; uNext < 16u; ++uNext)
+            {
+                const uint testBit = 1u << uNext;
+                if ((visitedMask[vScan] & testBit) != 0u)
+                {
+                    break;
+                }
+                if (keys[vScan * 16u + uNext] != key)
+                {
+                    break;
+                }
+                width += 1u;
+            }
+
+            uint height = 1u;
+            for (uint vNext = vScan + 1u; vNext < 16u; ++vNext)
+            {
+                bool rowOk = true;
+                for (uint dx = 0u; dx < width; ++dx)
+                {
+                    const uint uTest = uScan + dx;
+                    const uint testBit = 1u << uTest;
+                    if ((visitedMask[vNext] & testBit) != 0u ||
+                        keys[vNext * 16u + uTest] != key)
+                    {
+                        rowOk = false;
+                        break;
+                    }
+                }
+                if (!rowOk)
+                {
+                    break;
+                }
+                height += 1u;
+            }
+
+            const uint rowMask = ((1u << width) - 1u) << uScan;
+            for (uint dy = 0u; dy < height; ++dy)
+            {
+                visitedMask[vScan + dy] |= rowMask;
+            }
+
+            uint startX;
+            uint startY;
+            uint startZ;
+            voxelCoordsForSliceCell(faceId, slice, uScan, vScan, startX, startY, startZ);
+
+            // Reconstruct the packed voxel value (occupied bit + flags + material) from the merge key.
+            const uint packedVoxel = key | 0x1u;
+            emitMergedFace(faceId,
+                           packedVoxel,
+                           startX,
+                           startY,
+                           startZ,
+                           width,
+                           height,
+                           faceBase + emitted);
+            emitted += 1u;
+        }
+    }
+}
+
 [numthreads(64, 1, 1)]
 void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -341,30 +592,17 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    const uint packedVoxel = gVoxelBuffer[linearIndex];
-    const uint faceCount = gFaceCounts[linearIndex];
-    const uint faceBase = gFacePrefixes[linearIndex];
-    const uint x = linearIndex % kLogicalSize;
-    const uint y = (linearIndex / kLogicalSize) % kLogicalSize;
-    const uint z = linearIndex / (kLogicalSize * kLogicalSize);
-
-    if (isOccupied(packedVoxel) && faceCount > 0u)
+    // We repurpose the first 96 entries (6 faces * 16 slices) to contain greedy-merged quad counts.
+    // Prefix sums provide deterministic allocation, and the rest of the 4096-element scan is zeroed.
+    if (linearIndex < kSliceCount)
     {
-        uint localFace = 0u;
-        [unroll]
-        for (uint faceId = 0u; faceId < 6u; ++faceId)
-        {
-            if (faceVisible(faceId, x, y, z, packedVoxel))
-            {
-                emitFace(faceId, packedVoxel, x, y, z, faceBase + localFace);
-                localFace += 1u;
-            }
-        }
+        emitGreedySlice(linearIndex);
     }
 
     if (linearIndex == (kVoxelCount - 1u))
     {
-        const uint totalFaces = faceBase + faceCount;
+        // Total merged quads equals the final prefix value (the remaining entries are zero).
+        const uint totalFaces = gFacePrefixes[linearIndex] + gFaceCounts[linearIndex];
         GpuCullRecord record;
         record.boundsMin = float4(chunkWorldMin(), 1.0f);
         record.boundsMax = float4(chunkWorldMin() + float3((float)(kLogicalSize * gBlockScale),

@@ -3989,6 +3989,13 @@ public:
 
     using PackedFarLodVoxelGpu = std::uint32_t;
 
+    struct GpuBlockFaceUv
+    {
+        glm::vec2 base{0.0f};
+        glm::vec2 size{0.0f};
+    };
+    static_assert(sizeof(GpuBlockFaceUv) == 16u);
+
     struct FarLodChunkCpu
     {
         static constexpr int logicalSize = kLogicalSize;
@@ -4957,13 +4964,6 @@ private:
         std::uint32_t fillerBlock{0};
     };
     static_assert(sizeof(GpuTerrainAtlasSample) == 24u);
-
-    struct GpuBlockFaceUv
-    {
-        glm::vec2 base{0.0f};
-        glm::vec2 size{0.0f};
-    };
-    static_assert(sizeof(GpuBlockFaceUv) == 16u);
 
     struct GpuSynthesisRequest
     {

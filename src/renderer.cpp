@@ -2716,7 +2716,8 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                                      D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
                                      D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv)
 {
-    if (batch.gpuCullRecords.empty() ||
+    if (batch.gpuCullRecordBuffer == nullptr ||
+        batch.gpuCullRecordCount == 0 ||
         !depthPyramid_ ||
         !lodCullRootSignature_ ||
         !lodCullPipelineState_ ||
@@ -2728,7 +2729,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
 
     FrameResource& frame = frameResources_[currentBackBufferIndex_];
     renderDebugLog("renderFarBatchGpuCull: begin");
-    const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecords.size());
+    const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
     const std::uint64_t recordBytes = recordCount * sizeof(ChunkRenderBatch::GpuCullRecord);
     const std::uint64_t visibleIndexBytes = std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u);
     const std::uint64_t countBytes = sizeof(std::uint32_t);
@@ -2740,7 +2741,6 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                 << " recordBytes=" << recordBytes
                 << " visibleIndexBytes=" << visibleIndexBytes
                 << " indirectBytes=" << indirectBytes
-                << " existingRecordCapacity=" << frame.farCullRecordCapacityBytes
                 << " existingVisibleCapacity=" << frame.farCullVisibleIndexCapacityBytes
                 << " existingIndirectCapacity=" << frame.farCullIndirectCapacityBytes;
         renderDebugLog(sizeLog.str());
@@ -2749,50 +2749,39 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
             lodVisibilityDebugLog("lodvis cull_begin " + sizeLog.str());
         }
     }
-    if (frame.farCullRecordCapacityBytes < recordBytes ||
-        frame.farCullVisibleIndexCapacityBytes < visibleIndexBytes ||
+    if (frame.farCullVisibleIndexCapacityBytes < visibleIndexBytes ||
         frame.farCullIndirectCapacityBytes < indirectBytes)
     {
         throwRenderError("far cull buffers were not pre-sized before batch recording");
     }
-    ID3D12Resource* recordsDefault = frame.farCullRecordsDefault.Get();
-    ID3D12Resource* recordsUpload = frame.farCullRecordsUpload.Get();
+    ID3D12Resource* recordsBuffer = batch.gpuCullRecordBuffer;
     ID3D12Resource* visibleIndices = frame.farCullVisibleIndices.Get();
     ID3D12Resource* visibleCount = frame.farCullVisibleCount.Get();
     ID3D12Resource* countUpload = frame.farCullCountUpload.Get();
     ID3D12Resource* indirectArgs = frame.farCullIndirectArgs.Get();
 
-    if (recordsDefault == nullptr || recordsUpload == nullptr ||
+    if (recordsBuffer == nullptr ||
         visibleIndices == nullptr || visibleCount == nullptr ||
         countUpload == nullptr || indirectArgs == nullptr ||
-        frame.farCullRecordsUploadMapped == nullptr || frame.farCullCountUploadMapped == nullptr)
+        frame.farCullCountUploadMapped == nullptr)
     {
         std::ostringstream nullLog;
         nullLog << "renderFarBatchGpuCull: invalid reusable far cull state"
-                << " recordsDefault=" << (recordsDefault != nullptr)
-                << " recordsUpload=" << (recordsUpload != nullptr)
+                << " recordsBuffer=" << (recordsBuffer != nullptr)
                 << " visibleIndices=" << (visibleIndices != nullptr)
                 << " visibleCount=" << (visibleCount != nullptr)
                 << " countUpload=" << (countUpload != nullptr)
                 << " indirectArgs=" << (indirectArgs != nullptr)
-                << " recordsUploadMapped=" << (frame.farCullRecordsUploadMapped != nullptr)
                 << " countUploadMapped=" << (frame.farCullCountUploadMapped != nullptr);
         renderDebugLog(nullLog.str());
         throw std::runtime_error("Renderer: failed to prepare reusable far cull buffers");
     }
 
-    std::memcpy(frame.farCullRecordsUploadMapped, batch.gpuCullRecords.data(), static_cast<std::size_t>(recordBytes));
     const std::uint32_t zeroValue = 0;
     std::memcpy(frame.farCullCountUploadMapped, &zeroValue, sizeof(zeroValue));
 
-    std::array<D3D12_RESOURCE_BARRIER, 4> preCopyBarriers{};
+    std::array<D3D12_RESOURCE_BARRIER, 3> preCopyBarriers{};
     UINT preCopyBarrierCount = 0;
-    if (frame.farCullRecordsState != D3D12_RESOURCE_STATE_COPY_DEST)
-    {
-        preCopyBarriers[preCopyBarrierCount++] =
-            transitionBarrier(recordsDefault, frame.farCullRecordsState, D3D12_RESOURCE_STATE_COPY_DEST);
-        frame.farCullRecordsState = D3D12_RESOURCE_STATE_COPY_DEST;
-    }
     if (frame.farCullVisibleCountState != D3D12_RESOURCE_STATE_COPY_DEST)
     {
         preCopyBarriers[preCopyBarrierCount++] =
@@ -2816,14 +2805,11 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
         commandList_->ResourceBarrier(preCopyBarrierCount, preCopyBarriers.data());
     }
 
-    commandList_->CopyBufferRegion(recordsDefault, 0, recordsUpload, 0, recordBytes);
     commandList_->CopyBufferRegion(visibleCount, 0, countUpload, 0, countBytes);
 
     const D3D12_RESOURCE_BARRIER setupBarriers[] = {
-        transitionBarrier(recordsDefault, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
         transitionBarrier(visibleCount, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
     commandList_->ResourceBarrier(static_cast<UINT>(std::size(setupBarriers)), setupBarriers);
-    frame.farCullRecordsState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     struct CullRootConstants
@@ -2853,7 +2839,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     commandList_->SetPipelineState(lodCullPipelineState_.Get());
     commandList_->SetComputeRoot32BitConstants(0, 44, &constants, 0);
     commandList_->SetComputeRootDescriptorTable(1, depthPyramidSrvGpu_);
-    commandList_->SetComputeRootShaderResourceView(2, recordsDefault->GetGPUVirtualAddress());
+    commandList_->SetComputeRootShaderResourceView(2, recordsBuffer->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(3, visibleIndices->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(4, visibleCount->GetGPUVirtualAddress());
     commandList_->Dispatch(dispatchGroups, 1, 1);
@@ -2876,7 +2862,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     renderDebugLog("renderFarBatchGpuCull: dispatch indirect build");
     commandList_->SetComputeRootSignature(lodIndirectRootSignature_.Get());
     commandList_->SetPipelineState(lodIndirectPipelineState_.Get());
-    commandList_->SetComputeRootShaderResourceView(0, recordsDefault->GetGPUVirtualAddress());
+    commandList_->SetComputeRootShaderResourceView(0, recordsBuffer->GetGPUVirtualAddress());
     commandList_->SetComputeRootShaderResourceView(1, visibleIndices->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(2, indirectArgs->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(3, visibleCount->GetGPUVirtualAddress());
@@ -3216,11 +3202,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
             ++farBatchCount;
-            if (!gpuFarCullDisabled && batch.supportsGpuCull && !batch.gpuCullRecords.empty())
+            if (!gpuFarCullDisabled && batch.supportsGpuCull &&
+                batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
                 shouldUseGpuFarCull = true;
                 ++farCullEligibleBatchCount;
-                farCullEligibleRecordCount += batch.gpuCullRecords.size();
+                farCullEligibleRecordCount += batch.gpuCullRecordCount;
             }
         }
         if (lodVisibilityDebugLoggingEnabled())
@@ -3240,12 +3227,13 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             std::uint64_t maxIndirectBytes = 0;
             for (const ChunkRenderBatch& batch : renderData.farBatches)
             {
-                if (gpuFarCullDisabled || !batch.supportsGpuCull || batch.gpuCullRecords.empty())
+                if (gpuFarCullDisabled || !batch.supportsGpuCull ||
+                    batch.gpuCullRecordBuffer == nullptr || batch.gpuCullRecordCount == 0)
                 {
                     continue;
                 }
 
-                const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecords.size());
+                const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
                 maxRecordBytes = std::max(maxRecordBytes,
                                           recordCount * sizeof(ChunkRenderBatch::GpuCullRecord));
                 maxVisibleIndexBytes = std::max(maxVisibleIndexBytes,
@@ -3279,7 +3267,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootConstantBufferView(0, farCb);
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
-            if (!gpuFarCullDisabled && batch.supportsGpuCull && !batch.gpuCullRecords.empty())
+            if (!gpuFarCullDisabled && batch.supportsGpuCull &&
+                batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
                 renderFarBatchGpuCull(batch,
                                       viewProj,

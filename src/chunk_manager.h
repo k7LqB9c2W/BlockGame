@@ -180,6 +180,8 @@ struct ChunkRenderBatch
         std::uint32_t reserved{0};
     };
     std::vector<GpuCullRecord> gpuCullRecords;
+    ID3D12Resource* gpuCullRecordBuffer{nullptr};
+    std::uint32_t gpuCullRecordCount{0};
     bool supportsGpuCull{false};
 };
 

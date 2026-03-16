@@ -59,9 +59,11 @@ struct FarLodGpuBiome
 struct GpuTerrainAtlasSample
 {
     uint hasSolid;
-    uint waterEnabled;
+    uint waterEnabled; // Aggregated water presence votes within this cell (0..N).
     int surfaceY;
     int waterBottomY;
+    int minSurfaceY;
+    int maxSurfaceY;
     uint surfaceBlock;
     uint fillerBlock;
 };
@@ -98,4 +100,3 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     gAtlasSamples[atlasIndex(cellCoord)] = gCanonicalSamples[updateIndex];
 }
-

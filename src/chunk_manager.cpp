@@ -1825,7 +1825,7 @@ private:
     static constexpr std::uint32_t kGpuContextFacePrefixGroupSize = 256u;
     static constexpr std::uint32_t kGpuContextFacePrefixGroupCount = kGpuContextVoxelCount / kGpuContextFacePrefixGroupSize;
     static constexpr std::uint32_t kGpuContextColumnDescriptorStrideBytes = 40u;
-    static constexpr std::uint32_t kGpuContextAtlasSampleStrideBytes = 24u;
+    static constexpr std::uint32_t kGpuContextAtlasSampleStrideBytes = 32u;
     static constexpr std::uint32_t kGpuContextStructureInstanceStrideBytes = 64u;
     static constexpr std::uint32_t kGpuContextPackedVoxelStrideBytes = 4u;
     static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
@@ -5086,13 +5086,15 @@ private:
     struct GpuTerrainAtlasSample
     {
         std::uint32_t hasSolid{0};
-        std::uint32_t waterEnabled{0};
+        std::uint32_t waterEnabled{0}; // Aggregated water presence votes within this cell (0..N).
         std::int32_t surfaceY{0};
         std::int32_t waterBottomY{0};
+        std::int32_t minSurfaceY{0};
+        std::int32_t maxSurfaceY{0};
         std::uint32_t surfaceBlock{0};
         std::uint32_t fillerBlock{0};
     };
-    static_assert(sizeof(GpuTerrainAtlasSample) == 24u);
+    static_assert(sizeof(GpuTerrainAtlasSample) == 32u);
 
     struct GpuSynthesisRequest
     {
@@ -6048,7 +6050,8 @@ private:
 
     [[nodiscard]] GpuTerrainAtlasSample buildCanonicalAtlasSample(const StructureSampleColumnFn& sampleColumnFn,
                                                                   int worldX,
-                                                                  int worldZ) const
+                                                                  int worldZ,
+                                                                  int blockScale) const
     {
         GpuTerrainAtlasSample sampleOut{};
         if (!sampleColumnFn)
@@ -6056,28 +6059,99 @@ private:
             return sampleOut;
         }
 
-        const ColumnSample sample = sampleColumnFn(worldX, worldZ);
-        if (!sample.dominantBiome)
+        // Aggregate a few canonical CPU columns across the cell footprint represented by this atlas entry.
+        // This reduces aliasing on slopes and shorelines when gBlockScale > 1.
+        const int footprint = std::max(blockScale, 1);
+        const int maxSampleX = worldX + (footprint - 1);
+        const int maxSampleZ = worldZ + (footprint - 1);
+        const int centerX = worldX + footprint / 2;
+        const int centerZ = worldZ + footprint / 2;
+
+        struct Point
+        {
+            int x{0};
+            int z{0};
+        };
+
+        const std::array<Point, 5> points{{
+            {worldX, worldZ},
+            {maxSampleX, worldZ},
+            {worldX, maxSampleZ},
+            {maxSampleX, maxSampleZ},
+            {centerX, centerZ},
+        }};
+
+        int minSurfaceY = std::numeric_limits<int>::max();
+        int maxSurfaceY = std::numeric_limits<int>::min();
+        std::int64_t surfaceSum = 0;
+        std::uint32_t sampleCount = 0u;
+        std::uint32_t waterVotes = 0u;
+        int minWaterBottomY = std::numeric_limits<int>::max();
+
+        ColumnSample centerSample{};
+        bool centerValid = false;
+
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            const ColumnSample sample = sampleColumnFn(points[i].x, points[i].z);
+            if (!sample.dominantBiome)
+            {
+                continue;
+            }
+            if (i == points.size() - 1)
+            {
+                centerSample = sample;
+                centerValid = true;
+            }
+
+            ++sampleCount;
+            minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
+            maxSurfaceY = std::max(maxSurfaceY, sample.surfaceY);
+            surfaceSum += static_cast<std::int64_t>(sample.surfaceY);
+
+            const terrain::BiomeDefinition& biome = *sample.dominantBiome;
+            const auto& waterFill = biome.terrainSettings.waterFill;
+            if (waterFill.enabled && sample.surfaceY < seaLevel_)
+            {
+                ++waterVotes;
+                int bottom = sample.surfaceY + 1;
+                if (waterFill.maxDepth > 0)
+                {
+                    bottom = std::max(bottom, seaLevel_ - waterFill.maxDepth + 1);
+                }
+                minWaterBottomY = std::min(minWaterBottomY, bottom);
+            }
+        }
+
+        if (sampleCount == 0u || minSurfaceY == std::numeric_limits<int>::max())
         {
             return sampleOut;
         }
 
-        const terrain::BiomeDefinition& biome = *sample.dominantBiome;
         sampleOut.hasSolid = 1u;
-        sampleOut.surfaceY = sample.surfaceY;
-        const terrain::TerrainColumnBlocks blocks =
-            terrain::resolveTerrainColumnBlocks(biome, sample, worldX, worldZ, seaLevel_);
-        sampleOut.surfaceBlock = static_cast<std::uint32_t>(static_cast<std::uint8_t>(blocks.surfaceBlock));
-        sampleOut.fillerBlock = static_cast<std::uint32_t>(static_cast<std::uint8_t>(blocks.fillerBlock));
+        sampleOut.minSurfaceY = minSurfaceY;
+        sampleOut.maxSurfaceY = maxSurfaceY;
+        sampleOut.surfaceY = static_cast<int>(std::llround(static_cast<double>(surfaceSum) /
+                                                           static_cast<double>(sampleCount)));
 
-        const auto& waterFill = biome.terrainSettings.waterFill;
-        sampleOut.waterEnabled = waterFill.enabled ? 1u : 0u;
-        int waterBottom = sampleOut.surfaceY + 1;
-        if (waterFill.enabled && sampleOut.surfaceY < seaLevel_ && waterFill.maxDepth > 0)
+        if (centerValid && centerSample.dominantBiome)
         {
-            waterBottom = std::max(waterBottom, seaLevel_ - waterFill.maxDepth + 1);
+            const terrain::BiomeDefinition& biome = *centerSample.dominantBiome;
+            const terrain::TerrainColumnBlocks blocks =
+                terrain::resolveTerrainColumnBlocks(biome, centerSample, centerX, centerZ, seaLevel_);
+            sampleOut.surfaceBlock = static_cast<std::uint32_t>(static_cast<std::uint8_t>(blocks.surfaceBlock));
+            sampleOut.fillerBlock = static_cast<std::uint32_t>(static_cast<std::uint8_t>(blocks.fillerBlock));
         }
-        sampleOut.waterBottomY = waterBottom;
+
+        sampleOut.waterEnabled = waterVotes;
+        if (waterVotes > 0u && minWaterBottomY != std::numeric_limits<int>::max())
+        {
+            sampleOut.waterBottomY = minWaterBottomY;
+        }
+        else
+        {
+            sampleOut.waterBottomY = sampleOut.surfaceY + 1;
+        }
         return sampleOut;
     }
 
@@ -6117,7 +6191,7 @@ private:
                 const glm::ivec2 cellCoord(rect.originCell.x + dx, rect.originCell.y + dz);
                 const int worldX = cellCoord.x * level.blockScale;
                 const int worldZ = cellCoord.y * level.blockScale;
-                dst[writeIndex++] = buildCanonicalAtlasSample(sampleColumnFn, worldX, worldZ);
+                dst[writeIndex++] = buildCanonicalAtlasSample(sampleColumnFn, worldX, worldZ, level.blockScale);
             }
         }
 

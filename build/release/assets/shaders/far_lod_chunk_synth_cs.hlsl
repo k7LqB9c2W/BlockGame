@@ -12,9 +12,11 @@ cbuffer ChunkParams : register(b0)
 struct GpuTerrainAtlasSample
 {
     uint hasSolid;
-    uint waterEnabled;
+    uint waterEnabled; // Aggregated water presence votes within this cell (0..N).
     int surfaceY;
     int waterBottomY;
+    int minSurfaceY;
+    int maxSurfaceY;
     uint surfaceBlock;
     uint fillerBlock;
 };
@@ -93,67 +95,38 @@ void FarLodChunkSynthMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint localX = dispatchThreadId.x;
     const uint localZ = dispatchThreadId.y;
     const int minX = gWorldMin.x + int(localX) * gBlockScale;
-    const int maxX = minX + (gBlockScale - 1);
     const int minZ = gWorldMin.z + int(localZ) * gBlockScale;
-    const int maxZ = minZ + (gBlockScale - 1);
-    const int centerX = (minX + maxX) / 2;
-    const int centerZ = (minZ + maxZ) / 2;
-    const int2 samplePoints[5] = {
-        int2(minX, minZ),
-        int2(maxX, minZ),
-        int2(minX, maxZ),
-        int2(maxX, maxZ),
-        int2(centerX, centerZ)
-    };
+    const int centerX = minX + gBlockScale / 2;
+    const int centerZ = minZ + gBlockScale / 2;
+
+    const GpuTerrainAtlasSample cellSample = sampleAtlas(centerX, centerZ);
 
     GpuTerrainColumnDescriptor descriptor = (GpuTerrainColumnDescriptor)0;
-    int minSurfaceY = 2147483647;
-    int minWaterBottomY = 2147483647;
-    uint waterHitCount = 0u;
-    GpuTerrainAtlasSample samples[5];
+    descriptor.centerHasSolid = cellSample.hasSolid;
+    descriptor.centerWaterEnabled = cellSample.waterEnabled;
+    descriptor.centerSurfaceY = cellSample.surfaceY;
+    descriptor.centerWaterBottomY = cellSample.waterBottomY;
+    descriptor.centerSurfaceBlock = cellSample.surfaceBlock;
+    descriptor.centerFillerBlock = cellSample.fillerBlock;
 
-    [unroll]
-    for (uint sampleIndex = 0u; sampleIndex < 5u; ++sampleIndex)
-    {
-        const GpuTerrainAtlasSample sample = sampleAtlas(samplePoints[sampleIndex].x, samplePoints[sampleIndex].y);
-        samples[sampleIndex] = sample;
-        minSurfaceY = min(minSurfaceY, sample.surfaceY);
-        if (sample.waterEnabled != 0u && sample.surfaceY < gSeaLevel)
-        {
-            waterHitCount += 1u;
-            minWaterBottomY = min(minWaterBottomY, sample.waterBottomY);
-        }
-        if (sampleIndex == 4u)
-        {
-            descriptor.centerHasSolid = sample.hasSolid;
-            descriptor.centerWaterEnabled = sample.waterEnabled;
-            descriptor.centerSurfaceY = sample.surfaceY;
-            descriptor.centerWaterBottomY = sample.waterBottomY;
-            descriptor.centerSurfaceBlock = sample.surfaceBlock;
-            descriptor.centerFillerBlock = sample.fillerBlock;
-        }
-    }
+    const int minSurfaceY = cellSample.minSurfaceY;
+    const int maxSurfaceY = cellSample.maxSurfaceY;
+    const int waterBottomY = cellSample.waterBottomY;
+    const uint waterVotes = cellSample.waterEnabled;
 
-    const GpuTerrainAtlasSample centerSample = samples[4];
     [unroll]
     for (uint localY = 0u; localY < kLogicalSize; ++localY)
     {
         const int voxelMinY = gWorldMin.y + int(localY) * gBlockScale;
         const int voxelMaxY = voxelMinY + (gBlockScale - 1);
-        uint solidHitCount = 0u;
-        [unroll]
-        for (uint sampleIndex = 0u; sampleIndex < 5u; ++sampleIndex)
-        {
-            if (samples[sampleIndex].hasSolid != 0u && samples[sampleIndex].surfaceY >= voxelMinY)
-            {
-                solidHitCount += 1u;
-            }
-        }
-
         const uint bit = (1u << localY);
-        if (centerSample.hasSolid != 0u && solidHitCount >= 3u)
+
+        // Conservative solid coverage: if any part of the represented footprint reaches into this band,
+        // treat the far voxel as occupied to avoid undercut holes on slopes.
+        if (cellSample.hasSolid != 0u && maxSurfaceY >= voxelMinY)
         {
-            if (minSurfaceY > voxelMaxY)
+            // If even the minimum surface is above this band, it is definitely interior filler.
+            if (minSurfaceY > voxelMaxY || cellSample.surfaceY > voxelMaxY)
             {
                 descriptor.terrainFillerMask |= bit;
             }
@@ -161,12 +134,13 @@ void FarLodChunkSynthMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             {
                 descriptor.terrainSurfaceMask |= bit;
             }
+            continue;
         }
-        else if (centerSample.waterEnabled != 0u &&
-                 waterHitCount >= 3u &&
-                 minWaterBottomY != 2147483647 &&
-                 minWaterBottomY <= voxelMaxY &&
-                 gSeaLevel >= voxelMinY)
+
+        // Aggregated water presence: require a majority of sampled footprint points to be below sea level.
+        if (waterVotes >= 3u &&
+            waterBottomY <= voxelMaxY &&
+            gSeaLevel >= voxelMinY)
         {
             descriptor.waterMask |= bit;
         }

@@ -1416,23 +1416,31 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchStamp(std::uint32_t stampCount,
-                       ID3D12Resource* stampBuffer,
-                       std::uint64_t stampOffsetBytes,
+    void dispatchStamp(const glm::ivec3& worldMin,
+                       int blockScale,
+                       int lodLevel,
+                       std::uint32_t structureCount,
+                       ID3D12Resource* structureBuffer,
                        ID3D12Resource* voxelBuffer)
     {
-        if (!open_ || stampCount == 0 || stampBuffer == nullptr || voxelBuffer == nullptr)
+        if (!open_ || structureCount == 0 || structureBuffer == nullptr || voxelBuffer == nullptr)
         {
             return;
         }
 
-        std::array<std::uint32_t, 1> constants{stampCount};
+        std::array<std::uint32_t, 6> constants{
+            static_cast<std::uint32_t>(worldMin.x),
+            static_cast<std::uint32_t>(worldMin.y),
+            static_cast<std::uint32_t>(worldMin.z),
+            static_cast<std::uint32_t>(blockScale),
+            static_cast<std::uint32_t>(lodLevel),
+            structureCount};
         const UINT descriptorIndex = allocateDescriptorRange(2);
         writeStructuredSrvDescriptor(descriptorIndex,
-                                     stampBuffer,
-                                     stampOffsetBytes,
-                                     stampCount,
-                                     kGpuContextStampEntryStrideBytes);
+                                     structureBuffer,
+                                     0,
+                                     structureCount,
+                                     kGpuContextStructureInstanceStrideBytes);
         writeStructuredUavDescriptor(descriptorIndex + 1u,
                                      voxelBuffer,
                                      0,
@@ -1452,12 +1460,14 @@ public:
         if (chunkManagerDebugLoggingEnabled())
         {
             std::ostringstream stream;
-            stream << "Far LOD GPU dispatch stamp stampCount=" << stampCount
-                   << " stampOffsetBytes=" << stampOffsetBytes
+            stream << "Far LOD GPU dispatch structure-stamp structureCount=" << structureCount
+                   << " worldMin=[" << worldMin.x << "," << worldMin.y << "," << worldMin.z << "]"
+                   << " blockScale=" << blockScale
+                   << " lodLevel=" << lodLevel
                    << " descriptorBase=" << descriptorIndex;
             chunkManagerDebugLog(stream.str());
         }
-        commandList_->Dispatch((stampCount + 63u) / 64u, 1, 1);
+        commandList_->Dispatch((kGpuContextVoxelCount + 63u) / 64u, 1, 1);
         hasCommands_ = true;
     }
 
@@ -1802,7 +1812,7 @@ private:
     static constexpr std::uint32_t kGpuContextFacePrefixGroupCount = kGpuContextVoxelCount / kGpuContextFacePrefixGroupSize;
     static constexpr std::uint32_t kGpuContextColumnDescriptorStrideBytes = 40u;
     static constexpr std::uint32_t kGpuContextAtlasSampleStrideBytes = 24u;
-    static constexpr std::uint32_t kGpuContextStampEntryStrideBytes = 8u;
+    static constexpr std::uint32_t kGpuContextStructureInstanceStrideBytes = 64u;
     static constexpr std::uint32_t kGpuContextPackedVoxelStrideBytes = 4u;
     static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
 
@@ -1877,7 +1887,7 @@ private:
         synthFillShader_ =
             compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_fill_cs.hlsl").string(), "FarLodChunkFillMain", "cs_5_0");
         stampShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_stamp_cs.hlsl").string(), "FarLodChunkStampMain", "cs_5_0");
+            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_structure_stamp_cs.hlsl").string(), "FarLodChunkStructureStampMain", "cs_5_0");
         faceCountShader_ =
             compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_face_count_cs.hlsl").string(), "FarLodChunkFaceCountMain", "cs_5_0");
         facePrefixGroupShader_ =
@@ -2022,7 +2032,7 @@ private:
         std::array<D3D12_ROOT_PARAMETER, 3> stampParams{};
         stampParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         stampParams[0].Constants.ShaderRegister = 0;
-        stampParams[0].Constants.Num32BitValues = 1;
+        stampParams[0].Constants.Num32BitValues = 6;
         stampParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         stampParams[1].DescriptorTable.NumDescriptorRanges = 1;
         stampParams[1].DescriptorTable.pDescriptorRanges = &stampSrvRange;
@@ -3315,6 +3325,16 @@ public:
         return result;
     }
 
+    [[nodiscard]] std::vector<StructureInstance> copyRegionInstances(const StructureRegionKey& key) const
+    {
+        const std::shared_ptr<const StructureRegion> region = getOrBuildRegion(key);
+        if (!region)
+        {
+            return {};
+        }
+        return region->instances;
+    }
+
 private:
     [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegion(const StructureRegionKey& key) const
     {
@@ -3996,6 +4016,42 @@ public:
     };
     static_assert(sizeof(GpuBlockFaceUv) == 16u);
 
+    struct GpuStructureInstance
+    {
+        std::uint32_t type{0};
+        std::int32_t originX{0};
+        std::int32_t originY{0};
+        std::int32_t originZ{0};
+        std::int32_t boundsMinX{0};
+        std::int32_t boundsMinY{0};
+        std::int32_t boundsMinZ{0};
+        std::int32_t boundsMaxX{0};
+        std::int32_t boundsMaxY{0};
+        std::int32_t boundsMaxZ{0};
+        std::uint32_t trunkHeight{0};
+        std::uint32_t bareTrunkHeight{0};
+        std::uint32_t maxLodLevel{0};
+        std::uint32_t reserved0{0};
+        std::uint32_t reserved1{0};
+        std::uint32_t reserved2{0};
+    };
+    static_assert(sizeof(GpuStructureInstance) == 64u);
+
+    struct GpuStructureRegionState
+    {
+        StructureRegionKey key{};
+        std::uint32_t instanceCount{0};
+        Microsoft::WRL::ComPtr<ID3D12Resource> instanceBuffer;
+        D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+
+        [[nodiscard]] bool valid() const noexcept
+        {
+            return instanceBuffer != nullptr && instanceCount > 0;
+        }
+    };
+
+    using StructureRegionSourceFn = std::function<std::vector<StructureInstance>(const StructureRegionKey&)>;
+
     struct FarLodChunkCpu
     {
         static constexpr int logicalSize = kLogicalSize;
@@ -4076,6 +4132,10 @@ public:
         blockUvCount_ = 0;
         emptyVoxelBuffer_.Reset();
         levelAtlases_.clear();
+        {
+            std::lock_guard<std::mutex> lock(structureRegionMutex_);
+            destroyGpuStructureRegions();
+        }
         if (parityReadbackScratch_ != nullptr)
         {
             parityReadbackScratch_->Unmap(0, nullptr);
@@ -4220,6 +4280,13 @@ public:
             (void)levelId;
             atlas.initialized = false;
         }
+    }
+
+    void setStructureRegionSource(StructureRegionSourceFn source)
+    {
+        std::lock_guard<std::mutex> lock(structureRegionMutex_);
+        structureRegionSource_ = std::move(source);
+        destroyGpuStructureRegions();
     }
 
     void setBlockUvTable(const std::vector<GpuBlockFaceUv>& table)
@@ -4666,6 +4733,10 @@ public:
         lastRenderedVertexCount_ = 0;
         rollingGpuParityMismatchCount_ = 0;
         levelActivationOuterRadiusChunks_.clear();
+        {
+            std::lock_guard<std::mutex> structureLock(structureRegionMutex_);
+            destroyGpuStructureRegions();
+        }
     }
 
     [[nodiscard]] int activeTileCount() const noexcept
@@ -4973,6 +5044,7 @@ private:
         glm::ivec3 worldMin{0};
         int blockScale{1};
         int lodLevel{0};
+        std::vector<StructureRegionKey> structureRegionKeys;
         std::shared_ptr<std::array<PackedFarLodVoxelGpu, kVoxelCount>> cpuPackedParityVoxels;
         std::shared_ptr<std::array<GpuTerrainColumnDescriptor, kLogicalSize * kLogicalSize>> cpuColumnParityDescriptors;
         bool parityRequested{false};
@@ -5967,6 +6039,214 @@ private:
         }
     }
 
+    [[nodiscard]] static GpuStructureInstance packGpuStructureInstance(const StructureInstance& instance) noexcept
+    {
+        GpuStructureInstance gpuInstance{};
+        gpuInstance.type = static_cast<std::uint32_t>(instance.type);
+        gpuInstance.originX = instance.origin.x;
+        gpuInstance.originY = instance.origin.y;
+        gpuInstance.originZ = instance.origin.z;
+        gpuInstance.boundsMinX = instance.bounds.min.x;
+        gpuInstance.boundsMinY = instance.bounds.min.y;
+        gpuInstance.boundsMinZ = instance.bounds.min.z;
+        gpuInstance.boundsMaxX = instance.bounds.max.x;
+        gpuInstance.boundsMaxY = instance.bounds.max.y;
+        gpuInstance.boundsMaxZ = instance.bounds.max.z;
+        gpuInstance.trunkHeight = static_cast<std::uint32_t>(std::max(instance.trunkHeight, 0));
+        gpuInstance.bareTrunkHeight = static_cast<std::uint32_t>(std::max(instance.bareTrunkHeight, 0));
+        gpuInstance.maxLodLevel = static_cast<std::uint32_t>(std::max(instance.maxLodLevel, 0));
+        return gpuInstance;
+    }
+
+    [[nodiscard]] static std::vector<StructureRegionKey> computeStructureRegionKeysForTile(const glm::ivec3& worldMin,
+                                                                                            int chunkSpanBlocks)
+    {
+        std::vector<StructureRegionKey> keys;
+        if (chunkSpanBlocks <= 0)
+        {
+            return keys;
+        }
+
+        const int minRegionX = floorDiv(worldMin.x - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(worldMin.x + chunkSpanBlocks - 1 + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(worldMin.z - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(worldMin.z + chunkSpanBlocks - 1 + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        keys.reserve(static_cast<std::size_t>(std::max(maxRegionX - minRegionX + 1, 0) *
+                                              std::max(maxRegionZ - minRegionZ + 1, 0)));
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                keys.push_back(StructureRegionKey{regionX, regionZ});
+            }
+        }
+        return keys;
+    }
+
+    void destroyGpuStructureRegions()
+    {
+        for (auto& [key, region] : gpuStructureRegions_)
+        {
+            (void)key;
+            region.instanceBuffer.Reset();
+        }
+        gpuStructureRegions_.clear();
+    }
+
+    void ensureGpuStructureRegions(const std::deque<GpuSynthesisRequest>& requests)
+    {
+        if (device_ == nullptr)
+        {
+            return;
+        }
+
+        StructureRegionSourceFn structureRegionSource;
+        {
+            std::lock_guard<std::mutex> lock(structureRegionMutex_);
+            structureRegionSource = structureRegionSource_;
+        }
+        if (!structureRegionSource)
+        {
+            return;
+        }
+
+        std::vector<StructureRegionKey> missingKeys;
+        {
+            std::lock_guard<std::mutex> lock(structureRegionMutex_);
+            std::unordered_set<StructureRegionKey, StructureRegionKeyHasher> requestedKeys;
+            for (const GpuSynthesisRequest& request : requests)
+            {
+                for (const StructureRegionKey& key : request.structureRegionKeys)
+                {
+                    if (!requestedKeys.insert(key).second)
+                    {
+                        continue;
+                    }
+                    if (!gpuStructureRegions_.contains(key))
+                    {
+                        missingKeys.push_back(key);
+                    }
+                }
+            }
+        }
+
+        if (missingKeys.empty())
+        {
+            return;
+        }
+
+        struct PendingRegionUpload
+        {
+            StructureRegionKey key{};
+            std::uint32_t instanceCount{0};
+            Microsoft::WRL::ComPtr<ID3D12Resource> defaultBuffer;
+            Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
+            D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+            bool uploadReady{false};
+        };
+
+        std::vector<PendingRegionUpload> uploads;
+        uploads.reserve(missingKeys.size());
+        for (const StructureRegionKey& key : missingKeys)
+        {
+            const std::vector<StructureInstance> instances = structureRegionSource(key);
+            if (instances.empty())
+            {
+                PendingRegionUpload upload{};
+                upload.key = key;
+                uploads.push_back(std::move(upload));
+                continue;
+            }
+
+            std::vector<GpuStructureInstance> gpuInstances;
+            gpuInstances.reserve(instances.size());
+            for (const StructureInstance& instance : instances)
+            {
+                gpuInstances.push_back(packGpuStructureInstance(instance));
+            }
+
+            PendingRegionUpload upload{};
+            upload.key = key;
+            upload.instanceCount = static_cast<std::uint32_t>(gpuInstances.size());
+            const std::uint64_t bufferBytes =
+                static_cast<std::uint64_t>(gpuInstances.size() * sizeof(GpuStructureInstance));
+            upload.defaultBuffer = createDefaultBuffer(device_.Get(), bufferBytes, D3D12_RESOURCE_STATE_COMMON);
+            if (upload.defaultBuffer == nullptr)
+            {
+                continue;
+            }
+
+            std::byte* uploadMapped = nullptr;
+            upload.uploadBuffer = createUploadBuffer(device_.Get(), bufferBytes, uploadMapped);
+            if (upload.uploadBuffer == nullptr || uploadMapped == nullptr)
+            {
+                continue;
+            }
+
+            std::memcpy(uploadMapped, gpuInstances.data(), static_cast<std::size_t>(bufferBytes));
+            upload.uploadBuffer->Unmap(0, nullptr);
+            uploadMapped = nullptr;
+            upload.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            upload.uploadReady = true;
+
+            std::wostringstream name;
+            name << L"FarLodStructureRegion_" << key.regionX << L"_" << key.regionZ;
+            setDebugObjectName(upload.defaultBuffer.Get(), name.str());
+            uploads.push_back(std::move(upload));
+        }
+
+        bool uploadedAnyBuffers = false;
+        bool uploadedBuffersCommitted = false;
+        if (uploadContext_.ready() && uploadContext_.begin())
+        {
+            for (PendingRegionUpload& upload : uploads)
+            {
+                if (!upload.uploadReady || upload.defaultBuffer == nullptr || upload.uploadBuffer == nullptr)
+                {
+                    continue;
+                }
+                uploadedAnyBuffers = true;
+                uploadContext_.transition(upload.defaultBuffer.Get(),
+                                          D3D12_RESOURCE_STATE_COMMON,
+                                          D3D12_RESOURCE_STATE_COPY_DEST);
+                uploadContext_.copyBuffer(upload.defaultBuffer.Get(), 0, upload.uploadBuffer.Get(), 0,
+                                          static_cast<std::uint64_t>(upload.instanceCount) * sizeof(GpuStructureInstance));
+                uploadContext_.transition(upload.defaultBuffer.Get(),
+                                          D3D12_RESOURCE_STATE_COPY_DEST,
+                                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+            if (uploadedAnyBuffers)
+            {
+                uploadContext_.flush(nullptr);
+                uploadContext_.waitForIdle();
+            }
+            uploadedBuffersCommitted = true;
+        }
+
+        std::lock_guard<std::mutex> lock(structureRegionMutex_);
+        for (PendingRegionUpload& upload : uploads)
+        {
+            if (gpuStructureRegions_.contains(upload.key))
+            {
+                continue;
+            }
+            if (upload.instanceCount > 0 && !uploadedBuffersCommitted)
+            {
+                continue;
+            }
+
+            GpuStructureRegionState region{};
+            region.key = upload.key;
+            region.instanceCount = upload.instanceCount;
+            if (upload.uploadReady)
+            {
+                region.instanceBuffer = std::move(upload.defaultBuffer);
+                region.state = upload.state;
+            }
+            gpuStructureRegions_.emplace(upload.key, std::move(region));
+        }
+    }
+
     void destroyBufferPages()
     {
         for (BufferPage& page : bufferPages_)
@@ -6344,6 +6624,8 @@ private:
                 gpuRequest.worldMin = result.cpu.worldMin;
                 gpuRequest.blockScale = result.cpu.blockScale;
                 gpuRequest.lodLevel = job.level.level;
+                gpuRequest.structureRegionKeys =
+                    computeStructureRegionKeysForTile(result.cpu.worldMin, job.level.chunkSpanBlocks());
                 gpuRequest.parityRequested = gpuParityEnabled_;
                 if (gpuRequest.parityRequested)
                 {
@@ -6683,6 +6965,7 @@ private:
         }
 
         appendAtlasUpdates(requests);
+        ensureGpuStructureRegions(requests);
 
         std::vector<PendingGpuParityReadback> pendingReadbacks;
         std::vector<FarLodChunkKey> submittedKeys;
@@ -6776,7 +7059,42 @@ private:
             }
             totalGpuSynthesisMs +=
                 std::chrono::duration<double, std::milli>(SteadyClock::now() - synthStart).count();
-            totalGpuStampMs += 0.0;
+
+            {
+                std::lock_guard<std::mutex> structureLock(structureRegionMutex_);
+                const SteadyClock::time_point stampStart = SteadyClock::now();
+                for (const StructureRegionKey& regionKey : request.structureRegionKeys)
+                {
+                    const auto regionIt = gpuStructureRegions_.find(regionKey);
+                    if (regionIt == gpuStructureRegions_.end())
+                    {
+                        continue;
+                    }
+
+                    GpuStructureRegionState& region = regionIt->second;
+                    if (!region.valid())
+                    {
+                        continue;
+                    }
+                    if (region.state != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+                    {
+                        gpuContext_.transition(region.instanceBuffer.Get(),
+                                               region.state,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        region.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    }
+
+                    gpuContext_.dispatchStamp(request.worldMin,
+                                              request.blockScale,
+                                              request.lodLevel,
+                                              region.instanceCount,
+                                              region.instanceBuffer.Get(),
+                                              chunk.gpu.voxelBuffer.Get());
+                    gpuContext_.uavBarrier(chunk.gpu.voxelBuffer.Get());
+                }
+                totalGpuStampMs +=
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - stampStart).count();
+            }
 
             const bool canBuildGpuMesh =
                 blockUvBuffer_ != nullptr &&
@@ -7871,6 +8189,9 @@ private:
     std::uint32_t blockUvCount_{0};
     Microsoft::WRL::ComPtr<ID3D12Resource> emptyVoxelBuffer_;
     std::unordered_map<int, FarLodLevelAtlasState> levelAtlases_;
+    mutable std::mutex structureRegionMutex_;
+    StructureRegionSourceFn structureRegionSource_{};
+    std::unordered_map<StructureRegionKey, GpuStructureRegionState, StructureRegionKeyHasher> gpuStructureRegions_;
     std::unordered_map<FarLodChunkKey, FarLodChunkRecord, FarLodChunkKeyHasher> chunks_;
     mutable std::mutex configMutex_;
     ColumnSampleFn columnSampleFn_{};
@@ -9243,6 +9564,11 @@ ChunkManager::Impl::Impl(unsigned seed)
     farTerrainManager_.setSeaLevel(globalSeaLevel_);
     farTerrainManager_.setWorldgenTables(
         terrain::buildFarLodWorldgenTables(biomeDatabase_, worldgenProfile_, effectiveSeed));
+    farTerrainManager_.setStructureRegionSource(
+        [this](const StructureRegionKey& key)
+        {
+            return structureRegistry_.copyRegionInstances(key);
+        });
     farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
     const unsigned concurrency = std::max(2u, std::thread::hardware_concurrency());
     farWorkerCount_ = static_cast<int>(std::clamp(concurrency / 3u, 1u, 4u));

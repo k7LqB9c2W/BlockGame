@@ -569,6 +569,21 @@ Microsoft::WRL::ComPtr<ID3D12Resource> createDefaultBuffer(ID3D12Device* device,
     return enabled;
 }
 
+void appendDebugLogLine(const char* envVarName,
+                        const std::filesystem::path& defaultPath,
+                        const std::string& message)
+{
+    const char* fileValue = std::getenv(envVarName);
+    const std::filesystem::path logPath =
+        (fileValue != nullptr && *fileValue != '\0') ? std::filesystem::path(fileValue)
+                                                     : defaultPath;
+    std::ofstream out(logPath, std::ios::app);
+    if (out)
+    {
+        out << message << '\n';
+    }
+}
+
 void chunkManagerDebugLog(const std::string& message)
 {
     if (!chunkManagerDebugLoggingEnabled())
@@ -576,6 +591,7 @@ void chunkManagerDebugLog(const std::string& message)
         return;
     }
     std::cerr << message << std::endl;
+    appendDebugLogLine("BLOCKGAME_RENDER_DEBUG_LOG_FILE", "gpudebug.log", message);
 }
 
 [[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept
@@ -596,16 +612,7 @@ void lodVisibilityDebugLog(const std::string& message)
     }
 
     std::cerr << message << std::endl;
-
-    const char* fileValue = std::getenv("BLOCKGAME_LOD_VIS_DEBUG_FILE");
-    const std::filesystem::path logPath =
-        (fileValue != nullptr && *fileValue != '\0') ? std::filesystem::path(fileValue)
-                                                     : std::filesystem::path("loddebug.log");
-    std::ofstream out(logPath, std::ios::app);
-    if (out)
-    {
-        out << message << '\n';
-    }
+    appendDebugLogLine("BLOCKGAME_LOD_VIS_DEBUG_FILE", "loddebug.log", message);
 }
 
 [[nodiscard]] std::string hexU32(std::uint32_t value)
@@ -3193,6 +3200,175 @@ struct StructureRegion
     StructureBvh bvh{};
 };
 
+using StructureSampleColumnFn = std::function<ColumnSample(int worldX, int worldZ)>;
+using StructureSurfaceBlockFn = std::function<BlockId(int worldX, int worldZ, const ColumnSample&)>;
+using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
+
+[[nodiscard]] StructureRegion buildStructureRegionData(const StructureRegionKey& key,
+                                                       const StructureSampleColumnFn& sampleColumnFn,
+                                                       const StructureSurfaceBlockFn& surfaceBlockFn,
+                                                       const StructureDensityFn& densityFn)
+{
+    StructureRegion region{};
+    region.key = key;
+    region.worldMin = glm::ivec2(key.regionX * kStructureRegionSize, key.regionZ * kStructureRegionSize);
+    region.worldMax = region.worldMin + glm::ivec2(kStructureRegionSize - 1);
+    region.instances.reserve(64);
+
+    auto sampleColumn = [&](int worldX, int worldZ) -> ColumnSample {
+        return sampleColumnFn(worldX, worldZ);
+    };
+
+    auto resolvedSurfaceBlockAt = [&](int worldX, int worldZ, const ColumnSample& sample) -> BlockId {
+        return surfaceBlockFn(worldX, worldZ, sample);
+    };
+
+    auto densityAt = [&](int worldX, int worldZ) noexcept {
+        return densityFn(worldX, worldZ);
+    };
+
+    auto canAnchorTaigaSpruce = [&](int originX, int originZ, int& outGroundWorldY) -> bool
+    {
+        int groundWorldY = std::numeric_limits<int>::min();
+
+        for (int trunkX = 0; trunkX < 2; ++trunkX)
+        {
+            for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+            {
+                const ColumnSample baseSample = sampleColumn(originX + trunkX, originZ + trunkZ);
+                if (!baseSample.dominantBiome || !terrain::isTaigaBiome(*baseSample.dominantBiome))
+                {
+                    return false;
+                }
+                if (baseSample.dominantWeight < kTreeBiomeWeightThreshold)
+                {
+                    return false;
+                }
+
+                const BlockId surfaceBlock = resolvedSurfaceBlockAt(originX + trunkX, originZ + trunkZ, baseSample);
+                if (surfaceBlock != BlockId::Grass && surfaceBlock != BlockId::Podzol)
+                {
+                    return false;
+                }
+
+                if (groundWorldY == std::numeric_limits<int>::min())
+                {
+                    groundWorldY = baseSample.surfaceY;
+                }
+                else if (baseSample.surfaceY != groundWorldY)
+                {
+                    return false;
+                }
+            }
+        }
+
+        for (int dx = -2; dx <= 3; ++dx)
+        {
+            for (int dz = -2; dz <= 3; ++dz)
+            {
+                const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
+                if (!neighborSample.dominantBiome)
+                {
+                    return false;
+                }
+                if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
+                {
+                    return false;
+                }
+            }
+        }
+
+        outGroundWorldY = groundWorldY;
+        return groundWorldY > 2;
+    };
+
+    for (int worldX = region.worldMin.x; worldX <= region.worldMax.x; ++worldX)
+    {
+        for (int worldZ = region.worldMin.y; worldZ <= region.worldMax.y; ++worldZ)
+        {
+            const ColumnSample columnSample = sampleColumn(worldX, worldZ);
+            if (!columnSample.dominantBiome)
+            {
+                continue;
+            }
+
+            const BiomeDefinition& biome = *columnSample.dominantBiome;
+            if (!biome.generatesTrees || columnSample.dominantWeight < kTreeBiomeWeightThreshold)
+            {
+                continue;
+            }
+
+            const int groundWorldY = columnSample.surfaceY;
+            if (groundWorldY <= 2)
+            {
+                continue;
+            }
+
+            if (terrain::isTaigaBiome(biome))
+            {
+                if (!shouldSpawnTaigaSpruce(biome, worldX, groundWorldY, worldZ))
+                {
+                    continue;
+                }
+
+                int taigaGroundWorldY = std::numeric_limits<int>::min();
+                if (!canAnchorTaigaSpruce(worldX, worldZ, taigaGroundWorldY))
+                {
+                    continue;
+                }
+
+                StructureInstance instance{};
+                instance.type = StructureType::TaigaSpruce;
+                instance.origin = glm::ivec3(worldX, taigaGroundWorldY, worldZ);
+                instance.trunkHeight = taigaSpruceTrunkHeight(worldX, taigaGroundWorldY, worldZ);
+                instance.bareTrunkHeight = taigaSpruceBareTrunkHeight(worldX, taigaGroundWorldY, worldZ);
+                instance.maxLodLevel = 4;
+                instance.bounds.min = glm::ivec3(worldX - kTaigaSpruceMaxLeafRadius,
+                                                 taigaGroundWorldY + 1,
+                                                 worldZ - kTaigaSpruceMaxLeafRadius);
+                instance.bounds.max = glm::ivec3(worldX + 1 + kTaigaSpruceMaxLeafRadius,
+                                                 taigaGroundWorldY + instance.trunkHeight + 1,
+                                                 worldZ + 1 + kTaigaSpruceMaxLeafRadius);
+                region.instances.push_back(instance);
+                continue;
+            }
+
+            DefaultTreeCandidate candidate{};
+            if (!tryBuildDefaultTreeCandidate(worldX,
+                                              worldZ,
+                                              columnSample,
+                                              sampleColumn,
+                                              densityAt,
+                                              candidate))
+            {
+                continue;
+            }
+
+            if (defaultTreeHasSpacingConflict(candidate, sampleColumn, densityAt))
+            {
+                continue;
+            }
+
+            StructureInstance instance{};
+            instance.type = StructureType::DefaultTree;
+            instance.origin = glm::ivec3(candidate.originX, candidate.groundWorldY, candidate.originZ);
+            instance.trunkHeight = candidate.trunkHeight;
+            instance.priority = candidate.priority;
+            instance.maxLodLevel = 3;
+            instance.bounds.min = glm::ivec3(candidate.originX - kDefaultTreeMaxRadius,
+                                             candidate.groundWorldY,
+                                             candidate.originZ - kDefaultTreeMaxRadius);
+            instance.bounds.max = glm::ivec3(candidate.originX + kDefaultTreeMaxRadius,
+                                             candidate.groundWorldY + candidate.trunkHeight,
+                                             candidate.originZ + kDefaultTreeMaxRadius);
+            region.instances.push_back(instance);
+        }
+    }
+
+    region.bvh.build(region.instances);
+    return region;
+}
+
 struct StructureRegistryProfilingSnapshot
 {
     std::uint64_t cacheHits{0};
@@ -3375,165 +3551,7 @@ private:
 
     [[nodiscard]] StructureRegion buildRegion(const StructureRegionKey& key) const
     {
-        StructureRegion region{};
-        region.key = key;
-        region.worldMin = glm::ivec2(key.regionX * kStructureRegionSize, key.regionZ * kStructureRegionSize);
-        region.worldMax = region.worldMin + glm::ivec2(kStructureRegionSize - 1);
-        region.instances.reserve(64);
-
-        auto sampleColumn = [this](int worldX, int worldZ) -> ColumnSample {
-            return sampleColumnFn_(worldX, worldZ);
-        };
-
-        auto resolvedSurfaceBlockAt = [this](int worldX, int worldZ, const ColumnSample& sample) -> BlockId {
-            return surfaceBlockFn_(worldX, worldZ, sample);
-        };
-
-        auto densityAt = [this](int worldX, int worldZ) noexcept {
-            return densityFn_(worldX, worldZ);
-        };
-
-        auto canAnchorTaigaSpruce = [&](int originX, int originZ, int& outGroundWorldY) -> bool
-        {
-            int groundWorldY = std::numeric_limits<int>::min();
-
-            for (int trunkX = 0; trunkX < 2; ++trunkX)
-            {
-                for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
-                {
-                    const ColumnSample baseSample = sampleColumn(originX + trunkX, originZ + trunkZ);
-                    if (!baseSample.dominantBiome || !terrain::isTaigaBiome(*baseSample.dominantBiome))
-                    {
-                        return false;
-                    }
-                    if (baseSample.dominantWeight < kTreeBiomeWeightThreshold)
-                    {
-                        return false;
-                    }
-
-                    const BlockId surfaceBlock =
-                        resolvedSurfaceBlockAt(originX + trunkX, originZ + trunkZ, baseSample);
-                    if (surfaceBlock != BlockId::Grass && surfaceBlock != BlockId::Podzol)
-                    {
-                        return false;
-                    }
-
-                    if (groundWorldY == std::numeric_limits<int>::min())
-                    {
-                        groundWorldY = baseSample.surfaceY;
-                    }
-                    else if (baseSample.surfaceY != groundWorldY)
-                    {
-                        return false;
-                    }
-                }
-            }
-
-            for (int dx = -2; dx <= 3; ++dx)
-            {
-                for (int dz = -2; dz <= 3; ++dz)
-                {
-                    const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
-                    if (!neighborSample.dominantBiome)
-                    {
-                        return false;
-                    }
-                    if (std::abs(neighborSample.surfaceY - groundWorldY) > 1)
-                    {
-                        return false;
-                    }
-                }
-            }
-
-            outGroundWorldY = groundWorldY;
-            return groundWorldY > 2;
-        };
-
-        for (int worldX = region.worldMin.x; worldX <= region.worldMax.x; ++worldX)
-        {
-            for (int worldZ = region.worldMin.y; worldZ <= region.worldMax.y; ++worldZ)
-            {
-                const ColumnSample columnSample = sampleColumn(worldX, worldZ);
-                if (!columnSample.dominantBiome)
-                {
-                    continue;
-                }
-
-                const BiomeDefinition& biome = *columnSample.dominantBiome;
-                if (!biome.generatesTrees || columnSample.dominantWeight < kTreeBiomeWeightThreshold)
-                {
-                    continue;
-                }
-
-                const int groundWorldY = columnSample.surfaceY;
-                if (groundWorldY <= 2)
-                {
-                    continue;
-                }
-
-                if (terrain::isTaigaBiome(biome))
-                {
-                    if (!shouldSpawnTaigaSpruce(biome, worldX, groundWorldY, worldZ))
-                    {
-                        continue;
-                    }
-
-                    int taigaGroundWorldY = std::numeric_limits<int>::min();
-                    if (!canAnchorTaigaSpruce(worldX, worldZ, taigaGroundWorldY))
-                    {
-                        continue;
-                    }
-
-                    StructureInstance instance{};
-                    instance.type = StructureType::TaigaSpruce;
-                    instance.origin = glm::ivec3(worldX, taigaGroundWorldY, worldZ);
-                    instance.trunkHeight = taigaSpruceTrunkHeight(worldX, taigaGroundWorldY, worldZ);
-                    instance.bareTrunkHeight = taigaSpruceBareTrunkHeight(worldX, taigaGroundWorldY, worldZ);
-                    instance.maxLodLevel = 4;
-                    instance.bounds.min = glm::ivec3(worldX - kTaigaSpruceMaxLeafRadius,
-                                                     taigaGroundWorldY + 1,
-                                                     worldZ - kTaigaSpruceMaxLeafRadius);
-                    instance.bounds.max = glm::ivec3(worldX + 1 + kTaigaSpruceMaxLeafRadius,
-                                                     taigaGroundWorldY + instance.trunkHeight + 1,
-                                                     worldZ + 1 + kTaigaSpruceMaxLeafRadius);
-                    region.instances.push_back(instance);
-                    continue;
-                }
-
-                DefaultTreeCandidate candidate{};
-                if (!tryBuildDefaultTreeCandidate(worldX,
-                                                  worldZ,
-                                                  columnSample,
-                                                  sampleColumn,
-                                                  densityAt,
-                                                  candidate))
-                {
-                    continue;
-                }
-
-                if (defaultTreeHasSpacingConflict(candidate, sampleColumn, densityAt))
-                {
-                    continue;
-                }
-
-                StructureInstance instance{};
-                instance.type = StructureType::DefaultTree;
-                instance.origin = glm::ivec3(candidate.originX, candidate.groundWorldY, candidate.originZ);
-                instance.trunkHeight = candidate.trunkHeight;
-                instance.priority = candidate.priority;
-                instance.maxLodLevel = 3;
-                instance.bounds.min = glm::ivec3(candidate.originX - kDefaultTreeMaxRadius,
-                                                 candidate.groundWorldY,
-                                                 candidate.originZ - kDefaultTreeMaxRadius);
-                instance.bounds.max = glm::ivec3(candidate.originX + kDefaultTreeMaxRadius,
-                                                 candidate.groundWorldY + candidate.trunkHeight,
-                                                 candidate.originZ + kDefaultTreeMaxRadius);
-                region.instances.push_back(instance);
-            }
-        }
-
-        region.bvh.build(region.instances);
-        return region;
+        return buildStructureRegionData(key, sampleColumnFn_, surfaceBlockFn_, densityFn_);
     }
 
     mutable std::mutex mutex_;
@@ -4050,8 +4068,6 @@ public:
         }
     };
 
-    using StructureRegionSourceFn = std::function<std::vector<StructureInstance>(const StructureRegionKey&)>;
-
     struct FarLodChunkCpu
     {
         static constexpr int logicalSize = kLogicalSize;
@@ -4282,10 +4298,14 @@ public:
         }
     }
 
-    void setStructureRegionSource(StructureRegionSourceFn source)
+    void setStructureFieldSources(StructureSampleColumnFn sampleColumnFn,
+                                  StructureSurfaceBlockFn surfaceBlockFn,
+                                  StructureDensityFn densityFn)
     {
         std::lock_guard<std::mutex> lock(structureRegionMutex_);
-        structureRegionSource_ = std::move(source);
+        structureSampleColumnFn_ = std::move(sampleColumnFn);
+        structureSurfaceBlockFn_ = std::move(surfaceBlockFn);
+        structureDensityFn_ = std::move(densityFn);
         destroyGpuStructureRegions();
     }
 
@@ -4630,6 +4650,7 @@ public:
         lastRenderedFaceCount_ = 0;
         lastRenderedVertexCount_ = 0;
         std::size_t emittedPages = 0;
+        bool loggedFirstRecord = false;
         for (std::size_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
         {
             const BufferPage& page = bufferPages_[pageIndex];
@@ -4642,6 +4663,35 @@ public:
             if (batch.supportsGpuCull)
             {
                 ++emittedPages;
+                if (lodVisibilityDebugLoggingEnabled() && !loggedFirstRecord)
+                {
+                    for (const auto& [key, chunk] : chunks_)
+                    {
+                        (void)key;
+                        if (!chunk.active ||
+                            !chunk.gpu.resident ||
+                            chunk.gpu.pageIndex != pageIndex ||
+                            chunk.gpu.indexCount == 0)
+                        {
+                            continue;
+                        }
+
+                        std::ostringstream recordStream;
+                        recordStream << "lodvis first_record page=" << pageIndex
+                                     << " level=" << chunk.key.level
+                                     << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                                     << " boundsMin=[" << chunk.residentBoundsMin.x << "," << chunk.residentBoundsMin.y << "," << chunk.residentBoundsMin.z << "]"
+                                     << " boundsMax=[" << chunk.residentBoundsMax.x << "," << chunk.residentBoundsMax.y << "," << chunk.residentBoundsMax.z << "]"
+                                     << " indexCount=" << chunk.gpu.indexCount
+                                     << " firstIndex=" << chunk.gpu.indexOffset
+                                     << " baseVertex=" << chunk.gpu.vertexOffset
+                                     << " recordIndex=" << chunk.gpu.recordIndex
+                                     << " pageRecordCount=" << page.recordActiveCount;
+                        lodVisibilityDebugLog(recordStream.str());
+                        loggedFirstRecord = true;
+                        break;
+                    }
+                }
             }
         }
 
@@ -6100,12 +6150,16 @@ private:
             return;
         }
 
-        StructureRegionSourceFn structureRegionSource;
+        StructureSampleColumnFn sampleColumnFn;
+        StructureSurfaceBlockFn surfaceBlockFn;
+        StructureDensityFn densityFn;
         {
             std::lock_guard<std::mutex> lock(structureRegionMutex_);
-            structureRegionSource = structureRegionSource_;
+            sampleColumnFn = structureSampleColumnFn_;
+            surfaceBlockFn = structureSurfaceBlockFn_;
+            densityFn = structureDensityFn_;
         }
-        if (!structureRegionSource)
+        if (!sampleColumnFn || !surfaceBlockFn || !densityFn)
         {
             return;
         }
@@ -6149,7 +6203,8 @@ private:
         uploads.reserve(missingKeys.size());
         for (const StructureRegionKey& key : missingKeys)
         {
-            const std::vector<StructureInstance> instances = structureRegionSource(key);
+            const StructureRegion region = buildStructureRegionData(key, sampleColumnFn, surfaceBlockFn, densityFn);
+            const std::vector<StructureInstance>& instances = region.instances;
             if (instances.empty())
             {
                 PendingRegionUpload upload{};
@@ -6186,7 +6241,7 @@ private:
             std::memcpy(uploadMapped, gpuInstances.data(), static_cast<std::size_t>(bufferBytes));
             upload.uploadBuffer->Unmap(0, nullptr);
             uploadMapped = nullptr;
-            upload.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            upload.state = D3D12_RESOURCE_STATE_COMMON;
             upload.uploadReady = true;
 
             std::wostringstream name;
@@ -6213,7 +6268,7 @@ private:
                                           static_cast<std::uint64_t>(upload.instanceCount) * sizeof(GpuStructureInstance));
                 uploadContext_.transition(upload.defaultBuffer.Get(),
                                           D3D12_RESOURCE_STATE_COPY_DEST,
-                                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                                          D3D12_RESOURCE_STATE_COMMON);
             }
             if (uploadedAnyBuffers)
             {
@@ -7076,14 +7131,6 @@ private:
                     {
                         continue;
                     }
-                    if (region.state != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-                    {
-                        gpuContext_.transition(region.instanceBuffer.Get(),
-                                               region.state,
-                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                        region.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-                    }
-
                     gpuContext_.dispatchStamp(request.worldMin,
                                               request.blockScale,
                                               request.lodLevel,
@@ -7272,22 +7319,22 @@ private:
                     {
                         gpuContext_.transition(page.vertexBuffer.Get(),
                                                page.vertexState,
-                                               D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-                        page.vertexState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+                                               D3D12_RESOURCE_STATE_COMMON);
+                        page.vertexState = D3D12_RESOURCE_STATE_COMMON;
                     }
                     if (page.indexBuffer != nullptr)
                     {
                         gpuContext_.transition(page.indexBuffer.Get(),
                                                page.indexState,
-                                               D3D12_RESOURCE_STATE_INDEX_BUFFER);
-                        page.indexState = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+                                               D3D12_RESOURCE_STATE_COMMON);
+                        page.indexState = D3D12_RESOURCE_STATE_COMMON;
                     }
                     if (page.drawRecordBuffer != nullptr)
                     {
                         gpuContext_.transition(page.drawRecordBuffer.Get(),
                                                page.drawRecordState,
-                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                        page.drawRecordState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                                               D3D12_RESOURCE_STATE_COMMON);
+                        page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
                     }
                 }
 
@@ -8190,7 +8237,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> emptyVoxelBuffer_;
     std::unordered_map<int, FarLodLevelAtlasState> levelAtlases_;
     mutable std::mutex structureRegionMutex_;
-    StructureRegionSourceFn structureRegionSource_{};
+    StructureSampleColumnFn structureSampleColumnFn_{};
+    StructureSurfaceBlockFn structureSurfaceBlockFn_{};
+    StructureDensityFn structureDensityFn_{};
     std::unordered_map<StructureRegionKey, GpuStructureRegionState, StructureRegionKeyHasher> gpuStructureRegions_;
     std::unordered_map<FarLodChunkKey, FarLodChunkRecord, FarLodChunkKeyHasher> chunks_;
     mutable std::mutex configMutex_;
@@ -9564,10 +9613,28 @@ ChunkManager::Impl::Impl(unsigned seed)
     farTerrainManager_.setSeaLevel(globalSeaLevel_);
     farTerrainManager_.setWorldgenTables(
         terrain::buildFarLodWorldgenTables(biomeDatabase_, worldgenProfile_, effectiveSeed));
-    farTerrainManager_.setStructureRegionSource(
-        [this](const StructureRegionKey& key)
+    farTerrainManager_.setStructureFieldSources(
+        [this](int worldX, int worldZ)
         {
-            return structureRegistry_.copyRegionInstances(key);
+            return this->sampleColumn(worldX, worldZ);
+        },
+        [this](int worldX, int worldZ, const ColumnSample& sample)
+        {
+            if (!sample.dominantBiome)
+            {
+                return BlockId::Air;
+            }
+            const terrain::TerrainColumnBlocks blocks =
+                terrain::resolveTerrainColumnBlocks(*sample.dominantBiome, sample, worldX, worldZ, globalSeaLevel_);
+            return blocks.surfaceBlock;
+        },
+        [this](int worldX, int worldZ) noexcept
+        {
+            return noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                              static_cast<float>(worldZ) * 0.05f,
+                              4,
+                              0.55f,
+                              2.0f);
         });
     farTerrainManager_.setBenchmarkMetrics(&benchmarkMetrics_);
     const unsigned concurrency = std::max(2u, std::thread::hardware_concurrency());

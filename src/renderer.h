@@ -229,9 +229,11 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> farCullVisibleCount;
         Microsoft::WRL::ComPtr<ID3D12Resource> farCullCountUpload;
         Microsoft::WRL::ComPtr<ID3D12Resource> farCullIndirectArgs;
+        Microsoft::WRL::ComPtr<ID3D12Resource> farCullVisibleCountReadback;
         std::byte* mappedConstants{nullptr};
         std::byte* farCullRecordsUploadMapped{nullptr};
         std::byte* farCullCountUploadMapped{nullptr};
+        std::byte* farCullVisibleCountReadbackMapped{nullptr};
         std::uint64_t farCullRecordCapacityBytes{0};
         std::uint64_t farCullVisibleIndexCapacityBytes{0};
         std::uint64_t farCullIndirectCapacityBytes{0};
@@ -239,6 +241,7 @@ private:
         D3D12_RESOURCE_STATES farCullVisibleIndicesState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         D3D12_RESOURCE_STATES farCullVisibleCountState{D3D12_RESOURCE_STATE_COPY_DEST};
         D3D12_RESOURCE_STATES farCullIndirectArgsState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        bool farCullVisibleCountReadbackValid{false};
         UINT64 fenceValue{0};
     };
 

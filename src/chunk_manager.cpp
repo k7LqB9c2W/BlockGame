@@ -4761,6 +4761,13 @@ public:
             clearPendingGpuMeshCountReadbacks();
             pendingGpuParityReadbacks_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(dirtyBuildPlanMutex_);
+            hasPendingDirtyBuildPlanRequest_ = false;
+            hasReadyDirtyBuildPlanResult_ = false;
+            pendingDirtyBuildPlanRequest_ = {};
+            readyDirtyBuildPlanResult_ = {};
+        }
         std::lock_guard<std::mutex> lock(configMutex_);
         for (auto& [key, chunk] : chunks_)
         {
@@ -5168,6 +5175,27 @@ private:
         int ringDistanceChunks{0};
         bool hadResidentMesh{false};
         bool fallbackOnly{false};
+    };
+
+    struct DirtyBuildPlanRequest
+    {
+        std::uint64_t sequence{0};
+        std::uint64_t epoch{0};
+        glm::ivec3 cameraChunk{0};
+        glm::vec3 cameraForward{0.0f, 0.0f, -1.0f};
+        Frustum visibilityFrustum{};
+        glm::vec3 visibilityCameraPos{0.0f};
+        bool hasVisibilityFrustum{false};
+        int exactMissingChunks{0};
+        std::size_t exactPendingUploads{0};
+        std::size_t workerBudget{1};
+    };
+
+    struct DirtyBuildPlanResult
+    {
+        std::uint64_t sequence{0};
+        std::uint64_t epoch{0};
+        std::vector<BuildJob> jobs;
     };
 
     struct AtlasUpdateRect
@@ -7148,6 +7176,10 @@ private:
         {
             workerThreads_.emplace_back(&FarTerrainManager::workerThreadLoop, this);
         }
+        if (!dirtyBuildPlannerThread_.joinable())
+        {
+            dirtyBuildPlannerThread_ = std::thread(&FarTerrainManager::dirtyBuildPlannerLoop, this);
+        }
     }
 
     void stopWorkers()
@@ -7163,6 +7195,19 @@ private:
         }
         workerThreads_.clear();
         {
+            std::lock_guard<std::mutex> lock(dirtyBuildPlanMutex_);
+            hasPendingDirtyBuildPlanRequest_ = false;
+            hasReadyDirtyBuildPlanResult_ = false;
+            dirtyBuildPlannerBusy_ = false;
+            pendingDirtyBuildPlanRequest_ = {};
+            readyDirtyBuildPlanResult_ = {};
+        }
+        dirtyBuildPlanCv_.notify_all();
+        if (dirtyBuildPlannerThread_.joinable())
+        {
+            dirtyBuildPlannerThread_.join();
+        }
+        {
             std::lock_guard<std::mutex> lock(buildQueueMutex_);
             buildQueue_.clear();
             queuedKeys_.clear();
@@ -7176,6 +7221,41 @@ private:
             gpuSynthesisRequests_.clear();
             clearPendingGpuMeshCountReadbacks();
             pendingGpuParityReadbacks_.clear();
+        }
+    }
+
+    void dirtyBuildPlannerLoop()
+    {
+        for (;;)
+        {
+            DirtyBuildPlanRequest request{};
+            {
+                std::unique_lock<std::mutex> lock(dirtyBuildPlanMutex_);
+                dirtyBuildPlanCv_.wait(lock,
+                                       [this]
+                                       {
+                                           return stopWorkers_.load(std::memory_order_acquire) ||
+                                                  hasPendingDirtyBuildPlanRequest_;
+                                       });
+                if (stopWorkers_.load(std::memory_order_acquire) && !hasPendingDirtyBuildPlanRequest_)
+                {
+                    return;
+                }
+
+                request = std::move(pendingDirtyBuildPlanRequest_);
+                pendingDirtyBuildPlanRequest_ = {};
+                hasPendingDirtyBuildPlanRequest_ = false;
+                dirtyBuildPlannerBusy_ = true;
+            }
+
+            DirtyBuildPlanResult result = buildDirtyPlanFromSnapshot(request);
+
+            {
+                std::lock_guard<std::mutex> lock(dirtyBuildPlanMutex_);
+                readyDirtyBuildPlanResult_ = std::move(result);
+                hasReadyDirtyBuildPlanResult_ = true;
+                dirtyBuildPlannerBusy_ = false;
+            }
         }
     }
 
@@ -7281,47 +7361,128 @@ private:
         return (chunk.gpu.resident && chunk.gpu.indexCount > 0) ? chunk.residentBoundsMax : chunk.cpu.boundsMax;
     }
 
-    void scheduleDirtyBuilds()
+    [[nodiscard]] static bool dirtyBuildJobPriorityLess(const BuildJob& lhs, const BuildJob& rhs) noexcept
     {
-        std::vector<FarLodChunkKey> candidateKeys;
-        constexpr float kForwardDotThreshold = -0.35f;
-        const glm::vec2 forwardXZ = normalizePriorityForwardXZ(cameraForward_);
-        Frustum visibilityFrustum{};
-        glm::vec3 visibilityCameraPos{0.0f};
-        bool hasVisibilityFrustum = false;
+        const int lhsTier = !lhs.hadResidentMesh ? (lhs.fallbackOnly ? 1 : 0) : 2;
+        const int rhsTier = !rhs.hadResidentMesh ? (rhs.fallbackOnly ? 1 : 0) : 2;
+        if (lhsTier != rhsTier)
         {
-            std::lock_guard<std::mutex> lock(configMutex_);
-            visibilityFrustum = lastVisibilityFrustum_;
-            visibilityCameraPos = lastVisibilityCameraPos_;
-            hasVisibilityFrustum = hasVisibilityFrustum_;
-            for (auto& [key, chunk] : chunks_)
+            return lhsTier < rhsTier;
+        }
+        if (lhs.hadResidentMesh != rhs.hadResidentMesh)
+        {
+            return rhs.hadResidentMesh;
+        }
+        if (!lhs.hadResidentMesh && !rhs.hadResidentMesh)
+        {
+            if (lhs.level.level != rhs.level.level)
             {
-                if (!chunk.active || !chunk.dirty || chunk.inFlight)
+                return lhs.level.level > rhs.level.level;
+            }
+        }
+        else if (lhs.level.level != rhs.level.level)
+        {
+            return lhs.level.level < rhs.level.level;
+        }
+        return lhs.ringDistanceChunks < rhs.ringDistanceChunks;
+    }
+
+    static void trimDirtyBuildJobs(std::vector<BuildJob>& jobs,
+                                   std::size_t workerBudget,
+                                   int exactMissingChunks,
+                                   std::size_t exactPendingUploads)
+    {
+        static constexpr std::size_t kFallbackReservation = 2;
+        const std::size_t exactBacklogPenalty =
+            (exactMissingChunks > 32 || exactPendingUploads > 24)
+                ? 8
+                : ((exactMissingChunks > 8 || exactPendingUploads > 8) ? 16 : 32);
+        const std::size_t maxQueuedPerUpdate = std::max<std::size_t>(workerBudget * 12, exactBacklogPenalty);
+        if (jobs.size() <= maxQueuedPerUpdate)
+        {
+            return;
+        }
+
+        std::vector<BuildJob> trimmed;
+        trimmed.reserve(maxQueuedPerUpdate);
+        std::size_t fallbackAdded = 0;
+        const std::size_t desiredFallback = std::min(kFallbackReservation, maxQueuedPerUpdate);
+        for (const BuildJob& job : jobs)
+        {
+            if (trimmed.size() >= maxQueuedPerUpdate)
+            {
+                break;
+            }
+            if (job.fallbackOnly)
+            {
+                continue;
+            }
+            const std::size_t remaining = maxQueuedPerUpdate - trimmed.size();
+            if (remaining <= (desiredFallback - fallbackAdded))
+            {
+                break;
+            }
+            trimmed.push_back(job);
+        }
+        if (trimmed.size() < maxQueuedPerUpdate && fallbackAdded < desiredFallback)
+        {
+            for (const BuildJob& job : jobs)
+            {
+                if (!job.fallbackOnly)
                 {
                     continue;
                 }
-                if (queuedKeys_.contains(key))
+                if (trimmed.size() >= maxQueuedPerUpdate)
                 {
-                    continue;
+                    break;
                 }
-
-                const bool keepResidentStable = chunk.gpu.resident && chunk.gpu.indexCount > 0;
-                const int ringDistanceChunks =
-                    chunkMinHorizontalRingDistanceChunks(chunk.level, cameraChunk_, key.coord);
-                const int nearBuildGraceChunks = std::max(2, chunk.level.blockScale * 2);
-                const bool keepNearbyStable = ringDistanceChunks <= nearBuildGraceChunks;
-
-                if (keepResidentStable || keepNearbyStable)
+                trimmed.push_back(job);
+                ++fallbackAdded;
+                if (fallbackAdded >= desiredFallback)
                 {
-                    candidateKeys.push_back(key);
-                    continue;
+                    break;
                 }
+            }
+        }
+        jobs.swap(trimmed);
+    }
 
+    [[nodiscard]] DirtyBuildPlanResult buildDirtyPlanFromSnapshot(const DirtyBuildPlanRequest& request)
+    {
+        DirtyBuildPlanResult result{};
+        result.sequence = request.sequence;
+        result.epoch = request.epoch;
+
+        std::unordered_set<FarLodChunkKey, FarLodChunkKeyHasher> queuedKeysSnapshot;
+        {
+            std::lock_guard<std::mutex> lock(buildQueueMutex_);
+            queuedKeysSnapshot = queuedKeys_;
+        }
+
+        constexpr float kForwardDotThreshold = -0.35f;
+        const glm::vec2 forwardXZ = normalizePriorityForwardXZ(request.cameraForward);
+
+        std::lock_guard<std::mutex> lock(configMutex_);
+        for (const auto& [key, chunk] : chunks_)
+        {
+            if (!chunk.active || !chunk.dirty || chunk.inFlight || queuedKeysSnapshot.contains(key))
+            {
+                continue;
+            }
+
+            const bool keepResidentStable = chunk.gpu.resident && chunk.gpu.indexCount > 0;
+            const int ringDistanceChunks =
+                chunkMinHorizontalRingDistanceChunks(chunk.level, request.cameraChunk, key.coord);
+            const int nearBuildGraceChunks = std::max(2, chunk.level.blockScale * 2);
+            const bool keepNearbyStable = ringDistanceChunks <= nearBuildGraceChunks;
+
+            if (!keepResidentStable && !keepNearbyStable)
+            {
                 const glm::vec3 boundsMin = chunkDrawBoundsMin(chunk);
                 const glm::vec3 boundsMax = chunkDrawBoundsMax(chunk);
                 const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
-                const glm::vec2 toChunk(center.x - static_cast<float>(cameraChunk_.x * kChunkSizeX),
-                                        center.z - static_cast<float>(cameraChunk_.z * kChunkSizeZ));
+                const glm::vec2 toChunk(center.x - static_cast<float>(request.cameraChunk.x * kChunkSizeX),
+                                        center.z - static_cast<float>(request.cameraChunk.z * kChunkSizeZ));
                 if (glm::dot(toChunk, toChunk) > kEpsilon)
                 {
                     const float facing = glm::dot(glm::normalize(toChunk), forwardXZ);
@@ -7330,160 +7491,92 @@ private:
                         continue;
                     }
                 }
-                if (hasVisibilityFrustum && !visibilityFrustum.intersectsAABB(boundsMin, boundsMax))
+                if (request.hasVisibilityFrustum && !request.visibilityFrustum.intersectsAABB(boundsMin, boundsMax))
                 {
-                    const glm::vec3 toChunk3 = center - visibilityCameraPos;
-                    if (glm::dot(toChunk3, toChunk3) <=
+                    const glm::vec3 toChunk3 = center - request.visibilityCameraPos;
+                    if (glm::dot(toChunk3, toChunk3) >
                         static_cast<float>(chunk.level.chunkSpanBlocks() * chunk.level.chunkSpanBlocks() * 4))
                     {
-                        // keep near-frustum-edge work alive to avoid visible starvation on turns
-                    }
-                    else
-                    {
                         continue;
                     }
                 }
-                candidateKeys.push_back(key);
             }
+
+            result.jobs.push_back(BuildJob{
+                key,
+                chunk.level,
+                chunk.buildVersion,
+                request.epoch,
+                ringDistanceChunks,
+                keepResidentStable,
+                chunk.fallbackOnly});
         }
 
-        if (candidateKeys.empty())
-        {
-            return;
-        }
+        std::sort(result.jobs.begin(), result.jobs.end(), dirtyBuildJobPriorityLess);
+        trimDirtyBuildJobs(result.jobs,
+                           request.workerBudget,
+                           request.exactMissingChunks,
+                           request.exactPendingUploads);
+        return result;
+    }
 
-        std::vector<BuildJob> jobs;
-        jobs.reserve(candidateKeys.size());
+    void requestDirtyBuildPlan()
+    {
+        DirtyBuildPlanRequest request{};
+        request.sequence = dirtyBuildPlanSequence_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+        request.epoch = buildEpoch_.load(std::memory_order_acquire);
+        request.cameraChunk = cameraChunk_;
+        request.cameraForward = cameraForward_;
+        request.exactMissingChunks = exactMissingChunks_.load(std::memory_order_relaxed);
+        request.exactPendingUploads = exactPendingUploads_.load(std::memory_order_relaxed);
+        request.workerBudget = std::max<std::size_t>(workerCount_, 1);
         {
             std::lock_guard<std::mutex> lock(configMutex_);
-            const std::uint64_t epoch = buildEpoch_.load(std::memory_order_acquire);
-            for (const FarLodChunkKey& key : candidateKeys)
-            {
-                const auto it = chunks_.find(key);
-                if (it == chunks_.end())
-                {
-                    continue;
-                }
-
-                FarLodChunkRecord& chunk = it->second;
-                if (!chunk.active || !chunk.dirty || chunk.inFlight || queuedKeys_.contains(key))
-                {
-                    continue;
-                }
-
-                jobs.push_back(BuildJob{
-                    key,
-                    chunk.level,
-                    chunk.buildVersion,
-                    epoch,
-                    chunkMinHorizontalRingDistanceChunks(chunk.level, cameraChunk_, key.coord),
-                    (chunk.gpu.resident && chunk.gpu.indexCount > 0),
-                    chunk.fallbackOnly});
-            }
+            request.visibilityFrustum = lastVisibilityFrustum_;
+            request.visibilityCameraPos = lastVisibilityCameraPos_;
+            request.hasVisibilityFrustum = hasVisibilityFrustum_;
         }
 
-        std::sort(jobs.begin(),
-                  jobs.end(),
-                  [this](const BuildJob& lhs, const BuildJob& rhs)
-                  {
-                      const int lhsTier = !lhs.hadResidentMesh ? (lhs.fallbackOnly ? 1 : 0) : 2;
-                      const int rhsTier = !rhs.hadResidentMesh ? (rhs.fallbackOnly ? 1 : 0) : 2;
-                      if (lhsTier != rhsTier)
-                      {
-                          return lhsTier < rhsTier;
-                      }
-                      if (lhs.hadResidentMesh != rhs.hadResidentMesh)
-                      {
-                          return rhs.hadResidentMesh;
-                      }
-                      if (!lhs.hadResidentMesh && !rhs.hadResidentMesh)
-                      {
-                          if (lhs.level.level != rhs.level.level)
-                          {
-                              // Fill broad coverage first: coarser (higher level) tiles can cover holes sooner.
-                              return lhs.level.level > rhs.level.level;
-                          }
-                      }
-                      else
-                      {
-                          if (lhs.level.level != rhs.level.level)
-                          {
-                              // Refinement: once something is resident, prefer finer (lower level) updates.
-                              return lhs.level.level < rhs.level.level;
-                          }
-                      }
-                      return lhs.ringDistanceChunks < rhs.ringDistanceChunks;
-                  });
-
+        std::lock_guard<std::mutex> lock(dirtyBuildPlanMutex_);
+        if (dirtyBuildPlannerBusy_ || hasPendingDirtyBuildPlanRequest_)
         {
-            // Make sure fallback parents don't starve, but also can't dominate the queue.
-            static constexpr std::size_t kFallbackReservation = 2;
-            const std::size_t workerBudget = std::max<std::size_t>(workerCount_, 1);
-            const std::size_t exactBacklogPenalty =
-                (exactMissingChunks_.load(std::memory_order_relaxed) > 32 || exactPendingUploads_.load(std::memory_order_relaxed) > 24)
-                    ? 8
-                    : ((exactMissingChunks_.load(std::memory_order_relaxed) > 8 ||
-                        exactPendingUploads_.load(std::memory_order_relaxed) > 8)
-                           ? 16
-                           : 32);
-            const std::size_t maxQueuedPerUpdate = std::max<std::size_t>(workerBudget * 12, exactBacklogPenalty);
-            if (jobs.size() > maxQueuedPerUpdate)
+            return;
+        }
+        pendingDirtyBuildPlanRequest_ = std::move(request);
+        hasPendingDirtyBuildPlanRequest_ = true;
+        dirtyBuildPlanCv_.notify_one();
+    }
+
+    void consumeReadyDirtyBuildPlan()
+    {
+        DirtyBuildPlanResult result{};
+        {
+            std::lock_guard<std::mutex> lock(dirtyBuildPlanMutex_);
+            if (!hasReadyDirtyBuildPlanResult_)
             {
-                std::vector<BuildJob> trimmed;
-                trimmed.reserve(maxQueuedPerUpdate);
-                std::size_t fallbackAdded = 0;
-                const std::size_t desiredFallback = std::min(kFallbackReservation, maxQueuedPerUpdate);
-                for (const BuildJob& job : jobs)
-                {
-                    if (trimmed.size() >= maxQueuedPerUpdate)
-                    {
-                        break;
-                    }
-                    if (job.fallbackOnly)
-                    {
-                        continue;
-                    }
-                    const std::size_t remaining = maxQueuedPerUpdate - trimmed.size();
-                    if (remaining <= (desiredFallback - fallbackAdded))
-                    {
-                        break;
-                    }
-                    trimmed.push_back(job);
-                }
-                if (trimmed.size() < maxQueuedPerUpdate && fallbackAdded < desiredFallback)
-                {
-                    for (const BuildJob& job : jobs)
-                    {
-                        if (!job.fallbackOnly)
-                        {
-                            continue;
-                        }
-                        if (trimmed.size() >= maxQueuedPerUpdate)
-                        {
-                            break;
-                        }
-                        trimmed.push_back(job);
-                        ++fallbackAdded;
-                        if (fallbackAdded >= desiredFallback)
-                        {
-                            break;
-                        }
-                    }
-                }
-                jobs.swap(trimmed);
+                return;
             }
+            result = std::move(readyDirtyBuildPlanResult_);
+            readyDirtyBuildPlanResult_ = {};
+            hasReadyDirtyBuildPlanResult_ = false;
         }
 
-        if (jobs.empty())
+        if (result.jobs.empty())
         {
             return;
         }
 
+        const std::uint64_t currentEpoch = buildEpoch_.load(std::memory_order_acquire);
         std::vector<BuildJob> readyJobs;
-        readyJobs.reserve(jobs.size());
+        readyJobs.reserve(result.jobs.size());
         {
             std::lock_guard<std::mutex> lock(configMutex_);
-            for (const BuildJob& job : jobs)
+            if (result.epoch != currentEpoch)
+            {
+                return;
+            }
+
+            for (const BuildJob& job : result.jobs)
             {
                 auto it = chunks_.find(job.key);
                 if (it == chunks_.end())
@@ -7492,7 +7585,7 @@ private:
                 }
 
                 FarLodChunkRecord& chunk = it->second;
-                if (!chunk.active || !chunk.dirty || chunk.inFlight)
+                if (!chunk.active || !chunk.dirty || chunk.inFlight || chunk.buildVersion != job.buildVersion)
                 {
                     continue;
                 }
@@ -7507,24 +7600,44 @@ private:
             return;
         }
 
+        std::vector<FarLodChunkKey> duplicateKeys;
+        duplicateKeys.reserve(readyJobs.size());
         {
             std::lock_guard<std::mutex> lock(buildQueueMutex_);
             for (const BuildJob& job : readyJobs)
             {
                 if (!queuedKeys_.insert(job.key).second)
                 {
-                    std::lock_guard<std::mutex> configLock(configMutex_);
-                    auto it = chunks_.find(job.key);
-                    if (it != chunks_.end())
-                    {
-                        it->second.inFlight = false;
-                    }
+                    duplicateKeys.push_back(job.key);
                     continue;
                 }
                 buildQueue_.push_back(job);
             }
         }
-        buildQueueCv_.notify_all();
+
+        if (!duplicateKeys.empty())
+        {
+            std::lock_guard<std::mutex> lock(configMutex_);
+            for (const FarLodChunkKey& key : duplicateKeys)
+            {
+                auto it = chunks_.find(key);
+                if (it != chunks_.end())
+                {
+                    it->second.inFlight = false;
+                }
+            }
+        }
+
+        if (readyJobs.size() > duplicateKeys.size())
+        {
+            buildQueueCv_.notify_all();
+        }
+    }
+
+    void scheduleDirtyBuilds()
+    {
+        consumeReadyDirtyBuildPlan();
+        requestDirtyBuildPlan();
     }
 
     void submitGpuSynthesisRequests(double budgetMs)
@@ -9021,14 +9134,23 @@ private:
     std::deque<PendingGpuMeshEmitRequest> pendingGpuMeshEmitRequests_;
     std::deque<PendingGpuParityReadback> pendingGpuParityReadbacks_;
     std::vector<std::thread> workerThreads_;
+    std::thread dirtyBuildPlannerThread_;
     std::atomic<bool> stopWorkers_{false};
     std::atomic<std::uint64_t> buildEpoch_{1};
+    std::atomic<std::uint64_t> dirtyBuildPlanSequence_{0};
     std::size_t workerCount_{1};
     std::atomic<int> exactMissingChunks_{0};
     std::atomic<std::size_t> exactPendingUploads_{0};
     ChunkBenchmarkMetrics* benchmarkMetrics_{nullptr};
     std::unordered_map<int, int> levelActivationOuterRadiusChunks_;
     mutable std::mutex gpuRequestMutex_;
+    mutable std::mutex dirtyBuildPlanMutex_;
+    std::condition_variable dirtyBuildPlanCv_;
+    DirtyBuildPlanRequest pendingDirtyBuildPlanRequest_{};
+    DirtyBuildPlanResult readyDirtyBuildPlanResult_{};
+    bool hasPendingDirtyBuildPlanRequest_{false};
+    bool hasReadyDirtyBuildPlanResult_{false};
+    bool dirtyBuildPlannerBusy_{false};
     bool gpuParityEnabled_{false};
     bool gpuSynthesisEnabled_{false};
     std::uint32_t rollingGpuParityMismatchCount_{0};

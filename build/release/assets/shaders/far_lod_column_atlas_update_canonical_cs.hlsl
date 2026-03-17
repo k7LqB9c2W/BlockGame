@@ -71,6 +71,14 @@ struct FarLodGpuBiome
     float footprintMultiplier;
 };
 
+struct GpuTerrainAtlasCanonicalInput
+{
+    uint hasSolid;
+    uint biomeIndex;
+    int centerSurfaceY;
+    float distanceToShore;
+};
+
 struct GpuTerrainAtlasSample
 {
     uint hasSolid;
@@ -101,11 +109,12 @@ struct CanopyPointSample
 
 StructuredBuffer<FarLodGpuWorldgenHeader> gWorldgenHeader : register(t0);
 StructuredBuffer<FarLodGpuBiome> gBiomes : register(t1);
-StructuredBuffer<GpuTerrainAtlasSample> gCanonicalSamples : register(t2);
+StructuredBuffer<GpuTerrainAtlasCanonicalInput> gCanonicalInputs : register(t2);
 StructuredBuffer<GpuTerrainAtlasReductionInput> gCanonicalReductionInputs : register(t3);
 RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u0);
 
 static const uint kFarLodBiomeOcean = 1u << 0;
+static const uint kFarLodBiomeSmoothBeaches = 1u << 1;
 static const uint kFarLodBiomeWaterFill = 1u << 2;
 static const uint kFarLodBiomeTaiga = 1u << 3;
 static const uint kFarLodBiomeGeneratesTrees = 1u << 4;
@@ -128,6 +137,8 @@ static const float kTemperatureScale = 0.11f;
 static const float kMoistureScale = 0.09f;
 static const float kFertilityScale = 0.05f;
 static const float kContinentalScale = 0.065f;
+static const uint kBlockSand = 4u;
+static const uint kBlockPodzol = 9u;
 static const uint kBlockLeaves = 3u;
 static const uint kBlockSpruceLeaves = 8u;
 
@@ -172,6 +183,105 @@ float smoothStep(float t)
 {
     t = saturate(t);
     return t * t * (3.0f - 2.0f * t);
+}
+
+float valueNoise2D(float x, float z, float frequency, int seed)
+{
+    const float sampleX = x * frequency;
+    const float sampleZ = z * frequency;
+    const int x0 = (int)floor(sampleX);
+    const int z0 = (int)floor(sampleZ);
+    const int x1 = x0 + 1;
+    const int z1 = z0 + 1;
+
+    const float tx = smoothStep(sampleX - (float)x0);
+    const float tz = smoothStep(sampleZ - (float)z0);
+
+    const float v00 = hashToUnitFloat(x0 + seed * 17, seed * 31, z0 - seed * 13);
+    const float v10 = hashToUnitFloat(x1 + seed * 17, seed * 31, z0 - seed * 13);
+    const float v01 = hashToUnitFloat(x0 + seed * 17, seed * 31, z1 - seed * 13);
+    const float v11 = hashToUnitFloat(x1 + seed * 17, seed * 31, z1 - seed * 13);
+
+    const float ix0 = lerp(v00, v10, tx);
+    const float ix1 = lerp(v01, v11, tx);
+    return lerp(ix0, ix1, tz);
+}
+
+float taigaPodzolNoise(int worldX, int worldZ)
+{
+    const float broad = valueNoise2D((float)worldX, (float)worldZ, 1.0f / 16.0f, 19);
+    const float medium = valueNoise2D((float)worldX, (float)worldZ, 1.0f / 8.0f, 37);
+    const float detail = valueNoise2D((float)worldX, (float)worldZ, 1.0f / 4.0f, 73);
+    return broad * 0.55f + medium * 0.30f + detail * 0.15f;
+}
+
+void resolveCenterMaterialAndWater(FarLodGpuBiome biome,
+                                   int centerSurfaceY,
+                                   float distanceToShore,
+                                   int centerX,
+                                   int centerZ,
+                                   out uint surfaceBlock,
+                                   out uint fillerBlock,
+                                   out uint waterEnabled,
+                                   out int waterBottomY)
+{
+    surfaceBlock = biome.surfaceBlock;
+    fillerBlock = biome.fillerBlock;
+    waterEnabled = 0u;
+    waterBottomY = centerSurfaceY + 1;
+
+    const bool nearSeaLevel = abs(centerSurfaceY - gSeaLevel) <= 2;
+    const float beachDistanceRange = 6.0f;
+    if ((biome.flags & kFarLodBiomeOcean) == 0u &&
+        nearSeaLevel &&
+        isfinite(distanceToShore) &&
+        distanceToShore <= beachDistanceRange)
+    {
+        const float noise = hashToUnitFloat(centerX, centerSurfaceY, centerZ);
+        if ((biome.flags & kFarLodBiomeSmoothBeaches) != 0u)
+        {
+            const float shorelineWeight = 1.0f - saturate(distanceToShore / beachDistanceRange);
+            const float sandProbability = lerp(0.4f, 0.95f, shorelineWeight);
+            if (noise <= sandProbability)
+            {
+                surfaceBlock = kBlockSand;
+                fillerBlock = kBlockSand;
+            }
+            else if (noise < sandProbability + 0.1f)
+            {
+                fillerBlock = kBlockSand;
+            }
+        }
+        else
+        {
+            if (noise < 0.55f)
+            {
+                surfaceBlock = kBlockSand;
+            }
+            fillerBlock = kBlockSand;
+        }
+    }
+
+    if ((biome.flags & kFarLodBiomeTaiga) != 0u && surfaceBlock != kBlockSand)
+    {
+        const float patchNoise = taigaPodzolNoise(centerX, centerZ);
+        const float patchSelector = hashToUnitFloat(centerX, centerSurfaceY * 23 + 11, centerZ);
+        if (patchNoise > 0.67f || (patchNoise > 0.59f && patchSelector > 0.45f))
+        {
+            surfaceBlock = kBlockPodzol;
+            fillerBlock = kBlockPodzol;
+        }
+    }
+
+    if ((biome.flags & kFarLodBiomeWaterFill) != 0u && centerSurfaceY < gSeaLevel)
+    {
+        waterEnabled = 1u;
+        waterBottomY = centerSurfaceY + 1;
+        if (biome.waterMaxDepth > 0)
+        {
+            waterBottomY = max(waterBottomY, gSeaLevel - biome.waterMaxDepth + 1);
+        }
+    }
 }
 
 float fade(float t)
@@ -522,7 +632,13 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int2 cellCoord = int2(gUpdateOriginCellX + (int)dispatchThreadId.x,
                                 gUpdateOriginCellZ + (int)dispatchThreadId.y);
 
-    GpuTerrainAtlasSample sample = gCanonicalSamples[updateIndex];
+    const GpuTerrainAtlasCanonicalInput canonicalInput = gCanonicalInputs[updateIndex];
+    GpuTerrainAtlasSample sample = (GpuTerrainAtlasSample)0;
+    sample.hasSolid = canonicalInput.hasSolid;
+    sample.surfaceY = canonicalInput.centerSurfaceY;
+    sample.waterBottomY = canonicalInput.centerSurfaceY + 1;
+    sample.minSurfaceY = canonicalInput.centerSurfaceY;
+    sample.maxSurfaceY = canonicalInput.centerSurfaceY;
     sample.canopyBottomY = 0;
     sample.canopyTopY = 0;
     sample.canopyBlock = 0u;
@@ -531,6 +647,19 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (sample.hasSolid != 0u)
     {
         const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
+        if (canonicalInput.biomeIndex < header.biomeCount)
+        {
+            const FarLodGpuBiome centerBiome = gBiomes[canonicalInput.biomeIndex];
+            resolveCenterMaterialAndWater(centerBiome,
+                                          canonicalInput.centerSurfaceY,
+                                          canonicalInput.distanceToShore,
+                                          cellCoord.x * gBlockScale + max(gBlockScale, 1) / 2,
+                                          cellCoord.y * gBlockScale + max(gBlockScale, 1) / 2,
+                                          sample.surfaceBlock,
+                                          sample.fillerBlock,
+                                          sample.waterEnabled,
+                                          sample.waterBottomY);
+        }
         const int worldX = cellCoord.x * gBlockScale;
         const int worldZ = cellCoord.y * gBlockScale;
         const int footprint = max(gBlockScale, 1);

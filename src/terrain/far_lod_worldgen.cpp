@@ -23,50 +23,10 @@ constexpr float kMoistureScale = 0.09f;
 constexpr float kFertilityScale = 0.05f;
 constexpr float kContinentalScale = 0.065f;
 
-float hashToUnitFloat(int x, int y, int z) noexcept
-{
-    std::uint32_t h = static_cast<std::uint32_t>(x);
-    h ^= static_cast<std::uint32_t>(y) * 374761393u;
-    h ^= static_cast<std::uint32_t>(z) * 668265263u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    h ^= (h >> 16);
-    return static_cast<float>(h & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
-}
-
 float smoothStep(float t) noexcept
 {
     t = std::clamp(t, 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
-}
-
-float valueNoise2D(float x, float z, float frequency, int seed) noexcept
-{
-    const float sampleX = x * frequency;
-    const float sampleZ = z * frequency;
-    const int x0 = static_cast<int>(std::floor(sampleX));
-    const int z0 = static_cast<int>(std::floor(sampleZ));
-    const int x1 = x0 + 1;
-    const int z1 = z0 + 1;
-
-    const float tx = smoothStep(sampleX - static_cast<float>(x0));
-    const float tz = smoothStep(sampleZ - static_cast<float>(z0));
-
-    const float v00 = hashToUnitFloat(x0 + seed * 17, seed * 31, z0 - seed * 13);
-    const float v10 = hashToUnitFloat(x1 + seed * 17, seed * 31, z0 - seed * 13);
-    const float v01 = hashToUnitFloat(x0 + seed * 17, seed * 31, z1 - seed * 13);
-    const float v11 = hashToUnitFloat(x1 + seed * 17, seed * 31, z1 - seed * 13);
-
-    const float ix0 = std::lerp(v00, v10, tx);
-    const float ix1 = std::lerp(v01, v11, tx);
-    return std::lerp(ix0, ix1, tz);
-}
-
-float taigaPodzolNoise(int worldX, int worldZ) noexcept
-{
-    const float broad = valueNoise2D(static_cast<float>(worldX), static_cast<float>(worldZ), 1.0f / 16.0f, 19);
-    const float medium = valueNoise2D(static_cast<float>(worldX), static_cast<float>(worldZ), 1.0f / 8.0f, 37);
-    const float detail = valueNoise2D(static_cast<float>(worldX), static_cast<float>(worldZ), 1.0f / 4.0f, 73);
-    return broad * 0.55f + medium * 0.30f + detail * 0.15f;
 }
 
 float fade(float t) noexcept
@@ -312,60 +272,6 @@ std::array<float, 2> warpPosition(const FarLodGpuWorldgenHeader& header, int wor
     const float warpSample =
         fbm2(worldXF, worldZF, header.mainNoise, header.seed + 11u, header.warpFrequency / std::max(header.mainNoise.frequency, 1.0e-6f));
     return {worldXF + warpSample * header.warpAmplitude, worldZF + warpSample * header.warpAmplitude};
-}
-
-void resolveFarLodColumnBlocks(const FarLodGpuBiome& biome,
-                               int surfaceY,
-                               float distanceToShore,
-                               int seaLevel,
-                               int worldX,
-                               int worldZ,
-                               BlockId& surfaceBlock,
-                               BlockId& fillerBlock) noexcept
-{
-    surfaceBlock = static_cast<BlockId>(biome.surfaceBlock);
-    fillerBlock = static_cast<BlockId>(biome.fillerBlock);
-
-    const bool nearSeaLevel = std::abs(surfaceY - seaLevel) <= 2;
-    constexpr float kBeachDistanceRange = 6.0f;
-    if ((biome.flags & kFarLodBiomeOcean) == 0u &&
-        nearSeaLevel &&
-        std::isfinite(distanceToShore) &&
-        distanceToShore <= kBeachDistanceRange)
-    {
-        const float noise = hashToUnitFloat(worldX, surfaceY, worldZ);
-        if ((biome.flags & kFarLodBiomeSmoothBeaches) != 0u)
-        {
-            const float shorelineWeight = 1.0f - std::clamp(distanceToShore / kBeachDistanceRange, 0.0f, 1.0f);
-            const float sandProbability = std::lerp(0.4f, 0.95f, shorelineWeight);
-            if (noise <= sandProbability)
-            {
-                surfaceBlock = BlockId::Sand;
-                fillerBlock = BlockId::Sand;
-            }
-            else if (noise < sandProbability + 0.1f)
-            {
-                fillerBlock = BlockId::Sand;
-            }
-        }
-        else
-        {
-            surfaceBlock = noise < 0.55f ? BlockId::Sand : surfaceBlock;
-            fillerBlock = BlockId::Sand;
-        }
-    }
-
-    if ((biome.flags & kFarLodBiomeTaiga) != 0u && surfaceBlock != BlockId::Sand)
-    {
-        const float patchNoise = taigaPodzolNoise(worldX, worldZ);
-        const float patchSelector = hashToUnitFloat(worldX, surfaceY * 23 + 11, worldZ);
-        const bool usePodzol = patchNoise > 0.67f || (patchNoise > 0.59f && patchSelector > 0.45f);
-        if (usePodzol)
-        {
-            surfaceBlock = BlockId::Podzol;
-            fillerBlock = BlockId::Podzol;
-        }
-    }
 }
 
 } // namespace

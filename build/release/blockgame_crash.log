@@ -2963,3 +2963,171 @@ C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_chu
   [61] frame/render_world
   [62] frame/ui
   [63] frame/end_frame
+2026-03-16 16:54:08 - uncaught exception: Renderer: failed to close command list
+2026-03-16 16:54:08 - diagnostics: uncaught exception | phase=frame/end_frame | frame=2098 | heartbeat_age_ms=2913.99
+2026-03-16 16:54:08 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-16 17:12:03 - uncaught exception: Renderer: failed to present swap chain (hr=0x887A0005) (removedReason=0x887A0006)
+2026-03-16 17:12:03 - diagnostics: uncaught exception | phase=frame/end_frame | frame=4092 | heartbeat_age_ms=1907.90
+2026-03-16 17:12:03 - breadcrumbs:
+  [0] frame/build_render_data
+  [1] frame/render_world
+  [2] frame/ui
+  [3] frame/end_frame
+  [4] frame/presented
+  [5] frame/start
+  [6] frame/poll_events
+  [7] frame/input
+  [8] frame/chunk_update
+  [9] frame/render_begin
+  [10] frame/build_render_data
+  [11] frame/render_world
+  [12] frame/ui
+  [13] frame/end_frame
+  [14] frame/presented
+  [15] frame/start
+  [16] frame/poll_events
+  [17] frame/input
+  [18] frame/chunk_update
+  [19] frame/render_begin
+  [20] frame/build_render_data
+  [21] frame/render_world
+  [22] frame/ui
+  [23] frame/end_frame
+  [24] frame/presented
+  [25] frame/start
+  [26] frame/poll_events
+  [27] frame/input
+  [28] frame/chunk_update
+  [29] frame/render_begin
+  [30] frame/build_render_data
+  [31] frame/render_world
+  [32] frame/ui
+  [33] frame/end_frame
+  [34] frame/presented
+  [35] frame/start
+  [36] frame/poll_events
+  [37] frame/input
+  [38] frame/chunk_update
+  [39] frame/render_begin
+  [40] frame/build_render_data
+  [41] frame/render_world
+  [42] frame/ui
+  [43] frame/end_frame
+  [44] frame/presented
+  [45] frame/start
+  [46] frame/poll_events
+  [47] frame/input
+  [48] frame/chunk_update
+  [49] frame/render_begin
+  [50] frame/build_render_data
+  [51] frame/render_world
+  [52] frame/ui
+  [53] frame/end_frame
+  [54] frame/presented
+  [55] frame/start
+  [56] frame/poll_events
+  [57] frame/input
+  [58] frame/chunk_update
+  [59] frame/render_begin
+  [60] frame/build_render_data
+  [61] frame/render_world
+  [62] frame/ui
+  [63] frame/end_frame
+2026-03-16 17:58:48 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl(222,15): warning X3078: 'z': loop control variable conflicts with a previous declaration in the outer scope; most recent declaration will be used
+C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl(296,24-106): error X3020: type mismatch between conditional values
+
+2026-03-16 17:58:48 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=318.87
+2026-03-16 17:58:48 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-16 17:59:47 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl(222,15): warning X3078: 'z': loop control variable conflicts with a previous declaration in the outer scope; most recent declaration will be used
+C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl(296,24-106): error X3020: type mismatch between conditional values
+
+2026-03-16 17:59:47 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=270.52
+2026-03-16 17:59:47 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-16 18:00:00 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl(341,10): error X3003: redefinition of 'i'
+
+2026-03-16 18:00:00 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=285.55
+2026-03-16 18:00:00 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-16 18:00:28 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\Release\assets\shaders\far_lod_chunk_face_count_cs.hlsl(341,10): error X3003: redefinition of 'i'
+
+2026-03-16 18:00:28 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=279.43
+2026-03-16 18:00:28 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager

@@ -66,6 +66,10 @@ struct GpuTerrainAtlasSample
     int maxSurfaceY;
     uint surfaceBlock;
     uint fillerBlock;
+    int canopyBottomY;
+    int canopyTopY;
+    uint canopyBlock;
+    uint canopyStrength;
 };
 
 StructuredBuffer<FarLodGpuWorldgenHeader> gWorldgenHeader : register(t0);

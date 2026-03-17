@@ -1,241 +1,246 @@
 cbuffer FaceCountParams : register(b0)
 {
+    int gWorldMinY;
+    int gBlockScale;
     uint gNegativeNeighborMask;
+    uint gMaxMergeExtent;
 };
 
-StructuredBuffer<uint> gVoxelBuffer : register(t0);
-StructuredBuffer<uint> gNeighborPosX : register(t1);
-StructuredBuffer<uint> gNeighborPosY : register(t2);
-StructuredBuffer<uint> gNeighborPosZ : register(t3);
+struct GpuTerrainColumnDescriptor
+{
+    uint flags;
+    int terrainTopY;
+    int terrainBaseY;
+    int waterTopY;
+    int waterBottomY;
+    int canopyTopY;
+    int canopyBottomY;
+    uint terrainTopBlock;
+    uint terrainSideBlock;
+    uint waterBlock;
+    uint canopyBlock;
+    uint reserved;
+};
+
+StructuredBuffer<GpuTerrainColumnDescriptor> gColumnBuffer : register(t0);
+StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosX : register(t1);
+StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosY : register(t2);
+StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosZ : register(t3);
 RWStructuredBuffer<uint> gFaceCounts : register(u0);
 
 static const uint kLogicalSize = 16u;
 static const uint kNegativeNeighborX = 0x1u;
-static const uint kNegativeNeighborY = 0x2u;
 static const uint kNegativeNeighborZ = 0x4u;
-static const uint kSliceCount = 96u;
+static const uint kColumnFlagTerrain = 0x01u;
+static const uint kColumnFlagWater = 0x02u;
+static const uint kColumnFlagCanopy = 0x04u;
+static const uint kMaterialFlagWater = 0x01u;
+static const uint kMaterialFlagFarLod = 0x02u;
+static const uint kLayerTerrain = 0u;
+static const uint kLayerWater = 1u;
+static const uint kLayerCanopy = 2u;
+static const uint kTopPlaneCount = 3u;
+static const uint kSideSlicesPerLayer = 64u;
+static const uint kPlaneCount = kTopPlaneCount + 3u * kSideSlicesPerLayer;
 
-static const uint kBlockAir = 0u;
-static const uint kBlockLeaves = 3u;
-static const uint kBlockWater = 5u;
-static const uint kBlockSpruceLeaves = 8u;
-
-static const uint kFaceTop = 0u;
-static const uint kFaceBottom = 1u;
-static const uint kFaceNorth = 2u;
-static const uint kFaceSouth = 3u;
-static const uint kFaceEast = 4u;
-static const uint kFaceWest = 5u;
-
-uint voxelIndex(uint x, uint y, uint z)
+uint columnIndex(uint x, uint z)
 {
-    return (y * kLogicalSize + z) * kLogicalSize + x;
+    return z * kLogicalSize + x;
 }
 
-bool isOccupied(uint packedVoxel)
+GpuTerrainColumnDescriptor sampleLocal(uint x, uint z)
 {
-    return (packedVoxel & 0x1u) != 0u;
+    return gColumnBuffer[columnIndex(x, z)];
 }
 
-uint voxelMaterial(uint packedVoxel)
+bool layerActive(GpuTerrainColumnDescriptor column, uint layerId)
 {
-    return (packedVoxel >> 8u) & 0xffu;
+    if (layerId == kLayerTerrain)
+    {
+        return (column.flags & kColumnFlagTerrain) != 0u;
+    }
+    if (layerId == kLayerWater)
+    {
+        return (column.flags & kColumnFlagWater) != 0u;
+    }
+    return (column.flags & kColumnFlagCanopy) != 0u;
 }
 
-bool isAlphaCutoutBlock(uint blockId)
+uint layerTopBlock(GpuTerrainColumnDescriptor column, uint layerId)
 {
-    return blockId == kBlockLeaves || blockId == kBlockSpruceLeaves;
+    if (layerId == kLayerTerrain) return column.terrainTopBlock;
+    if (layerId == kLayerWater) return column.waterBlock;
+    return column.canopyBlock;
 }
 
-bool isNonOpaqueBlock(uint blockId)
+uint layerSideBlock(GpuTerrainColumnDescriptor column, uint layerId)
 {
-    return blockId == kBlockAir || blockId == kBlockWater || isAlphaCutoutBlock(blockId);
+    if (layerId == kLayerTerrain) return column.terrainSideBlock;
+    if (layerId == kLayerWater) return column.waterBlock;
+    return column.canopyBlock;
 }
 
-bool shouldRenderBlockFace(uint owningBlock, uint neighborBlock)
+int layerTopY(GpuTerrainColumnDescriptor column, uint layerId)
 {
-    if (owningBlock == kBlockAir)
+    if (layerId == kLayerTerrain) return column.terrainTopY;
+    if (layerId == kLayerWater) return column.waterTopY;
+    return column.canopyTopY;
+}
+
+int layerBottomY(GpuTerrainColumnDescriptor column, uint layerId)
+{
+    if (layerId == kLayerTerrain) return column.terrainBaseY;
+    if (layerId == kLayerWater) return column.waterBottomY;
+    return column.canopyBottomY;
+}
+
+uint layerMaterialFlags(uint layerId)
+{
+    return kMaterialFlagFarLod | ((layerId == kLayerWater) ? kMaterialFlagWater : 0u);
+}
+
+bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
+{
+    if (!layerActive(column, layerId))
     {
         return false;
     }
-
-    if (neighborBlock == kBlockAir)
-    {
-        return true;
-    }
-
-    if (isAlphaCutoutBlock(owningBlock))
-    {
-        if (isAlphaCutoutBlock(neighborBlock))
-        {
-            return owningBlock != neighborBlock;
-        }
-
-        return neighborBlock == kBlockWater;
-    }
-
-    if (owningBlock == kBlockWater)
-    {
-        return neighborBlock == kBlockAir;
-    }
-
-    return isNonOpaqueBlock(neighborBlock);
-}
-
-uint samplePositiveX(uint x, uint y, uint z)
-{
-    return (x + 1u < kLogicalSize) ? gVoxelBuffer[voxelIndex(x + 1u, y, z)]
-                                   : gNeighborPosX[voxelIndex(0u, y, z)];
-}
-
-uint samplePositiveY(uint x, uint y, uint z)
-{
-    return (y + 1u < kLogicalSize) ? gVoxelBuffer[voxelIndex(x, y + 1u, z)]
-                                   : gNeighborPosY[voxelIndex(x, 0u, z)];
-}
-
-uint samplePositiveZ(uint x, uint y, uint z)
-{
-    return (z + 1u < kLogicalSize) ? gVoxelBuffer[voxelIndex(x, y, z + 1u)]
-                                   : gNeighborPosZ[voxelIndex(x, y, 0u)];
-}
-
-bool faceVisible(uint faceId, uint x, uint y, uint z, uint packedVoxel)
-{
-    if (!isOccupied(packedVoxel))
+    if (layerId == kLayerTerrain &&
+        (column.flags & kColumnFlagWater) != 0u &&
+        column.waterTopY > column.terrainTopY)
     {
         return false;
     }
-
-    const uint material = voxelMaterial(packedVoxel);
-    if (faceId == kFaceTop)
-    {
-        return shouldRenderBlockFace(material, samplePositiveY(x, y, z));
-    }
-    if (faceId == kFaceBottom)
-    {
-        if (y == 0u && (gNegativeNeighborMask & kNegativeNeighborY) != 0u)
-        {
-            return false;
-        }
-        return shouldRenderBlockFace(material, (y > 0u) ? gVoxelBuffer[voxelIndex(x, y - 1u, z)] : 0u);
-    }
-    if (faceId == kFaceNorth)
-    {
-        if (z == 0u && (gNegativeNeighborMask & kNegativeNeighborZ) != 0u)
-        {
-            return false;
-        }
-        return shouldRenderBlockFace(material, (z > 0u) ? gVoxelBuffer[voxelIndex(x, y, z - 1u)] : 0u);
-    }
-    if (faceId == kFaceSouth)
-    {
-        return shouldRenderBlockFace(material, samplePositiveZ(x, y, z));
-    }
-    if (faceId == kFaceEast)
-    {
-        return shouldRenderBlockFace(material, samplePositiveX(x, y, z));
-    }
-
-    if (x == 0u && (gNegativeNeighborMask & kNegativeNeighborX) != 0u)
-    {
-        return false;
-    }
-    return shouldRenderBlockFace(material, (x > 0u) ? gVoxelBuffer[voxelIndex(x - 1u, y, z)] : 0u);
+    const int topY = layerTopY(column, layerId);
+    const int chunkMaxY = gWorldMinY + int(kLogicalSize) * gBlockScale;
+    return topY >= gWorldMinY && topY < chunkMaxY;
 }
 
-uint faceMergeKey(uint faceId, uint x, uint y, uint z, uint packedVoxel)
+uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
 {
-    if (!faceVisible(faceId, x, y, z, packedVoxel))
+    if (!topFaceVisible(column, layerId))
     {
         return 0u;
     }
 
-    // Merge only when material + voxel flags match exactly (water/structure/cutout/terrain).
-    // (Low bits 0x1f hold occupancy+flags; high bits hold the 8-bit material id.)
-    // Exclude occupancy so "0" can be safely used as the sentinel for non-emitting cells.
-    return packedVoxel & 0xFF1Eu;
+    uint h = 2166136261u;
+    h = (h ^ layerTopBlock(column, layerId)) * 16777619u;
+    h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
+    h = (h ^ asuint(layerTopY(column, layerId))) * 16777619u;
+    return h | 1u;
 }
 
-void decodeSlice(uint sliceIndex, out uint faceId, out uint slice)
+bool sideSegment(GpuTerrainColumnDescriptor current,
+                 GpuTerrainColumnDescriptor neighbor,
+                 uint layerId,
+                 out int segmentBottom,
+                 out int segmentTopExclusive)
 {
-    faceId = sliceIndex / kLogicalSize;
-    slice = sliceIndex - faceId * kLogicalSize;
-}
-
-void voxelCoordsForSliceCell(uint faceId, uint slice, uint u, uint v, out uint x, out uint y, out uint z)
-{
-    // Each slice is a 16x16 grid. Greedy merge runs in that 2D plane, per face and per slice.
-    if (faceId == kFaceTop || faceId == kFaceBottom)
+    segmentBottom = 0;
+    segmentTopExclusive = 0;
+    if (!layerActive(current, layerId))
     {
-        x = u;
-        y = slice;
-        z = v;
-        return;
-    }
-    if (faceId == kFaceNorth || faceId == kFaceSouth)
-    {
-        x = u;
-        y = v;
-        z = slice;
-        return;
+        return false;
     }
 
-    // East/West: u maps to Z, v maps to Y.
-    x = slice;
-    y = v;
-    z = u;
+    const int currentTop = layerTopY(current, layerId);
+    const int currentBottom = layerBottomY(current, layerId);
+    int occluderTop = currentBottom - 1;
+    if (layerActive(neighbor, layerId))
+    {
+        occluderTop = layerTopY(neighbor, layerId);
+    }
+
+    segmentBottom = max(currentBottom, occluderTop + 1);
+    segmentTopExclusive = currentTop + 1;
+    segmentBottom = max(segmentBottom, gWorldMinY);
+    segmentTopExclusive = min(segmentTopExclusive, gWorldMinY + int(kLogicalSize) * gBlockScale);
+    return segmentTopExclusive > segmentBottom;
 }
 
-uint greedyQuadCount(uint faceId, uint slice)
+uint hashSideKey(GpuTerrainColumnDescriptor current,
+                 GpuTerrainColumnDescriptor neighbor,
+                 uint layerId,
+                 out bool visible)
 {
+    visible = false;
+    int segmentBottom = 0;
+    int segmentTopExclusive = 0;
+    if (!sideSegment(current, neighbor, layerId, segmentBottom, segmentTopExclusive))
+    {
+        return 0u;
+    }
+
+    uint h = 2166136261u;
+    h = (h ^ layerSideBlock(current, layerId)) * 16777619u;
+    h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
+    h = (h ^ asuint(segmentBottom)) * 16777619u;
+    h = (h ^ asuint(segmentTopExclusive)) * 16777619u;
+    visible = true;
+    return h | 1u;
+}
+
+void decodePlane(uint planeIndex, out uint layerId, out bool isTopPlane, out uint dirId, out uint slice)
+{
+    if (planeIndex < kTopPlaneCount)
+    {
+        layerId = planeIndex;
+        isTopPlane = true;
+        dirId = 0u;
+        slice = 0u;
+        return;
+    }
+
+    const uint rem = planeIndex - kTopPlaneCount;
+    layerId = rem / kSideSlicesPerLayer;
+    const uint sideIndex = rem - layerId * kSideSlicesPerLayer;
+    dirId = sideIndex / kLogicalSize;
+    slice = sideIndex - dirId * kLogicalSize;
+    isTopPlane = false;
+}
+
+uint countTopQuads(uint layerId)
+{
+    const uint maxExtent = clamp(gMaxMergeExtent, 1u, 16u);
     uint keys[256];
     uint visitedMask[16];
-    for (uint initRow = 0u; initRow < 16u; ++initRow)
+    for (uint row = 0u; row < 16u; ++row)
     {
-        visitedMask[initRow] = 0u;
+        visitedMask[row] = 0u;
     }
 
-    for (uint vFill = 0u; vFill < 16u; ++vFill)
+    for (uint fillZ = 0u; fillZ < 16u; ++fillZ)
     {
-        for (uint uFill = 0u; uFill < 16u; ++uFill)
+        for (uint x = 0u; x < 16u; ++x)
         {
-            uint x;
-            uint y;
-            uint z;
-            voxelCoordsForSliceCell(faceId, slice, uFill, vFill, x, y, z);
-            const uint packedVoxel = gVoxelBuffer[voxelIndex(x, y, z)];
-            keys[vFill * 16u + uFill] = faceMergeKey(faceId, x, y, z, packedVoxel);
+            const GpuTerrainColumnDescriptor column = sampleLocal(x, fillZ);
+            keys[fillZ * 16u + x] = hashTopKey(column, layerId);
         }
     }
 
     uint quadCount = 0u;
-    for (uint vScan = 0u; vScan < 16u; ++vScan)
+    for (uint z = 0u; z < 16u; ++z)
     {
-        for (uint uScan = 0u; uScan < 16u; ++uScan)
+        for (uint x = 0u; x < 16u; ++x)
         {
-            const uint bit = 1u << uScan;
-            if ((visitedMask[vScan] & bit) != 0u)
+            const uint bit = 1u << x;
+            if ((visitedMask[z] & bit) != 0u)
             {
                 continue;
             }
 
-            const uint key = keys[vScan * 16u + uScan];
+            const uint key = keys[z * 16u + x];
             if (key == 0u)
             {
-                visitedMask[vScan] |= bit;
+                visitedMask[z] |= bit;
                 continue;
             }
 
             uint width = 1u;
-            for (uint uNext = uScan + 1u; uNext < 16u; ++uNext)
+            for (uint nx = x + 1u; nx < 16u && width < maxExtent; ++nx)
             {
-                const uint testBit = 1u << uNext;
-                if ((visitedMask[vScan] & testBit) != 0u)
-                {
-                    break;
-                }
-                if (keys[vScan * 16u + uNext] != key)
+                const uint testBit = 1u << nx;
+                if ((visitedMask[z] & testBit) != 0u || keys[z * 16u + nx] != key)
                 {
                     break;
                 }
@@ -243,15 +248,14 @@ uint greedyQuadCount(uint faceId, uint slice)
             }
 
             uint height = 1u;
-            for (uint vNext = vScan + 1u; vNext < 16u; ++vNext)
+            for (uint nz = z + 1u; nz < 16u && height < maxExtent; ++nz)
             {
                 bool rowOk = true;
                 for (uint dx = 0u; dx < width; ++dx)
                 {
-                    const uint uTest = uScan + dx;
-                    const uint testBit = 1u << uTest;
-                    if ((visitedMask[vNext] & testBit) != 0u ||
-                        keys[vNext * 16u + uTest] != key)
+                    const uint xTest = x + dx;
+                    const uint testBit = 1u << xTest;
+                    if ((visitedMask[nz] & testBit) != 0u || keys[nz * 16u + xTest] != key)
                     {
                         rowOk = false;
                         break;
@@ -264,16 +268,98 @@ uint greedyQuadCount(uint faceId, uint slice)
                 height += 1u;
             }
 
-            const uint rowMask = ((1u << width) - 1u) << uScan;
-            for (uint dy = 0u; dy < height; ++dy)
+            const uint rowMask = ((1u << width) - 1u) << x;
+            for (uint dz = 0u; dz < height; ++dz)
             {
-                visitedMask[vScan + dy] |= rowMask;
+                visitedMask[z + dz] |= rowMask;
             }
 
             quadCount += 1u;
         }
     }
     return quadCount;
+}
+
+uint countSideRuns(uint layerId, uint dirId, uint slice)
+{
+    uint keys[16];
+    [unroll]
+    for (uint i = 0u; i < 16u; ++i)
+    {
+        GpuTerrainColumnDescriptor current = (GpuTerrainColumnDescriptor)0;
+        GpuTerrainColumnDescriptor neighbor = (GpuTerrainColumnDescriptor)0;
+        bool blockedByNegativeNeighbor = false;
+
+        if (dirId == 0u)
+        {
+            current = sampleLocal(slice, i);
+            if (slice + 1u < 16u)
+            {
+                neighbor = sampleLocal(slice + 1u, i);
+            }
+            else
+            {
+                neighbor = gNeighborPosX[columnIndex(0u, i)];
+            }
+        }
+        else if (dirId == 1u)
+        {
+            current = sampleLocal(slice, i);
+            blockedByNegativeNeighbor = (slice == 0u) && ((gNegativeNeighborMask & kNegativeNeighborX) != 0u);
+            if (slice > 0u)
+            {
+                neighbor = sampleLocal(slice - 1u, i);
+            }
+        }
+        else if (dirId == 2u)
+        {
+            current = sampleLocal(i, slice);
+            if (slice + 1u < 16u)
+            {
+                neighbor = sampleLocal(i, slice + 1u);
+            }
+            else
+            {
+                neighbor = gNeighborPosZ[columnIndex(i, 0u)];
+            }
+        }
+        else
+        {
+            current = sampleLocal(i, slice);
+            blockedByNegativeNeighbor = (slice == 0u) && ((gNegativeNeighborMask & kNegativeNeighborZ) != 0u);
+            if (slice > 0u)
+            {
+                neighbor = sampleLocal(i, slice - 1u);
+            }
+        }
+
+        bool visible = false;
+        keys[i] = blockedByNegativeNeighbor ? 0u : hashSideKey(current, neighbor, layerId, visible);
+    }
+
+    uint runCount = 0u;
+    uint scanIndex = 0u;
+    while (scanIndex < 16u)
+    {
+        const uint key = keys[scanIndex];
+        if (key == 0u)
+        {
+            scanIndex += 1u;
+            continue;
+        }
+
+        uint runLength = 1u;
+        while ((scanIndex + runLength) < 16u &&
+               runLength < clamp(gMaxMergeExtent, 1u, 16u) &&
+               keys[scanIndex + runLength] == key)
+        {
+            runLength += 1u;
+        }
+
+        runCount += 1u;
+        scanIndex += runLength;
+    }
+    return runCount;
 }
 
 [numthreads(64, 1, 1)]
@@ -285,17 +371,16 @@ void FarLodChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // This buffer is scanned as a fixed 4096-element prefix sum by the existing pipeline.
-    // We repurpose the first 96 entries (6 faces * 16 slices) to contain greedy-merged quad counts.
-    // The remaining entries must be zeroed for deterministic emission.
-    if (linearIndex >= kSliceCount)
+    if (linearIndex >= kPlaneCount)
     {
         gFaceCounts[linearIndex] = 0u;
         return;
     }
 
-    uint faceId;
+    uint layerId;
+    bool isTopPlane;
+    uint dirId;
     uint slice;
-    decodeSlice(linearIndex, faceId, slice);
-    gFaceCounts[linearIndex] = greedyQuadCount(faceId, slice);
+    decodePlane(linearIndex, layerId, isTopPlane, dirId, slice);
+    gFaceCounts[linearIndex] = isTopPlane ? countTopQuads(layerId) : countSideRuns(layerId, dirId, slice);
 }

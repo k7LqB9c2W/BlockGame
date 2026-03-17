@@ -12,26 +12,32 @@ cbuffer ChunkParams : register(b0)
 struct GpuTerrainAtlasSample
 {
     uint hasSolid;
-    uint waterEnabled; // Aggregated water presence votes within this cell (0..N).
+    uint waterEnabled;
     int surfaceY;
     int waterBottomY;
     int minSurfaceY;
     int maxSurfaceY;
     uint surfaceBlock;
     uint fillerBlock;
+    int canopyBottomY;
+    int canopyTopY;
+    uint canopyBlock;
+    uint canopyStrength;
 };
 
 struct GpuTerrainColumnDescriptor
 {
-    uint centerHasSolid;
-    uint centerWaterEnabled;
-    int centerSurfaceY;
-    int centerWaterBottomY;
-    uint centerSurfaceBlock;
-    uint centerFillerBlock;
-    uint terrainSurfaceMask;
-    uint terrainFillerMask;
-    uint waterMask;
+    uint flags;
+    int terrainTopY;
+    int terrainBaseY;
+    int waterTopY;
+    int waterBottomY;
+    int canopyTopY;
+    int canopyBottomY;
+    uint terrainTopBlock;
+    uint terrainSideBlock;
+    uint waterBlock;
+    uint canopyBlock;
     uint reserved;
 };
 
@@ -39,6 +45,12 @@ StructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(t0);
 RWStructuredBuffer<GpuTerrainColumnDescriptor> gColumnBuffer : register(u0);
 
 static const uint kLogicalSize = 16u;
+static const uint kColumnFlagTerrain = 0x01u;
+static const uint kColumnFlagWater = 0x02u;
+static const uint kColumnFlagCanopy = 0x04u;
+static const uint kColumnFlagSteep = 0x08u;
+static const uint kBlockAir = 0u;
+static const uint kBlockWater = 5u;
 
 uint columnIndex(uint localX, uint localZ)
 {
@@ -73,10 +85,9 @@ uint atlasIndex(int2 cellCoord)
     return (uint)(atlasZ * gAtlasSizeX + atlasX);
 }
 
-GpuTerrainAtlasSample sampleAtlas(int worldX, int worldZ)
+GpuTerrainAtlasSample sampleAtlasCell(int2 cellCoord)
 {
     GpuTerrainAtlasSample sample = (GpuTerrainAtlasSample)0;
-    const int2 cellCoord = int2(floorDiv(worldX, gBlockScale), floorDiv(worldZ, gBlockScale));
     if (!atlasContainsCell(cellCoord))
     {
         return sample;
@@ -98,51 +109,73 @@ void FarLodChunkSynthMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int minZ = gWorldMin.z + int(localZ) * gBlockScale;
     const int centerX = minX + gBlockScale / 2;
     const int centerZ = minZ + gBlockScale / 2;
+    const int2 centerCell = int2(floorDiv(centerX, gBlockScale), floorDiv(centerZ, gBlockScale));
 
-    const GpuTerrainAtlasSample cellSample = sampleAtlas(centerX, centerZ);
+    const GpuTerrainAtlasSample center = sampleAtlasCell(centerCell);
+    const GpuTerrainAtlasSample east = sampleAtlasCell(centerCell + int2(1, 0));
+    const GpuTerrainAtlasSample west = sampleAtlasCell(centerCell + int2(-1, 0));
+    const GpuTerrainAtlasSample south = sampleAtlasCell(centerCell + int2(0, 1));
+    const GpuTerrainAtlasSample north = sampleAtlasCell(centerCell + int2(0, -1));
 
     GpuTerrainColumnDescriptor descriptor = (GpuTerrainColumnDescriptor)0;
-    descriptor.centerHasSolid = cellSample.hasSolid;
-    descriptor.centerWaterEnabled = cellSample.waterEnabled;
-    descriptor.centerSurfaceY = cellSample.surfaceY;
-    descriptor.centerWaterBottomY = cellSample.waterBottomY;
-    descriptor.centerSurfaceBlock = cellSample.surfaceBlock;
-    descriptor.centerFillerBlock = cellSample.fillerBlock;
+    descriptor.terrainTopBlock = kBlockAir;
+    descriptor.terrainSideBlock = kBlockAir;
+    descriptor.waterBlock = kBlockWater;
+    descriptor.canopyBlock = kBlockAir;
 
-    const int minSurfaceY = cellSample.minSurfaceY;
-    const int maxSurfaceY = cellSample.maxSurfaceY;
-    const int waterBottomY = cellSample.waterBottomY;
-    const uint waterVotes = cellSample.waterEnabled;
-
-    [unroll]
-    for (uint localY = 0u; localY < kLogicalSize; ++localY)
+    if (center.hasSolid != 0u)
     {
-        const int voxelMinY = gWorldMin.y + int(localY) * gBlockScale;
-        const int voxelMaxY = voxelMinY + (gBlockScale - 1);
-        const uint bit = (1u << localY);
-
-        // Conservative solid coverage: if any part of the represented footprint reaches into this band,
-        // treat the far voxel as occupied to avoid undercut holes on slopes.
-        if (cellSample.hasSolid != 0u && maxSurfaceY >= voxelMinY)
+        const int localRelief = max(center.maxSurfaceY - center.minSurfaceY, 0);
+        int neighborDelta = 0;
+        if (east.hasSolid != 0u)
         {
-            // If even the minimum surface is above this band, it is definitely interior filler.
-            if (minSurfaceY > voxelMaxY || cellSample.surfaceY > voxelMaxY)
-            {
-                descriptor.terrainFillerMask |= bit;
-            }
-            else
-            {
-                descriptor.terrainSurfaceMask |= bit;
-            }
-            continue;
+            neighborDelta = max(neighborDelta, max(abs(center.maxSurfaceY - east.maxSurfaceY), abs(center.surfaceY - east.surfaceY)));
+        }
+        if (west.hasSolid != 0u)
+        {
+            neighborDelta = max(neighborDelta, max(abs(center.maxSurfaceY - west.maxSurfaceY), abs(center.surfaceY - west.surfaceY)));
+        }
+        if (south.hasSolid != 0u)
+        {
+            neighborDelta = max(neighborDelta, max(abs(center.maxSurfaceY - south.maxSurfaceY), abs(center.surfaceY - south.surfaceY)));
+        }
+        if (north.hasSolid != 0u)
+        {
+            neighborDelta = max(neighborDelta, max(abs(center.maxSurfaceY - north.maxSurfaceY), abs(center.surfaceY - north.surfaceY)));
         }
 
-        // Aggregated water presence: require a majority of sampled footprint points to be below sea level.
-        if (waterVotes >= 3u &&
-            waterBottomY <= voxelMaxY &&
-            gSeaLevel >= voxelMinY)
+        const int steepMetric = max(localRelief, neighborDelta);
+        const float preserveT = saturate((float)(steepMetric - gBlockScale) / (float)max(gBlockScale * 4, 1));
+        descriptor.flags |= kColumnFlagTerrain;
+        if (steepMetric >= gBlockScale)
         {
-            descriptor.waterMask |= bit;
+            descriptor.flags |= kColumnFlagSteep;
+        }
+        descriptor.terrainTopY = max(center.surfaceY, (int)round(lerp((float)center.surfaceY, (float)center.maxSurfaceY, preserveT)));
+        descriptor.terrainBaseY = (steepMetric >= gBlockScale) ? min(center.minSurfaceY, center.surfaceY) : center.surfaceY;
+        descriptor.terrainTopBlock = center.surfaceBlock;
+        descriptor.terrainSideBlock = (center.fillerBlock != 0u) ? center.fillerBlock : center.surfaceBlock;
+    }
+
+    if ((center.waterEnabled > 0u) &&
+        ((descriptor.flags & kColumnFlagTerrain) != 0u) &&
+        (gSeaLevel > descriptor.terrainTopY))
+    {
+        descriptor.flags |= kColumnFlagWater;
+        descriptor.waterTopY = gSeaLevel;
+        descriptor.waterBottomY = min(center.waterBottomY, descriptor.waterTopY);
+    }
+
+    if (center.canopyStrength >= 64u && center.canopyTopY > center.canopyBottomY)
+    {
+        const int terrainCap = ((descriptor.flags & kColumnFlagTerrain) != 0u) ? descriptor.terrainTopY : center.surfaceY;
+        const int canopyBottom = max(center.canopyBottomY, terrainCap + 1);
+        if (center.canopyTopY > canopyBottom)
+        {
+            descriptor.flags |= kColumnFlagCanopy;
+            descriptor.canopyBottomY = canopyBottom;
+            descriptor.canopyTopY = center.canopyTopY;
+            descriptor.canopyBlock = center.canopyBlock;
         }
     }
 

@@ -7,6 +7,7 @@ struct DecodedVertexLighting
     float ao;
     float aoDebug;
     uint flags;
+    float farVoxelScale;
 };
 
 static const uint kMaterialFlagWater = 0x01u;
@@ -49,6 +50,8 @@ DecodedVertexLighting decodeVertexLighting(uint packedLighting)
     decoded.ao = decodeAoFactor(aoLevel);
     decoded.aoDebug = decoded.ao;
     decoded.flags = (packedLighting >> 10) & 0x3Fu;
+    const uint scale = (packedLighting >> 16) & 0xFFu;
+    decoded.farVoxelScale = (scale > 0u) ? (float)scale : 1.0f;
     return decoded;
 }
 

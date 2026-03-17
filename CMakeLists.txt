@@ -42,6 +42,7 @@ set(BLOCKGAME_SOURCES
     ${SRC_ROOT}/terrain/surface_map.cpp
     ${SRC_ROOT}/terrain/terrain_generator.cpp
     ${SRC_ROOT}/terrain/worldgen_profile.cpp
+    ${CMAKE_SOURCE_DIR}/blockgame.rc
 )
 
 add_executable(blockgame ${BLOCKGAME_SOURCES})

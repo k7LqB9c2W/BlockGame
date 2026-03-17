@@ -2,7 +2,7 @@ cbuffer FaceCountParams : register(b0)
 {
     int gWorldMinY;
     int gBlockScale;
-    uint gNegativeNeighborMask;
+    uint gReserved0;
     uint gMaxMergeExtent;
 };
 
@@ -24,13 +24,12 @@ struct GpuTerrainColumnDescriptor
 
 StructuredBuffer<GpuTerrainColumnDescriptor> gColumnBuffer : register(t0);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosX : register(t1);
-StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosY : register(t2);
+StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegX : register(t2);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosZ : register(t3);
+StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegZ : register(t4);
 RWStructuredBuffer<uint> gFaceCounts : register(u0);
 
 static const uint kLogicalSize = 16u;
-static const uint kNegativeNeighborX = 0x1u;
-static const uint kNegativeNeighborZ = 0x4u;
 static const uint kColumnFlagTerrain = 0x01u;
 static const uint kColumnFlagWater = 0x02u;
 static const uint kColumnFlagCanopy = 0x04u;
@@ -317,8 +316,6 @@ uint countSideRuns(uint layerId, uint dirId, uint slice)
     {
         GpuTerrainColumnDescriptor current = (GpuTerrainColumnDescriptor)0;
         GpuTerrainColumnDescriptor neighbor = (GpuTerrainColumnDescriptor)0;
-        bool blockedByNegativeNeighbor = false;
-
         if (dirId == 0u)
         {
             current = sampleLocal(slice, i);
@@ -334,10 +331,13 @@ uint countSideRuns(uint layerId, uint dirId, uint slice)
         else if (dirId == 1u)
         {
             current = sampleLocal(slice, i);
-            blockedByNegativeNeighbor = (slice == 0u) && ((gNegativeNeighborMask & kNegativeNeighborX) != 0u);
             if (slice > 0u)
             {
                 neighbor = sampleLocal(slice - 1u, i);
+            }
+            else
+            {
+                neighbor = gNeighborNegX[columnIndex(kLogicalSize - 1u, i)];
             }
         }
         else if (dirId == 2u)
@@ -355,15 +355,18 @@ uint countSideRuns(uint layerId, uint dirId, uint slice)
         else
         {
             current = sampleLocal(i, slice);
-            blockedByNegativeNeighbor = (slice == 0u) && ((gNegativeNeighborMask & kNegativeNeighborZ) != 0u);
             if (slice > 0u)
             {
                 neighbor = sampleLocal(i, slice - 1u);
             }
+            else
+            {
+                neighbor = gNeighborNegZ[columnIndex(i, kLogicalSize - 1u)];
+            }
         }
 
         bool visible = false;
-        keys[i] = blockedByNegativeNeighbor ? 0u : hashSideKey(current, neighbor, layerId, visible);
+        keys[i] = hashSideKey(current, neighbor, layerId, visible);
     }
 
     uint runCount = 0u;

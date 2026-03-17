@@ -506,6 +506,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\surface_map.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\terrain_generator.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\worldgen_profile.cpp" />
+    <ResourceCompile Include="C:\Users\Jacob\Documents\code\BlockGame\blockgame.rc" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="C:\Users\Jacob\Documents\code\BlockGame\build\ZERO_CHECK.vcxproj">

@@ -39,6 +39,9 @@
     <CustomBuild Include="C:\Users\Jacob\Documents\code\BlockGame\CMakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="C:\Users\Jacob\Documents\code\BlockGame\blockgame.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <Filter Include="src">
       <UniqueIdentifier>{EA6A7B5B-2F42-351A-A24D-0276ECD1A8F5}</UniqueIdentifier>
     </Filter>

@@ -1454,16 +1454,18 @@ public:
 
     void dispatchFaceCount(int worldMinY,
                            int blockScale,
-                           std::uint32_t negativeNeighborMask,
+                           std::uint32_t reservedFlags,
                            std::uint32_t maxMergeExtent,
                            ID3D12Resource* voxelBuffer,
                            ID3D12Resource* neighborPosX,
-                           ID3D12Resource* neighborPosY,
+                           ID3D12Resource* neighborNegX,
                            ID3D12Resource* neighborPosZ,
+                           ID3D12Resource* neighborNegZ,
                            ID3D12Resource* faceCountBuffer)
     {
         if (!open_ || voxelBuffer == nullptr || neighborPosX == nullptr ||
-            neighborPosY == nullptr || neighborPosZ == nullptr || faceCountBuffer == nullptr)
+            neighborNegX == nullptr || neighborPosZ == nullptr || neighborNegZ == nullptr ||
+            faceCountBuffer == nullptr)
         {
             return;
         }
@@ -1471,9 +1473,9 @@ public:
         std::array<std::uint32_t, 4> constants{
             static_cast<std::uint32_t>(worldMinY),
             static_cast<std::uint32_t>(blockScale),
-            negativeNeighborMask,
+            reservedFlags,
             maxMergeExtent};
-        const UINT descriptorIndex = allocateDescriptorRange(5);
+        const UINT descriptorIndex = allocateDescriptorRange(6);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      voxelBuffer,
                                      0,
@@ -1485,7 +1487,7 @@ public:
                                      kGpuContextColumnCount,
                                      kGpuContextColumnDescriptorStrideBytes);
         writeStructuredSrvDescriptor(descriptorIndex + 2u,
-                                     neighborPosY,
+                                     neighborNegX,
                                      0,
                                      kGpuContextColumnCount,
                                      kGpuContextColumnDescriptorStrideBytes);
@@ -1494,7 +1496,12 @@ public:
                                      0,
                                      kGpuContextColumnCount,
                                      kGpuContextColumnDescriptorStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 4u,
+        writeStructuredSrvDescriptor(descriptorIndex + 4u,
+                                     neighborNegZ,
+                                     0,
+                                     kGpuContextColumnCount,
+                                     kGpuContextColumnDescriptorStrideBytes);
+        writeStructuredUavDescriptor(descriptorIndex + 5u,
                                      faceCountBuffer,
                                      0,
                                      kGpuContextVoxelCount,
@@ -1508,7 +1515,7 @@ public:
         srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
         commandList_->SetComputeRootDescriptorTable(1, srvHandle);
         D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 4u;
+        uavHandle.ptr += descriptorSize_ * 5u;
         commandList_->SetComputeRootDescriptorTable(2, uavHandle);
         commandList_->Dispatch((kGpuContextVoxelCount + 63u) / 64u, 1, 1);
         hasCommands_ = true;
@@ -1597,11 +1604,12 @@ public:
                           std::uint32_t vertexBase,
                           std::uint32_t indexBase,
                           std::uint32_t recordIndex,
-                          std::uint32_t negativeNeighborMask,
+                          std::uint32_t reservedFlags,
                           ID3D12Resource* voxelBuffer,
                           ID3D12Resource* neighborPosX,
-                          ID3D12Resource* neighborPosY,
+                          ID3D12Resource* neighborNegX,
                           ID3D12Resource* neighborPosZ,
+                          ID3D12Resource* neighborNegZ,
                           ID3D12Resource* faceCountBuffer,
                           ID3D12Resource* facePrefixBuffer,
                           ID3D12Resource* blockUvBuffer,
@@ -1614,8 +1622,8 @@ public:
                           ID3D12Resource* drawRecordBuffer,
                           std::uint32_t drawRecordCount)
     {
-        if (!open_ || voxelBuffer == nullptr || neighborPosX == nullptr || neighborPosY == nullptr ||
-            neighborPosZ == nullptr || faceCountBuffer == nullptr || facePrefixBuffer == nullptr ||
+        if (!open_ || voxelBuffer == nullptr || neighborPosX == nullptr || neighborNegX == nullptr ||
+            neighborPosZ == nullptr || neighborNegZ == nullptr || faceCountBuffer == nullptr || facePrefixBuffer == nullptr ||
             blockUvBuffer == nullptr || vertexBuffer == nullptr || indexBuffer == nullptr || drawRecordBuffer == nullptr)
         {
             return;
@@ -1630,8 +1638,8 @@ public:
             vertexBase,
             indexBase,
             recordIndex,
-            negativeNeighborMask};
-        const UINT descriptorIndex = allocateDescriptorRange(10);
+            reservedFlags};
+        const UINT descriptorIndex = allocateDescriptorRange(11);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      voxelBuffer,
                                      0,
@@ -1643,7 +1651,7 @@ public:
                                      kGpuContextColumnCount,
                                      kGpuContextColumnDescriptorStrideBytes);
         writeStructuredSrvDescriptor(descriptorIndex + 2u,
-                                     neighborPosY,
+                                     neighborNegX,
                                      0,
                                      kGpuContextColumnCount,
                                      kGpuContextColumnDescriptorStrideBytes);
@@ -1653,31 +1661,36 @@ public:
                                      kGpuContextColumnCount,
                                      kGpuContextColumnDescriptorStrideBytes);
         writeStructuredSrvDescriptor(descriptorIndex + 4u,
+                                     neighborNegZ,
+                                     0,
+                                     kGpuContextColumnCount,
+                                     kGpuContextColumnDescriptorStrideBytes);
+        writeStructuredSrvDescriptor(descriptorIndex + 5u,
                                      faceCountBuffer,
                                      0,
                                      kGpuContextVoxelCount,
                                      kGpuContextPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 5u,
+        writeStructuredSrvDescriptor(descriptorIndex + 6u,
                                      facePrefixBuffer,
                                      0,
                                      kGpuContextVoxelCount,
                                      kGpuContextPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 6u,
+        writeStructuredSrvDescriptor(descriptorIndex + 7u,
                                      blockUvBuffer,
                                      0,
                                      blockUvCount,
                                      blockUvStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 7u,
+        writeStructuredUavDescriptor(descriptorIndex + 8u,
                                      vertexBuffer,
                                      0,
                                      vertexBufferCount,
                                      static_cast<std::uint32_t>(sizeof(Vertex)));
-        writeStructuredUavDescriptor(descriptorIndex + 8u,
+        writeStructuredUavDescriptor(descriptorIndex + 9u,
                                      indexBuffer,
                                      0,
                                      indexBufferCount,
                                      static_cast<std::uint32_t>(sizeof(std::uint32_t)));
-        writeStructuredUavDescriptor(descriptorIndex + 9u,
+        writeStructuredUavDescriptor(descriptorIndex + 10u,
                                      drawRecordBuffer,
                                      0,
                                      drawRecordCount,
@@ -1691,7 +1704,7 @@ public:
         srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
         commandList_->SetComputeRootDescriptorTable(1, srvHandle);
         D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 7u;
+        uavHandle.ptr += descriptorSize_ * 8u;
         commandList_->SetComputeRootDescriptorTable(2, uavHandle);
         commandList_->Dispatch((kGpuContextVoxelCount + 63u) / 64u, 1, 1);
         hasCommands_ = true;
@@ -2042,7 +2055,7 @@ private:
 
         D3D12_DESCRIPTOR_RANGE faceCountSrvRange{};
         faceCountSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        faceCountSrvRange.NumDescriptors = 4;
+        faceCountSrvRange.NumDescriptors = 5;
         faceCountSrvRange.BaseShaderRegister = 0;
         faceCountSrvRange.OffsetInDescriptorsFromTableStart = 0;
         D3D12_DESCRIPTOR_RANGE faceCountUavRange{};
@@ -2153,7 +2166,7 @@ private:
 
         D3D12_DESCRIPTOR_RANGE faceEmitSrvRange{};
         faceEmitSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        faceEmitSrvRange.NumDescriptors = 7;
+        faceEmitSrvRange.NumDescriptors = 8;
         faceEmitSrvRange.BaseShaderRegister = 0;
         faceEmitSrvRange.OffsetInDescriptorsFromTableStart = 0;
         D3D12_DESCRIPTOR_RANGE faceEmitUavRange{};
@@ -7367,10 +7380,10 @@ private:
                     break;
                 }
 
-                std::uint32_t negativeNeighborMask = 0u;
                 ID3D12Resource* neighborPosX = emptyVoxelBuffer_.Get();
-                ID3D12Resource* neighborPosY = emptyVoxelBuffer_.Get();
+                ID3D12Resource* neighborNegX = emptyVoxelBuffer_.Get();
                 ID3D12Resource* neighborPosZ = emptyVoxelBuffer_.Get();
+                ID3D12Resource* neighborNegZ = emptyVoxelBuffer_.Get();
                 auto tryPositiveNeighbor = [&](const glm::ivec3& offset,
                                                ID3D12Resource*& outBuffer)
                 {
@@ -7399,7 +7412,8 @@ private:
                     }
                 };
 
-                auto tryNegativeNeighbor = [&](const glm::ivec3& offset, std::uint32_t maskBit)
+                auto tryNegativeNeighbor = [&](const glm::ivec3& offset,
+                                               ID3D12Resource*& outBuffer)
                 {
                     const FarLodChunkKey neighborKey{request.key.level, request.key.coord + offset};
                     auto neighborIt = chunks_.find(neighborKey);
@@ -7416,13 +7430,20 @@ private:
                     {
                         return;
                     }
-                    negativeNeighborMask |= maskBit;
+                    outBuffer = neighbor.gpu.columnBuffer.Get();
+                    if (neighbor.gpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+                    {
+                        gpuContext_.transition(neighbor.gpu.columnBuffer.Get(),
+                                               neighbor.gpu.columnState,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        neighbor.gpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    }
                 };
 
                 tryPositiveNeighbor(glm::ivec3(1, 0, 0), neighborPosX);
                 tryPositiveNeighbor(glm::ivec3(0, 0, 1), neighborPosZ);
-                tryNegativeNeighbor(glm::ivec3(-1, 0, 0), 0x1u);
-                tryNegativeNeighbor(glm::ivec3(0, 0, -1), 0x4u);
+                tryNegativeNeighbor(glm::ivec3(-1, 0, 0), neighborNegX);
+                tryNegativeNeighbor(glm::ivec3(0, 0, -1), neighborNegZ);
 
                 if (chunk.gpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
                 {
@@ -7476,12 +7497,13 @@ private:
                                                                                    : 16u;
                     gpuContext_.dispatchFaceCount(static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
                                                   request.blockScale,
-                                                  negativeNeighborMask,
+                                                  0u,
                                                   maxMergeExtent,
                                                   chunk.gpu.columnBuffer.Get(),
                                                   neighborPosX,
-                                                  neighborPosY,
+                                                  neighborNegX,
                                                   neighborPosZ,
+                                                  neighborNegZ,
                                                   chunk.gpu.faceCountBuffer.Get());
                     gpuContext_.uavBarrier(chunk.gpu.faceCountBuffer.Get());
                     gpuContext_.dispatchFacePrefix(chunk.gpu.faceCountBuffer.Get(),
@@ -7496,11 +7518,12 @@ private:
                                                  static_cast<std::uint32_t>(allocation.vertexOffset),
                                                  static_cast<std::uint32_t>(allocation.indexOffset),
                                                  allocation.recordIndex,
-                                                 negativeNeighborMask,
+                                                 0u,
                                                  chunk.gpu.columnBuffer.Get(),
                                                  neighborPosX,
-                                                 neighborPosY,
+                                                 neighborNegX,
                                                  neighborPosZ,
+                                                 neighborNegZ,
                                                  chunk.gpu.faceCountBuffer.Get(),
                                                  chunk.gpu.facePrefixBuffer.Get(),
                                                  blockUvBuffer_.Get(),

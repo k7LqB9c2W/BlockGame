@@ -3352,3 +3352,10 @@ C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_col
   [2] startup/renderer_initialize
   [3] startup/chunk_manager
 2026-03-17 09:53:16 - hang dump: written to blockgame_hang.dmp
+2026-03-17 10:09:15 - diagnostics: hang watchdog timeout | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=15967.88
+2026-03-17 10:09:15 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 10:09:15 - hang dump: written to blockgame_hang.dmp

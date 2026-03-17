@@ -1062,7 +1062,6 @@ public:
 
         atlasUpdatePipelineState_.Reset();
         synthColumnPipelineState_.Reset();
-        synthFillPipelineState_.Reset();
         stampPipelineState_.Reset();
         faceCountPipelineState_.Reset();
         facePrefixGroupPipelineState_.Reset();
@@ -1071,7 +1070,6 @@ public:
         faceEmitPipelineState_.Reset();
         atlasUpdateRootSignature_.Reset();
         synthColumnRootSignature_.Reset();
-        synthFillRootSignature_.Reset();
         stampRootSignature_.Reset();
         faceCountRootSignature_.Reset();
         facePrefixGroupRootSignature_.Reset();
@@ -1081,7 +1079,6 @@ public:
         descriptorHeap_.Reset();
         atlasUpdateShader_.Reset();
         synthColumnShader_.Reset();
-        synthFillShader_.Reset();
         stampShader_.Reset();
         faceCountShader_.Reset();
         facePrefixGroupShader_.Reset();
@@ -1785,7 +1782,6 @@ public:
     {
         return device_ != nullptr && queue_ != nullptr && allocator_ != nullptr && commandList_ != nullptr &&
                atlasUpdatePipelineState_ != nullptr && synthColumnPipelineState_ != nullptr &&
-               synthFillPipelineState_ != nullptr &&
                stampPipelineState_ != nullptr &&
                faceCountPipelineState_ != nullptr &&
                facePrefixGroupPipelineState_ != nullptr &&
@@ -1895,8 +1891,6 @@ private:
             compileShaderFromFileLocal((shaderRoot / "far_lod_column_atlas_update_canonical_cs.hlsl").string(), "FarLodColumnAtlasUpdateMain", "cs_5_0");
         synthColumnShader_ =
             compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_synth_cs.hlsl").string(), "FarLodChunkSynthMain", "cs_5_0");
-        synthFillShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_fill_cs.hlsl").string(), "FarLodChunkFillMain", "cs_5_0");
         stampShader_ =
             compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_structure_stamp_cs.hlsl").string(), "FarLodChunkStructureStampMain", "cs_5_0");
         faceCountShader_ =
@@ -1996,38 +1990,6 @@ private:
         synthColumnPso.CS = {synthColumnShader_->GetBufferPointer(), synthColumnShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&synthColumnPso, IID_PPV_ARGS(&synthColumnPipelineState_)),
                         "failed to create far lod synth column pipeline");
-
-        D3D12_DESCRIPTOR_RANGE fillSrvRange{};
-        fillSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        fillSrvRange.NumDescriptors = 1;
-        fillSrvRange.BaseShaderRegister = 0;
-        fillSrvRange.OffsetInDescriptorsFromTableStart = 0;
-        D3D12_DESCRIPTOR_RANGE fillUavRange{};
-        fillUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        fillUavRange.NumDescriptors = 1;
-        fillUavRange.BaseShaderRegister = 0;
-        fillUavRange.OffsetInDescriptorsFromTableStart = 0;
-
-        std::array<D3D12_ROOT_PARAMETER, 3> fillParams{};
-        fillParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        fillParams[0].Constants.ShaderRegister = 0;
-        fillParams[0].Constants.Num32BitValues = 9;
-        fillParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        fillParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        fillParams[1].DescriptorTable.pDescriptorRanges = &fillSrvRange;
-        fillParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        fillParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        fillParams[2].DescriptorTable.pDescriptorRanges = &fillUavRange;
-        D3D12_ROOT_SIGNATURE_DESC fillDesc{};
-        fillDesc.NumParameters = static_cast<UINT>(fillParams.size());
-        fillDesc.pParameters = fillParams.data();
-        createRootSignature(fillDesc, synthFillRootSignature_, "far lod synth fill root signature");
-
-        D3D12_COMPUTE_PIPELINE_STATE_DESC synthFillPso{};
-        synthFillPso.pRootSignature = synthFillRootSignature_.Get();
-        synthFillPso.CS = {synthFillShader_->GetBufferPointer(), synthFillShader_->GetBufferSize()};
-        throwIfFailedDx(device_->CreateComputePipelineState(&synthFillPso, IID_PPV_ARGS(&synthFillPipelineState_)),
-                        "failed to create far lod synth fill pipeline");
 
         D3D12_DESCRIPTOR_RANGE stampSrvRange{};
         stampSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -2217,7 +2179,6 @@ private:
     UINT64 fenceValue_{0};
     UINT64 lastSubmittedFenceValue_{0};
     Microsoft::WRL::ComPtr<ID3DBlob> synthColumnShader_;
-    Microsoft::WRL::ComPtr<ID3DBlob> synthFillShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> stampShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> atlasUpdateShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> faceCountShader_;
@@ -2227,7 +2188,6 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> faceEmitShader_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasUpdateRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> synthColumnRootSignature_;
-    Microsoft::WRL::ComPtr<ID3D12RootSignature> synthFillRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> stampRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> faceCountRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> facePrefixGroupRootSignature_;
@@ -2236,7 +2196,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> faceEmitRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> atlasUpdatePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> synthColumnPipelineState_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> synthFillPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> stampPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> faceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> facePrefixGroupPipelineState_;

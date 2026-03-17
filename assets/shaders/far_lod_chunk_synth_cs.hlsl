@@ -52,6 +52,69 @@ static const uint kColumnFlagSteep = 0x08u;
 static const uint kBlockAir = 0u;
 static const uint kBlockWater = 5u;
 
+int quantizeHeight(int y, int step)
+{
+    if (step <= 1)
+    {
+        return y;
+    }
+
+    const int halfStep = step / 2;
+    if (y >= 0)
+    {
+        return ((y + halfStep) / step) * step;
+    }
+    return ((y - halfStep) / step) * step;
+}
+
+int terrainSurfaceSnapStep()
+{
+    return max(1, gBlockScale / 4);
+}
+
+int terrainColumnBaseY(int topY)
+{
+    return topY - terrainSurfaceSnapStep() + 1;
+}
+
+int stableSurfaceHeight(GpuTerrainAtlasSample center,
+                        GpuTerrainAtlasSample east,
+                        GpuTerrainAtlasSample west,
+                        GpuTerrainAtlasSample south,
+                        GpuTerrainAtlasSample north)
+{
+    int heights[5];
+    uint count = 0u;
+    heights[count++] = center.surfaceY;
+    if (east.hasSolid != 0u) heights[count++] = east.surfaceY;
+    if (west.hasSolid != 0u) heights[count++] = west.surfaceY;
+    if (south.hasSolid != 0u) heights[count++] = south.surfaceY;
+    if (north.hasSolid != 0u) heights[count++] = north.surfaceY;
+
+    for (uint i = 1u; i < count; ++i)
+    {
+        const int value = heights[i];
+        int insertIndex = (int)i - 1;
+        while (insertIndex >= 0 && heights[insertIndex] > value)
+        {
+            heights[insertIndex + 1] = heights[insertIndex];
+            insertIndex -= 1;
+        }
+        heights[insertIndex + 1] = value;
+    }
+
+    if (count == 1u)
+    {
+        return heights[0];
+    }
+
+    if ((count & 1u) != 0u)
+    {
+        return heights[count / 2u];
+    }
+    return (heights[count / 2u - 1u] + heights[count / 2u]) / 2;
+}
+
 uint columnIndex(uint localX, uint localZ)
 {
     return localZ * kLogicalSize + localX;
@@ -145,14 +208,28 @@ void FarLodChunkSynthMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
 
         const int steepMetric = max(localRelief, neighborDelta);
-        const float preserveT = saturate((float)(steepMetric - gBlockScale) / (float)max(gBlockScale * 4, 1));
+        const int snapStep = terrainSurfaceSnapStep();
+        const int quantizedMinTop = quantizeHeight(center.minSurfaceY, snapStep);
+        const int quantizedMaxTop = max(quantizedMinTop, quantizeHeight(center.maxSurfaceY, snapStep));
+        int sourceTopY = center.surfaceY;
+        if (localRelief < snapStep * 2 && steepMetric < snapStep * 2)
+        {
+            sourceTopY = stableSurfaceHeight(center, east, west, south, north);
+        }
+        int chosenTop = clamp(quantizeHeight(sourceTopY, snapStep),
+                              quantizedMinTop,
+                              quantizedMaxTop);
+        if (localRelief >= snapStep || steepMetric >= snapStep * 2)
+        {
+            chosenTop = max(chosenTop, quantizedMaxTop);
+        }
         descriptor.flags |= kColumnFlagTerrain;
-        if (steepMetric >= gBlockScale)
+        if (localRelief >= snapStep || steepMetric >= snapStep * 2)
         {
             descriptor.flags |= kColumnFlagSteep;
         }
-        descriptor.terrainTopY = max(center.surfaceY, (int)round(lerp((float)center.surfaceY, (float)center.maxSurfaceY, preserveT)));
-        descriptor.terrainBaseY = (steepMetric >= gBlockScale) ? min(center.minSurfaceY, center.surfaceY) : center.surfaceY;
+        descriptor.terrainTopY = chosenTop;
+        descriptor.terrainBaseY = terrainColumnBaseY(chosenTop);
         descriptor.terrainTopBlock = center.surfaceBlock;
         descriptor.terrainSideBlock = (center.fillerBlock != 0u) ? center.fillerBlock : center.surfaceBlock;
     }

@@ -4494,43 +4494,38 @@ public:
                         }
                     }
 
-                    int relevantMinWorldY = minSurfaceY - level.blockScale;
-                    int relevantMaxWorldY = maxSurfaceY + level.blockScale + kFarStructureHeadroomBlocks;
-                    if (anyWaterFill)
+                    // Terrain ownership is surface-based in XZ. One page owns the visible surface
+                    // for this footprint regardless of world Y.
+                    const glm::ivec3 chunkCoord{chunkX, 0, chunkZ};
+                    FarLodChunkKey key{level.level, chunkCoord};
+                    FarLodChunkRecord& chunk = chunks_[key];
+                    chunk.key = key;
+                    chunk.level = level;
+                    chunk.lastTouchedStamp = updateStamp_;
+                    chunk.active = true;
+                    chunk.fallbackOnly = false;
+                    if (!chunk.initialized)
                     {
-                        relevantMinWorldY = std::min(relevantMinWorldY, seaLevel_ - level.blockScale);
-                        relevantMaxWorldY = std::max(relevantMaxWorldY, seaLevel_ + level.blockScale);
+                        initializeChunk(chunk, level);
+                        chunk.dirty = true;
                     }
 
-                    const int relevantChunkMinY = std::max(chunkMinY, floorDiv(relevantMinWorldY, span));
-                    const int relevantChunkMaxY = std::min(chunkMaxY, floorDiv(relevantMaxWorldY, span));
-                    if (relevantChunkMaxY < relevantChunkMinY)
-                    {
-                        continue;
-                    }
+                    const int relevantMinWorldY =
+                        std::min(minSurfaceY - level.blockScale, anyWaterFill ? seaLevel_ - level.blockScale : minSurfaceY);
+                    const int relevantMaxWorldY =
+                        std::max(maxSurfaceY + level.blockScale + kFarStructureHeadroomBlocks,
+                                 anyWaterFill ? seaLevel_ + level.blockScale : maxSurfaceY + level.blockScale);
+                    chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
+                                                    static_cast<float>(relevantMinWorldY),
+                                                    chunk.cpu.worldMin.z);
+                    chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
+                                                    static_cast<float>(relevantMaxWorldY + 1),
+                                                    chunk.cpu.worldMin.z + level.chunkSpanBlocks());
 
-                    for (int chunkY = relevantChunkMinY; chunkY <= relevantChunkMaxY; ++chunkY)
+                    const bool needsFallback = !(chunk.gpu.resident && chunk.gpu.indexCount > 0);
+                    if (needsFallback)
                     {
-                        const glm::ivec3 chunkCoord{chunkX, chunkY, chunkZ};
-                        FarLodChunkKey key{level.level, chunkCoord};
-                        FarLodChunkRecord& chunk = chunks_[key];
-                        chunk.key = key;
-                        chunk.level = level;
-                        chunk.lastTouchedStamp = updateStamp_;
-                        chunk.active = true;
-                        chunk.fallbackOnly = false;
-                        if (!chunk.initialized)
-                        {
-                            initializeChunk(chunk, level);
-                            chunk.dirty = true;
-                        }
-
-                        const bool needsFallback =
-                            !(chunk.gpu.resident && chunk.gpu.indexCount > 0);
-                        if (needsFallback)
-                        {
-                            touchFallbackParent(level, chunkCoord);
-                        }
+                        touchFallbackParent(level, chunkCoord);
                     }
                 }
             }
@@ -4560,6 +4555,10 @@ public:
                 // Fallback parents are temporary: stop drawing them as soon as they are no longer needed,
                 // then retire their residency quickly so they don't hang around as redundant coverage.
                 chunk.active = false;
+                if (chunk.gpu.resident && chunk.gpu.indexCount > 0)
+                {
+                    releaseChunkRenderAllocation(chunk);
+                }
             }
 
             const std::uint64_t untouchedUpdates = updateStamp_ - chunk.lastTouchedStamp;
@@ -4860,12 +4859,15 @@ private:
             int outerRadiusChunks;
         };
 
-        static constexpr std::array<LevelTemplate, 5> kLevelTemplates{{
-            {1, 2, 72},
-            {2, 4, 128},
-            {3, 8, 192},
-            {4, 16, 320},
-            {5, 32, kMaxTotalRenderDistanceChunks},
+        static constexpr std::array<LevelTemplate, 8> kLevelTemplates{{
+            {1, 2, 48},
+            {2, 4, 80},
+            {3, 8, 128},
+            {4, 16, 192},
+            {5, 32, 288},
+            {6, 64, 384},
+            {7, 128, 480},
+            {8, 256, kMaxTotalRenderDistanceChunks},
         }};
 
         levels_.clear();
@@ -6059,7 +6061,7 @@ private:
 
         int minSurfaceY = std::numeric_limits<int>::max();
         int maxSurfaceY = std::numeric_limits<int>::min();
-        std::int64_t surfaceSum = 0;
+        std::array<int, 9> sampledSurfaceHeights{};
         std::uint32_t sampleCount = 0u;
         std::uint32_t waterVotes = 0u;
         int minWaterBottomY = std::numeric_limits<int>::max();
@@ -6087,7 +6089,7 @@ private:
             ++sampleCount;
             minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
             maxSurfaceY = std::max(maxSurfaceY, sample.surfaceY);
-            surfaceSum += static_cast<std::int64_t>(sample.surfaceY);
+            sampledSurfaceHeights[sampleCount - 1u] = sample.surfaceY;
 
             const terrain::BiomeDefinition& biome = *sample.dominantBiome;
             const auto& waterFill = biome.terrainSettings.waterFill;
@@ -6126,8 +6128,16 @@ private:
         sampleOut.hasSolid = 1u;
         sampleOut.minSurfaceY = minSurfaceY;
         sampleOut.maxSurfaceY = maxSurfaceY;
-        sampleOut.surfaceY = static_cast<int>(std::llround(static_cast<double>(surfaceSum) /
-                                                           static_cast<double>(sampleCount)));
+        std::sort(sampledSurfaceHeights.begin(), sampledSurfaceHeights.begin() + static_cast<std::ptrdiff_t>(sampleCount));
+        if ((sampleCount & 1u) != 0u)
+        {
+            sampleOut.surfaceY = sampledSurfaceHeights[sampleCount / 2u];
+        }
+        else
+        {
+            sampleOut.surfaceY =
+                (sampledSurfaceHeights[sampleCount / 2u - 1u] + sampledSurfaceHeights[sampleCount / 2u]) / 2;
+        }
 
         if (centerValid && centerSample.dominantBiome)
         {
@@ -7361,7 +7371,6 @@ private:
                 ID3D12Resource* neighborPosX = emptyVoxelBuffer_.Get();
                 ID3D12Resource* neighborPosY = emptyVoxelBuffer_.Get();
                 ID3D12Resource* neighborPosZ = emptyVoxelBuffer_.Get();
-
                 auto tryPositiveNeighbor = [&](const glm::ivec3& offset,
                                                ID3D12Resource*& outBuffer)
                 {
@@ -7465,7 +7474,7 @@ private:
                                                         : (request.blockScale <= 4) ? 4u
                                                         : (request.blockScale <= 8) ? 8u
                                                                                    : 16u;
-                    gpuContext_.dispatchFaceCount(request.worldMin.y,
+                    gpuContext_.dispatchFaceCount(static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
                                                   request.blockScale,
                                                   negativeNeighborMask,
                                                   maxMergeExtent,
@@ -7479,7 +7488,9 @@ private:
                                                    chunk.gpu.facePrefixBuffer.Get(),
                                                    chunk.gpu.faceGroupSumBuffer.Get());
                     gpuContext_.uavBarrier(chunk.gpu.facePrefixBuffer.Get());
-                    gpuContext_.dispatchFaceEmit(request.worldMin,
+                    gpuContext_.dispatchFaceEmit(glm::ivec3(request.worldMin.x,
+                                                            static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
+                                                            request.worldMin.z),
                                                  request.blockScale,
                                                  maxMergeExtent,
                                                  static_cast<std::uint32_t>(allocation.vertexOffset),
@@ -8489,6 +8500,65 @@ FarTerrainManager::GpuTerrainColumnDescriptor FarTerrainManager::buildGpuTerrain
         return std::max(std::abs(center.maxSurfaceY - neighbor.maxSurfaceY),
                         std::abs(center.surfaceY - neighbor.surfaceY));
     };
+    auto quantizeHeight = [](int y, int step) noexcept
+    {
+        if (step <= 1)
+        {
+            return y;
+        }
+
+        const int halfStep = step / 2;
+        if (y >= 0)
+        {
+            return ((y + halfStep) / step) * step;
+        }
+        return ((y - halfStep) / step) * step;
+    };
+    auto terrainSurfaceSnapStep = [&](int stepBase) noexcept
+    {
+        return std::max(1, stepBase / 4);
+    };
+    auto terrainColumnBaseY = [&](int topY, int snapStep) noexcept
+    {
+        return topY - snapStep + 1;
+    };
+    auto stableSurfaceHeight = [&](const GpuTerrainAtlasSample& sampleCenter,
+                                   const GpuTerrainAtlasSample& sampleEast,
+                                   const GpuTerrainAtlasSample& sampleWest,
+                                   const GpuTerrainAtlasSample& sampleSouth,
+                                   const GpuTerrainAtlasSample& sampleNorth) noexcept
+    {
+        std::array<int, 5> heights{};
+        std::size_t count = 0;
+        heights[count++] = sampleCenter.surfaceY;
+        if (sampleEast.hasSolid != 0u)
+        {
+            heights[count++] = sampleEast.surfaceY;
+        }
+        if (sampleWest.hasSolid != 0u)
+        {
+            heights[count++] = sampleWest.surfaceY;
+        }
+        if (sampleSouth.hasSolid != 0u)
+        {
+            heights[count++] = sampleSouth.surfaceY;
+        }
+        if (sampleNorth.hasSolid != 0u)
+        {
+            heights[count++] = sampleNorth.surfaceY;
+        }
+
+        std::sort(heights.begin(), heights.begin() + static_cast<std::ptrdiff_t>(count));
+        if (count == 1)
+        {
+            return heights[0];
+        }
+        if ((count & 1u) != 0u)
+        {
+            return heights[count / 2];
+        }
+        return (heights[count / 2 - 1] + heights[count / 2]) / 2;
+    };
 
     GpuTerrainColumnDescriptor descriptor{};
     descriptor.terrainTopBlock = static_cast<std::uint32_t>(toIndex(BlockId::Air));
@@ -8504,23 +8574,29 @@ FarTerrainManager::GpuTerrainColumnDescriptor FarTerrainManager::buildGpuTerrain
                                           neighborDelta(west),
                                           neighborDelta(south),
                                           neighborDelta(north)});
-        const float preserveT =
-            std::clamp(static_cast<float>(steepMetric - safeBlockScale) /
-                           static_cast<float>(std::max(safeBlockScale * 4, 1)),
-                       0.0f,
-                       1.0f);
+        const int snapStep = terrainSurfaceSnapStep(safeBlockScale);
+        const int quantizedMinTop = quantizeHeight(center.minSurfaceY, snapStep);
+        const int quantizedMaxTop = std::max(quantizedMinTop, quantizeHeight(center.maxSurfaceY, snapStep));
+        int sourceTopY = center.surfaceY;
+        if (localRelief < snapStep * 2 && steepMetric < snapStep * 2)
+        {
+            sourceTopY = stableSurfaceHeight(center, east, west, south, north);
+        }
+        int chosenTop =
+            std::clamp(quantizeHeight(sourceTopY, snapStep),
+                       quantizedMinTop,
+                       quantizedMaxTop);
+        if (localRelief >= snapStep || steepMetric >= snapStep * 2)
+        {
+            chosenTop = std::max(chosenTop, quantizedMaxTop);
+        }
         descriptor.flags |= kFarColumnFlagTerrain;
-        if (steepMetric >= safeBlockScale)
+        if (localRelief >= snapStep || steepMetric >= snapStep * 2)
         {
             descriptor.flags |= kFarColumnFlagSteep;
         }
-        descriptor.terrainTopY =
-            std::max(center.surfaceY,
-                     static_cast<int>(std::lround(std::lerp(static_cast<float>(center.surfaceY),
-                                                           static_cast<float>(center.maxSurfaceY),
-                                                           preserveT))));
-        descriptor.terrainBaseY =
-            (steepMetric >= safeBlockScale) ? std::min(center.minSurfaceY, center.surfaceY) : center.surfaceY;
+        descriptor.terrainTopY = chosenTop;
+        descriptor.terrainBaseY = terrainColumnBaseY(chosenTop, snapStep);
         descriptor.terrainTopBlock = center.surfaceBlock;
         descriptor.terrainSideBlock = center.fillerBlock != 0u ? center.fillerBlock : center.surfaceBlock;
     }

@@ -147,9 +147,7 @@ bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
     {
         return false;
     }
-    const int topY = layerTopY(column, layerId);
-    const int chunkMaxY = gWorldMinY + int(kLogicalSize) * gBlockScale;
-    return topY >= gWorldMinY && topY < chunkMaxY;
+    return true;
 }
 
 bool sideSegment(GpuTerrainColumnDescriptor current,
@@ -167,16 +165,47 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
 
     const int currentTop = layerTopY(current, layerId);
     const int currentBottom = layerBottomY(current, layerId);
+    if (layerId == kLayerTerrain)
+    {
+        const bool neighborIsActive = layerActive(neighbor, layerId);
+        int neighborTop = gWorldMinY - 1;
+        if (neighborIsActive)
+        {
+            neighborTop = layerTopY(neighbor, layerId);
+        }
+
+        if (currentTop <= neighborTop)
+        {
+            return false;
+        }
+
+        segmentBottom = neighborTop + 1;
+        segmentTopExclusive = currentTop + 1;
+        return segmentTopExclusive > segmentBottom;
+    }
+
     int occluderTop = currentBottom - 1;
-    if (layerActive(neighbor, layerId))
+    const bool neighborIsActive = layerActive(neighbor, layerId);
+    if (neighborIsActive)
     {
         occluderTop = layerTopY(neighbor, layerId);
+    }
+    else if (layerId == kLayerTerrain)
+    {
+        occluderTop = currentBottom - 1;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (currentTop <= occluderTop)
+    {
+        return false;
     }
 
     segmentBottom = max(currentBottom, occluderTop + 1);
     segmentTopExclusive = currentTop + 1;
-    segmentBottom = max(segmentBottom, gWorldMinY);
-    segmentTopExclusive = min(segmentTopExclusive, gWorldMinY + int(kLogicalSize) * gBlockScale);
     return segmentTopExclusive > segmentBottom;
 }
 
@@ -399,9 +428,9 @@ void emitTopPlane(uint planeIndex, uint layerId)
                      layerId,
                      kFaceTop,
                      float3(x0, y, z0),
-                     float3(x1, y, z0),
-                     float3(x1, y, z1),
                      float3(x0, y, z1),
+                     float3(x1, y, z1),
+                     float3(x1, y, z0),
                      float3(0.0f, 1.0f, 0.0f));
             emitted += 1u;
         }
@@ -555,7 +584,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
                 p2 = float3(x, (float)segmentTopExclusive, z1);
                 p3 = float3(x, (float)segmentTopExclusive, z0);
                 normal = float3(1.0f, 0.0f, 0.0f);
-                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceEast, p0, p1, p2, p3, normal);
+                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceEast, p0, p3, p2, p1, normal);
             }
             else if (dirId == 1u)
             {
@@ -567,7 +596,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
                 p2 = float3(x, (float)segmentTopExclusive, z1);
                 p3 = float3(x, (float)segmentBottom, z1);
                 normal = float3(-1.0f, 0.0f, 0.0f);
-                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceWest, p0, p1, p2, p3, normal);
+                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceWest, p0, p3, p2, p1, normal);
             }
             else if (dirId == 2u)
             {
@@ -579,7 +608,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
                 p2 = float3(x1, (float)segmentTopExclusive, z);
                 p3 = float3(x1, (float)segmentBottom, z);
                 normal = float3(0.0f, 0.0f, 1.0f);
-                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceSouth, p0, p1, p2, p3, normal);
+                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceSouth, p0, p3, p2, p1, normal);
             }
             else
             {
@@ -591,7 +620,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
                 p2 = float3(x1, (float)segmentTopExclusive, z);
                 p3 = float3(x0, (float)segmentTopExclusive, z);
                 normal = float3(0.0f, 0.0f, -1.0f);
-                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceNorth, p0, p1, p2, p3, normal);
+                emitQuad(faceBase + emitted, layerSideBlock(current, layerId), layerId, kFaceNorth, p0, p3, p2, p1, normal);
             }
 
             emitted += 1u;
@@ -630,10 +659,42 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (linearIndex == (kVoxelCount - 1u))
     {
         const uint totalFaces = gFacePrefixes[linearIndex] + gFaceCounts[linearIndex];
+        int boundsMinY = 2147483647;
+        int boundsMaxY = -2147483647;
+        [loop]
+        for (uint z = 0u; z < kLogicalSize; ++z)
+        {
+            [loop]
+            for (uint x = 0u; x < kLogicalSize; ++x)
+            {
+                const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
+                if ((column.flags & kColumnFlagTerrain) != 0u)
+                {
+                    boundsMinY = min(boundsMinY, column.terrainBaseY);
+                    boundsMaxY = max(boundsMaxY, column.terrainTopY + 1);
+                }
+                if ((column.flags & kColumnFlagWater) != 0u)
+                {
+                    boundsMinY = min(boundsMinY, column.waterBottomY);
+                    boundsMaxY = max(boundsMaxY, column.waterTopY + 1);
+                }
+                if ((column.flags & kColumnFlagCanopy) != 0u)
+                {
+                    boundsMinY = min(boundsMinY, column.canopyBottomY);
+                    boundsMaxY = max(boundsMaxY, column.canopyTopY + 1);
+                }
+            }
+        }
+        if (boundsMinY > boundsMaxY)
+        {
+            boundsMinY = gWorldMinY;
+            boundsMaxY = gWorldMinY + gBlockScale;
+        }
+
         GpuCullRecord record;
-        record.boundsMin = float4((float)gWorldMinX, (float)gWorldMinY, (float)gWorldMinZ, 1.0f);
+        record.boundsMin = float4((float)gWorldMinX, (float)boundsMinY, (float)gWorldMinZ, 1.0f);
         record.boundsMax = float4((float)(gWorldMinX + int(kLogicalSize) * gBlockScale),
-                                  (float)(gWorldMinY + int(kLogicalSize) * gBlockScale),
+                                  (float)boundsMaxY,
                                   (float)(gWorldMinZ + int(kLogicalSize) * gBlockScale),
                                   1.0f);
         record.indexCount = totalFaces * 6u;

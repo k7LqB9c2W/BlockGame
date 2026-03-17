@@ -111,9 +111,7 @@ bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
     {
         return false;
     }
-    const int topY = layerTopY(column, layerId);
-    const int chunkMaxY = gWorldMinY + int(kLogicalSize) * gBlockScale;
-    return topY >= gWorldMinY && topY < chunkMaxY;
+    return true;
 }
 
 uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
@@ -145,16 +143,47 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
 
     const int currentTop = layerTopY(current, layerId);
     const int currentBottom = layerBottomY(current, layerId);
+    if (layerId == kLayerTerrain)
+    {
+        const bool neighborIsActive = layerActive(neighbor, layerId);
+        int neighborTop = gWorldMinY - 1;
+        if (neighborIsActive)
+        {
+            neighborTop = layerTopY(neighbor, layerId);
+        }
+
+        if (currentTop <= neighborTop)
+        {
+            return false;
+        }
+
+        segmentBottom = neighborTop + 1;
+        segmentTopExclusive = currentTop + 1;
+        return segmentTopExclusive > segmentBottom;
+    }
+
     int occluderTop = currentBottom - 1;
-    if (layerActive(neighbor, layerId))
+    const bool neighborIsActive = layerActive(neighbor, layerId);
+    if (neighborIsActive)
     {
         occluderTop = layerTopY(neighbor, layerId);
+    }
+    else if (layerId == kLayerTerrain)
+    {
+        occluderTop = currentBottom - 1;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (currentTop <= occluderTop)
+    {
+        return false;
     }
 
     segmentBottom = max(currentBottom, occluderTop + 1);
     segmentTopExclusive = currentTop + 1;
-    segmentBottom = max(segmentBottom, gWorldMinY);
-    segmentTopExclusive = min(segmentTopExclusive, gWorldMinY + int(kLogicalSize) * gBlockScale);
     return segmentTopExclusive > segmentBottom;
 }
 

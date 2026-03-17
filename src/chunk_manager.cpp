@@ -4397,151 +4397,26 @@ public:
         std::size_t remainingNewChunkActivations = workBudget.newChunkActivations;
         std::size_t remainingNewFallbackActivations = workBudget.newFallbackActivations;
 
-        auto nextCoarserLevel = [this](int levelId) -> const FarLodLevelConfig*
-        {
-            for (std::size_t i = 0; i < levels_.size(); ++i)
-            {
-                if (levels_[i].level == levelId)
-                {
-                    return (i + 1 < levels_.size()) ? &levels_[i + 1] : nullptr;
-                }
-            }
-            return nullptr;
-        };
-
-        auto touchFallbackParent = [&](const FarLodLevelConfig& childLevel, const glm::ivec3& childCoord)
-        {
-            const FarLodLevelConfig* parentLevel = nextCoarserLevel(childLevel.level);
-            if (parentLevel == nullptr)
-            {
-                return;
-            }
-
-            const glm::ivec3 baseMin = childCoord * childLevel.blockScale;
-            const glm::ivec3 parentCoord{
-                floorDiv(baseMin.x, parentLevel->blockScale),
-                floorDiv(baseMin.y, parentLevel->blockScale),
-                floorDiv(baseMin.z, parentLevel->blockScale)};
-            FarLodChunkKey parentKey{parentLevel->level, parentCoord};
-            auto parentIt = chunks_.find(parentKey);
-            const bool parentMissing = (parentIt == chunks_.end());
-            if (parentMissing && remainingNewFallbackActivations == 0)
-            {
-                return;
-            }
-            FarLodChunkRecord& parent = parentMissing ? chunks_[parentKey] : parentIt->second;
-            if (parentMissing && remainingNewFallbackActivations > 0)
-            {
-                --remainingNewFallbackActivations;
-            }
-            const bool alreadyTouchedThisUpdate = (parent.lastTouchedStamp == updateStamp_);
-            parent.key = parentKey;
-            parent.level = *parentLevel;
-            parent.lastTouchedStamp = updateStamp_;
-            parent.active = true;
-            if (!(alreadyTouchedThisUpdate && !parent.fallbackOnly))
-            {
-                parent.fallbackOnly = true;
-            }
-            if (!parent.initialized)
-            {
-                initializeChunk(parent, *parentLevel);
-                parent.dirty = true;
-            }
-            else if (!(parent.gpu.resident && parent.gpu.indexCount > 0) && !parent.dirty)
-            {
-                markDirty(parent);
-            }
-        };
-
-        auto touchLevel = [&](const FarLodLevelConfig& level)
-        {
-            int& activationOuterRadiusChunks = levelActivationOuterRadiusChunks_[level.level];
-            activationOuterRadiusChunks = std::max(activationOuterRadiusChunks, level.innerRadiusChunks);
-            activationOuterRadiusChunks =
-                std::min(level.outerRadiusChunks, activationOuterRadiusChunks + workBudget.activationStepChunks);
-            const int activeOuterRadiusChunks = activationOuterRadiusChunks;
-
-            const int chunkMinX = floorDiv(cameraChunk.x - activeOuterRadiusChunks, level.blockScale);
-            const int chunkMaxX = floorDiv(cameraChunk.x + activeOuterRadiusChunks, level.blockScale);
-            constexpr int kFarVerticalHeadroomChunks = 6;
-            constexpr int kFarStructureHeadroomBlocks = 48;
-            const int verticalRadiusChunks =
-                std::max(gActiveVerticalRadius.load(std::memory_order_relaxed) + kFarVerticalHeadroomChunks, 8);
-            const int chunkMinY = floorDiv(cameraChunk.y - verticalRadiusChunks, level.blockScale);
-            const int chunkMaxY = floorDiv(cameraChunk.y + verticalRadiusChunks, level.blockScale);
-            const int chunkMinZ = floorDiv(cameraChunk.z - activeOuterRadiusChunks, level.blockScale);
-            const int chunkMaxZ = floorDiv(cameraChunk.z + activeOuterRadiusChunks, level.blockScale);
-            const int span = level.chunkSpanBlocks();
-            const int verticalBandMinWorldY = chunkMinY * span;
-            const int verticalBandMaxWorldY = ((chunkMaxY + 1) * span) - 1;
-
-            for (int chunkX = chunkMinX; chunkX <= chunkMaxX; ++chunkX)
-            {
-                for (int chunkZ = chunkMinZ; chunkZ <= chunkMaxZ; ++chunkZ)
-                {
-                    const glm::ivec3 horizontalProbeCoord{chunkX, 0, chunkZ};
-                    if (!chunkIntersectsHorizontalRing(level, cameraChunk_, horizontalProbeCoord, activeOuterRadiusChunks))
-                    {
-                        continue;
-                    }
-
-                    // Terrain ownership is surface-based in XZ. One page owns the visible surface
-                    // for this footprint regardless of world Y.
-                    const glm::ivec3 chunkCoord{chunkX, 0, chunkZ};
-                    FarLodChunkKey key{level.level, chunkCoord};
-                    auto chunkIt = chunks_.find(key);
-                    const bool chunkMissing = (chunkIt == chunks_.end());
-                    if (chunkMissing && remainingNewChunkActivations == 0)
-                    {
-                        continue;
-                    }
-
-                    FarLodChunkRecord& chunk = chunkMissing ? chunks_[key] : chunkIt->second;
-                    if (chunkMissing && remainingNewChunkActivations > 0)
-                    {
-                        --remainingNewChunkActivations;
-                    }
-                    chunk.key = key;
-                    chunk.level = level;
-                    chunk.lastTouchedStamp = updateStamp_;
-                    chunk.active = true;
-                    chunk.fallbackOnly = false;
-                    if (!chunk.initialized)
-                    {
-                        initializeChunk(chunk, level);
-                        chunk.dirty = true;
-                    }
-
-                    const int conservativeMinWorldY =
-                        std::min(verticalBandMinWorldY - level.blockScale,
-                                 seaLevel_ - (level.chunkSpanBlocks() + level.blockScale));
-                    const int conservativeMaxWorldY =
-                        std::max(verticalBandMaxWorldY + level.blockScale + kFarStructureHeadroomBlocks,
-                                 seaLevel_ + level.blockScale);
-                    chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
-                                                    static_cast<float>(conservativeMinWorldY),
-                                                    chunk.cpu.worldMin.z);
-                    chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
-                                                    static_cast<float>(conservativeMaxWorldY + 1),
-                                                    chunk.cpu.worldMin.z + level.chunkSpanBlocks());
-
-                    const bool needsFallback = !(chunk.gpu.resident && chunk.gpu.indexCount > 0);
-                    if (needsFallback)
-                    {
-                        touchFallbackParent(level, chunkCoord);
-                    }
-                }
-            }
-        };
-
         for (const FarLodLevelConfig& level : levels_)
         {
             if (level.outerRadiusChunks > level.innerRadiusChunks)
             {
-                touchLevel(level);
+                int& activationOuterRadiusChunks = levelActivationOuterRadiusChunks_[level.level];
+                activationOuterRadiusChunks = std::max(activationOuterRadiusChunks, level.innerRadiusChunks);
+                activationOuterRadiusChunks =
+                    std::min(level.outerRadiusChunks, activationOuterRadiusChunks + workBudget.activationStepChunks);
             }
         }
+
+        consumeReadyTouchLevelPlan();
+        for (const FarLodLevelConfig& level : levels_)
+        {
+            if (level.outerRadiusChunks > level.innerRadiusChunks)
+            {
+                applyTouchLevelCache(level, remainingNewChunkActivations, remainingNewFallbackActivations);
+            }
+        }
+        requestTouchLevelPlan(cameraChunk_);
 
         static constexpr std::uint64_t kFarTileUntouchedGraceUpdates = 12u;
         static constexpr std::uint64_t kFarFallbackUntouchedGraceUpdates = 2u;
@@ -4768,6 +4643,17 @@ public:
             pendingDirtyBuildPlanRequest_ = {};
             readyDirtyBuildPlanResult_ = {};
         }
+        {
+            std::lock_guard<std::mutex> lock(touchLevelPlanMutex_);
+            hasPendingTouchLevelPlanRequest_ = false;
+            hasReadyTouchLevelPlanResult_ = false;
+            touchLevelPlannerBusy_ = false;
+            pendingTouchLevelPlanRequest_ = {};
+            readyTouchLevelPlanResult_ = {};
+            touchLevelCaches_.clear();
+            hasLastTouchLevelPlanRequest_ = false;
+            lastTouchLevelPlanLevels_.clear();
+        }
         std::lock_guard<std::mutex> lock(configMutex_);
         for (auto& [key, chunk] : chunks_)
         {
@@ -4954,6 +4840,23 @@ private:
             {
                 ++it;
             }
+        }
+
+        for (auto it = touchLevelCaches_.begin(); it != touchLevelCaches_.end();)
+        {
+            if (!activeLevelIds.contains(it->first))
+            {
+                it = touchLevelCaches_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        if (!activeLevelIds.size())
+        {
+            hasLastTouchLevelPlanRequest_ = false;
+            lastTouchLevelPlanLevels_.clear();
         }
     }
 
@@ -5196,6 +5099,50 @@ private:
         std::uint64_t sequence{0};
         std::uint64_t epoch{0};
         std::vector<BuildJob> jobs;
+    };
+
+    struct HorizontalRingSpan
+    {
+        int chunkZ{0};
+        int minChunkX{0};
+        int maxChunkX{0};
+    };
+
+    struct TouchLevelPlanLevelRequest
+    {
+        FarLodLevelConfig level{};
+        int activeOuterRadiusChunks{0};
+    };
+
+    struct TouchLevelPlanLevelResult
+    {
+        FarLodLevelConfig level{};
+        int activeOuterRadiusChunks{0};
+        std::vector<FarLodChunkKey> activeKeys;
+    };
+
+    struct TouchLevelPlanRequest
+    {
+        std::uint64_t sequence{0};
+        std::uint64_t epoch{0};
+        glm::ivec3 cameraChunk{0};
+        std::size_t workerBudget{1};
+        std::vector<TouchLevelPlanLevelRequest> levels;
+    };
+
+    struct TouchLevelPlanResult
+    {
+        std::uint64_t sequence{0};
+        std::uint64_t epoch{0};
+        std::vector<TouchLevelPlanLevelResult> levels;
+    };
+
+    struct TouchLevelCacheState
+    {
+        FarLodLevelConfig level{};
+        int activeOuterRadiusChunks{0};
+        glm::ivec3 cameraChunk{0};
+        std::vector<FarLodChunkKey> activeKeys;
     };
 
     struct AtlasUpdateRect
@@ -5452,55 +5399,6 @@ private:
         return 0;
     }
 
-    [[nodiscard]] static bool chunkIntersectsHorizontalRing(const FarLodLevelConfig& level,
-                                                            const glm::ivec3& cameraChunk,
-                                                            const glm::ivec3& chunkCoord) noexcept
-    {
-        const glm::ivec2 minCoord(chunkCoord.x * level.blockScale, chunkCoord.z * level.blockScale);
-        const glm::ivec2 maxCoord = minCoord + glm::ivec2(level.blockScale - 1);
-        const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
-        {
-            if (center < minValue) return minValue - center;
-            if (center > maxValue) return center - maxValue;
-            return 0;
-        };
-        const auto maxAxisDistance = [](int center, int minValue, int maxValue) noexcept
-        {
-            return std::max(std::abs(center - minValue), std::abs(center - maxValue));
-        };
-
-        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                         minAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
-        const int maxDistance = std::max(maxAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                         maxAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
-        return maxDistance > level.innerRadiusChunks && minDistance <= level.outerRadiusChunks;
-    }
-
-    [[nodiscard]] static bool chunkIntersectsHorizontalRing(const FarLodLevelConfig& level,
-                                                            const glm::ivec3& cameraChunk,
-                                                            const glm::ivec3& chunkCoord,
-                                                            int outerRadiusChunks) noexcept
-    {
-        const glm::ivec2 minCoord(chunkCoord.x * level.blockScale, chunkCoord.z * level.blockScale);
-        const glm::ivec2 maxCoord = minCoord + glm::ivec2(level.blockScale - 1);
-        const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
-        {
-            if (center < minValue) return minValue - center;
-            if (center > maxValue) return center - maxValue;
-            return 0;
-        };
-        const auto maxAxisDistance = [](int center, int minValue, int maxValue) noexcept
-        {
-            return std::max(std::abs(center - minValue), std::abs(center - maxValue));
-        };
-
-        const int minDistance = std::max(minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                         minAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
-        const int maxDistance = std::max(maxAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
-                                         maxAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
-        return maxDistance > level.innerRadiusChunks && minDistance <= outerRadiusChunks;
-    }
-
     [[nodiscard]] static int chunkMinHorizontalRingDistanceChunks(const FarLodLevelConfig& level,
                                                                   const glm::ivec3& cameraChunk,
                                                                   const glm::ivec3& chunkCoord) noexcept
@@ -5517,6 +5415,400 @@ private:
         const int minDistance = std::max(minAxisDistance(cameraChunk.x, minCoord.x, maxCoord.x),
                                          minAxisDistance(cameraChunk.z, minCoord.y, maxCoord.y));
         return std::max(0, minDistance - level.innerRadiusChunks);
+    }
+
+    [[nodiscard]] static int ceilDivPositive(int value, int divisor) noexcept
+    {
+        return -floorDiv(-value, divisor);
+    }
+
+    [[nodiscard]] static std::vector<HorizontalRingSpan> buildHorizontalRingSpans(const FarLodLevelConfig& level,
+                                                                                   const glm::ivec3& cameraChunk,
+                                                                                   int outerRadiusChunks)
+    {
+        std::vector<HorizontalRingSpan> spans;
+        if (outerRadiusChunks <= level.innerRadiusChunks || level.blockScale <= 0)
+        {
+            return spans;
+        }
+
+        const int blockScale = level.blockScale;
+        const int outerMinChunkX = floorDiv(cameraChunk.x - outerRadiusChunks, blockScale);
+        const int outerMaxChunkX = floorDiv(cameraChunk.x + outerRadiusChunks, blockScale);
+        const int outerMinChunkZ = floorDiv(cameraChunk.z - outerRadiusChunks, blockScale);
+        const int outerMaxChunkZ = floorDiv(cameraChunk.z + outerRadiusChunks, blockScale);
+
+        spans.reserve(static_cast<std::size_t>(std::max(outerMaxChunkZ - outerMinChunkZ + 1, 0) * 2));
+
+        const auto minAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            if (center < minValue) return minValue - center;
+            if (center > maxValue) return center - maxValue;
+            return 0;
+        };
+        const auto maxAxisDistance = [](int center, int minValue, int maxValue) noexcept
+        {
+            return std::max(std::abs(center - minValue), std::abs(center - maxValue));
+        };
+
+        for (int chunkZ = outerMinChunkZ; chunkZ <= outerMaxChunkZ; ++chunkZ)
+        {
+            const int zMin = chunkZ * blockScale;
+            const int zMax = zMin + blockScale - 1;
+            const int zMinDistance = minAxisDistance(cameraChunk.z, zMin, zMax);
+            if (zMinDistance > outerRadiusChunks)
+            {
+                continue;
+            }
+
+            const int zMaxDistance = maxAxisDistance(cameraChunk.z, zMin, zMax);
+            if (zMaxDistance > level.innerRadiusChunks)
+            {
+                spans.push_back(HorizontalRingSpan{chunkZ, outerMinChunkX, outerMaxChunkX});
+                continue;
+            }
+
+            const int fullyInsideMinChunkX =
+                ceilDivPositive(cameraChunk.x - level.innerRadiusChunks, blockScale);
+            const int fullyInsideMaxChunkX =
+                floorDiv(cameraChunk.x + level.innerRadiusChunks - (blockScale - 1), blockScale);
+            if (fullyInsideMinChunkX > fullyInsideMaxChunkX)
+            {
+                spans.push_back(HorizontalRingSpan{chunkZ, outerMinChunkX, outerMaxChunkX});
+                continue;
+            }
+
+            if (outerMinChunkX < fullyInsideMinChunkX)
+            {
+                spans.push_back(HorizontalRingSpan{
+                    chunkZ,
+                    outerMinChunkX,
+                    std::min(outerMaxChunkX, fullyInsideMinChunkX - 1)});
+            }
+            if (fullyInsideMaxChunkX < outerMaxChunkX)
+            {
+                spans.push_back(HorizontalRingSpan{
+                    chunkZ,
+                    std::max(outerMinChunkX, fullyInsideMaxChunkX + 1),
+                    outerMaxChunkX});
+            }
+        }
+
+        return spans;
+    }
+
+    [[nodiscard]] std::vector<FarLodChunkKey> buildTouchLevelActiveKeys(const TouchLevelPlanLevelRequest& levelRequest,
+                                                                        const glm::ivec3& cameraChunk,
+                                                                        std::size_t workerBudget) const
+    {
+        const std::vector<HorizontalRingSpan> spans =
+            buildHorizontalRingSpans(levelRequest.level, cameraChunk, levelRequest.activeOuterRadiusChunks);
+        if (spans.empty())
+        {
+            return {};
+        }
+
+        std::size_t totalKeyCount = 0;
+        for (const HorizontalRingSpan& span : spans)
+        {
+            totalKeyCount += static_cast<std::size_t>(std::max(span.maxChunkX - span.minChunkX + 1, 0));
+        }
+
+        const std::size_t threadCount =
+            std::min<std::size_t>(std::max<std::size_t>(workerBudget, 1), spans.size());
+        std::vector<std::vector<FarLodChunkKey>> threadKeys(threadCount);
+        std::vector<std::thread> workers;
+        workers.reserve(threadCount > 0 ? threadCount - 1 : 0);
+
+        auto buildRange = [&](std::size_t threadIndex, std::size_t beginSpan, std::size_t endSpan)
+        {
+            std::size_t localCount = 0;
+            for (std::size_t spanIndex = beginSpan; spanIndex < endSpan; ++spanIndex)
+            {
+                localCount += static_cast<std::size_t>(
+                    std::max(spans[spanIndex].maxChunkX - spans[spanIndex].minChunkX + 1, 0));
+            }
+
+            std::vector<FarLodChunkKey>& out = threadKeys[threadIndex];
+            out.reserve(localCount);
+            for (std::size_t spanIndex = beginSpan; spanIndex < endSpan; ++spanIndex)
+            {
+                const HorizontalRingSpan& span = spans[spanIndex];
+                for (int chunkX = span.minChunkX; chunkX <= span.maxChunkX; ++chunkX)
+                {
+                    out.push_back(FarLodChunkKey{
+                        levelRequest.level.level,
+                        glm::ivec3(chunkX, 0, span.chunkZ)});
+                }
+            }
+        };
+
+        const std::size_t spansPerThread = (spans.size() + threadCount - 1) / threadCount;
+        for (std::size_t threadIndex = 1; threadIndex < threadCount; ++threadIndex)
+        {
+            const std::size_t beginSpan = threadIndex * spansPerThread;
+            const std::size_t endSpan = std::min(spans.size(), beginSpan + spansPerThread);
+            workers.emplace_back(buildRange, threadIndex, beginSpan, endSpan);
+        }
+
+        buildRange(0u, 0u, std::min(spans.size(), spansPerThread));
+        for (std::thread& worker : workers)
+        {
+            if (worker.joinable())
+            {
+                worker.join();
+            }
+        }
+
+        std::vector<FarLodChunkKey> keys;
+        keys.reserve(totalKeyCount);
+        for (std::vector<FarLodChunkKey>& local : threadKeys)
+        {
+            keys.insert(keys.end(),
+                        std::make_move_iterator(local.begin()),
+                        std::make_move_iterator(local.end()));
+        }
+        return keys;
+    }
+
+    [[nodiscard]] TouchLevelPlanResult buildTouchLevelPlan(const TouchLevelPlanRequest& request) const
+    {
+        TouchLevelPlanResult result{};
+        result.sequence = request.sequence;
+        result.epoch = request.epoch;
+        result.levels.reserve(request.levels.size());
+        for (const TouchLevelPlanLevelRequest& levelRequest : request.levels)
+        {
+            TouchLevelPlanLevelResult levelResult{};
+            levelResult.level = levelRequest.level;
+            levelResult.activeOuterRadiusChunks = levelRequest.activeOuterRadiusChunks;
+            levelResult.activeKeys = buildTouchLevelActiveKeys(levelRequest, request.cameraChunk, request.workerBudget);
+            result.levels.push_back(std::move(levelResult));
+        }
+        return result;
+    }
+
+    [[nodiscard]] const FarLodLevelConfig* nextCoarserLevel(int levelId) const noexcept
+    {
+        for (std::size_t i = 0; i < levels_.size(); ++i)
+        {
+            if (levels_[i].level == levelId)
+            {
+                return (i + 1 < levels_.size()) ? &levels_[i + 1] : nullptr;
+            }
+        }
+        return nullptr;
+    }
+
+    void updateChunkConservativeBounds(FarLodChunkRecord& chunk,
+                                       const FarLodLevelConfig& level,
+                                       int verticalBandMinWorldY,
+                                       int verticalBandMaxWorldY) const
+    {
+        constexpr int kFarStructureHeadroomBlocks = 48;
+        const int conservativeMinWorldY =
+            std::min(verticalBandMinWorldY - level.blockScale,
+                     seaLevel_ - (level.chunkSpanBlocks() + level.blockScale));
+        const int conservativeMaxWorldY =
+            std::max(verticalBandMaxWorldY + level.blockScale + kFarStructureHeadroomBlocks,
+                     seaLevel_ + level.blockScale);
+        chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
+                                        static_cast<float>(conservativeMinWorldY),
+                                        chunk.cpu.worldMin.z);
+        chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
+                                        static_cast<float>(conservativeMaxWorldY + 1),
+                                        chunk.cpu.worldMin.z + level.chunkSpanBlocks());
+    }
+
+    void requestTouchLevelPlan(const glm::ivec3& cameraChunk)
+    {
+        std::vector<std::pair<int, int>> levelState;
+        levelState.reserve(levels_.size());
+        TouchLevelPlanRequest request{};
+        request.sequence = touchLevelPlanSequence_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+        request.epoch = buildEpoch_.load(std::memory_order_acquire);
+        request.cameraChunk = cameraChunk;
+        request.workerBudget = std::max<std::size_t>(workerCount_, 1);
+        request.levels.reserve(levels_.size());
+
+        for (const FarLodLevelConfig& level : levels_)
+        {
+            if (level.outerRadiusChunks <= level.innerRadiusChunks)
+            {
+                continue;
+            }
+            const auto it = levelActivationOuterRadiusChunks_.find(level.level);
+            const int activeOuterRadiusChunks =
+                (it != levelActivationOuterRadiusChunks_.end()) ? it->second : level.innerRadiusChunks;
+            levelState.emplace_back(level.level, activeOuterRadiusChunks);
+            request.levels.push_back(TouchLevelPlanLevelRequest{level, activeOuterRadiusChunks});
+        }
+
+        if (hasLastTouchLevelPlanRequest_ &&
+            lastTouchLevelPlanCameraChunk_.x == cameraChunk.x &&
+            lastTouchLevelPlanCameraChunk_.z == cameraChunk.z &&
+            lastTouchLevelPlanLevels_ == levelState)
+        {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(touchLevelPlanMutex_);
+            pendingTouchLevelPlanRequest_ = std::move(request);
+            hasPendingTouchLevelPlanRequest_ = true;
+        }
+        touchLevelPlanCv_.notify_one();
+        lastTouchLevelPlanCameraChunk_ = cameraChunk;
+        lastTouchLevelPlanLevels_ = std::move(levelState);
+        hasLastTouchLevelPlanRequest_ = true;
+    }
+
+    void consumeReadyTouchLevelPlan()
+    {
+        TouchLevelPlanResult result{};
+        {
+            std::lock_guard<std::mutex> lock(touchLevelPlanMutex_);
+            if (!hasReadyTouchLevelPlanResult_)
+            {
+                return;
+            }
+            result = std::move(readyTouchLevelPlanResult_);
+            readyTouchLevelPlanResult_ = {};
+            hasReadyTouchLevelPlanResult_ = false;
+        }
+
+        if (result.epoch != buildEpoch_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        for (TouchLevelPlanLevelResult& levelResult : result.levels)
+        {
+            TouchLevelCacheState& cache = touchLevelCaches_[levelResult.level.level];
+            cache.level = levelResult.level;
+            cache.activeOuterRadiusChunks = levelResult.activeOuterRadiusChunks;
+            cache.cameraChunk = lastTouchLevelPlanCameraChunk_;
+            cache.activeKeys = std::move(levelResult.activeKeys);
+        }
+    }
+
+    void applyTouchLevelCache(const FarLodLevelConfig& level,
+                              std::size_t& remainingNewChunkActivations,
+                              std::size_t& remainingNewFallbackActivations)
+    {
+        const auto cacheIt = touchLevelCaches_.find(level.level);
+        if (cacheIt == touchLevelCaches_.end())
+        {
+            return;
+        }
+
+        constexpr int kFarVerticalHeadroomChunks = 6;
+        const int verticalRadiusChunks =
+            std::max(gActiveVerticalRadius.load(std::memory_order_relaxed) + kFarVerticalHeadroomChunks, 8);
+        const int chunkMinY = floorDiv(cameraChunk_.y - verticalRadiusChunks, level.blockScale);
+        const int chunkMaxY = floorDiv(cameraChunk_.y + verticalRadiusChunks, level.blockScale);
+        const int span = level.chunkSpanBlocks();
+        const int verticalBandMinWorldY = chunkMinY * span;
+        const int verticalBandMaxWorldY = ((chunkMaxY + 1) * span) - 1;
+
+        std::vector<FarLodChunkKey> fallbackParents;
+        fallbackParents.reserve(cacheIt->second.activeKeys.size() / 2 + 1);
+        std::unordered_set<FarLodChunkKey, FarLodChunkKeyHasher> uniqueFallbackParents;
+
+        for (const FarLodChunkKey& key : cacheIt->second.activeKeys)
+        {
+            auto chunkIt = chunks_.find(key);
+            const bool chunkMissing = (chunkIt == chunks_.end());
+            if (chunkMissing && remainingNewChunkActivations == 0)
+            {
+                continue;
+            }
+
+            FarLodChunkRecord& chunk = chunkMissing ? chunks_[key] : chunkIt->second;
+            if (chunkMissing)
+            {
+                --remainingNewChunkActivations;
+            }
+
+            chunk.key = key;
+            chunk.level = level;
+            chunk.lastTouchedStamp = updateStamp_;
+            chunk.active = true;
+            chunk.fallbackOnly = false;
+            if (!chunk.initialized)
+            {
+                initializeChunk(chunk, level);
+                chunk.dirty = true;
+            }
+            updateChunkConservativeBounds(chunk, level, verticalBandMinWorldY, verticalBandMaxWorldY);
+            if (!(chunk.gpu.resident && chunk.gpu.indexCount > 0) && !chunk.dirty && !chunk.inFlight)
+            {
+                markDirty(chunk);
+            }
+
+            if (chunk.gpu.resident && chunk.gpu.indexCount > 0)
+            {
+                continue;
+            }
+
+            const FarLodLevelConfig* parentLevel = nextCoarserLevel(level.level);
+            if (parentLevel == nullptr)
+            {
+                continue;
+            }
+
+            const glm::ivec3 baseMin = key.coord * level.blockScale;
+            const glm::ivec3 parentCoord{
+                floorDiv(baseMin.x, parentLevel->blockScale),
+                floorDiv(baseMin.y, parentLevel->blockScale),
+                floorDiv(baseMin.z, parentLevel->blockScale)};
+            FarLodChunkKey parentKey{parentLevel->level, parentCoord};
+            if (uniqueFallbackParents.insert(parentKey).second)
+            {
+                fallbackParents.push_back(parentKey);
+            }
+        }
+
+        for (const FarLodChunkKey& parentKey : fallbackParents)
+        {
+            auto parentIt = chunks_.find(parentKey);
+            const bool parentMissing = (parentIt == chunks_.end());
+            if (parentMissing && remainingNewFallbackActivations == 0)
+            {
+                continue;
+            }
+
+            const FarLodLevelConfig* parentLevel = nextCoarserLevel(level.level);
+            if (parentLevel == nullptr)
+            {
+                continue;
+            }
+
+            FarLodChunkRecord& parent = parentMissing ? chunks_[parentKey] : parentIt->second;
+            if (parentMissing)
+            {
+                --remainingNewFallbackActivations;
+            }
+
+            const bool alreadyTouchedThisUpdate = (parent.lastTouchedStamp == updateStamp_);
+            parent.key = parentKey;
+            parent.level = *parentLevel;
+            parent.lastTouchedStamp = updateStamp_;
+            parent.active = true;
+            if (!(alreadyTouchedThisUpdate && !parent.fallbackOnly))
+            {
+                parent.fallbackOnly = true;
+            }
+            if (!parent.initialized)
+            {
+                initializeChunk(parent, *parentLevel);
+                parent.dirty = true;
+            }
+            else if (!(parent.gpu.resident && parent.gpu.indexCount > 0) && !parent.dirty)
+            {
+                markDirty(parent);
+            }
+        }
     }
 
     void initializeChunk(FarLodChunkRecord& chunk, const FarLodLevelConfig& level)
@@ -7180,6 +7472,10 @@ private:
         {
             dirtyBuildPlannerThread_ = std::thread(&FarTerrainManager::dirtyBuildPlannerLoop, this);
         }
+        if (!touchLevelPlannerThread_.joinable())
+        {
+            touchLevelPlannerThread_ = std::thread(&FarTerrainManager::touchLevelPlannerLoop, this);
+        }
     }
 
     void stopWorkers()
@@ -7206,6 +7502,22 @@ private:
         if (dirtyBuildPlannerThread_.joinable())
         {
             dirtyBuildPlannerThread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(touchLevelPlanMutex_);
+            hasPendingTouchLevelPlanRequest_ = false;
+            hasReadyTouchLevelPlanResult_ = false;
+            touchLevelPlannerBusy_ = false;
+            pendingTouchLevelPlanRequest_ = {};
+            readyTouchLevelPlanResult_ = {};
+            touchLevelCaches_.clear();
+            hasLastTouchLevelPlanRequest_ = false;
+            lastTouchLevelPlanLevels_.clear();
+        }
+        touchLevelPlanCv_.notify_all();
+        if (touchLevelPlannerThread_.joinable())
+        {
+            touchLevelPlannerThread_.join();
         }
         {
             std::lock_guard<std::mutex> lock(buildQueueMutex_);
@@ -7255,6 +7567,41 @@ private:
                 readyDirtyBuildPlanResult_ = std::move(result);
                 hasReadyDirtyBuildPlanResult_ = true;
                 dirtyBuildPlannerBusy_ = false;
+            }
+        }
+    }
+
+    void touchLevelPlannerLoop()
+    {
+        for (;;)
+        {
+            TouchLevelPlanRequest request{};
+            {
+                std::unique_lock<std::mutex> lock(touchLevelPlanMutex_);
+                touchLevelPlanCv_.wait(lock,
+                                       [this]
+                                       {
+                                           return stopWorkers_.load(std::memory_order_acquire) ||
+                                                  hasPendingTouchLevelPlanRequest_;
+                                       });
+                if (stopWorkers_.load(std::memory_order_acquire) && !hasPendingTouchLevelPlanRequest_)
+                {
+                    return;
+                }
+
+                request = std::move(pendingTouchLevelPlanRequest_);
+                pendingTouchLevelPlanRequest_ = {};
+                hasPendingTouchLevelPlanRequest_ = false;
+                touchLevelPlannerBusy_ = true;
+            }
+
+            TouchLevelPlanResult result = buildTouchLevelPlan(request);
+
+            {
+                std::lock_guard<std::mutex> lock(touchLevelPlanMutex_);
+                readyTouchLevelPlanResult_ = std::move(result);
+                hasReadyTouchLevelPlanResult_ = true;
+                touchLevelPlannerBusy_ = false;
             }
         }
     }
@@ -9135,9 +9482,11 @@ private:
     std::deque<PendingGpuParityReadback> pendingGpuParityReadbacks_;
     std::vector<std::thread> workerThreads_;
     std::thread dirtyBuildPlannerThread_;
+    std::thread touchLevelPlannerThread_;
     std::atomic<bool> stopWorkers_{false};
     std::atomic<std::uint64_t> buildEpoch_{1};
     std::atomic<std::uint64_t> dirtyBuildPlanSequence_{0};
+    std::atomic<std::uint64_t> touchLevelPlanSequence_{0};
     std::size_t workerCount_{1};
     std::atomic<int> exactMissingChunks_{0};
     std::atomic<std::size_t> exactPendingUploads_{0};
@@ -9151,6 +9500,17 @@ private:
     bool hasPendingDirtyBuildPlanRequest_{false};
     bool hasReadyDirtyBuildPlanResult_{false};
     bool dirtyBuildPlannerBusy_{false};
+    mutable std::mutex touchLevelPlanMutex_;
+    std::condition_variable touchLevelPlanCv_;
+    TouchLevelPlanRequest pendingTouchLevelPlanRequest_{};
+    TouchLevelPlanResult readyTouchLevelPlanResult_{};
+    bool hasPendingTouchLevelPlanRequest_{false};
+    bool hasReadyTouchLevelPlanResult_{false};
+    bool touchLevelPlannerBusy_{false};
+    bool hasLastTouchLevelPlanRequest_{false};
+    glm::ivec3 lastTouchLevelPlanCameraChunk_{0};
+    std::vector<std::pair<int, int>> lastTouchLevelPlanLevels_;
+    std::unordered_map<int, TouchLevelCacheState> touchLevelCaches_;
     bool gpuParityEnabled_{false};
     bool gpuSynthesisEnabled_{false};
     std::uint32_t rollingGpuParityMismatchCount_{0};

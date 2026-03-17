@@ -4393,6 +4393,9 @@ public:
                                               ceilToIntPositive(
                                                   static_cast<float>(farDistanceBlocks_) / static_cast<float>(kChunkSizeX)));
         refreshLevels(nearRadiusChunks, realRadiusChunks);
+        FarLodWorkBudget workBudget = computeWorkBudget();
+        std::size_t remainingNewChunkActivations = workBudget.newChunkActivations;
+        std::size_t remainingNewFallbackActivations = workBudget.newFallbackActivations;
 
         auto nextCoarserLevel = [this](int levelId) -> const FarLodLevelConfig*
         {
@@ -4420,7 +4423,17 @@ public:
                 floorDiv(baseMin.y, parentLevel->blockScale),
                 floorDiv(baseMin.z, parentLevel->blockScale)};
             FarLodChunkKey parentKey{parentLevel->level, parentCoord};
-            FarLodChunkRecord& parent = chunks_[parentKey];
+            auto parentIt = chunks_.find(parentKey);
+            const bool parentMissing = (parentIt == chunks_.end());
+            if (parentMissing && remainingNewFallbackActivations == 0)
+            {
+                return;
+            }
+            FarLodChunkRecord& parent = parentMissing ? chunks_[parentKey] : parentIt->second;
+            if (parentMissing && remainingNewFallbackActivations > 0)
+            {
+                --remainingNewFallbackActivations;
+            }
             const bool alreadyTouchedThisUpdate = (parent.lastTouchedStamp == updateStamp_);
             parent.key = parentKey;
             parent.level = *parentLevel;
@@ -4443,11 +4456,10 @@ public:
 
         auto touchLevel = [&](const FarLodLevelConfig& level)
         {
-            constexpr int kFarActivationStepChunks = 6;
             int& activationOuterRadiusChunks = levelActivationOuterRadiusChunks_[level.level];
             activationOuterRadiusChunks = std::max(activationOuterRadiusChunks, level.innerRadiusChunks);
             activationOuterRadiusChunks =
-                std::min(level.outerRadiusChunks, activationOuterRadiusChunks + kFarActivationStepChunks);
+                std::min(level.outerRadiusChunks, activationOuterRadiusChunks + workBudget.activationStepChunks);
             const int activeOuterRadiusChunks = activationOuterRadiusChunks;
 
             const int chunkMinX = floorDiv(cameraChunk.x - activeOuterRadiusChunks, level.blockScale);
@@ -4474,44 +4486,23 @@ public:
                         continue;
                     }
 
-                    const int worldMinX = chunkX * span;
-                    const int worldMaxX = worldMinX + span - 1;
-                    const int worldMinZ = chunkZ * span;
-                    const int worldMaxZ = worldMinZ + span - 1;
-                    const int worldMidX = (worldMinX + worldMaxX) / 2;
-                    const int worldMidZ = (worldMinZ + worldMaxZ) / 2;
-                    const std::array<glm::ivec2, 9> samplePoints{{
-                        {worldMinX, worldMinZ},
-                        {worldMaxX, worldMinZ},
-                        {worldMinX, worldMaxZ},
-                        {worldMaxX, worldMaxZ},
-                        {worldMidX, worldMinZ},
-                        {worldMidX, worldMaxZ},
-                        {worldMinX, worldMidZ},
-                        {worldMaxX, worldMidZ},
-                        {worldMidX, worldMidZ},
-                    }};
-
-                    int minSurfaceY = std::numeric_limits<int>::max();
-                    int maxSurfaceY = std::numeric_limits<int>::min();
-                    bool anyWaterFill = false;
-                    for (const glm::ivec2& samplePoint : samplePoints)
-                    {
-                        const ColumnSample sample =
-                            columnSampleFn(samplePoint.x, samplePoint.y, verticalBandMinWorldY, verticalBandMaxWorldY);
-                        minSurfaceY = std::min(minSurfaceY, sample.surfaceY);
-                        maxSurfaceY = std::max(maxSurfaceY, sample.surfaceY);
-                        if (sample.dominantBiome != nullptr && sample.dominantBiome->terrainSettings.waterFill.enabled)
-                        {
-                            anyWaterFill = true;
-                        }
-                    }
-
                     // Terrain ownership is surface-based in XZ. One page owns the visible surface
                     // for this footprint regardless of world Y.
                     const glm::ivec3 chunkCoord{chunkX, 0, chunkZ};
                     FarLodChunkKey key{level.level, chunkCoord};
-                    FarLodChunkRecord& chunk = chunks_[key];
+                    auto chunkIt = chunks_.find(key);
+                    const bool chunkMissing = (chunkIt == chunks_.end());
+                    if (chunkMissing && remainingNewChunkActivations == 0)
+                    {
+                        continue;
+                    }
+
+                    FarLodChunkRecord& chunk = chunkMissing ? chunks_[key] : chunkIt->second;
+                    if (chunkMissing && remainingNewChunkActivations > 0)
+                    {
+                        --remainingNewChunkActivations;
+                    }
+                    const bool needsBoundsRefresh = chunkMissing || !chunk.initialized || chunk.dirty;
                     chunk.key = key;
                     chunk.level = level;
                     chunk.lastTouchedStamp = updateStamp_;
@@ -4523,17 +4514,33 @@ public:
                         chunk.dirty = true;
                     }
 
-                    const int relevantMinWorldY =
-                        std::min(minSurfaceY - level.blockScale, anyWaterFill ? seaLevel_ - level.blockScale : minSurfaceY);
-                    const int relevantMaxWorldY =
-                        std::max(maxSurfaceY + level.blockScale + kFarStructureHeadroomBlocks,
-                                 anyWaterFill ? seaLevel_ + level.blockScale : maxSurfaceY + level.blockScale);
-                    chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
-                                                    static_cast<float>(relevantMinWorldY),
-                                                    chunk.cpu.worldMin.z);
-                    chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
-                                                    static_cast<float>(relevantMaxWorldY + 1),
-                                                    chunk.cpu.worldMin.z + level.chunkSpanBlocks());
+                    if (needsBoundsRefresh)
+                    {
+                        int minSurfaceY = std::numeric_limits<int>::max();
+                        int maxSurfaceY = std::numeric_limits<int>::min();
+                        bool anyWaterFill = false;
+                        sampleChunkSurfaceBounds(columnSampleFn,
+                                                 level,
+                                                 chunkX,
+                                                 chunkZ,
+                                                 verticalBandMinWorldY,
+                                                 verticalBandMaxWorldY,
+                                                 minSurfaceY,
+                                                 maxSurfaceY,
+                                                 anyWaterFill);
+
+                        const int relevantMinWorldY =
+                            std::min(minSurfaceY - level.blockScale, anyWaterFill ? seaLevel_ - level.blockScale : minSurfaceY);
+                        const int relevantMaxWorldY =
+                            std::max(maxSurfaceY + level.blockScale + kFarStructureHeadroomBlocks,
+                                     anyWaterFill ? seaLevel_ + level.blockScale : maxSurfaceY + level.blockScale);
+                        chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
+                                                        static_cast<float>(relevantMinWorldY),
+                                                        chunk.cpu.worldMin.z);
+                        chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
+                                                        static_cast<float>(relevantMaxWorldY + 1),
+                                                        chunk.cpu.worldMin.z + level.chunkSpanBlocks());
+                    }
 
                     const bool needsFallback = !(chunk.gpu.resident && chunk.gpu.indexCount > 0);
                     if (needsFallback)
@@ -4580,6 +4587,11 @@ public:
             {
                 staleKeys.push_back(key);
             }
+        }
+
+        if (staleKeys.size() > workBudget.staleReleaseCount)
+        {
+            staleKeys.resize(workBudget.staleReleaseCount);
         }
 
         for (const FarLodChunkKey& key : staleKeys)
@@ -5178,6 +5190,15 @@ private:
     {
         glm::ivec2 originCell{0};
         glm::ivec2 sizeCells{0};
+    };
+
+    struct FarLodWorkBudget
+    {
+        int activationStepChunks{1};
+        std::size_t newChunkActivations{0};
+        std::size_t newFallbackActivations{0};
+        std::size_t staleReleaseCount{0};
+        std::size_t atlasUpdateCells{0};
     };
 
     struct FarLodLevelAtlasState
@@ -5997,6 +6018,64 @@ private:
         return glm::ivec2(chunkMinX * kLogicalSize, chunkMinZ * kLogicalSize);
     }
 
+    [[nodiscard]] FarLodWorkBudget computeWorkBudget() const
+    {
+        std::size_t buildBacklog = 0;
+        {
+            std::lock_guard<std::mutex> lock(buildQueueMutex_);
+            buildBacklog = buildQueue_.size() + queuedKeys_.size();
+        }
+
+        std::size_t gpuBacklog = 0;
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            gpuBacklog = gpuSynthesisRequests_.size() +
+                         pendingGpuMeshCountReadbacks_.size() +
+                         pendingGpuMeshEmitRequests_.size() +
+                         pendingGpuParityReadbacks_.size();
+        }
+
+        const std::size_t totalBacklog = buildBacklog + gpuBacklog;
+        const int exactMissing = exactMissingChunks_.load(std::memory_order_relaxed);
+        const std::size_t exactPendingUploads = exactPendingUploads_.load(std::memory_order_relaxed);
+        const std::size_t workerBudget = std::max<std::size_t>(workerCount_, 1);
+
+        FarLodWorkBudget budget{};
+        if (totalBacklog > 512 || exactMissing > 48 || exactPendingUploads > 48)
+        {
+            budget.activationStepChunks = 1;
+            budget.newChunkActivations = std::max<std::size_t>(workerBudget * 2, 4);
+            budget.newFallbackActivations = 2;
+            budget.staleReleaseCount = 4;
+            budget.atlasUpdateCells = 8u * 1024u;
+        }
+        else if (totalBacklog > 256 || exactMissing > 24 || exactPendingUploads > 24)
+        {
+            budget.activationStepChunks = 2;
+            budget.newChunkActivations = std::max<std::size_t>(workerBudget * 4, 8);
+            budget.newFallbackActivations = 4;
+            budget.staleReleaseCount = 8;
+            budget.atlasUpdateCells = 16u * 1024u;
+        }
+        else if (totalBacklog > 96 || exactMissing > 8 || exactPendingUploads > 8)
+        {
+            budget.activationStepChunks = 4;
+            budget.newChunkActivations = std::max<std::size_t>(workerBudget * 8, 16);
+            budget.newFallbackActivations = 6;
+            budget.staleReleaseCount = 16;
+            budget.atlasUpdateCells = 32u * 1024u;
+        }
+        else
+        {
+            budget.activationStepChunks = 6;
+            budget.newChunkActivations = std::max<std::size_t>(workerBudget * 12, 32);
+            budget.newFallbackActivations = 8;
+            budget.staleReleaseCount = 24;
+            budget.atlasUpdateCells = 96u * 1024u;
+        }
+        return budget;
+    }
+
     void ensureAtlasState(const FarLodLevelConfig& level)
     {
         if (device_ == nullptr)
@@ -6185,6 +6264,51 @@ private:
             return;
         }
         mergeAtlasUpdateRect(rects, *clipped);
+    }
+
+    void sampleChunkSurfaceBounds(const ColumnSampleFn& columnSampleFn,
+                                  const FarLodLevelConfig& level,
+                                  int chunkX,
+                                  int chunkZ,
+                                  int verticalBandMinWorldY,
+                                  int verticalBandMaxWorldY,
+                                  int& outMinSurfaceY,
+                                  int& outMaxSurfaceY,
+                                  bool& outAnyWaterFill) const
+    {
+        const int span = level.chunkSpanBlocks();
+        const int worldMinX = chunkX * span;
+        const int worldMaxX = worldMinX + span - 1;
+        const int worldMinZ = chunkZ * span;
+        const int worldMaxZ = worldMinZ + span - 1;
+        const int worldMidX = (worldMinX + worldMaxX) / 2;
+        const int worldMidZ = (worldMinZ + worldMaxZ) / 2;
+        const std::array<glm::ivec2, 9> samplePoints{{
+            {worldMinX, worldMinZ},
+            {worldMaxX, worldMinZ},
+            {worldMinX, worldMaxZ},
+            {worldMaxX, worldMaxZ},
+            {worldMidX, worldMinZ},
+            {worldMidX, worldMaxZ},
+            {worldMinX, worldMidZ},
+            {worldMaxX, worldMidZ},
+            {worldMidX, worldMidZ},
+        }};
+
+        outMinSurfaceY = std::numeric_limits<int>::max();
+        outMaxSurfaceY = std::numeric_limits<int>::min();
+        outAnyWaterFill = false;
+        for (const glm::ivec2& samplePoint : samplePoints)
+        {
+            const ColumnSample sample =
+                columnSampleFn(samplePoint.x, samplePoint.y, verticalBandMinWorldY, verticalBandMaxWorldY);
+            outMinSurfaceY = std::min(outMinSurfaceY, sample.surfaceY);
+            outMaxSurfaceY = std::max(outMaxSurfaceY, sample.surfaceY);
+            if (sample.dominantBiome != nullptr && sample.dominantBiome->terrainSettings.waterFill.enabled)
+            {
+                outAnyWaterFill = true;
+            }
+        }
     }
 
     [[nodiscard]] GpuTerrainAtlasSample buildCanonicalAtlasSample(const StructureSampleColumnFn& sampleColumnFn,
@@ -6453,7 +6577,7 @@ private:
         }
     }
 
-    void appendAtlasUpdates(const std::deque<GpuSynthesisRequest>& requests)
+    void appendAtlasUpdates(const std::deque<GpuSynthesisRequest>& requests, std::size_t atlasCellBudget)
     {
         std::unordered_set<int> requestedLevels;
         requestedLevels.reserve(requests.size());
@@ -6490,6 +6614,11 @@ private:
                 continue;
             }
 
+            if (atlasCellBudget == 0)
+            {
+                continue;
+            }
+
             std::vector<AtlasUpdateRect> rects;
             for (const AtlasUpdateRect& rect : prepareAtlasUpdateRects(atlas, level))
             {
@@ -6518,23 +6647,52 @@ private:
             atlas.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             for (const AtlasUpdateRect& rect : rects)
             {
-                if (!uploadCanonicalAtlasUpdateRect(atlas, level, rect, sampleColumnFn, densityFn))
+                if (atlasCellBudget == 0)
                 {
+                    mergeAtlasUpdateRect(atlas.pendingDirtyRects, rect);
+                    continue;
+                }
+
+                const std::size_t rectCellCount =
+                    static_cast<std::size_t>(rect.sizeCells.x) * static_cast<std::size_t>(rect.sizeCells.y);
+                int uploadHeight = rect.sizeCells.y;
+                if (rectCellCount > atlasCellBudget)
+                {
+                    const std::size_t maxRows = std::max<std::size_t>(1, atlasCellBudget / static_cast<std::size_t>(rect.sizeCells.x));
+                    uploadHeight = static_cast<int>(std::min<std::size_t>(maxRows, static_cast<std::size_t>(rect.sizeCells.y)));
+                }
+
+                const AtlasUpdateRect uploadRect{rect.originCell, glm::ivec2(rect.sizeCells.x, uploadHeight)};
+                const int remainingHeight = rect.sizeCells.y - uploadHeight;
+                if (remainingHeight > 0)
+                {
+                    mergeAtlasUpdateRect(atlas.pendingDirtyRects,
+                                         AtlasUpdateRect{
+                                             glm::ivec2(rect.originCell.x, rect.originCell.y + uploadHeight),
+                                             glm::ivec2(rect.sizeCells.x, remainingHeight)});
+                }
+
+                if (!uploadCanonicalAtlasUpdateRect(atlas, level, uploadRect, sampleColumnFn, densityFn))
+                {
+                    mergeAtlasUpdateRect(atlas.pendingDirtyRects, uploadRect);
                     continue;
                 }
                 gpuContext_.dispatchAtlasUpdate(atlas.originCell,
                                                 atlas.atlasSizeCells,
-                                                rect.originCell,
-                                                rect.sizeCells,
+                                                uploadRect.originCell,
+                                                uploadRect.sizeCells,
                                                 level.blockScale,
                                                 worldgenTables_.header.seaLevel,
                                                 worldgenHeaderBuffer_.Get(),
                                                 worldgenBiomeBuffer_.Get(),
                                                 worldgenTables_.header.biomeCount,
                                                 atlas.canonicalUpdateBuffer.Get(),
-                                                static_cast<std::uint32_t>(rect.sizeCells.x * rect.sizeCells.y),
+                                                static_cast<std::uint32_t>(uploadRect.sizeCells.x * uploadRect.sizeCells.y),
                                                 atlas.buffer.Get(),
                                                 atlas.elementCount());
+                const std::size_t uploadedCells =
+                    static_cast<std::size_t>(uploadRect.sizeCells.x) * static_cast<std::size_t>(uploadRect.sizeCells.y);
+                atlasCellBudget = (uploadedCells >= atlasCellBudget) ? 0 : (atlasCellBudget - uploadedCells);
             }
             gpuContext_.uavBarrier(atlas.buffer.Get());
             gpuContext_.transition(atlas.buffer.Get(),
@@ -7491,7 +7649,7 @@ private:
             return;
         }
 
-        appendAtlasUpdates(requests);
+        appendAtlasUpdates(requests, computeWorkBudget().atlasUpdateCells);
 
         std::vector<PendingGpuParityReadback> pendingReadbacks;
         std::vector<PendingGpuMeshCountReadback> pendingCountReadbacks;

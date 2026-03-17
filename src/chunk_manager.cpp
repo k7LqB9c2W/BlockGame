@@ -4633,6 +4633,7 @@ public:
         }
 
         scheduleDirtyBuilds();
+        pollGpuMeshCountReadbacks();
         submitGpuSynthesisRequests(uploadBudgetMs);
         collectCompletedBuilds(uploadBudgetMs);
         pollGpuParityResults();
@@ -4749,6 +4750,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(gpuRequestMutex_);
             gpuSynthesisRequests_.clear();
+            clearPendingGpuMeshCountReadbacks();
             pendingGpuParityReadbacks_.clear();
         }
         std::lock_guard<std::mutex> lock(configMutex_);
@@ -5119,6 +5121,28 @@ private:
         std::shared_ptr<std::array<GpuTerrainColumnDescriptor, kLogicalSize * kLogicalSize>> cpuColumnParityDescriptors;
         bool parityRequested{false};
         bool copySubmitted{false};
+    };
+
+    struct PendingGpuMeshCountReadback
+    {
+        FarLodChunkKey key{};
+        std::uint32_t buildVersion{0};
+        std::uint64_t epoch{0};
+        glm::ivec3 worldMin{0};
+        int blockScale{1};
+        UINT64 computeFenceValue{0};
+        Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer;
+        std::byte* mappedData{nullptr};
+    };
+
+    struct PendingGpuMeshEmitRequest
+    {
+        FarLodChunkKey key{};
+        std::uint32_t buildVersion{0};
+        std::uint64_t epoch{0};
+        glm::ivec3 worldMin{0};
+        int blockScale{1};
+        std::uint32_t faceCount{0};
     };
 
     struct BuildJob
@@ -5580,7 +5604,9 @@ private:
         BufferPage page;
         page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
         page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
-        page.recordCapacity = std::max<std::size_t>(1, page.vertexCapacity / kMaxFarVerticesPerTile);
+        page.recordCapacity = std::max<std::size_t>(
+            1,
+            std::min(page.vertexCapacity / 4u, page.indexCapacity / 6u));
         page.vertexBuffer = createDefaultBuffer(device_.Get(),
                                                 static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
                                                 D3D12_RESOURCE_STATE_COMMON,
@@ -5790,6 +5816,27 @@ private:
         uploadContext_.flush(nullptr);
         uploadContext_.waitForIdle();
         upload->Unmap(0, nullptr);
+    }
+
+    static void releaseGpuMeshCountReadback(PendingGpuMeshCountReadback& readback) noexcept
+    {
+        if (readback.readbackBuffer != nullptr && readback.mappedData != nullptr)
+        {
+            readback.readbackBuffer->Unmap(0, nullptr);
+        }
+        readback.readbackBuffer.Reset();
+        readback.mappedData = nullptr;
+        readback.computeFenceValue = 0;
+    }
+
+    void clearPendingGpuMeshCountReadbacks() noexcept
+    {
+        for (PendingGpuMeshCountReadback& readback : pendingGpuMeshCountReadbacks_)
+        {
+            releaseGpuMeshCountReadback(readback);
+        }
+        pendingGpuMeshCountReadbacks_.clear();
+        pendingGpuMeshEmitRequests_.clear();
     }
 
     void releasePendingMeshAllocation(FarLodChunkRecord& chunk)
@@ -6864,6 +6911,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(gpuRequestMutex_);
             gpuSynthesisRequests_.clear();
+            clearPendingGpuMeshCountReadbacks();
             pendingGpuParityReadbacks_.clear();
         }
     }
@@ -7225,20 +7273,23 @@ private:
             lastAverageGpuFaceBuildMs_ = 0.0;
             std::lock_guard<std::mutex> lock(gpuRequestMutex_);
             gpuSynthesisRequests_.clear();
+            clearPendingGpuMeshCountReadbacks();
             pendingGpuParityReadbacks_.clear();
             return;
         }
 
         std::deque<GpuSynthesisRequest> requests;
+        std::deque<PendingGpuMeshEmitRequest> pendingEmitRequests;
         {
             std::lock_guard<std::mutex> lock(gpuRequestMutex_);
             requests.swap(gpuSynthesisRequests_);
+            pendingEmitRequests.swap(pendingGpuMeshEmitRequests_);
         }
 
         lastAverageGpuSynthesisMs_ = 0.0;
         lastAverageGpuStampMs_ = 0.0;
         lastAverageGpuFaceBuildMs_ = 0.0;
-        if (requests.empty() || !gpuContext_.ready())
+        if ((requests.empty() && pendingEmitRequests.empty()) || !gpuContext_.ready())
         {
             if (!requests.empty())
             {
@@ -7246,6 +7297,14 @@ private:
                 for (GpuSynthesisRequest& request : requests)
                 {
                     gpuSynthesisRequests_.push_back(std::move(request));
+                }
+            }
+            if (!pendingEmitRequests.empty())
+            {
+                std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+                for (PendingGpuMeshEmitRequest& request : pendingEmitRequests)
+                {
+                    pendingGpuMeshEmitRequests_.push_back(std::move(request));
                 }
             }
             return;
@@ -7259,22 +7318,229 @@ private:
             {
                 gpuSynthesisRequests_.push_back(std::move(request));
             }
+            for (PendingGpuMeshEmitRequest& request : pendingEmitRequests)
+            {
+                pendingGpuMeshEmitRequests_.push_back(std::move(request));
+            }
             return;
         }
 
         appendAtlasUpdates(requests);
 
         std::vector<PendingGpuParityReadback> pendingReadbacks;
+        std::vector<PendingGpuMeshCountReadback> pendingCountReadbacks;
         std::vector<FarLodChunkKey> submittedKeys;
         std::vector<FarLodChunkKey> stagedGpuMeshes;
         static constexpr std::size_t kMaxGpuSynthSubmitsPerUpdate = 4;
+        static constexpr std::uint64_t kFaceCountReadbackSizeBytes = sizeof(std::uint32_t) * 2u;
+        static constexpr std::uint64_t kLastFaceWordOffset =
+            static_cast<std::uint64_t>(kVoxelCount - 1u) * sizeof(std::uint32_t);
         const double budgetLimit = budgetMs <= 0.0 ? std::numeric_limits<double>::max() : budgetMs;
         const SteadyClock::time_point submitStart = SteadyClock::now();
         double totalGpuSynthesisMs = 0.0;
         double totalGpuStampMs = 0.0;
         double totalGpuFaceBuildMs = 0.0;
         std::size_t submittedCount = 0;
+        std::size_t synthSubmittedCount = 0;
         std::size_t faceBuildSamples = 0;
+        auto computeMaxMergeExtent = [](int blockScale) noexcept
+        {
+            return (blockScale <= 2)   ? 2u
+                 : (blockScale <= 4)   ? 4u
+                 : (blockScale <= 8)   ? 8u
+                                       : 16u;
+        };
+
+        while (!pendingEmitRequests.empty())
+        {
+            if (submittedCount >= kMaxGpuSynthSubmitsPerUpdate)
+            {
+                break;
+            }
+            if (std::chrono::duration<double, std::milli>(SteadyClock::now() - submitStart).count() >= budgetLimit)
+            {
+                break;
+            }
+
+            PendingGpuMeshEmitRequest emitRequest = std::move(pendingEmitRequests.front());
+            pendingEmitRequests.pop_front();
+
+            std::lock_guard<std::mutex> lock(configMutex_);
+            auto it = chunks_.find(emitRequest.key);
+            if (it == chunks_.end())
+            {
+                continue;
+            }
+
+            FarLodChunkRecord& chunk = it->second;
+            if (!chunk.active ||
+                emitRequest.epoch != buildEpoch_.load(std::memory_order_acquire) ||
+                emitRequest.buildVersion != chunk.buildVersion ||
+                chunk.gpu.columnBuffer == nullptr ||
+                chunk.gpu.faceCountBuffer == nullptr ||
+                chunk.gpu.facePrefixBuffer == nullptr ||
+                emitRequest.faceCount == 0u)
+            {
+                continue;
+            }
+
+            const std::size_t vertexCount = static_cast<std::size_t>(emitRequest.faceCount) * 4u;
+            const std::uint32_t indexCount = emitRequest.faceCount * 6u;
+            Allocation allocation = acquireAllocation(vertexCount, indexCount);
+            if (allocation.pageIndex == kInvalidChunkBufferPage || allocation.pageIndex >= bufferPages_.size())
+            {
+                pendingEmitRequests.push_front(std::move(emitRequest));
+                break;
+            }
+
+            if (!stageGpuMeshForCommit(chunk,
+                                       allocation,
+                                       vertexCount,
+                                       indexCount,
+                                       emitRequest.buildVersion,
+                                       emitRequest.epoch))
+            {
+                releaseAllocationRange(allocation.pageIndex,
+                                       allocation.vertexOffset,
+                                       vertexCount,
+                                       allocation.indexOffset,
+                                       indexCount,
+                                       allocation.recordIndex);
+                pendingEmitRequests.push_front(std::move(emitRequest));
+                break;
+            }
+
+            ID3D12Resource* neighborPosX = emptyVoxelBuffer_.Get();
+            ID3D12Resource* neighborNegX = emptyVoxelBuffer_.Get();
+            ID3D12Resource* neighborPosZ = emptyVoxelBuffer_.Get();
+            ID3D12Resource* neighborNegZ = emptyVoxelBuffer_.Get();
+            auto bindNeighbor = [&](const glm::ivec3& offset, ID3D12Resource*& outBuffer)
+            {
+                const FarLodChunkKey neighborKey{emitRequest.key.level, emitRequest.key.coord + offset};
+                auto neighborIt = chunks_.find(neighborKey);
+                if (neighborIt == chunks_.end())
+                {
+                    return;
+                }
+                FarLodChunkRecord& neighbor = neighborIt->second;
+                if (!neighbor.gpu.voxelReady || neighbor.gpu.columnBuffer == nullptr)
+                {
+                    return;
+                }
+                if (gpuContext_.completedFenceValue() < neighbor.gpu.voxelFenceValue)
+                {
+                    return;
+                }
+                outBuffer = neighbor.gpu.columnBuffer.Get();
+                if (neighbor.gpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+                {
+                    gpuContext_.transition(neighbor.gpu.columnBuffer.Get(),
+                                           neighbor.gpu.columnState,
+                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    neighbor.gpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                }
+            };
+            bindNeighbor(glm::ivec3(1, 0, 0), neighborPosX);
+            bindNeighbor(glm::ivec3(-1, 0, 0), neighborNegX);
+            bindNeighbor(glm::ivec3(0, 0, 1), neighborPosZ);
+            bindNeighbor(glm::ivec3(0, 0, -1), neighborNegZ);
+
+            if (chunk.gpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+            {
+                gpuContext_.transition(chunk.gpu.columnBuffer.Get(),
+                                       chunk.gpu.columnState,
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                chunk.gpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            }
+            gpuContext_.transition(chunk.gpu.faceCountBuffer.Get(),
+                                   chunk.gpu.faceCountState,
+                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            gpuContext_.transition(chunk.gpu.facePrefixBuffer.Get(),
+                                   chunk.gpu.facePrefixState,
+                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            chunk.gpu.facePrefixState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+            BufferPage& page = bufferPages_[allocation.pageIndex];
+            if (page.vertexBuffer != nullptr)
+            {
+                gpuContext_.transition(page.vertexBuffer.Get(),
+                                       page.vertexState,
+                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                page.vertexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+            if (page.indexBuffer != nullptr)
+            {
+                gpuContext_.transition(page.indexBuffer.Get(),
+                                       page.indexState,
+                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                page.indexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+            if (page.drawRecordBuffer != nullptr)
+            {
+                gpuContext_.transition(page.drawRecordBuffer.Get(),
+                                       page.drawRecordState,
+                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+
+            const SteadyClock::time_point faceBuildStart = SteadyClock::now();
+            const std::uint32_t maxMergeExtent = computeMaxMergeExtent(emitRequest.blockScale);
+            gpuContext_.dispatchFaceEmit(glm::ivec3(emitRequest.worldMin.x,
+                                                    static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
+                                                    emitRequest.worldMin.z),
+                                         emitRequest.blockScale,
+                                         maxMergeExtent,
+                                         static_cast<std::uint32_t>(allocation.vertexOffset),
+                                         static_cast<std::uint32_t>(allocation.indexOffset),
+                                         allocation.recordIndex,
+                                         0u,
+                                         chunk.gpu.columnBuffer.Get(),
+                                         neighborPosX,
+                                         neighborNegX,
+                                         neighborPosZ,
+                                         neighborNegZ,
+                                         chunk.gpu.faceCountBuffer.Get(),
+                                         chunk.gpu.facePrefixBuffer.Get(),
+                                         blockUvBuffer_.Get(),
+                                         blockUvCount_,
+                                         static_cast<std::uint32_t>(sizeof(GpuBlockFaceUv)),
+                                         page.vertexBuffer.Get(),
+                                         static_cast<std::uint32_t>(page.vertexCapacity),
+                                         page.indexBuffer.Get(),
+                                         static_cast<std::uint32_t>(page.indexCapacity),
+                                         page.drawRecordBuffer.Get(),
+                                         static_cast<std::uint32_t>(page.recordCapacity));
+
+            totalGpuFaceBuildMs +=
+                std::chrono::duration<double, std::milli>(SteadyClock::now() - faceBuildStart).count();
+            ++faceBuildSamples;
+
+            if (page.vertexBuffer != nullptr)
+            {
+                gpuContext_.transition(page.vertexBuffer.Get(),
+                                       page.vertexState,
+                                       D3D12_RESOURCE_STATE_COMMON);
+                page.vertexState = D3D12_RESOURCE_STATE_COMMON;
+            }
+            if (page.indexBuffer != nullptr)
+            {
+                gpuContext_.transition(page.indexBuffer.Get(),
+                                       page.indexState,
+                                       D3D12_RESOURCE_STATE_COMMON);
+                page.indexState = D3D12_RESOURCE_STATE_COMMON;
+            }
+            if (page.drawRecordBuffer != nullptr)
+            {
+                gpuContext_.transition(page.drawRecordBuffer.Get(),
+                                       page.drawRecordState,
+                                       D3D12_RESOURCE_STATE_COMMON);
+                page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
+            }
+
+            stagedGpuMeshes.push_back(emitRequest.key);
+            ++submittedCount;
+        }
 
         while (!requests.empty())
         {
@@ -7358,34 +7624,14 @@ private:
                 chunk.gpu.faceCountBuffer != nullptr &&
                 chunk.gpu.facePrefixBuffer != nullptr &&
                 chunk.gpu.faceGroupSumBuffer != nullptr;
-            Allocation allocation{};
             if (canBuildGpuMesh)
             {
-                allocation = acquireAllocation(kMaxFarVerticesPerTile, kMaxFarIndicesPerTile);
-                if (allocation.pageIndex == kInvalidChunkBufferPage)
-                {
-                    requests.push_front(std::move(request));
-                    break;
-                }
-
-                if (!stageGpuMeshForCommit(chunk, allocation, request.buildVersion, request.epoch))
-                {
-                    releaseAllocationRange(allocation.pageIndex,
-                                           allocation.vertexOffset,
-                                           kMaxFarVerticesPerTile,
-                                           allocation.indexOffset,
-                                           static_cast<std::uint32_t>(kMaxFarIndicesPerTile),
-                                           allocation.recordIndex);
-                    requests.push_front(std::move(request));
-                    break;
-                }
-
                 ID3D12Resource* neighborPosX = emptyVoxelBuffer_.Get();
                 ID3D12Resource* neighborNegX = emptyVoxelBuffer_.Get();
                 ID3D12Resource* neighborPosZ = emptyVoxelBuffer_.Get();
                 ID3D12Resource* neighborNegZ = emptyVoxelBuffer_.Get();
-                auto tryPositiveNeighbor = [&](const glm::ivec3& offset,
-                                               ID3D12Resource*& outBuffer)
+                auto bindNeighbor = [&](const glm::ivec3& offset,
+                                        ID3D12Resource*& outBuffer)
                 {
                     const FarLodChunkKey neighborKey{request.key.level, request.key.coord + offset};
                     auto neighborIt = chunks_.find(neighborKey);
@@ -7412,38 +7658,10 @@ private:
                     }
                 };
 
-                auto tryNegativeNeighbor = [&](const glm::ivec3& offset,
-                                               ID3D12Resource*& outBuffer)
-                {
-                    const FarLodChunkKey neighborKey{request.key.level, request.key.coord + offset};
-                    auto neighborIt = chunks_.find(neighborKey);
-                    if (neighborIt == chunks_.end())
-                    {
-                        return;
-                    }
-                    FarLodChunkRecord& neighbor = neighborIt->second;
-                    if (!neighbor.gpu.voxelReady || neighbor.gpu.columnBuffer == nullptr)
-                    {
-                        return;
-                    }
-                    if (gpuContext_.completedFenceValue() < neighbor.gpu.voxelFenceValue)
-                    {
-                        return;
-                    }
-                    outBuffer = neighbor.gpu.columnBuffer.Get();
-                    if (neighbor.gpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-                    {
-                        gpuContext_.transition(neighbor.gpu.columnBuffer.Get(),
-                                               neighbor.gpu.columnState,
-                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                        neighbor.gpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-                    }
-                };
-
-                tryPositiveNeighbor(glm::ivec3(1, 0, 0), neighborPosX);
-                tryPositiveNeighbor(glm::ivec3(0, 0, 1), neighborPosZ);
-                tryNegativeNeighbor(glm::ivec3(-1, 0, 0), neighborNegX);
-                tryNegativeNeighbor(glm::ivec3(0, 0, -1), neighborNegZ);
+                bindNeighbor(glm::ivec3(1, 0, 0), neighborPosX);
+                bindNeighbor(glm::ivec3(-1, 0, 0), neighborNegX);
+                bindNeighbor(glm::ivec3(0, 0, 1), neighborPosZ);
+                bindNeighbor(glm::ivec3(0, 0, -1), neighborNegZ);
 
                 if (chunk.gpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
                 {
@@ -7465,105 +7683,65 @@ private:
                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 chunk.gpu.faceGroupSumState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-                if (allocation.pageIndex < bufferPages_.size())
+                const SteadyClock::time_point faceBuildStart = SteadyClock::now();
+                const std::uint32_t maxMergeExtent = computeMaxMergeExtent(request.blockScale);
+                gpuContext_.dispatchFaceCount(static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
+                                              request.blockScale,
+                                              0u,
+                                              maxMergeExtent,
+                                              chunk.gpu.columnBuffer.Get(),
+                                              neighborPosX,
+                                              neighborNegX,
+                                              neighborPosZ,
+                                              neighborNegZ,
+                                              chunk.gpu.faceCountBuffer.Get());
+                gpuContext_.uavBarrier(chunk.gpu.faceCountBuffer.Get());
+                gpuContext_.dispatchFacePrefix(chunk.gpu.faceCountBuffer.Get(),
+                                               chunk.gpu.facePrefixBuffer.Get(),
+                                               chunk.gpu.faceGroupSumBuffer.Get());
+                gpuContext_.uavBarrier(chunk.gpu.facePrefixBuffer.Get());
+
+                std::byte* readbackMapped = nullptr;
+                Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer =
+                    createReadbackBuffer(device_.Get(), kFaceCountReadbackSizeBytes, readbackMapped);
+                if (readbackBuffer == nullptr || readbackMapped == nullptr)
                 {
-                    BufferPage& page = bufferPages_[allocation.pageIndex];
-                    if (page.vertexBuffer != nullptr)
-                    {
-                        gpuContext_.transition(page.vertexBuffer.Get(),
-                                               page.vertexState,
-                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                        page.vertexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-                    }
-                    if (page.indexBuffer != nullptr)
-                    {
-                        gpuContext_.transition(page.indexBuffer.Get(),
-                                               page.indexState,
-                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                        page.indexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-                    }
-                    if (page.drawRecordBuffer != nullptr)
-                    {
-                        gpuContext_.transition(page.drawRecordBuffer.Get(),
-                                               page.drawRecordState,
-                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                        page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-                    }
-
-                    const SteadyClock::time_point faceBuildStart = SteadyClock::now();
-                    const std::uint32_t maxMergeExtent = (request.blockScale <= 2)   ? 2u
-                                                        : (request.blockScale <= 4) ? 4u
-                                                        : (request.blockScale <= 8) ? 8u
-                                                                                   : 16u;
-                    gpuContext_.dispatchFaceCount(static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
-                                                  request.blockScale,
-                                                  0u,
-                                                  maxMergeExtent,
-                                                  chunk.gpu.columnBuffer.Get(),
-                                                  neighborPosX,
-                                                  neighborNegX,
-                                                  neighborPosZ,
-                                                  neighborNegZ,
-                                                  chunk.gpu.faceCountBuffer.Get());
-                    gpuContext_.uavBarrier(chunk.gpu.faceCountBuffer.Get());
-                    gpuContext_.dispatchFacePrefix(chunk.gpu.faceCountBuffer.Get(),
-                                                   chunk.gpu.facePrefixBuffer.Get(),
-                                                   chunk.gpu.faceGroupSumBuffer.Get());
-                    gpuContext_.uavBarrier(chunk.gpu.facePrefixBuffer.Get());
-                    gpuContext_.dispatchFaceEmit(glm::ivec3(request.worldMin.x,
-                                                            static_cast<int>(std::floor(chunk.cpu.boundsMin.y)),
-                                                            request.worldMin.z),
-                                                 request.blockScale,
-                                                 maxMergeExtent,
-                                                 static_cast<std::uint32_t>(allocation.vertexOffset),
-                                                 static_cast<std::uint32_t>(allocation.indexOffset),
-                                                 allocation.recordIndex,
-                                                 0u,
-                                                 chunk.gpu.columnBuffer.Get(),
-                                                 neighborPosX,
-                                                 neighborNegX,
-                                                 neighborPosZ,
-                                                 neighborNegZ,
-                                                 chunk.gpu.faceCountBuffer.Get(),
-                                                 chunk.gpu.facePrefixBuffer.Get(),
-                                                 blockUvBuffer_.Get(),
-                                                 blockUvCount_,
-                                                 static_cast<std::uint32_t>(sizeof(GpuBlockFaceUv)),
-                                                 page.vertexBuffer.Get(),
-                                                 static_cast<std::uint32_t>(page.vertexCapacity),
-                                                 page.indexBuffer.Get(),
-                                                 static_cast<std::uint32_t>(page.indexCapacity),
-                                                 page.drawRecordBuffer.Get(),
-                                                 static_cast<std::uint32_t>(page.recordCapacity));
-
-                    totalGpuFaceBuildMs +=
-                        std::chrono::duration<double, std::milli>(SteadyClock::now() - faceBuildStart).count();
-                    ++faceBuildSamples;
-
-                    if (page.vertexBuffer != nullptr)
-                    {
-                        gpuContext_.transition(page.vertexBuffer.Get(),
-                                               page.vertexState,
-                                               D3D12_RESOURCE_STATE_COMMON);
-                        page.vertexState = D3D12_RESOURCE_STATE_COMMON;
-                    }
-                    if (page.indexBuffer != nullptr)
-                    {
-                        gpuContext_.transition(page.indexBuffer.Get(),
-                                               page.indexState,
-                                               D3D12_RESOURCE_STATE_COMMON);
-                        page.indexState = D3D12_RESOURCE_STATE_COMMON;
-                    }
-                    if (page.drawRecordBuffer != nullptr)
-                    {
-                        gpuContext_.transition(page.drawRecordBuffer.Get(),
-                                               page.drawRecordState,
-                                               D3D12_RESOURCE_STATE_COMMON);
-                        page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
-                    }
+                    requests.push_front(std::move(request));
+                    break;
                 }
 
-                stagedGpuMeshes.push_back(request.key);
+                gpuContext_.transition(chunk.gpu.facePrefixBuffer.Get(),
+                                       chunk.gpu.facePrefixState,
+                                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+                chunk.gpu.facePrefixState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                gpuContext_.transition(chunk.gpu.faceCountBuffer.Get(),
+                                       chunk.gpu.faceCountState,
+                                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+                chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                gpuContext_.copyBuffer(readbackBuffer.Get(),
+                                       0,
+                                       chunk.gpu.facePrefixBuffer.Get(),
+                                       kLastFaceWordOffset,
+                                       sizeof(std::uint32_t));
+                gpuContext_.copyBuffer(readbackBuffer.Get(),
+                                       sizeof(std::uint32_t),
+                                       chunk.gpu.faceCountBuffer.Get(),
+                                       kLastFaceWordOffset,
+                                       sizeof(std::uint32_t));
+
+                totalGpuFaceBuildMs +=
+                    std::chrono::duration<double, std::milli>(SteadyClock::now() - faceBuildStart).count();
+                ++faceBuildSamples;
+
+                PendingGpuMeshCountReadback pendingCount{};
+                pendingCount.key = request.key;
+                pendingCount.buildVersion = request.buildVersion;
+                pendingCount.epoch = request.epoch;
+                pendingCount.worldMin = request.worldMin;
+                pendingCount.blockScale = request.blockScale;
+                pendingCount.readbackBuffer = std::move(readbackBuffer);
+                pendingCount.mappedData = readbackMapped;
+                pendingCountReadbacks.push_back(std::move(pendingCount));
             }
 
             if (request.parityRequested)
@@ -7591,6 +7769,7 @@ private:
             }
 
             submittedKeys.push_back(request.key);
+            ++synthSubmittedCount;
             ++submittedCount;
         }
 
@@ -7599,9 +7778,14 @@ private:
         {
             std::ostringstream stream;
             stream << "Far LOD GPU submit batch flushed submittedCount=" << submittedCount
+                   << " pendingExactCounts=" << pendingCountReadbacks.size()
                    << " pendingParity=" << pendingReadbacks.size()
                    << " fence=" << flushResult.fenceValue;
             chunkManagerDebugLog(stream.str());
+        }
+        for (PendingGpuMeshCountReadback& pending : pendingCountReadbacks)
+        {
+            pending.computeFenceValue = flushResult.fenceValue;
         }
         for (PendingGpuParityReadback& pending : pendingReadbacks)
         {
@@ -7658,6 +7842,14 @@ private:
             {
                 gpuSynthesisRequests_.push_back(std::move(request));
             }
+            for (PendingGpuMeshEmitRequest& request : pendingEmitRequests)
+            {
+                pendingGpuMeshEmitRequests_.push_back(std::move(request));
+            }
+            for (PendingGpuMeshCountReadback& pending : pendingCountReadbacks)
+            {
+                pendingGpuMeshCountReadbacks_.push_back(std::move(pending));
+            }
             for (PendingGpuParityReadback& pending : pendingReadbacks)
             {
                 pendingGpuParityReadbacks_.push_back(std::move(pending));
@@ -7666,8 +7858,16 @@ private:
 
         if (submittedCount > 0)
         {
-            lastAverageGpuSynthesisMs_ = totalGpuSynthesisMs / static_cast<double>(submittedCount);
-            lastAverageGpuStampMs_ = totalGpuStampMs / static_cast<double>(submittedCount);
+            if (synthSubmittedCount > 0)
+            {
+                lastAverageGpuSynthesisMs_ = totalGpuSynthesisMs / static_cast<double>(synthSubmittedCount);
+                lastAverageGpuStampMs_ = totalGpuStampMs / static_cast<double>(synthSubmittedCount);
+            }
+            else
+            {
+                lastAverageGpuSynthesisMs_ = 0.0;
+                lastAverageGpuStampMs_ = 0.0;
+            }
             if (faceBuildSamples > 0)
             {
                 lastAverageGpuFaceBuildMs_ = totalGpuFaceBuildMs / static_cast<double>(faceBuildSamples);
@@ -7834,6 +8034,82 @@ private:
         }
         lastCollectMs_ = std::chrono::duration<double, std::milli>(SteadyClock::now() - collectStart).count();
         lastUploadMs_ = std::chrono::duration<double, std::milli>(SteadyClock::now() - uploadStart).count();
+    }
+
+    void pollGpuMeshCountReadbacks()
+    {
+        std::deque<PendingGpuMeshCountReadback> pending;
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            pending.swap(pendingGpuMeshCountReadbacks_);
+        }
+
+        if (pending.empty())
+        {
+            return;
+        }
+
+        std::deque<PendingGpuMeshCountReadback> stillPending;
+        std::vector<PendingGpuMeshEmitRequest> readyEmitRequests;
+        const UINT64 completedFenceValue = gpuContext_.completedFenceValue();
+
+        for (PendingGpuMeshCountReadback& pendingReadback : pending)
+        {
+            if (pendingReadback.computeFenceValue == 0 || pendingReadback.computeFenceValue > completedFenceValue)
+            {
+                stillPending.push_back(std::move(pendingReadback));
+                continue;
+            }
+
+            if (pendingReadback.mappedData == nullptr)
+            {
+                releaseGpuMeshCountReadback(pendingReadback);
+                continue;
+            }
+
+            const auto* values = reinterpret_cast<const std::uint32_t*>(pendingReadback.mappedData);
+            const std::uint32_t totalFaces = values[0] + values[1];
+
+            bool stillRelevant = false;
+            {
+                std::lock_guard<std::mutex> configLock(configMutex_);
+                auto it = chunks_.find(pendingReadback.key);
+                if (it != chunks_.end())
+                {
+                    const FarLodChunkRecord& chunk = it->second;
+                    stillRelevant =
+                        chunk.active &&
+                        pendingReadback.epoch == buildEpoch_.load(std::memory_order_acquire) &&
+                        pendingReadback.buildVersion == chunk.buildVersion;
+                }
+            }
+
+            if (stillRelevant && totalFaces > 0u)
+            {
+                PendingGpuMeshEmitRequest emitRequest{};
+                emitRequest.key = pendingReadback.key;
+                emitRequest.buildVersion = pendingReadback.buildVersion;
+                emitRequest.epoch = pendingReadback.epoch;
+                emitRequest.worldMin = pendingReadback.worldMin;
+                emitRequest.blockScale = pendingReadback.blockScale;
+                emitRequest.faceCount = totalFaces;
+                readyEmitRequests.push_back(std::move(emitRequest));
+            }
+
+            releaseGpuMeshCountReadback(pendingReadback);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
+            for (PendingGpuMeshCountReadback& pendingReadback : stillPending)
+            {
+                pendingGpuMeshCountReadbacks_.push_back(std::move(pendingReadback));
+            }
+            for (PendingGpuMeshEmitRequest& emitRequest : readyEmitRequests)
+            {
+                pendingGpuMeshEmitRequests_.push_back(std::move(emitRequest));
+            }
+        }
     }
 
     void pollGpuParityResults()
@@ -8293,6 +8569,8 @@ private:
 
     [[nodiscard]] bool stageGpuMeshForCommit(FarLodChunkRecord& chunk,
                                              const Allocation& allocation,
+                                             std::size_t vertexCount,
+                                             std::uint32_t indexCount,
                                              std::uint32_t buildVersion,
                                              std::uint64_t epoch)
     {
@@ -8327,8 +8605,8 @@ private:
         chunk.pendingMesh.pageIndex = allocation.pageIndex;
         chunk.pendingMesh.vertexOffset = allocation.vertexOffset;
         chunk.pendingMesh.indexOffset = allocation.indexOffset;
-        chunk.pendingMesh.vertexCount = kMaxFarVerticesPerTile;
-        chunk.pendingMesh.indexCount = static_cast<std::uint32_t>(kMaxFarIndicesPerTile);
+        chunk.pendingMesh.vertexCount = vertexCount;
+        chunk.pendingMesh.indexCount = indexCount;
         chunk.pendingMesh.recordIndex = allocation.recordIndex;
         chunk.pendingMesh.boundsMin = chunk.cpu.boundsMin;
         chunk.pendingMesh.boundsMax = chunk.cpu.boundsMax;
@@ -8476,6 +8754,8 @@ private:
     mutable std::mutex completedMutex_;
     std::deque<BuildResult> completedBuilds_;
     std::deque<GpuSynthesisRequest> gpuSynthesisRequests_;
+    std::deque<PendingGpuMeshCountReadback> pendingGpuMeshCountReadbacks_;
+    std::deque<PendingGpuMeshEmitRequest> pendingGpuMeshEmitRequests_;
     std::deque<PendingGpuParityReadback> pendingGpuParityReadbacks_;
     std::vector<std::thread> workerThreads_;
     std::atomic<bool> stopWorkers_{false};

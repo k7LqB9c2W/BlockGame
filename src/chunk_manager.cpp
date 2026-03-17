@@ -4718,6 +4718,18 @@ public:
     void invalidateWorldBlock(const glm::ivec3& worldPos)
     {
         std::lock_guard<std::mutex> lock(configMutex_);
+        for (auto& [levelId, atlas] : levelAtlases_)
+        {
+            (void)levelId;
+            const int scale = std::max(atlas.blockScale, 1);
+            const glm::ivec2 cellCoord(floorDiv(worldPos.x, scale), floorDiv(worldPos.z, scale));
+            atlas.canonicalSampleCache.erase(cellCoord);
+            appendClippedAtlasUpdateRect(atlas.pendingDirtyRects,
+                                         AtlasUpdateRect{cellCoord, glm::ivec2(1, 1)},
+                                         atlas.originCell,
+                                         atlas.atlasSizeCells);
+        }
+
         for (auto& [key, chunk] : chunks_)
         {
             (void)key;
@@ -5096,6 +5108,12 @@ private:
     };
     static_assert(sizeof(GpuTerrainAtlasSample) == 48u);
 
+    struct CachedAtlasSampleEntry
+    {
+        GpuTerrainAtlasSample sample{};
+        std::uint64_t lastUsedStamp{0};
+    };
+
     struct GpuSynthesisRequest
     {
         FarLodChunkKey key{};
@@ -5174,6 +5192,8 @@ private:
         D3D12_RESOURCE_STATES canonicalUpdateState{D3D12_RESOURCE_STATE_COMMON};
         std::uint32_t canonicalUpdateCapacity{0};
         bool initialized{false};
+        std::vector<AtlasUpdateRect> pendingDirtyRects;
+        std::unordered_map<glm::ivec2, CachedAtlasSampleEntry, ColumnHasher> canonicalSampleCache;
 
         [[nodiscard]] std::uint32_t elementCount() const noexcept
         {
@@ -6022,6 +6042,8 @@ private:
         atlas.canonicalUpdateCapacity = atlas.elementCount();
         atlas.originCell = computeDesiredAtlasOriginCell(level);
         atlas.initialized = false;
+        atlas.pendingDirtyRects.clear();
+        atlas.canonicalSampleCache.clear();
     }
 
     [[nodiscard]] std::vector<AtlasUpdateRect> prepareAtlasUpdateRects(FarLodLevelAtlasState& atlas,
@@ -6051,6 +6073,7 @@ private:
         }
 
         atlas.originCell = desiredOriginCell;
+        const int absDeltaX = std::abs(delta.x);
         if (delta.x > 0)
         {
             rects.push_back(AtlasUpdateRect{
@@ -6066,17 +6089,102 @@ private:
 
         if (delta.y > 0)
         {
+            const int originX = atlas.originCell.x + (delta.x < 0 ? absDeltaX : 0);
+            const int width = atlas.atlasSizeCells.x - absDeltaX;
+            if (width > 0)
+            {
             rects.push_back(AtlasUpdateRect{
-                {atlas.originCell.x, atlas.originCell.y + atlas.atlasSizeCells.y - delta.y},
-                {atlas.atlasSizeCells.x, delta.y}});
+                    {originX, atlas.originCell.y + atlas.atlasSizeCells.y - delta.y},
+                    {width, delta.y}});
+            }
         }
         else if (delta.y < 0)
         {
+            const int originX = atlas.originCell.x + (delta.x < 0 ? absDeltaX : 0);
+            const int width = atlas.atlasSizeCells.x - absDeltaX;
+            if (width > 0)
+            {
             rects.push_back(AtlasUpdateRect{
-                {atlas.originCell.x, atlas.originCell.y},
-                {atlas.atlasSizeCells.x, -delta.y}});
+                    {originX, atlas.originCell.y},
+                    {width, -delta.y}});
+            }
         }
         return rects;
+    }
+
+    [[nodiscard]] static bool atlasRectValid(const AtlasUpdateRect& rect) noexcept
+    {
+        return rect.sizeCells.x > 0 && rect.sizeCells.y > 0;
+    }
+
+    [[nodiscard]] static std::optional<AtlasUpdateRect> clipAtlasUpdateRect(const AtlasUpdateRect& rect,
+                                                                            const glm::ivec2& originCell,
+                                                                            const glm::ivec2& atlasSizeCells) noexcept
+    {
+        const int minX = std::max(rect.originCell.x, originCell.x);
+        const int minZ = std::max(rect.originCell.y, originCell.y);
+        const int maxX = std::min(rect.originCell.x + rect.sizeCells.x, originCell.x + atlasSizeCells.x);
+        const int maxZ = std::min(rect.originCell.y + rect.sizeCells.y, originCell.y + atlasSizeCells.y);
+        if (maxX <= minX || maxZ <= minZ)
+        {
+            return std::nullopt;
+        }
+        return AtlasUpdateRect{{minX, minZ}, {maxX - minX, maxZ - minZ}};
+    }
+
+    static void mergeAtlasUpdateRect(std::vector<AtlasUpdateRect>& rects, const AtlasUpdateRect& rect)
+    {
+        if (!atlasRectValid(rect))
+        {
+            return;
+        }
+
+        AtlasUpdateRect merged = rect;
+        bool mergedAny = true;
+        while (mergedAny)
+        {
+            mergedAny = false;
+            for (auto it = rects.begin(); it != rects.end();)
+            {
+                const AtlasUpdateRect& existing = *it;
+                const bool overlapOrTouch =
+                    merged.originCell.x <= existing.originCell.x + existing.sizeCells.x &&
+                    merged.originCell.x + merged.sizeCells.x >= existing.originCell.x &&
+                    merged.originCell.y <= existing.originCell.y + existing.sizeCells.y &&
+                    merged.originCell.y + merged.sizeCells.y >= existing.originCell.y;
+                if (!overlapOrTouch)
+                {
+                    ++it;
+                    continue;
+                }
+
+                const int minX = std::min(merged.originCell.x, existing.originCell.x);
+                const int minZ = std::min(merged.originCell.y, existing.originCell.y);
+                const int maxX = std::max(merged.originCell.x + merged.sizeCells.x,
+                                          existing.originCell.x + existing.sizeCells.x);
+                const int maxZ = std::max(merged.originCell.y + merged.sizeCells.y,
+                                          existing.originCell.y + existing.sizeCells.y);
+                merged.originCell = glm::ivec2(minX, minZ);
+                merged.sizeCells = glm::ivec2(maxX - minX, maxZ - minZ);
+                it = rects.erase(it);
+                mergedAny = true;
+            }
+        }
+
+        rects.push_back(merged);
+    }
+
+    static void appendClippedAtlasUpdateRect(std::vector<AtlasUpdateRect>& rects,
+                                             const AtlasUpdateRect& rect,
+                                             const glm::ivec2& originCell,
+                                             const glm::ivec2& atlasSizeCells)
+    {
+        const std::optional<AtlasUpdateRect> clipped = clipAtlasUpdateRect(rect, originCell, atlasSizeCells);
+        if (!clipped.has_value())
+        {
+            return;
+        }
+        mergeAtlasUpdateRect(rects, *clipped);
     }
 
     [[nodiscard]] GpuTerrainAtlasSample buildCanonicalAtlasSample(const StructureSampleColumnFn& sampleColumnFn,
@@ -6280,9 +6388,22 @@ private:
             for (int dx = 0; dx < rect.sizeCells.x; ++dx)
             {
                 const glm::ivec2 cellCoord(rect.originCell.x + dx, rect.originCell.y + dz);
-                const int worldX = cellCoord.x * level.blockScale;
-                const int worldZ = cellCoord.y * level.blockScale;
-                dst[writeIndex++] = buildCanonicalAtlasSample(sampleColumnFn, densityFn, worldX, worldZ, level.blockScale);
+                auto cacheIt = atlas.canonicalSampleCache.find(cellCoord);
+                if (cacheIt == atlas.canonicalSampleCache.end())
+                {
+                    const int worldX = cellCoord.x * level.blockScale;
+                    const int worldZ = cellCoord.y * level.blockScale;
+                    CachedAtlasSampleEntry entry{};
+                    entry.sample = buildCanonicalAtlasSample(sampleColumnFn, densityFn, worldX, worldZ, level.blockScale);
+                    entry.lastUsedStamp = updateStamp_;
+                    cacheIt = atlas.canonicalSampleCache.emplace(cellCoord, entry).first;
+                }
+                else
+                {
+                    cacheIt->second.lastUsedStamp = updateStamp_;
+                }
+
+                dst[writeIndex++] = cacheIt->second.sample;
             }
         }
 
@@ -6296,6 +6417,40 @@ private:
                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         atlas.canonicalUpdateState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         return true;
+    }
+
+    void pruneCanonicalAtlasSampleCache(FarLodLevelAtlasState& atlas)
+    {
+        const std::size_t maxRetainedEntries =
+            static_cast<std::size_t>(std::max(atlas.atlasSizeCells.x * atlas.atlasSizeCells.y * 3, 1024));
+        if (atlas.canonicalSampleCache.size() <= maxRetainedEntries)
+        {
+            return;
+        }
+
+        const glm::ivec2 keepMin = atlas.originCell - atlas.atlasSizeCells;
+        const glm::ivec2 keepMax = atlas.originCell + atlas.atlasSizeCells * 2;
+        const std::uint64_t minRecentStamp = (updateStamp_ > 8u) ? (updateStamp_ - 8u) : 0u;
+        for (auto it = atlas.canonicalSampleCache.begin(); it != atlas.canonicalSampleCache.end();)
+        {
+            const glm::ivec2& cellCoord = it->first;
+            const bool outsideExpandedWindow =
+                cellCoord.x < keepMin.x || cellCoord.x >= keepMax.x ||
+                cellCoord.y < keepMin.y || cellCoord.y >= keepMax.y;
+            if (outsideExpandedWindow || it->second.lastUsedStamp < minRecentStamp)
+            {
+                it = atlas.canonicalSampleCache.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        if (atlas.canonicalSampleCache.size() > maxRetainedEntries * 2u)
+        {
+            atlas.canonicalSampleCache.clear();
+        }
     }
 
     void appendAtlasUpdates(const std::deque<GpuSynthesisRequest>& requests)
@@ -6335,9 +6490,19 @@ private:
                 continue;
             }
 
-            const std::vector<AtlasUpdateRect> rects = prepareAtlasUpdateRects(atlas, level);
+            std::vector<AtlasUpdateRect> rects;
+            for (const AtlasUpdateRect& rect : prepareAtlasUpdateRects(atlas, level))
+            {
+                appendClippedAtlasUpdateRect(rects, rect, atlas.originCell, atlas.atlasSizeCells);
+            }
+            for (const AtlasUpdateRect& rect : atlas.pendingDirtyRects)
+            {
+                appendClippedAtlasUpdateRect(rects, rect, atlas.originCell, atlas.atlasSizeCells);
+            }
+            atlas.pendingDirtyRects.clear();
             if (rects.empty())
             {
+                pruneCanonicalAtlasSampleCache(atlas);
                 continue;
             }
 
@@ -6376,6 +6541,7 @@ private:
                                    atlas.state,
                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             atlas.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            pruneCanonicalAtlasSampleCache(atlas);
         }
     }
 

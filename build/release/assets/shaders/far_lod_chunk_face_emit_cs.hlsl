@@ -149,9 +149,42 @@ bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
     return true;
 }
 
+int computeTileClosureFloorY()
+{
+    int floorY = 2147483647;
+    [loop]
+    for (uint z = 0u; z < kLogicalSize; ++z)
+    {
+        [loop]
+        for (uint x = 0u; x < kLogicalSize; ++x)
+        {
+            const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
+            if ((column.flags & kColumnFlagTerrain) != 0u)
+            {
+                floorY = min(floorY, column.terrainTopY - gBlockScale);
+            }
+            if ((column.flags & kColumnFlagWater) != 0u)
+            {
+                floorY = min(floorY, column.waterBottomY);
+            }
+            if ((column.flags & kColumnFlagCanopy) != 0u)
+            {
+                floorY = min(floorY, column.canopyBottomY);
+            }
+        }
+    }
+
+    if (floorY == 2147483647)
+    {
+        return gWorldMinY;
+    }
+    return floorY;
+}
+
 bool sideSegment(GpuTerrainColumnDescriptor current,
                  GpuTerrainColumnDescriptor neighbor,
                  uint layerId,
+                 int tileClosureFloorY,
                  out int segmentBottom,
                  out int segmentTopExclusive)
 {
@@ -167,7 +200,7 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
     if (layerId == kLayerTerrain)
     {
         const bool neighborIsActive = layerActive(neighbor, layerId);
-        int neighborTop = gWorldMinY - 1;
+        int neighborTop = tileClosureFloorY - 1;
         if (neighborIsActive)
         {
             neighborTop = layerTopY(neighbor, layerId);
@@ -225,12 +258,13 @@ uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
 uint hashSideKey(GpuTerrainColumnDescriptor current,
                  GpuTerrainColumnDescriptor neighbor,
                  uint layerId,
+                 int tileClosureFloorY,
                  out bool visible)
 {
     visible = false;
     int segmentBottom = 0;
     int segmentTopExclusive = 0;
-    if (!sideSegment(current, neighbor, layerId, segmentBottom, segmentTopExclusive))
+    if (!sideSegment(current, neighbor, layerId, tileClosureFloorY, segmentBottom, segmentTopExclusive))
     {
         return 0u;
     }
@@ -446,6 +480,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
 
     const uint maxExtent = clamp(gMaxMergeExtent, 1u, 16u);
     const uint faceBase = gFacePrefixes[planeIndex];
+    const int tileClosureFloorY = computeTileClosureFloorY();
     uint keys[16];
     [unroll]
     for (uint i = 0u; i < 16u; ++i)
@@ -502,7 +537,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
         }
 
         bool visible = false;
-        keys[i] = hashSideKey(current, neighbor, layerId, visible);
+        keys[i] = hashSideKey(current, neighbor, layerId, tileClosureFloorY, visible);
     }
 
     uint emitted = 0u;
@@ -577,7 +612,7 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
 
         int segmentBottom = 0;
         int segmentTopExclusive = 0;
-        if (sideSegment(current, neighbor, layerId, segmentBottom, segmentTopExclusive))
+        if (sideSegment(current, neighbor, layerId, tileClosureFloorY, segmentBottom, segmentTopExclusive))
         {
             float3 p0;
             float3 p1;
@@ -670,6 +705,7 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (linearIndex == (kVoxelCount - 1u))
     {
         const uint totalFaces = gFacePrefixes[linearIndex] + gFaceCounts[linearIndex];
+        const int tileClosureFloorY = computeTileClosureFloorY();
         int boundsMinY = 2147483647;
         int boundsMaxY = -2147483647;
         [loop]
@@ -681,9 +717,9 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                 const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
                 if ((column.flags & kColumnFlagTerrain) != 0u)
                 {
-                    // Terrain side walls can conservatively close down to gWorldMinY - 1 for
-                    // missing neighbors, so the cull bounds must include that full span.
-                    boundsMinY = min(boundsMinY, gWorldMinY - 1);
+                    // Terrain side walls close to the GPU-derived tile floor when a
+                    // border neighbor is absent, so cull bounds must cover that floor.
+                    boundsMinY = min(boundsMinY, tileClosureFloorY - 1);
                     boundsMaxY = max(boundsMaxY, column.terrainTopY + 1);
                 }
                 if ((column.flags & kColumnFlagWater) != 0u)
@@ -700,8 +736,8 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
         if (boundsMinY > boundsMaxY)
         {
-            boundsMinY = gWorldMinY;
-            boundsMaxY = gWorldMinY + gBlockScale;
+            boundsMinY = tileClosureFloorY;
+            boundsMaxY = tileClosureFloorY + gBlockScale;
         }
 
         GpuCullRecord record;

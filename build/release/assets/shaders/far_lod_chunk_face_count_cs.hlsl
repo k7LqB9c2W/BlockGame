@@ -113,6 +113,38 @@ bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
     return true;
 }
 
+int computeTileClosureFloorY()
+{
+    int floorY = 2147483647;
+    [loop]
+    for (uint z = 0u; z < kLogicalSize; ++z)
+    {
+        [loop]
+        for (uint x = 0u; x < kLogicalSize; ++x)
+        {
+            const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
+            if ((column.flags & kColumnFlagTerrain) != 0u)
+            {
+                floorY = min(floorY, column.terrainTopY - gBlockScale);
+            }
+            if ((column.flags & kColumnFlagWater) != 0u)
+            {
+                floorY = min(floorY, column.waterBottomY);
+            }
+            if ((column.flags & kColumnFlagCanopy) != 0u)
+            {
+                floorY = min(floorY, column.canopyBottomY);
+            }
+        }
+    }
+
+    if (floorY == 2147483647)
+    {
+        return gWorldMinY;
+    }
+    return floorY;
+}
+
 uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
 {
     if (!topFaceVisible(column, layerId))
@@ -130,6 +162,7 @@ uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
 bool sideSegment(GpuTerrainColumnDescriptor current,
                  GpuTerrainColumnDescriptor neighbor,
                  uint layerId,
+                 int tileClosureFloorY,
                  out int segmentBottom,
                  out int segmentTopExclusive)
 {
@@ -145,7 +178,7 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
     if (layerId == kLayerTerrain)
     {
         const bool neighborIsActive = layerActive(neighbor, layerId);
-        int neighborTop = gWorldMinY - 1;
+        int neighborTop = tileClosureFloorY - 1;
         if (neighborIsActive)
         {
             neighborTop = layerTopY(neighbor, layerId);
@@ -189,12 +222,13 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
 uint hashSideKey(GpuTerrainColumnDescriptor current,
                  GpuTerrainColumnDescriptor neighbor,
                  uint layerId,
+                 int tileClosureFloorY,
                  out bool visible)
 {
     visible = false;
     int segmentBottom = 0;
     int segmentTopExclusive = 0;
-    if (!sideSegment(current, neighbor, layerId, segmentBottom, segmentTopExclusive))
+    if (!sideSegment(current, neighbor, layerId, tileClosureFloorY, segmentBottom, segmentTopExclusive))
     {
         return 0u;
     }
@@ -310,6 +344,7 @@ uint countTopQuads(uint layerId)
 
 uint countSideRuns(uint layerId, uint dirId, uint slice)
 {
+    const int tileClosureFloorY = computeTileClosureFloorY();
     uint keys[16];
     [unroll]
     for (uint i = 0u; i < 16u; ++i)
@@ -366,7 +401,7 @@ uint countSideRuns(uint layerId, uint dirId, uint slice)
         }
 
         bool visible = false;
-        keys[i] = hashSideKey(current, neighbor, layerId, visible);
+        keys[i] = hashSideKey(current, neighbor, layerId, tileClosureFloorY, visible);
     }
 
     uint runCount = 0u;

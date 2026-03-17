@@ -4502,7 +4502,6 @@ public:
                     {
                         --remainingNewChunkActivations;
                     }
-                    const bool needsBoundsRefresh = chunkMissing || !chunk.initialized || chunk.dirty;
                     chunk.key = key;
                     chunk.level = level;
                     chunk.lastTouchedStamp = updateStamp_;
@@ -4514,33 +4513,18 @@ public:
                         chunk.dirty = true;
                     }
 
-                    if (needsBoundsRefresh)
-                    {
-                        int minSurfaceY = std::numeric_limits<int>::max();
-                        int maxSurfaceY = std::numeric_limits<int>::min();
-                        bool anyWaterFill = false;
-                        sampleChunkSurfaceBounds(columnSampleFn,
-                                                 level,
-                                                 chunkX,
-                                                 chunkZ,
-                                                 verticalBandMinWorldY,
-                                                 verticalBandMaxWorldY,
-                                                 minSurfaceY,
-                                                 maxSurfaceY,
-                                                 anyWaterFill);
-
-                        const int relevantMinWorldY =
-                            std::min(minSurfaceY - level.blockScale, anyWaterFill ? seaLevel_ - level.blockScale : minSurfaceY);
-                        const int relevantMaxWorldY =
-                            std::max(maxSurfaceY + level.blockScale + kFarStructureHeadroomBlocks,
-                                     anyWaterFill ? seaLevel_ + level.blockScale : maxSurfaceY + level.blockScale);
-                        chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
-                                                        static_cast<float>(relevantMinWorldY),
-                                                        chunk.cpu.worldMin.z);
-                        chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
-                                                        static_cast<float>(relevantMaxWorldY + 1),
-                                                        chunk.cpu.worldMin.z + level.chunkSpanBlocks());
-                    }
+                    const int conservativeMinWorldY =
+                        std::min(verticalBandMinWorldY - level.blockScale,
+                                 seaLevel_ - (level.chunkSpanBlocks() + level.blockScale));
+                    const int conservativeMaxWorldY =
+                        std::max(verticalBandMaxWorldY + level.blockScale + kFarStructureHeadroomBlocks,
+                                 seaLevel_ + level.blockScale);
+                    chunk.cpu.boundsMin = glm::vec3(chunk.cpu.worldMin.x,
+                                                    static_cast<float>(conservativeMinWorldY),
+                                                    chunk.cpu.worldMin.z);
+                    chunk.cpu.boundsMax = glm::vec3(chunk.cpu.worldMin.x + level.chunkSpanBlocks(),
+                                                    static_cast<float>(conservativeMaxWorldY + 1),
+                                                    chunk.cpu.worldMin.z + level.chunkSpanBlocks());
 
                     const bool needsFallback = !(chunk.gpu.resident && chunk.gpu.indexCount > 0);
                     if (needsFallback)
@@ -6264,51 +6248,6 @@ private:
             return;
         }
         mergeAtlasUpdateRect(rects, *clipped);
-    }
-
-    void sampleChunkSurfaceBounds(const ColumnSampleFn& columnSampleFn,
-                                  const FarLodLevelConfig& level,
-                                  int chunkX,
-                                  int chunkZ,
-                                  int verticalBandMinWorldY,
-                                  int verticalBandMaxWorldY,
-                                  int& outMinSurfaceY,
-                                  int& outMaxSurfaceY,
-                                  bool& outAnyWaterFill) const
-    {
-        const int span = level.chunkSpanBlocks();
-        const int worldMinX = chunkX * span;
-        const int worldMaxX = worldMinX + span - 1;
-        const int worldMinZ = chunkZ * span;
-        const int worldMaxZ = worldMinZ + span - 1;
-        const int worldMidX = (worldMinX + worldMaxX) / 2;
-        const int worldMidZ = (worldMinZ + worldMaxZ) / 2;
-        const std::array<glm::ivec2, 9> samplePoints{{
-            {worldMinX, worldMinZ},
-            {worldMaxX, worldMinZ},
-            {worldMinX, worldMaxZ},
-            {worldMaxX, worldMaxZ},
-            {worldMidX, worldMinZ},
-            {worldMidX, worldMaxZ},
-            {worldMinX, worldMidZ},
-            {worldMaxX, worldMidZ},
-            {worldMidX, worldMidZ},
-        }};
-
-        outMinSurfaceY = std::numeric_limits<int>::max();
-        outMaxSurfaceY = std::numeric_limits<int>::min();
-        outAnyWaterFill = false;
-        for (const glm::ivec2& samplePoint : samplePoints)
-        {
-            const ColumnSample sample =
-                columnSampleFn(samplePoint.x, samplePoint.y, verticalBandMinWorldY, verticalBandMaxWorldY);
-            outMinSurfaceY = std::min(outMinSurfaceY, sample.surfaceY);
-            outMaxSurfaceY = std::max(outMaxSurfaceY, sample.surfaceY);
-            if (sample.dominantBiome != nullptr && sample.dominantBiome->terrainSettings.waterFill.enabled)
-            {
-                outAnyWaterFill = true;
-            }
-        }
     }
 
     [[nodiscard]] GpuTerrainAtlasSample buildCanonicalAtlasSample(const StructureSampleColumnFn& sampleColumnFn,

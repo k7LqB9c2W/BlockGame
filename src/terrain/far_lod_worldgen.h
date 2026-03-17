@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -27,6 +28,13 @@ enum FarLodBiomeFlags : std::uint32_t
     kFarLodBiomeSmoothBeaches = 1u << 1,
     kFarLodBiomeWaterFill = 1u << 2,
     kFarLodBiomeTaiga = 1u << 3,
+    kFarLodBiomeGeneratesTrees = 1u << 4,
+};
+
+struct FarLodGpuFloat2
+{
+    float x{0.0f};
+    float y{0.0f};
 };
 
 struct FarLodGpuWorldgenHeader
@@ -40,6 +48,11 @@ struct FarLodGpuWorldgenHeader
     FbmSettings mediumNoise{};
     FbmSettings detailNoise{};
     FbmSettings mountainNoise{};
+    float treeDensityFrequency{0.05f};
+    std::uint32_t treeDensityOctaves{4};
+    float treeDensityGain{0.55f};
+    float treeDensityLacunarity{2.0f};
+    std::array<FarLodGpuFloat2, 4> treeDensityOctaveOffsets{};
 };
 
 struct FarLodGpuBiome

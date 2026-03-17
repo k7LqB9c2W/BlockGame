@@ -383,6 +383,10 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
     tables.header.mediumNoise = worldgenProfile.noise.medium;
     tables.header.detailNoise = worldgenProfile.noise.detail;
     tables.header.mountainNoise = worldgenProfile.noise.mountain;
+    tables.header.treeDensityFrequency = 0.05f;
+    tables.header.treeDensityOctaves = 4u;
+    tables.header.treeDensityGain = 0.55f;
+    tables.header.treeDensityLacunarity = 2.0f;
 
     tables.biomes.reserve(biomeDatabase.biomeCount());
     for (const BiomeDefinition& biome : biomeDatabase.definitions())
@@ -406,6 +410,10 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
         if (biome.id == "taiga")
         {
             packed.flags |= kFarLodBiomeTaiga;
+        }
+        if (biome.generatesTrees)
+        {
+            packed.flags |= kFarLodBiomeGeneratesTrees;
         }
         packed.coastProfile = static_cast<std::uint32_t>(mapCoastProfile(biome.effectiveCoastProfile()));
         packed.propertyBits = biome.properties.value();

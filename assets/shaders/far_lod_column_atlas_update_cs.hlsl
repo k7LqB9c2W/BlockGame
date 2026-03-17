@@ -12,6 +12,12 @@ cbuffer AtlasUpdateParams : register(b0)
     int gSeaLevel;
 };
 
+struct FarLodGpuFloat2
+{
+    float x;
+    float y;
+};
+
 struct FarLodGpuWorldgenHeader
 {
     int seaLevel;
@@ -35,6 +41,11 @@ struct FarLodGpuWorldgenHeader
     uint mountainOctaves;
     float mountainGain;
     float mountainLacunarity;
+    float treeDensityFrequency;
+    uint treeDensityOctaves;
+    float treeDensityGain;
+    float treeDensityLacunarity;
+    FarLodGpuFloat2 treeDensityOctaveOffsets[4];
 };
 
 struct FarLodGpuBiome
@@ -80,6 +91,7 @@ static const uint kFarLodBiomeOcean = 1u << 0;
 static const uint kFarLodBiomeSmoothBeaches = 1u << 1;
 static const uint kFarLodBiomeWaterFill = 1u << 2;
 static const uint kFarLodBiomeTaiga = 1u << 3;
+static const uint kFarLodBiomeGeneratesTrees = 1u << 4;
 static const uint kPropHot = 1u << 0;
 static const uint kPropTemperate = 1u << 1;
 static const uint kPropCold = 1u << 2;

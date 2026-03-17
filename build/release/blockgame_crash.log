@@ -3298,3 +3298,57 @@ stack:
   [62] frame/input
   [63] frame/chunk_update
 2026-03-17 00:49:21 - hang dump: written to blockgame_hang.dmp
+2026-03-17 09:28:35 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(558,41-45): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(559,22-26): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(560,22-26): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(561,21-25): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(568,22-26): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(574,17-36): error X3004: undeclared identifier 'canopyDensitySamples'
+
+2026-03-17 09:28:35 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=134.35
+2026-03-17 09:28:35 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 09:28:44 - uncaught exception: shader compilation failed for C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl: C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(558,41-45): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(559,22-26): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(560,22-26): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(561,21-25): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(568,22-26): error X3000: syntax error: unexpected token 'point'
+C:\Users\Jacob\Documents\code\BlockGame\build\release\assets\shaders\far_lod_column_atlas_update_canonical_cs.hlsl(574,17-36): error X3004: undeclared identifier 'canopyDensitySamples'
+
+2026-03-17 09:28:44 - diagnostics: uncaught exception | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=125.00
+2026-03-17 09:28:44 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 09:30:17 - diagnostics: hang watchdog timeout | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=15068.87
+2026-03-17 09:30:17 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 09:30:17 - hang dump: written to blockgame_hang.dmp
+2026-03-17 09:30:47 - diagnostics: hang watchdog timeout | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=15001.65
+2026-03-17 09:30:47 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 09:30:47 - hang dump: written to blockgame_hang.dmp
+2026-03-17 09:44:29 - diagnostics: hang watchdog timeout | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=15937.68
+2026-03-17 09:44:29 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 09:44:30 - hang dump: written to blockgame_hang.dmp
+2026-03-17 09:53:15 - diagnostics: hang watchdog timeout | phase=startup/chunk_manager | frame=0 | heartbeat_age_ms=15945.88
+2026-03-17 09:53:15 - breadcrumbs:
+  [0] startup/crash_logging
+  [1] startup/window_ready
+  [2] startup/renderer_initialize
+  [3] startup/chunk_manager
+2026-03-17 09:53:16 - hang dump: written to blockgame_hang.dmp

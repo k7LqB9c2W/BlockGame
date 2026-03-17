@@ -172,6 +172,41 @@ void setProcessEnvironmentVariable(const char* name, const char* value)
 #endif
 }
 
+[[nodiscard]] std::filesystem::path resolveDebugLogPath(const char* envVarName,
+                                                        const std::filesystem::path& defaultPath)
+{
+    const char* value = std::getenv(envVarName);
+    if (value != nullptr && *value != '\0')
+    {
+        return std::filesystem::path(value);
+    }
+    return defaultPath;
+}
+
+void resetDebugLogFile(const char* envVarName,
+                       const std::filesystem::path& defaultPath,
+                       std::string_view initialLine = {})
+{
+    const std::filesystem::path logPath = resolveDebugLogPath(envVarName, defaultPath);
+    setProcessEnvironmentVariable(envVarName, logPath.string().c_str());
+    std::error_code ec;
+    const std::filesystem::path parentPath = logPath.parent_path();
+    if (!parentPath.empty())
+    {
+        std::filesystem::create_directories(parentPath, ec);
+    }
+
+    std::ofstream out(logPath, std::ios::trunc);
+    if (!out)
+    {
+        return;
+    }
+    if (!initialLine.empty())
+    {
+        out << initialLine << '\n';
+    }
+}
+
 void applyLaunchDebugOptions(int argc, char** argv)
 {
     bool enableGpuDebug = false;
@@ -234,6 +269,9 @@ void applyLaunchDebugOptions(int argc, char** argv)
 
     if (enableGpuDebug)
     {
+        resetDebugLogFile("BLOCKGAME_RENDER_DEBUG_LOG_FILE",
+                          "gpudebug.log",
+                          "gpu debug logging enabled");
         setProcessEnvironmentVariable("BLOCKGAME_RENDER_DEBUG_LOG", "1");
         setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DEBUG_LAYER", "1");
         setProcessEnvironmentVariable("BLOCKGAME_ENABLE_D3D12_DRED", "1");
@@ -261,14 +299,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
 
     if (enableLodVisibilityDebug)
     {
-        constexpr const char* kLodDebugLogPath = "loddebug.log";
         setProcessEnvironmentVariable("BLOCKGAME_LOD_VIS_DEBUG", "1");
-        setProcessEnvironmentVariable("BLOCKGAME_LOD_VIS_DEBUG_FILE", kLodDebugLogPath);
-        std::ofstream lodDebugOut(kLodDebugLogPath, std::ios::trunc);
-        if (lodDebugOut)
-        {
-            lodDebugOut << "lod visibility debug enabled\n";
-        }
+        resetDebugLogFile("BLOCKGAME_LOD_VIS_DEBUG_FILE",
+                          "loddebug.log",
+                          "lod visibility debug enabled");
     }
 
     std::vector<std::string> enabledOptions;

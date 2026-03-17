@@ -670,7 +670,9 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                 const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
                 if ((column.flags & kColumnFlagTerrain) != 0u)
                 {
-                    boundsMinY = min(boundsMinY, column.terrainBaseY);
+                    // Terrain side walls can conservatively close down to gWorldMinY - 1 for
+                    // missing neighbors, so the cull bounds must include that full span.
+                    boundsMinY = min(boundsMinY, gWorldMinY - 1);
                     boundsMaxY = max(boundsMaxY, column.terrainTopY + 1);
                 }
                 if ((column.flags & kColumnFlagWater) != 0u)

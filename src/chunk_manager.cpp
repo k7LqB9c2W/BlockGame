@@ -4112,8 +4112,8 @@ public:
 
     FarTerrainManager()
         : levels_{
-              FarLodLevelConfig{1, 2, kDefaultNearRenderDistance, 72},
-              FarLodLevelConfig{2, 4, 72, 128},
+              FarLodLevelConfig{1, 2, kDefaultNearRenderDistance, 32},
+              FarLodLevelConfig{2, 4, 32, 80},
               FarLodLevelConfig{3, 8, 128, 192},
               FarLodLevelConfig{4, 16, 192, 320},
               FarLodLevelConfig{5, 32, 320, kMaxTotalRenderDistanceChunks}}
@@ -4899,7 +4899,7 @@ private:
         };
 
         static constexpr std::array<LevelTemplate, 8> kLevelTemplates{{
-            {1, 2, 48},
+            {1, 2, 32},
             {2, 4, 80},
             {3, 8, 128},
             {4, 16, 192},

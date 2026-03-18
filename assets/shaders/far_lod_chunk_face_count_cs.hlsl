@@ -22,13 +22,22 @@ struct GpuTerrainColumnDescriptor
     uint reserved;
 };
 
+struct GpuFaceMergeDescriptor
+{
+    uint value0;
+    uint value1;
+    uint value2;
+    uint value3;
+};
+
 StructuredBuffer<GpuTerrainColumnDescriptor> gColumnBuffer : register(t0);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosX : register(t1);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegX : register(t2);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosZ : register(t3);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegZ : register(t4);
 RWStructuredBuffer<uint> gFaceCounts : register(u0);
-RWStructuredBuffer<uint> gFaceAnalysis : register(u1);
+RWStructuredBuffer<uint> gFaceMetadata : register(u1);
+RWStructuredBuffer<GpuFaceMergeDescriptor> gFaceDescriptors : register(u2);
 
 static const uint kLogicalSize = 16u;
 static const uint kColumnFlagTerrain = 0x01u;
@@ -42,10 +51,9 @@ static const uint kLayerCanopy = 2u;
 static const uint kTopPlaneCount = 3u;
 static const uint kSideSlicesPerLayer = 64u;
 static const uint kPlaneCount = kTopPlaneCount + 3u * kSideSlicesPerLayer;
-static const uint kTopPlaneKeyCount = kTopPlaneCount * kLogicalSize * kLogicalSize;
-static const uint kFaceAnalysisClosureFloorOffset = 0u;
-static const uint kFaceAnalysisTopKeysOffset = 1u;
-static const uint kFaceAnalysisSideKeysOffset = kFaceAnalysisTopKeysOffset + kTopPlaneKeyCount;
+static const uint kFaceMetadataClosureFloorOffset = 0u;
+static const uint kMaxTopDescriptorsPerPlane = kLogicalSize * kLogicalSize;
+static const uint kMaxSideDescriptorsPerPlane = kLogicalSize;
 
 groupshared GpuTerrainColumnDescriptor gSharedColumns[kLogicalSize * kLogicalSize];
 groupshared int gSharedTileClosureFloorY;
@@ -60,14 +68,25 @@ GpuTerrainColumnDescriptor sampleLocal(uint x, uint z)
     return gSharedColumns[columnIndex(x, z)];
 }
 
-uint topAnalysisIndex(uint layerId, uint x, uint z)
+uint topDescriptorBase(uint layerId)
 {
-    return kFaceAnalysisTopKeysOffset + layerId * (kLogicalSize * kLogicalSize) + z * kLogicalSize + x;
+    return layerId * kMaxTopDescriptorsPerPlane;
 }
 
-uint sideAnalysisBase(uint planeIndex)
+uint sideDescriptorBase(uint planeIndex)
 {
-    return kFaceAnalysisSideKeysOffset + (planeIndex - kTopPlaneCount) * kLogicalSize;
+    return kTopPlaneCount * kMaxTopDescriptorsPerPlane +
+           (planeIndex - kTopPlaneCount) * kMaxSideDescriptorsPerPlane;
+}
+
+void storeDescriptor(uint descriptorIndex, uint value0, uint value1, uint value2, uint value3)
+{
+    GpuFaceMergeDescriptor descriptor;
+    descriptor.value0 = value0;
+    descriptor.value1 = value1;
+    descriptor.value2 = value2;
+    descriptor.value3 = value3;
+    gFaceDescriptors[descriptorIndex] = descriptor;
 }
 
 bool layerActive(GpuTerrainColumnDescriptor column, uint layerId)
@@ -210,26 +229,16 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
     return segmentTopExclusive > segmentBottom;
 }
 
-uint hashSideKey(GpuTerrainColumnDescriptor current,
-                 GpuTerrainColumnDescriptor neighbor,
-                 uint layerId,
-                 int tileClosureFloorY,
-                 out bool visible)
+uint hashSideDescriptorKey(GpuTerrainColumnDescriptor current,
+                           uint layerId,
+                           int segmentBottom,
+                           int segmentTopExclusive)
 {
-    visible = false;
-    int segmentBottom = 0;
-    int segmentTopExclusive = 0;
-    if (!sideSegment(current, neighbor, layerId, tileClosureFloorY, segmentBottom, segmentTopExclusive))
-    {
-        return 0u;
-    }
-
     uint h = 2166136261u;
     h = (h ^ layerSideBlock(current, layerId)) * 16777619u;
     h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
     h = (h ^ asuint(segmentBottom)) * 16777619u;
     h = (h ^ asuint(segmentTopExclusive)) * 16777619u;
-    visible = true;
     return h | 1u;
 }
 
@@ -255,6 +264,7 @@ void decodePlane(uint planeIndex, out uint layerId, out bool isTopPlane, out uin
 uint countTopQuads(uint layerId)
 {
     const uint maxExtent = clamp(gMaxMergeExtent, 1u, 16u);
+    const uint descriptorBase = topDescriptorBase(layerId);
     uint keys[256];
     uint visitedMask[16];
     for (uint row = 0u; row < 16u; ++row)
@@ -267,9 +277,7 @@ uint countTopQuads(uint layerId)
         for (uint x = 0u; x < 16u; ++x)
         {
             const GpuTerrainColumnDescriptor column = sampleLocal(x, fillZ);
-            const uint key = hashTopKey(column, layerId);
-            keys[fillZ * 16u + x] = key;
-            gFaceAnalysis[topAnalysisIndex(layerId, x, fillZ)] = key;
+            keys[fillZ * 16u + x] = hashTopKey(column, layerId);
         }
     }
 
@@ -329,6 +337,7 @@ uint countTopQuads(uint layerId)
                 visitedMask[z + dz] |= rowMask;
             }
 
+            storeDescriptor(descriptorBase + quadCount, x, z, width, height);
             quadCount += 1u;
         }
     }
@@ -337,9 +346,12 @@ uint countTopQuads(uint layerId)
 
 uint countSideRuns(uint planeIndex, uint layerId, uint dirId, uint slice)
 {
+    const uint maxExtent = clamp(gMaxMergeExtent, 1u, 16u);
     const int tileClosureFloorY = computeTileClosureFloorY();
-    const uint analysisBase = sideAnalysisBase(planeIndex);
+    const uint descriptorBase = sideDescriptorBase(planeIndex);
     uint keys[16];
+    int segmentBottoms[16];
+    int segmentTops[16];
     [unroll]
     for (uint i = 0u; i < 16u; ++i)
     {
@@ -394,10 +406,20 @@ uint countSideRuns(uint planeIndex, uint layerId, uint dirId, uint slice)
             }
         }
 
-        bool visible = false;
-        const uint key = hashSideKey(current, neighbor, layerId, tileClosureFloorY, visible);
-        keys[i] = key;
-        gFaceAnalysis[analysisBase + i] = key;
+        int segmentBottom = 0;
+        int segmentTopExclusive = 0;
+        if (sideSegment(current, neighbor, layerId, tileClosureFloorY, segmentBottom, segmentTopExclusive))
+        {
+            keys[i] = hashSideDescriptorKey(current, layerId, segmentBottom, segmentTopExclusive);
+            segmentBottoms[i] = segmentBottom;
+            segmentTops[i] = segmentTopExclusive;
+        }
+        else
+        {
+            keys[i] = 0u;
+            segmentBottoms[i] = 0;
+            segmentTops[i] = 0;
+        }
     }
 
     uint runCount = 0u;
@@ -413,12 +435,17 @@ uint countSideRuns(uint planeIndex, uint layerId, uint dirId, uint slice)
 
         uint runLength = 1u;
         while ((scanIndex + runLength) < 16u &&
-               runLength < clamp(gMaxMergeExtent, 1u, 16u) &&
+               runLength < maxExtent &&
                keys[scanIndex + runLength] == key)
         {
             runLength += 1u;
         }
 
+        storeDescriptor(descriptorBase + runCount,
+                        scanIndex,
+                        runLength,
+                        asuint(segmentBottoms[scanIndex]),
+                        asuint(segmentTops[scanIndex]));
         runCount += 1u;
         scanIndex += runLength;
     }
@@ -466,7 +493,7 @@ void FarLodChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID,
         gSharedTileClosureFloorY = (floorY == 2147483647) ? gWorldMinY : floorY;
         if (linearIndex == 0u)
         {
-            gFaceAnalysis[kFaceAnalysisClosureFloorOffset] = asuint(gSharedTileClosureFloorY);
+            gFaceMetadata[kFaceMetadataClosureFloorOffset] = asuint(gSharedTileClosureFloorY);
         }
     }
     GroupMemoryBarrierWithGroupSync();

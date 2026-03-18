@@ -13,7 +13,7 @@ struct ShaderCompileSpec
     const char* target;
 };
 
-inline constexpr std::array<ShaderCompileSpec, 25> kBlockGameShaderCompileSpecs{{
+inline constexpr std::array<ShaderCompileSpec, 27> kBlockGameShaderCompileSpecs{{
     {"world_vs.hlsl", "main", "vs_5_0"},
     {"shadow_vs.hlsl", "main", "vs_5_0"},
     {"world_near_ps.hlsl", "main", "ps_5_0"},
@@ -31,6 +31,8 @@ inline constexpr std::array<ShaderCompileSpec, 25> kBlockGameShaderCompileSpecs{
     {"atmosphere_skyview_ps.hlsl", "main", "ps_5_0"},
     {"atmosphere_sky_ps.hlsl", "main", "ps_5_0"},
     {"atmosphere_aerial_perspective_ps.hlsl", "main", "ps_5_0"},
+    {"far_lod_column_atlas_update_canonical_cs.hlsl", "FarLodChunkSeedCacheMain", "cs_5_0"},
+    {"far_lod_column_atlas_update_canonical_cs.hlsl", "FarLodColumnSampleCacheMain", "cs_5_0"},
     {"far_lod_column_atlas_update_canonical_cs.hlsl", "FarLodColumnAtlasUpdateMain", "cs_5_0"},
     {"far_lod_chunk_synth_cs.hlsl", "FarLodChunkSynthMain", "cs_5_0"},
     {"far_lod_chunk_structure_stamp_cs.hlsl", "FarLodChunkStructureStampMain", "cs_5_0"},

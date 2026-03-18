@@ -10,6 +10,10 @@ cbuffer AtlasUpdateParams : register(b0)
     int gUpdateSizeZ;
     int gBlockScale;
     int gSeaLevel;
+    int gSeedCacheOriginChunkX;
+    int gSeedCacheOriginChunkZ;
+    int gSeedCacheSizeX;
+    int gSeedCacheSizeZ;
 };
 
 struct FarLodGpuFloat2
@@ -215,7 +219,6 @@ StructuredBuffer<FarLodGpuBiomeSelection> gOceanSelections : register(t3);
 StructuredBuffer<FarLodGpuTransitionBiome> gTransitionBiomes : register(t4);
 StructuredBuffer<FarLodGpuSubBiome> gSubBiomes : register(t5);
 StructuredBuffer<uint> gSurfacePermutation : register(t6);
-RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u0);
 
 static const uint kFarLodBiomeOcean = 1u << 0;
 static const uint kFarLodBiomeSmoothBeaches = 1u << 1;
@@ -263,6 +266,26 @@ struct WeightedSeed
     float weight;
     float normalizedDistance;
 };
+
+struct GpuChunkSeedCacheEntry
+{
+    uint seedCount;
+    uint reserved0;
+    uint reserved1;
+    uint reserved2;
+    ExactBiomeSeed seeds[kMaxChunkSeeds];
+};
+
+struct GpuSamplePointCacheEntry
+{
+    SamplePoint points[9];
+};
+
+StructuredBuffer<GpuChunkSeedCacheEntry> gChunkSeedCache : register(t7);
+StructuredBuffer<GpuSamplePointCacheEntry> gSampleCache : register(t8);
+RWStructuredBuffer<GpuChunkSeedCacheEntry> gChunkSeedCacheOut : register(u0);
+RWStructuredBuffer<GpuSamplePointCacheEntry> gSampleCacheOut : register(u1);
+RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u2);
 
 uint2 xor64(uint2 a, uint2 b)
 {
@@ -767,6 +790,13 @@ uint atlasIndex(int2 cellCoord)
     return (uint)(atlasZ * gAtlasSizeX + atlasX);
 }
 
+uint seedCacheIndex(int2 chunkCoord)
+{
+    const int cacheX = positiveModulo(chunkCoord.x - gSeedCacheOriginChunkX, gSeedCacheSizeX);
+    const int cacheZ = positiveModulo(chunkCoord.y - gSeedCacheOriginChunkZ, gSeedCacheSizeZ);
+    return (uint)(cacheZ * gSeedCacheSizeX + cacheX);
+}
+
 float hashToUnitFloat(int x, int y, int z)
 {
     uint h = (uint)x;
@@ -1076,6 +1106,277 @@ SamplePoint samplePointLegacy(int worldX, int worldZ)
             for (uint seedIndex = 0u; seedIndex < chunkSeedCount; ++seedIndex)
             {
                 const ExactBiomeSeed seed = chunkSeeds[seedIndex];
+                const FarLodGpuBiome seedBiome = gBiomes[seed.biomeIndex];
+                const float2 delta = float2(worldPos - seed.position);
+                const float distance = length(delta);
+                const float normalized = distance / max(seed.radius, 1.0f);
+                const float blended = saturate(1.0f - normalized);
+                const float influence = smoothStep(blended);
+
+                const float edgeDistance = abs(distance - seed.radius);
+                if ((seedBiome.flags & kFarLodBiomeOcean) != 0u)
+                {
+                    nearestOceanEdge = min(nearestOceanEdge, edgeDistance);
+                }
+                else
+                {
+                    nearestLandEdge = min(nearestLandEdge, edgeDistance);
+                }
+
+                if (influence <= 1.192092896e-07f)
+                {
+                    continue;
+                }
+
+                const float blendFactor = evaluateInterpolationCurve(1.0f - normalized, seedBiome.interpolationCurve);
+                const float adjustedWeight = influence * blendFactor * seedBiome.interpolationWeight;
+                if (adjustedWeight <= 1.192092896e-07f)
+                {
+                    continue;
+                }
+
+                WeightedSeed candidate;
+                candidate.seed = seed;
+                candidate.weight = adjustedWeight;
+                candidate.normalizedDistance = normalized;
+                insertWeightedSeed(weightedSeeds, weightedCount, candidate);
+            }
+        }
+    }
+
+    uint biomeIndex = 0u;
+    float aggregatedHeight = 0.0f;
+    float aggregatedRoughness = 0.0f;
+    float aggregatedHills = 0.0f;
+    float aggregatedMountains = 0.0f;
+    float keepOriginal = 0.0f;
+    float landWeight = 0.0f;
+    float oceanWeight = 0.0f;
+    float landHeight = 0.0f;
+    float oceanHeight = 0.0f;
+    float landRoughness = 0.0f;
+    float oceanRoughness = 0.0f;
+    float landHills = 0.0f;
+    float oceanHills = 0.0f;
+    float landMountains = 0.0f;
+    float oceanMountains = 0.0f;
+    float landKeepOriginal = 0.0f;
+    float oceanKeepOriginal = 0.0f;
+    uint landRepresentativeBiome = 0xFFFFFFFFu;
+    uint oceanRepresentativeBiome = 0xFFFFFFFFu;
+    float landRepresentativeWeight = 0.0f;
+    float oceanRepresentativeWeight = 0.0f;
+
+    if (weightedCount == 0u)
+    {
+        const FarLodGpuBiome fallbackBiome = gBiomes[0];
+        biomeIndex = 0u;
+        aggregatedHeight = applyHeightLimits(fallbackBiome, fallbackBiome.minHeight, 0.0f);
+        aggregatedRoughness = fallbackBiome.roughness;
+        aggregatedHills = fallbackBiome.hills;
+        aggregatedMountains = fallbackBiome.mountains;
+        keepOriginal = saturate(fallbackBiome.keepOriginalTerrain);
+        if ((fallbackBiome.flags & kFarLodBiomeOcean) != 0u)
+        {
+            oceanWeight = 1.0f;
+            oceanHeight = aggregatedHeight;
+            oceanRoughness = aggregatedRoughness;
+            oceanHills = aggregatedHills;
+            oceanMountains = aggregatedMountains;
+            oceanKeepOriginal = keepOriginal;
+            oceanRepresentativeBiome = 0u;
+            oceanRepresentativeWeight = 1.0f;
+        }
+        else
+        {
+            landWeight = 1.0f;
+            landHeight = aggregatedHeight;
+            landRoughness = aggregatedRoughness;
+            landHills = aggregatedHills;
+            landMountains = aggregatedMountains;
+            landKeepOriginal = keepOriginal;
+            landRepresentativeBiome = 0u;
+            landRepresentativeWeight = 1.0f;
+        }
+    }
+    else
+    {
+        float totalWeight = 0.0f;
+        [unroll]
+        for (uint weightIndex = 0u; weightIndex < kMaxWeightedSeeds; ++weightIndex)
+        {
+            if (weightIndex >= weightedCount)
+            {
+                break;
+            }
+            totalWeight += weightedSeeds[weightIndex].weight;
+        }
+        totalWeight = max(totalWeight, 1.0e-06f);
+
+        [unroll]
+        for (uint aggregateIndex = 0u; aggregateIndex < kMaxWeightedSeeds; ++aggregateIndex)
+        {
+            if (aggregateIndex >= weightedCount)
+            {
+                break;
+            }
+
+            const WeightedSeed entry = weightedSeeds[aggregateIndex];
+            const FarLodGpuBiome entryBiome = gBiomes[entry.seed.biomeIndex];
+            const float normalizedWeight = entry.weight / totalWeight;
+            const float height = applyHeightLimits(entryBiome, entry.seed.baseHeight, entry.normalizedDistance);
+
+            aggregatedHeight += height * normalizedWeight;
+            aggregatedRoughness += entryBiome.roughness * normalizedWeight;
+            aggregatedHills += entryBiome.hills * normalizedWeight;
+            aggregatedMountains += entryBiome.mountains * normalizedWeight;
+            keepOriginal += saturate(entryBiome.keepOriginalTerrain) * normalizedWeight;
+
+            if ((entryBiome.flags & kFarLodBiomeOcean) != 0u)
+            {
+                oceanWeight += normalizedWeight;
+                oceanHeight += height * normalizedWeight;
+                oceanRoughness += entryBiome.roughness * normalizedWeight;
+                oceanHills += entryBiome.hills * normalizedWeight;
+                oceanMountains += entryBiome.mountains * normalizedWeight;
+                oceanKeepOriginal += saturate(entryBiome.keepOriginalTerrain) * normalizedWeight;
+                if (normalizedWeight > oceanRepresentativeWeight)
+                {
+                    oceanRepresentativeBiome = entry.seed.biomeIndex;
+                    oceanRepresentativeWeight = normalizedWeight;
+                }
+            }
+            else
+            {
+                landWeight += normalizedWeight;
+                landHeight += height * normalizedWeight;
+                landRoughness += entryBiome.roughness * normalizedWeight;
+                landHills += entryBiome.hills * normalizedWeight;
+                landMountains += entryBiome.mountains * normalizedWeight;
+                landKeepOriginal += saturate(entryBiome.keepOriginalTerrain) * normalizedWeight;
+                if (normalizedWeight > landRepresentativeWeight)
+                {
+                    landRepresentativeBiome = entry.seed.biomeIndex;
+                    landRepresentativeWeight = normalizedWeight;
+                }
+            }
+        }
+
+        if (landWeight > 1.192092896e-07f)
+        {
+            landHeight /= landWeight;
+            landRoughness /= landWeight;
+            landHills /= landWeight;
+            landMountains /= landWeight;
+            landKeepOriginal /= landWeight;
+        }
+        if (oceanWeight > 1.192092896e-07f)
+        {
+            oceanHeight /= oceanWeight;
+            oceanRoughness /= oceanWeight;
+            oceanHills /= oceanWeight;
+            oceanMountains /= oceanWeight;
+            oceanKeepOriginal /= oceanWeight;
+        }
+    }
+
+    const bool dominantIsOcean = oceanWeight > landWeight;
+    if (dominantIsOcean && oceanRepresentativeBiome != 0xFFFFFFFFu)
+    {
+        biomeIndex = oceanRepresentativeBiome;
+    }
+    else if (landRepresentativeBiome != 0xFFFFFFFFu)
+    {
+        biomeIndex = landRepresentativeBiome;
+    }
+    else if (oceanRepresentativeBiome != 0xFFFFFFFFu)
+    {
+        biomeIndex = oceanRepresentativeBiome;
+    }
+
+    const FarLodGpuBiome biome = gBiomes[biomeIndex];
+    const float groupHeight = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanHeight :
+                              (landWeight > 1.192092896e-07f ? landHeight : aggregatedHeight);
+    const float groupRoughness = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanRoughness :
+                                 (landWeight > 1.192092896e-07f ? landRoughness : aggregatedRoughness);
+    const float groupHills = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanHills :
+                             (landWeight > 1.192092896e-07f ? landHills : aggregatedHills);
+    const float groupMountains = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanMountains :
+                                 (landWeight > 1.192092896e-07f ? landMountains : aggregatedMountains);
+    const float landBaseHeight = landWeight > 1.192092896e-07f ? landHeight : groupHeight;
+    const float oceanBaseHeight = oceanWeight > 1.192092896e-07f ? oceanHeight : groupHeight;
+    const float signedDistanceToCoast = dominantIsOcean ? -nearestLandEdge : nearestOceanEdge;
+    const float distanceToCoast = abs(signedDistanceToCoast);
+
+    float roughStrength = max(groupRoughness, 0.0f);
+    float hillStrength = max(groupHills, 0.0f);
+    float mountainStrength = max(groupMountains, 0.0f);
+    const CoastProfileSettings coastSettings = coastProfileSettings(biome.coastProfile);
+    const float absCoastDistance = isfinite(signedDistanceToCoast) ? abs(signedDistanceToCoast) : 3.402823466e+38F;
+    float baseHeight = solveShorelineBaseHeight(signedDistanceToCoast,
+                                                landBaseHeight,
+                                                oceanBaseHeight,
+                                                (float)header.seaLevel,
+                                                coastSettings);
+    roughStrength *= shorelineNoiseFactor(absCoastDistance, coastSettings.roughFadeDistance, coastSettings.roughFloor);
+    hillStrength *= shorelineNoiseFactor(absCoastDistance, coastSettings.hillFadeDistance, coastSettings.hillFloor);
+    mountainStrength *= shorelineNoiseFactor(absCoastDistance, coastSettings.mountainFadeDistance, coastSettings.mountainFloor);
+
+    const float worldXF = (float)worldX;
+    const float worldZF = (float)worldZ;
+    const float warpSample =
+        fbm2(worldXF,
+             worldZF,
+             header.mainFrequency,
+             header.mainOctaves,
+             header.mainGain,
+             header.mainLacunarity,
+             header.warpFrequency / max(header.mainFrequency, 1.0e-6f));
+    const float warpedX = worldXF + warpSample * header.warpAmplitude;
+    const float warpedZ = worldZF + warpSample * header.warpAmplitude;
+
+    const float roughNoise = fbm2(warpedX, warpedZ, header.detailFrequency, header.detailOctaves, header.detailGain, header.detailLacunarity, 1.0f);
+    const float hillNoise = fbm2(warpedX, warpedZ, header.mediumFrequency, header.mediumOctaves, header.mediumGain, header.mediumLacunarity, 1.0f);
+    const float mountainNoise = ridge2(warpedX, warpedZ, header.mountainFrequency, header.mountainOctaves, header.mountainLacunarity, header.mountainGain);
+
+    float surfaceHeight = baseHeight;
+    surfaceHeight += (roughNoise - 0.5f) * 4.0f * roughStrength;
+    surfaceHeight += (hillNoise - 0.5f) * 6.0f * hillStrength;
+    surfaceHeight += mountainNoise * 12.0f * mountainStrength;
+
+    SamplePoint result;
+    result.biomeIndex = biomeIndex;
+    result.biomeFlags = biome.flags;
+    result.surfaceY = (int)round(surfaceHeight);
+    result.distanceToShore = distanceToCoast;
+    return result;
+}
+
+SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
+{
+    const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
+    const int2 worldPos = int2(worldX, worldZ);
+    const int chunkX = floorDivExact(worldX, header.chunkSpan);
+    const int chunkZ = floorDivExact(worldZ, header.chunkSpan);
+
+    WeightedSeed weightedSeeds[kMaxWeightedSeeds];
+    uint weightedCount = 0u;
+    float nearestLandEdge = 3.402823466e+38F;
+    float nearestOceanEdge = 3.402823466e+38F;
+
+    [loop]
+    for (int dz = -header.neighborRadius; dz <= header.neighborRadius; ++dz)
+    {
+        [loop]
+        for (int dx = -header.neighborRadius; dx <= header.neighborRadius; ++dx)
+        {
+            const uint cacheIndex = seedCacheIndex(int2(chunkX + dx, chunkZ + dz));
+            const uint chunkSeedCount = gChunkSeedCache[cacheIndex].seedCount;
+
+            [loop]
+            for (uint seedIndex = 0u; seedIndex < chunkSeedCount; ++seedIndex)
+            {
+                const ExactBiomeSeed seed = gChunkSeedCache[cacheIndex].seeds[seedIndex];
                 const FarLodGpuBiome seedBiome = gBiomes[seed.biomeIndex];
                 const float2 delta = float2(worldPos - seed.position);
                 const float distance = length(delta);
@@ -1896,7 +2197,7 @@ void applyTransitionBiomeAtPoint(int worldX, int worldZ, inout ClimateResolvedPo
 
 SamplePoint samplePoint(int worldX, int worldZ)
 {
-    return samplePointLegacy(worldX, worldZ);
+    return samplePointFromSeedCache(worldX, worldZ);
 }
 
 void resolveCenterMaterialAndWater(FarLodGpuBiome biome,
@@ -1959,6 +2260,84 @@ void resolveCenterMaterialAndWater(FarLodGpuBiome biome,
     }
 }
 
+groupshared GpuSamplePointCacheEntry gSharedSampleTile[64];
+
+[numthreads(8, 8, 1)]
+void FarLodChunkSeedCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    if (dispatchThreadId.x >= (uint)gUpdateSizeX || dispatchThreadId.y >= (uint)gUpdateSizeZ)
+    {
+        return;
+    }
+
+    const int2 chunkCoord = int2(gUpdateOriginCellX + (int)dispatchThreadId.x,
+                                 gUpdateOriginCellZ + (int)dispatchThreadId.y);
+    GpuChunkSeedCacheEntry cacheEntry = (GpuChunkSeedCacheEntry)0;
+    ExactBiomeSeed seeds[kMaxChunkSeeds];
+    uint seedCount = 0u;
+    buildChunkSeeds(chunkCoord.x, chunkCoord.y, seeds, seedCount);
+    cacheEntry.seedCount = seedCount;
+    [unroll]
+    for (uint seedIndex = 0u; seedIndex < kMaxChunkSeeds; ++seedIndex)
+    {
+        if (seedIndex >= seedCount)
+        {
+            break;
+        }
+        cacheEntry.seeds[seedIndex] = seeds[seedIndex];
+    }
+    gChunkSeedCacheOut[seedCacheIndex(chunkCoord)] = cacheEntry;
+}
+
+[numthreads(8, 8, 1)]
+void FarLodColumnSampleCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID,
+                                 uint3 groupThreadId : SV_GroupThreadID)
+{
+    const bool active = dispatchThreadId.x < (uint)gUpdateSizeX && dispatchThreadId.y < (uint)gUpdateSizeZ;
+    const uint sharedIndex = groupThreadId.y * 8u + groupThreadId.x;
+    gSharedSampleTile[sharedIndex] = (GpuSamplePointCacheEntry)0;
+
+    int2 cellCoord = int2(0, 0);
+    if (active)
+    {
+        cellCoord = int2(gUpdateOriginCellX + (int)dispatchThreadId.x,
+                         gUpdateOriginCellZ + (int)dispatchThreadId.y);
+        const int worldX = cellCoord.x * gBlockScale;
+        const int worldZ = cellCoord.y * gBlockScale;
+        const int footprint = max(gBlockScale, 1);
+        const int maxSampleX = worldX + (footprint - 1);
+        const int maxSampleZ = worldZ + (footprint - 1);
+        const int centerX = worldX + footprint / 2;
+        const int centerZ = worldZ + footprint / 2;
+        const int midX = worldX + footprint / 2;
+        const int midZ = worldZ + footprint / 2;
+
+        const int2 points[9] = {
+            int2(worldX, worldZ),
+            int2(maxSampleX, worldZ),
+            int2(worldX, maxSampleZ),
+            int2(maxSampleX, maxSampleZ),
+            int2(centerX, centerZ),
+            int2(midX, worldZ),
+            int2(midX, maxSampleZ),
+            int2(worldX, midZ),
+            int2(maxSampleX, midZ),
+        };
+
+        [unroll]
+        for (uint sampleIndex = 0u; sampleIndex < 9u; ++sampleIndex)
+        {
+            gSharedSampleTile[sharedIndex].points[sampleIndex] =
+                samplePoint(points[sampleIndex].x, points[sampleIndex].y);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (active)
+    {
+        gSampleCacheOut[atlasIndex(cellCoord)] = gSharedSampleTile[sharedIndex];
+    }
+}
+
 [numthreads(8, 8, 1)]
 void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -1992,9 +2371,11 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     };
 
     SamplePoint samples[9];
+    const GpuSamplePointCacheEntry cacheEntry = gSampleCache[atlasIndex(cellCoord)];
+    [unroll]
     for (uint sampleIndex = 0u; sampleIndex < 9u; ++sampleIndex)
     {
-        samples[sampleIndex] = samplePoint(points[sampleIndex].x, points[sampleIndex].y);
+        samples[sampleIndex] = cacheEntry.points[sampleIndex];
     }
 
     int heights[9];

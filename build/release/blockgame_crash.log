@@ -603,3 +603,278 @@
   [27] 0x7ff8b9f87374 KERNEL32!BaseThreadInitThunk+0x14 [rva 0x17374]
   [28] 0x7ff8ba0dcc91 ntdll!RtlUserThreadStart+0x21 [rva 0x4cc91]
 2026-03-17 21:36:04 - minidump: written to blockgame_crash.dmp
+2026-03-17 23:40:02 - signal: SIGSEGV
+2026-03-17 23:40:02 - diagnostics: signal | phase=frame/chunk_update | frame=628 | heartbeat_age_ms=13.99
+2026-03-17 23:40:02 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-17 23:40:02 - stack:
+  [0] 0x7ff777c6bda2 blockgame!`anonymous namespace'::appendStackTrace+0x62 [rva 0xbda2] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:645+0x14
+  [1] 0x7ff777c6dd78 blockgame!`anonymous namespace'::crashSignalHandler+0xa8 [rva 0xdd78] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:131
+  [2] 0x7ff8b7ee0ef5 ucrtbase!seh_filter_exe+0x235 [rva 0x70ef5]
+  [3] 0x7ff777d84ac1 blockgame!`__scrt_common_main_seh'::`1'::filt$0+0x16 [rva 0x124ac1] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:304+0x16
+  [4] 0x7ff8680cf55d VCRUNTIME140!_C_specific_handler+0x9d [rva 0xf55d]
+  [5] 0x7ff8ba13296f ntdll!_chkstk+0x11f [rva 0xa296f]
+  [6] 0x7ff8ba0e2554 ntdll!RtlRaiseException+0x484 [rva 0x52554]
+  [7] 0x7ff8ba13147e ntdll!KiUserExceptionDispatcher+0x2e [rva 0xa147e]
+  [8] 0x7ffff0a978a5
+  [9] 0x7ffff0a8e339
+  [10] 0x7ffff0a7455e
+  [11] 0x7ffff09d4f24
+  [12] 0x7ff851a9ca7e
+  [13] 0x7ff777ca64a1 blockgame!`anonymous namespace'::FarTerrainManager::appendAtlasUpdates+0xb71 [rva 0x464a1] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:7404+0x2ea
+  [14] 0x7ff777cd14a6 blockgame!`anonymous namespace'::FarTerrainManager::submitGpuSynthesisRequests+0x486 [rva 0x714a6] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:8648+0x13
+  [15] 0x7ff777cd5ba9 blockgame!`anonymous namespace'::FarTerrainManager::update+0xae9 [rva 0x75ba9] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:4970
+  [16] 0x7ff777cd689e blockgame!ChunkManager::Impl::update+0xc0e [rva 0x7689e] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:11967+0x5e
+  [17] 0x7ff777c7649d blockgame!`anonymous namespace'::runGame+0x2e0d [rva 0x1649d] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:3438
+  [18] 0x7ff777c81256 blockgame!main+0x716 [rva 0x21256] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:4412+0x5
+  [19] 0x7ff777d7cb70 blockgame!__scrt_common_main_seh+0x10c [rva 0x11cb70] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288+0x22
+  [20] 0x7ff8b9f87374 KERNEL32!BaseThreadInitThunk+0x14 [rva 0x17374]
+  [21] 0x7ff8ba0dcc91 ntdll!RtlUserThreadStart+0x21 [rva 0x4cc91]
+2026-03-17 23:40:02 - minidump: written to blockgame_crash.dmp
+2026-03-17 23:40:20 - signal: SIGSEGV
+2026-03-17 23:40:20 - diagnostics: signal | phase=frame/chunk_update | frame=580 | heartbeat_age_ms=10.81
+2026-03-17 23:40:20 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-17 23:40:20 - stack:
+  [0] 0x7ff777c6bda2 blockgame!`anonymous namespace'::appendStackTrace+0x62 [rva 0xbda2] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:645+0x14
+  [1] 0x7ff777c6dd78 blockgame!`anonymous namespace'::crashSignalHandler+0xa8 [rva 0xdd78] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:131
+  [2] 0x7ff8b7ee0ef5 ucrtbase!seh_filter_exe+0x235 [rva 0x70ef5]
+  [3] 0x7ff777d84ac1 blockgame!`__scrt_common_main_seh'::`1'::filt$0+0x16 [rva 0x124ac1] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:304+0x16
+  [4] 0x7ff8680cf55d VCRUNTIME140!_C_specific_handler+0x9d [rva 0xf55d]
+  [5] 0x7ff8ba13296f ntdll!_chkstk+0x11f [rva 0xa296f]
+  [6] 0x7ff8ba0e2554 ntdll!RtlRaiseException+0x484 [rva 0x52554]
+  [7] 0x7ff8ba13147e ntdll!KiUserExceptionDispatcher+0x2e [rva 0xa147e]
+  [8] 0x7ffff0a978a5
+  [9] 0x7ffff0a8e339
+  [10] 0x7ffff0a7455e
+  [11] 0x7ffff09d4f24
+  [12] 0x7ff851a9ca7e
+  [13] 0x7ff777ca64a1 blockgame!`anonymous namespace'::FarTerrainManager::appendAtlasUpdates+0xb71 [rva 0x464a1] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:7404+0x2ea
+  [14] 0x7ff777cd14a6 blockgame!`anonymous namespace'::FarTerrainManager::submitGpuSynthesisRequests+0x486 [rva 0x714a6] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:8648+0x13
+  [15] 0x7ff777cd5ba9 blockgame!`anonymous namespace'::FarTerrainManager::update+0xae9 [rva 0x75ba9] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:4970
+  [16] 0x7ff777cd689e blockgame!ChunkManager::Impl::update+0xc0e [rva 0x7689e] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:11967+0x5e
+  [17] 0x7ff777c7649d blockgame!`anonymous namespace'::runGame+0x2e0d [rva 0x1649d] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:3438
+  [18] 0x7ff777c81256 blockgame!main+0x716 [rva 0x21256] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:4412+0x5
+  [19] 0x7ff777d7cb70 blockgame!__scrt_common_main_seh+0x10c [rva 0x11cb70] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288+0x22
+  [20] 0x7ff8b9f87374 KERNEL32!BaseThreadInitThunk+0x14 [rva 0x17374]
+  [21] 0x7ff8ba0dcc91 ntdll!RtlUserThreadStart+0x21 [rva 0x4cc91]
+2026-03-17 23:40:20 - minidump: written to blockgame_crash.dmp
+2026-03-17 23:40:41 - signal: SIGSEGV
+2026-03-17 23:40:41 - diagnostics: signal | phase=frame/chunk_update | frame=558 | heartbeat_age_ms=114.87
+2026-03-17 23:40:41 - breadcrumbs:
+  [0] frame/start
+  [1] frame/poll_events
+  [2] frame/input
+  [3] frame/chunk_update
+  [4] frame/render_begin
+  [5] frame/build_render_data
+  [6] frame/render_world
+  [7] frame/ui
+  [8] frame/end_frame
+  [9] frame/presented
+  [10] frame/start
+  [11] frame/poll_events
+  [12] frame/input
+  [13] frame/chunk_update
+  [14] frame/render_begin
+  [15] frame/build_render_data
+  [16] frame/render_world
+  [17] frame/ui
+  [18] frame/end_frame
+  [19] frame/presented
+  [20] frame/start
+  [21] frame/poll_events
+  [22] frame/input
+  [23] frame/chunk_update
+  [24] frame/render_begin
+  [25] frame/build_render_data
+  [26] frame/render_world
+  [27] frame/ui
+  [28] frame/end_frame
+  [29] frame/presented
+  [30] frame/start
+  [31] frame/poll_events
+  [32] frame/input
+  [33] frame/chunk_update
+  [34] frame/render_begin
+  [35] frame/build_render_data
+  [36] frame/render_world
+  [37] frame/ui
+  [38] frame/end_frame
+  [39] frame/presented
+  [40] frame/start
+  [41] frame/poll_events
+  [42] frame/input
+  [43] frame/chunk_update
+  [44] frame/render_begin
+  [45] frame/build_render_data
+  [46] frame/render_world
+  [47] frame/ui
+  [48] frame/end_frame
+  [49] frame/presented
+  [50] frame/start
+  [51] frame/poll_events
+  [52] frame/input
+  [53] frame/chunk_update
+  [54] frame/render_begin
+  [55] frame/build_render_data
+  [56] frame/render_world
+  [57] frame/ui
+  [58] frame/end_frame
+  [59] frame/presented
+  [60] frame/start
+  [61] frame/poll_events
+  [62] frame/input
+  [63] frame/chunk_update
+2026-03-17 23:40:41 - stack:
+  [0] 0x7ff777c6bda2 blockgame!`anonymous namespace'::appendStackTrace+0x62 [rva 0xbda2] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:645+0x14
+  [1] 0x7ff777c6dd78 blockgame!`anonymous namespace'::crashSignalHandler+0xa8 [rva 0xdd78] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:131
+  [2] 0x7ff8b7ee0ef5 ucrtbase!seh_filter_exe+0x235 [rva 0x70ef5]
+  [3] 0x7ff777d84ac1 blockgame!`__scrt_common_main_seh'::`1'::filt$0+0x16 [rva 0x124ac1] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:304+0x16
+  [4] 0x7ff8680cf55d VCRUNTIME140!_C_specific_handler+0x9d [rva 0xf55d]
+  [5] 0x7ff8ba13296f ntdll!_chkstk+0x11f [rva 0xa296f]
+  [6] 0x7ff8ba0e2554 ntdll!RtlRaiseException+0x484 [rva 0x52554]
+  [7] 0x7ff8ba13147e ntdll!KiUserExceptionDispatcher+0x2e [rva 0xa147e]
+  [8] 0x7ffff0a978a5
+  [9] 0x7ffff0a8e339
+  [10] 0x7ffff0a7455e
+  [11] 0x7ffff09d4f24
+  [12] 0x7ff851a9b898
+  [13] 0x7ff8215be596
+  [14] 0x7ff8215be20c
+  [15] 0x7ff777ca64a1 blockgame!`anonymous namespace'::FarTerrainManager::appendAtlasUpdates+0xb71 [rva 0x464a1] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:7404+0x2ea
+  [16] 0x7ff777cd14a6 blockgame!`anonymous namespace'::FarTerrainManager::submitGpuSynthesisRequests+0x486 [rva 0x714a6] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:8648+0x13
+  [17] 0x7ff777cd5ba9 blockgame!`anonymous namespace'::FarTerrainManager::update+0xae9 [rva 0x75ba9] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:4970
+  [18] 0x7ff777cd689e blockgame!ChunkManager::Impl::update+0xc0e [rva 0x7689e] at C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp:11967+0x5e
+  [19] 0x7ff777c7649d blockgame!`anonymous namespace'::runGame+0x2e0d [rva 0x1649d] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:3438
+  [20] 0x7ff777c81256 blockgame!main+0x716 [rva 0x21256] at C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp:4412+0x5
+  [21] 0x7ff777d7cb70 blockgame!__scrt_common_main_seh+0x10c [rva 0x11cb70] at D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288+0x22
+  [22] 0x7ff8b9f87374 KERNEL32!BaseThreadInitThunk+0x14 [rva 0x17374]
+  [23] 0x7ff8ba0dcc91 ntdll!RtlUserThreadStart+0x21 [rva 0x4cc91]
+2026-03-17 23:40:41 - minidump: written to blockgame_crash.dmp

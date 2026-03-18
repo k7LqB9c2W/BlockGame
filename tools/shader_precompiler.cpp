@@ -255,7 +255,7 @@ int compileShader(const fs::path& shaderRoot,
 
     if (isShaderUpToDate(sourcePath, outputPath))
     {
-        std::cout << "skipped " << spec.relativePath << " -> " << outputPath.filename().string() << '\n';
+        std::cout << "skipped " << spec.relativePath << " -> " << outputPath.filename().string() << std::endl;
         return 0;
     }
 
@@ -265,7 +265,7 @@ int compileShader(const fs::path& shaderRoot,
     {
         std::cout << " with dxc";
     }
-    std::cout << '\n';
+    std::cout << std::endl;
 
     const int result = !dxcPath.empty()
                            ? compileShaderWithDxc(dxcPath, shaderRoot, outputPath, spec)
@@ -276,7 +276,7 @@ int compileShader(const fs::path& shaderRoot,
         return result;
     }
 
-    std::cout << "compiled " << spec.relativePath << " -> " << outputPath.filename().string() << '\n';
+    std::cout << "compiled " << spec.relativePath << " -> " << outputPath.filename().string() << std::endl;
     return 0;
 }
 } // namespace

@@ -740,6 +740,14 @@ void lodVisibilityDebugLog(const std::string& message)
     return stream.str();
 }
 
+[[nodiscard]] std::string hexPtr(const void* value)
+{
+    std::ostringstream stream;
+    stream << "0x" << std::hex << std::uppercase
+           << static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(value));
+    return stream.str();
+}
+
 [[nodiscard]] std::string hexHr(HRESULT hr)
 {
     return hexU32(static_cast<std::uint32_t>(hr));
@@ -1492,46 +1500,123 @@ public:
                                     ID3D12Resource* sampleUavBuffer,
                                     std::uint32_t sampleUavElementCount)
     {
+        const auto logDescriptorWrite = [&](const char* kind,
+                                            UINT descriptorIndexValue,
+                                            const char* label,
+                                            ID3D12Resource* resource,
+                                            std::uint32_t elementCount,
+                                            std::uint32_t strideBytes)
+        {
+            if (!chunkManagerDebugLoggingEnabled())
+            {
+                return;
+            }
+
+            std::ostringstream stream;
+            stream << "Far LOD sample descriptor write"
+                   << " kind=" << kind
+                   << " descriptor=" << descriptorIndexValue
+                   << " label=" << label
+                   << " resource=" << hexPtr(resource)
+                   << " elements=" << elementCount
+                   << " stride=" << strideBytes;
+            chunkManagerDebugLog(stream.str());
+        };
+
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex,
+                           "worldgen_header",
+                           worldgenHeaderBuffer,
+                           1u,
+                           static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuWorldgenHeader)));
         writeStructuredSrvDescriptor(srvDescriptorIndex,
                                      worldgenHeaderBuffer,
                                      0,
                                      1,
                                      static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuWorldgenHeader)));
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 1u,
+                           "biomes",
+                           worldgenBiomeBuffer,
+                           biomeCount,
+                           static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuBiome)));
         writeStructuredSrvDescriptor(srvDescriptorIndex + 1u,
                                      worldgenBiomeBuffer,
                                      0,
                                      biomeCount,
                                      static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuBiome)));
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 2u,
+                           "biome_selections",
+                           biomeSelectionBuffer,
+                           biomeSelectionCount,
+                           kGpuContextBiomeSelectionStrideBytes);
         writeStructuredSrvDescriptor(srvDescriptorIndex + 2u,
                                      biomeSelectionBuffer,
                                      0,
                                      biomeSelectionCount,
                                      kGpuContextBiomeSelectionStrideBytes);
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 3u,
+                           "ocean_selections",
+                           oceanSelectionBuffer,
+                           oceanSelectionCount,
+                           kGpuContextBiomeSelectionStrideBytes);
         writeStructuredSrvDescriptor(srvDescriptorIndex + 3u,
                                      oceanSelectionBuffer,
                                      0,
                                      oceanSelectionCount,
                                      kGpuContextBiomeSelectionStrideBytes);
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 4u,
+                           "sub_biomes",
+                           subBiomeBuffer,
+                           subBiomeCount,
+                           kGpuContextSubBiomeStrideBytes);
         writeStructuredSrvDescriptor(srvDescriptorIndex + 4u,
                                      subBiomeBuffer,
                                      0,
                                      subBiomeCount,
                                      kGpuContextSubBiomeStrideBytes);
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 5u,
+                           "surface_permutation",
+                           permutationBuffer,
+                           permutationCount,
+                           kGpuContextPermutationStrideBytes);
         writeStructuredSrvDescriptor(srvDescriptorIndex + 5u,
                                      permutationBuffer,
                                      0,
                                      permutationCount,
                                      kGpuContextPermutationStrideBytes);
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 6u,
+                           "seed_headers",
+                           seedHeaderSrvBuffer,
+                           seedHeaderElementCount,
+                           kGpuContextChunkSeedCacheHeaderStrideBytes);
         writeStructuredSrvDescriptor(srvDescriptorIndex + 6u,
                                      seedHeaderSrvBuffer,
                                      0,
                                      seedHeaderElementCount,
                                      kGpuContextChunkSeedCacheHeaderStrideBytes);
+        logDescriptorWrite("srv",
+                           srvDescriptorIndex + 7u,
+                           "seed_data",
+                           seedDataSrvBuffer,
+                           seedDataElementCount,
+                           kGpuContextChunkSeedStrideBytes);
         writeStructuredSrvDescriptor(srvDescriptorIndex + 7u,
                                      seedDataSrvBuffer,
                                      0,
                                      seedDataElementCount,
                                      kGpuContextChunkSeedStrideBytes);
+        logDescriptorWrite("uav",
+                           uavDescriptorIndex,
+                           "sample_cache_out",
+                           sampleUavBuffer,
+                           sampleUavElementCount,
+                           kGpuContextAtlasSamplePointCacheStrideBytes);
         writeStructuredUavDescriptor(uavDescriptorIndex,
                                      sampleUavBuffer,
                                      0,
@@ -1712,6 +1797,9 @@ public:
                                         ID3D12Resource* sampleBuffer,
                                         std::uint32_t sampleElementCount)
     {
+        static std::uint64_t sampleDispatchSequence = 0u;
+        const std::uint64_t dispatchId = ++sampleDispatchSequence;
+        const bool logEnabled = chunkManagerDebugLoggingEnabled();
         if (!open_ || worldgenHeaderBuffer == nullptr || worldgenBiomeBuffer == nullptr ||
             biomeSelectionBuffer == nullptr || oceanSelectionBuffer == nullptr || subBiomeBuffer == nullptr ||
             permutationBuffer == nullptr || seedHeaderBuffer == nullptr || seedDataBuffer == nullptr ||
@@ -1751,6 +1839,39 @@ public:
             return;
         }
 
+        if (logEnabled)
+        {
+            std::ostringstream stream;
+            stream << "Far LOD sample dispatch begin"
+                   << " id=" << dispatchId
+                   << " atlasOrigin=[" << atlasOriginCell.x << "," << atlasOriginCell.y << "]"
+                   << " atlasSize=[" << atlasSizeCells.x << "," << atlasSizeCells.y << "]"
+                   << " updateOrigin=[" << updateOriginCell.x << "," << updateOriginCell.y << "]"
+                   << " updateSize=[" << updateSizeCells.x << "," << updateSizeCells.y << "]"
+                   << " blockScale=" << blockScale
+                   << " seedOrigin=[" << seedOriginChunk.x << "," << seedOriginChunk.y << "]"
+                   << " seedSize=[" << seedSizeChunks.x << "," << seedSizeChunks.y << "]"
+                   << " biomeCount=" << biomeCount
+                   << " biomeSelCount=" << biomeSelectionCount
+                   << " oceanSelCount=" << oceanSelectionCount
+                   << " subBiomeCount=" << subBiomeCount
+                   << " permutationCount=" << permutationCount
+                   << " seedHeaderCount=" << seedHeaderElementCount
+                   << " seedDataCount=" << seedDataElementCount
+                   << " sampleCount=" << sampleElementCount
+                   << " descriptorCursor=" << descriptorCursor_
+                   << " resources=[header=" << hexPtr(worldgenHeaderBuffer)
+                   << ",biomes=" << hexPtr(worldgenBiomeBuffer)
+                   << ",biomeSel=" << hexPtr(biomeSelectionBuffer)
+                   << ",oceanSel=" << hexPtr(oceanSelectionBuffer)
+                   << ",subBiome=" << hexPtr(subBiomeBuffer)
+                   << ",perm=" << hexPtr(permutationBuffer)
+                   << ",seedHeader=" << hexPtr(seedHeaderBuffer)
+                   << ",seedData=" << hexPtr(seedDataBuffer)
+                   << ",sample=" << hexPtr(sampleBuffer) << "]";
+            chunkManagerDebugLog(stream.str());
+        }
+
         std::array<std::uint32_t, 14> constants{
             static_cast<std::uint32_t>(atlasOriginCell.x),
             static_cast<std::uint32_t>(atlasOriginCell.y),
@@ -1768,6 +1889,21 @@ public:
             static_cast<std::uint32_t>(seedSizeChunks.y)};
         const UINT srvDescriptorIndex = allocateDescriptorRange(8);
         const UINT uavDescriptorIndex = allocateDescriptorRange(1);
+        if (logEnabled)
+        {
+            std::ostringstream stream;
+            stream << "Far LOD sample dispatch descriptors"
+                   << " id=" << dispatchId
+                   << " srvBase=" << srvDescriptorIndex
+                   << " uavBase=" << uavDescriptorIndex
+                   << " descriptorCursor=" << descriptorCursor_;
+            chunkManagerDebugLog(stream.str());
+        }
+
+        if (logEnabled)
+        {
+            chunkManagerDebugLog("Far LOD sample dispatch bind begin id=" + std::to_string(dispatchId));
+        }
         bindAtlasSampleDescriptors(srvDescriptorIndex,
                                    uavDescriptorIndex,
                                    worldgenHeaderBuffer,
@@ -1787,15 +1923,33 @@ public:
                                    seedDataElementCount,
                                    sampleBuffer,
                                    sampleElementCount);
+        if (logEnabled)
+        {
+            chunkManagerDebugLog("Far LOD sample dispatch bind end id=" + std::to_string(dispatchId));
+            chunkManagerDebugLog("Far LOD sample dispatch set_bindings begin id=" + std::to_string(dispatchId));
+        }
         setAtlasBindings(atlasSampleRootSignature_.Get(),
                          atlasSampleCachePipelineState_.Get(),
                          constants,
                          srvDescriptorIndex,
                          uavDescriptorIndex);
+        if (logEnabled)
+        {
+            chunkManagerDebugLog("Far LOD sample dispatch set_bindings end id=" + std::to_string(dispatchId));
+            chunkManagerDebugLog("Far LOD sample dispatch dispatch begin id=" + std::to_string(dispatchId));
+        }
         commandList_->Dispatch(static_cast<UINT>((updateSizeCells.x + 7) / 8),
                                static_cast<UINT>((updateSizeCells.y + 7) / 8),
                                1);
+        if (logEnabled)
+        {
+            chunkManagerDebugLog("Far LOD sample dispatch dispatch end id=" + std::to_string(dispatchId));
+        }
         hasCommands_ = true;
+        if (logEnabled)
+        {
+            chunkManagerDebugLog("Far LOD sample dispatch complete id=" + std::to_string(dispatchId));
+        }
     }
 
     void dispatchAtlasUpdate(const glm::ivec2& atlasOriginCell,

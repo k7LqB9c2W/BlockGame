@@ -104,6 +104,22 @@ struct FarLodGpuBiomeSelection
     uint reserved1;
 };
 
+struct FarLodGpuTransitionBiome
+{
+    uint biomeIndex;
+    float chance;
+    int width;
+    uint propertyBits;
+};
+
+struct FarLodGpuSubBiome
+{
+    uint biomeIndex;
+    float chance;
+    float minRadius;
+    float maxRadius;
+};
+
 struct GpuTerrainAtlasSample
 {
     uint hasSolid;
@@ -128,6 +144,56 @@ struct SamplePoint
     float distanceToShore;
 };
 
+struct ClimateComposition
+{
+    float aggregatedHeight;
+    float aggregatedRoughness;
+    float aggregatedHills;
+    float aggregatedMountains;
+    float keepOriginalMix;
+    float landWeight;
+    float oceanWeight;
+    float landHeight;
+    float oceanHeight;
+    float landRoughness;
+    float oceanRoughness;
+    float landHills;
+    float oceanHills;
+    float landMountains;
+    float oceanMountains;
+    float landKeepOriginal;
+    float oceanKeepOriginal;
+    uint landRepresentativeBiome;
+    uint oceanRepresentativeBiome;
+    float landRepresentativeWeight;
+    float oceanRepresentativeWeight;
+    float2 landSitePos;
+    float2 oceanSitePos;
+    float landSiteRadius;
+    float oceanSiteRadius;
+    uint prefersOcean;
+};
+
+struct ClimateResolvedPoint
+{
+    uint biomeIndex;
+    uint biomeFlags;
+    uint biomePropertyBits;
+    float representativeWeight;
+    float aggregatedHeight;
+    float aggregatedRoughness;
+    float aggregatedHills;
+    float aggregatedMountains;
+    float keepOriginalMix;
+    float2 dominantSitePos;
+    float dominantSiteRadius;
+    float distanceToCoast;
+    float signedDistanceToCoast;
+    float landBaseHeight;
+    float oceanBaseHeight;
+    uint dominantIsOcean;
+};
+
 struct CoastProfileSettings
 {
     float inlandBlendDistance;
@@ -146,8 +212,8 @@ StructuredBuffer<FarLodGpuWorldgenHeader> gWorldgenHeader : register(t0);
 StructuredBuffer<FarLodGpuBiome> gBiomes : register(t1);
 StructuredBuffer<FarLodGpuBiomeSelection> gBiomeSelections : register(t2);
 StructuredBuffer<FarLodGpuBiomeSelection> gOceanSelections : register(t3);
-StructuredBuffer<uint4> gTransitionBiomes : register(t4);
-StructuredBuffer<uint4> gSubBiomes : register(t5);
+StructuredBuffer<FarLodGpuTransitionBiome> gTransitionBiomes : register(t4);
+StructuredBuffer<FarLodGpuSubBiome> gSubBiomes : register(t5);
 StructuredBuffer<uint> gSurfacePermutation : register(t6);
 RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u0);
 
@@ -179,6 +245,9 @@ static const uint kBlockLeaves = 3u;
 static const uint kBlockSpruceLeaves = 8u;
 static const uint kMaxChunkSeeds = 64u;
 static const uint kMaxWeightedSeeds = 4u;
+static const float kClimateEpsilon = 1.0e-6f;
+static const float kDiagonalStep = 1.41421356237f;
+static const float kHugeFloat = 3.402823466e+38F;
 
 struct ExactBiomeSeed
 {
@@ -371,12 +440,10 @@ float2 randomInUnitCircle(inout uint2 rngState)
     return value;
 }
 
-float sampleSubBiomeRadius(uint4 subBiomeEntry, float defaultRadius, float noiseValue)
+float sampleSubBiomeRadius(FarLodGpuSubBiome subBiomeEntry, float defaultRadius, float noiseValue)
 {
-    const float minRadius = asfloat(subBiomeEntry.z);
-    const float maxRadius = asfloat(subBiomeEntry.w);
-    const float low = minRadius > 0.0f ? minRadius : defaultRadius * 0.25f;
-    const float high = maxRadius > 0.0f ? maxRadius : defaultRadius * 0.75f;
+    const float low = subBiomeEntry.minRadius > 0.0f ? subBiomeEntry.minRadius : defaultRadius * 0.25f;
+    const float high = subBiomeEntry.maxRadius > 0.0f ? subBiomeEntry.maxRadius : defaultRadius * 0.75f;
     return lerp(low, high, saturate(noiseValue));
 }
 
@@ -496,9 +563,9 @@ void spawnSubBiomeSeeds(ExactBiomeSeed parent,
             break;
         }
 
-        const uint4 subBiomeEntry = gSubBiomes[parentBiome.subBiomeOffset + subIndex];
-        const uint childBiomeIndex = subBiomeEntry.x;
-        const float chance = asfloat(subBiomeEntry.y);
+        const FarLodGpuSubBiome subBiomeEntry = gSubBiomes[parentBiome.subBiomeOffset + subIndex];
+        const uint childBiomeIndex = subBiomeEntry.biomeIndex;
+        const float chance = subBiomeEntry.chance;
         if (chance <= 1.192092896e-07f)
         {
             continue;
@@ -983,7 +1050,7 @@ uint selectBiomeIndex(float temperature01, float moisture01, float fertility01, 
     return bestBiomeIndex;
 }
 
-SamplePoint samplePoint(int worldX, int worldZ)
+SamplePoint samplePointLegacy(int worldX, int worldZ)
 {
     const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
     const int2 worldPos = int2(worldX, worldZ);
@@ -1253,6 +1320,583 @@ SamplePoint samplePoint(int worldX, int worldZ)
     result.surfaceY = (int)round(surfaceHeight);
     result.distanceToShore = distanceToCoast;
     return result;
+}
+
+float biomeMaxRadius(FarLodGpuBiome biome)
+{
+    return max(biome.radius + biome.radiusVariation, 1.0f);
+}
+
+uint groupPresenceMask(uint bits)
+{
+    uint mask = 0u;
+    for (int group = 0; group < 5; ++group)
+    {
+        const uint groupBits = (bits >> (group * 3)) & 0x7u;
+        if (groupBits != 0u)
+        {
+            mask |= 1u << (group * 3);
+        }
+    }
+    return mask;
+}
+
+float4 mod289(float4 value)
+{
+    return value - floor(value * (1.0f / 289.0f)) * 289.0f;
+}
+
+float4 permute289(float4 value)
+{
+    return mod289(((value * 34.0f) + 1.0f) * value);
+}
+
+float4 taylorInvSqrt4(float4 value)
+{
+    return 1.79284291400159f - 0.85373472095314f * value;
+}
+
+float2 glmFade2(float2 value)
+{
+    return (value * value * value) * (value * (value * 6.0f - 15.0f) + 10.0f);
+}
+
+float glmPerlin2(float2 position)
+{
+    float4 Pi = floor(float4(position.x, position.y, position.x, position.y)) + float4(0.0f, 0.0f, 1.0f, 1.0f);
+    float4 Pf = frac(float4(position.x, position.y, position.x, position.y)) - float4(0.0f, 0.0f, 1.0f, 1.0f);
+    Pi = mod289(Pi);
+
+    const float4 ix = float4(Pi.x, Pi.z, Pi.x, Pi.z);
+    const float4 iy = float4(Pi.y, Pi.y, Pi.w, Pi.w);
+    const float4 fx = float4(Pf.x, Pf.z, Pf.x, Pf.z);
+    const float4 fy = float4(Pf.y, Pf.y, Pf.w, Pf.w);
+
+    const float4 i = permute289(permute289(ix) + iy);
+
+    float4 gx = 2.0f * frac(i * (1.0f / 41.0f)) - 1.0f;
+    float4 gy = abs(gx) - 0.5f;
+    const float4 tx = floor(gx + 0.5f);
+    gx = gx - tx;
+
+    float2 g00 = float2(gx.x, gy.x);
+    float2 g10 = float2(gx.y, gy.y);
+    float2 g01 = float2(gx.z, gy.z);
+    float2 g11 = float2(gx.w, gy.w);
+
+    const float4 norm = taylorInvSqrt4(float4(dot(g00, g00), dot(g01, g01), dot(g10, g10), dot(g11, g11)));
+    g00 *= norm.x;
+    g01 *= norm.y;
+    g10 *= norm.z;
+    g11 *= norm.w;
+
+    const float n00 = dot(g00, float2(fx.x, fy.x));
+    const float n10 = dot(g10, float2(fx.y, fy.y));
+    const float n01 = dot(g01, float2(fx.z, fy.z));
+    const float n11 = dot(g11, float2(fx.w, fy.w));
+
+    const float2 fadeXY = glmFade2(float2(Pf.x, Pf.y));
+    const float2 nX = lerp(float2(n00, n01), float2(n10, n11), fadeXY.x);
+    return 2.3f * lerp(nX.x, nX.y, fadeXY.y);
+}
+
+float unitPerlinNoise(int worldX, int worldZ, uint seed, float frequency)
+{
+    const float offsetX = (float)(seed & 0xFFFFu) * 0.013f;
+    const float offsetZ = (float)((seed >> 16u) & 0xFFFFu) * 0.017f;
+    const float2 sample = float2((float)worldX + offsetX, (float)worldZ + offsetZ) * frequency;
+    return saturate(glmPerlin2(sample) * 0.5f + 0.5f);
+}
+
+float smoothFactorFromDistance(float distance, float range)
+{
+    if (!isfinite(distance) || range <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const float t = saturate(distance / range);
+    return 1.0f - (t * t * (3.0f - 2.0f * t));
+}
+
+float gridDistance(int dx, int dz)
+{
+    const float absDx = abs((float)dx);
+    const float absDz = abs((float)dz);
+    const float diagonal = min(absDx, absDz);
+    const float straight = max(absDx, absDz) - diagonal;
+    return diagonal * kDiagonalStep + straight;
+}
+
+void resolveRepresentativeFromComposition(ClimateComposition composition, bool useOceanDomain, out ClimateResolvedPoint resolvedPoint)
+{
+    resolvedPoint = (ClimateResolvedPoint)0;
+
+    const bool hasRequestedGroup = useOceanDomain ? (composition.oceanWeight > kClimateEpsilon)
+                                                  : (composition.landWeight > kClimateEpsilon);
+    const bool fallbackToOcean = !hasRequestedGroup && composition.oceanWeight > kClimateEpsilon;
+
+    uint representativeBiome = 0xFFFFFFFFu;
+    float representativeWeight = 0.0f;
+    float groupHeight = composition.aggregatedHeight;
+    float groupRoughness = composition.aggregatedRoughness;
+    float groupHills = composition.aggregatedHills;
+    float groupMountains = composition.aggregatedMountains;
+    float groupKeepOriginal = composition.keepOriginalMix;
+    float2 dominantSitePos = float2(0.0f, 0.0f);
+    float dominantSiteRadius = 0.0f;
+
+    if ((useOceanDomain && !fallbackToOcean) || fallbackToOcean)
+    {
+        representativeBiome = composition.oceanRepresentativeBiome;
+        representativeWeight = composition.oceanRepresentativeWeight;
+        if (composition.oceanWeight > kClimateEpsilon)
+        {
+            groupHeight = composition.oceanHeight;
+            groupRoughness = composition.oceanRoughness;
+            groupHills = composition.oceanHills;
+            groupMountains = composition.oceanMountains;
+            groupKeepOriginal = composition.oceanKeepOriginal;
+        }
+        if (composition.oceanRepresentativeBiome != 0xFFFFFFFFu)
+        {
+            dominantSitePos = composition.oceanSitePos;
+            dominantSiteRadius = composition.oceanSiteRadius;
+        }
+        useOceanDomain = true;
+    }
+    else if (composition.landWeight > kClimateEpsilon)
+    {
+        representativeBiome = composition.landRepresentativeBiome;
+        representativeWeight = composition.landRepresentativeWeight;
+        groupHeight = composition.landHeight;
+        groupRoughness = composition.landRoughness;
+        groupHills = composition.landHills;
+        groupMountains = composition.landMountains;
+        groupKeepOriginal = composition.landKeepOriginal;
+        if (composition.landRepresentativeBiome != 0xFFFFFFFFu)
+        {
+            dominantSitePos = composition.landSitePos;
+            dominantSiteRadius = composition.landSiteRadius;
+        }
+        useOceanDomain = false;
+    }
+
+    if (representativeBiome == 0xFFFFFFFFu)
+    {
+        representativeBiome = composition.landRepresentativeBiome != 0xFFFFFFFFu
+            ? composition.landRepresentativeBiome
+            : composition.oceanRepresentativeBiome;
+        representativeWeight = composition.landRepresentativeWeight > 0.0f
+            ? composition.landRepresentativeWeight
+            : composition.oceanRepresentativeWeight;
+        if (composition.landRepresentativeBiome != 0xFFFFFFFFu)
+        {
+            dominantSitePos = composition.landSitePos;
+            dominantSiteRadius = composition.landSiteRadius;
+        }
+        else
+        {
+            dominantSitePos = composition.oceanSitePos;
+            dominantSiteRadius = composition.oceanSiteRadius;
+        }
+    }
+
+    if (representativeBiome == 0xFFFFFFFFu)
+    {
+        representativeBiome = 0u;
+    }
+
+    const FarLodGpuBiome representative = gBiomes[representativeBiome];
+    resolvedPoint.biomeIndex = representativeBiome;
+    resolvedPoint.biomeFlags = representative.flags;
+    resolvedPoint.biomePropertyBits = representative.propertyBits;
+    resolvedPoint.representativeWeight = representativeWeight;
+    resolvedPoint.aggregatedHeight = groupHeight;
+    resolvedPoint.aggregatedRoughness = groupRoughness;
+    resolvedPoint.aggregatedHills = groupHills;
+    resolvedPoint.aggregatedMountains = groupMountains;
+    resolvedPoint.keepOriginalMix = saturate(groupKeepOriginal);
+    resolvedPoint.dominantSitePos = dominantSitePos;
+    resolvedPoint.dominantSiteRadius = dominantSiteRadius;
+    resolvedPoint.landBaseHeight = composition.landWeight > kClimateEpsilon ? composition.landHeight : groupHeight;
+    resolvedPoint.oceanBaseHeight = composition.oceanWeight > kClimateEpsilon ? composition.oceanHeight : groupHeight;
+    resolvedPoint.dominantIsOcean = useOceanDomain ? 1u : 0u;
+    resolvedPoint.distanceToCoast = kHugeFloat;
+    resolvedPoint.signedDistanceToCoast = useOceanDomain ? -kHugeFloat : kHugeFloat;
+}
+
+void accumulateClimateComposition(int worldX, int worldZ, out ClimateComposition composition)
+{
+    const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
+    const int2 worldPos = int2(worldX, worldZ);
+    const int chunkX = floorDivExact(worldX, header.chunkSpan);
+    const int chunkZ = floorDivExact(worldZ, header.chunkSpan);
+
+    composition = (ClimateComposition)0;
+    composition.landRepresentativeBiome = 0xFFFFFFFFu;
+    composition.oceanRepresentativeBiome = 0xFFFFFFFFu;
+
+    WeightedSeed weightedSeeds[kMaxWeightedSeeds];
+    uint weightedCount = 0u;
+
+    for (int dz = -header.neighborRadius; dz <= header.neighborRadius; ++dz)
+    {
+        for (int dx = -header.neighborRadius; dx <= header.neighborRadius; ++dx)
+        {
+            ExactBiomeSeed chunkSeeds[kMaxChunkSeeds];
+            uint chunkSeedCount = 0u;
+            buildChunkSeeds(chunkX + dx, chunkZ + dz, chunkSeeds, chunkSeedCount);
+
+            for (uint seedIndex = 0u; seedIndex < chunkSeedCount; ++seedIndex)
+            {
+                const ExactBiomeSeed seed = chunkSeeds[seedIndex];
+                const FarLodGpuBiome seedBiome = gBiomes[seed.biomeIndex];
+                const float distance = length(float2(worldPos - seed.position));
+                const float normalized = distance / max(seed.radius, 1.0f);
+                const float blended = saturate(1.0f - normalized);
+                const float influence = smoothStep(blended);
+                if (influence <= kClimateEpsilon)
+                {
+                    continue;
+                }
+
+                const float blendFactor = evaluateInterpolationCurve(1.0f - normalized, seedBiome.interpolationCurve);
+                const float adjustedWeight = influence * blendFactor * seedBiome.interpolationWeight;
+                if (adjustedWeight <= kClimateEpsilon)
+                {
+                    continue;
+                }
+
+                WeightedSeed candidate;
+                candidate.seed = seed;
+                candidate.weight = adjustedWeight;
+                candidate.normalizedDistance = normalized;
+                insertWeightedSeed(weightedSeeds, weightedCount, candidate);
+            }
+        }
+    }
+
+    if (weightedCount == 0u)
+    {
+        const FarLodGpuBiome fallbackBiome = gBiomes[0];
+        const float fallbackHeight = applyHeightLimits(fallbackBiome, fallbackBiome.minHeight, 0.0f);
+
+        composition.aggregatedHeight = fallbackHeight;
+        composition.aggregatedRoughness = fallbackBiome.roughness;
+        composition.aggregatedHills = fallbackBiome.hills;
+        composition.aggregatedMountains = fallbackBiome.mountains;
+        composition.keepOriginalMix = saturate(fallbackBiome.keepOriginalTerrain);
+
+        if ((fallbackBiome.flags & kFarLodBiomeOcean) != 0u)
+        {
+            composition.oceanWeight = 1.0f;
+            composition.oceanHeight = fallbackHeight;
+            composition.oceanRoughness = fallbackBiome.roughness;
+            composition.oceanHills = fallbackBiome.hills;
+            composition.oceanMountains = fallbackBiome.mountains;
+            composition.oceanKeepOriginal = composition.keepOriginalMix;
+            composition.oceanRepresentativeBiome = 0u;
+            composition.oceanRepresentativeWeight = 1.0f;
+            composition.oceanSitePos = float2((float)worldX, (float)worldZ);
+            composition.oceanSiteRadius = biomeMaxRadius(fallbackBiome);
+            composition.prefersOcean = 1u;
+        }
+        else
+        {
+            composition.landWeight = 1.0f;
+            composition.landHeight = fallbackHeight;
+            composition.landRoughness = fallbackBiome.roughness;
+            composition.landHills = fallbackBiome.hills;
+            composition.landMountains = fallbackBiome.mountains;
+            composition.landKeepOriginal = composition.keepOriginalMix;
+            composition.landRepresentativeBiome = 0u;
+            composition.landRepresentativeWeight = 1.0f;
+            composition.landSitePos = float2((float)worldX, (float)worldZ);
+            composition.landSiteRadius = biomeMaxRadius(fallbackBiome);
+            composition.prefersOcean = 0u;
+        }
+        return;
+    }
+
+    float totalWeight = 0.0f;
+    for (uint weightIndex = 0u; weightIndex < weightedCount; ++weightIndex)
+    {
+        totalWeight += weightedSeeds[weightIndex].weight;
+    }
+    totalWeight = max(totalWeight, kClimateEpsilon);
+
+    for (uint aggregateIndex = 0u; aggregateIndex < weightedCount; ++aggregateIndex)
+    {
+        const WeightedSeed entry = weightedSeeds[aggregateIndex];
+        const FarLodGpuBiome entryBiome = gBiomes[entry.seed.biomeIndex];
+        const float normalizedWeight = entry.weight / totalWeight;
+        const float height = applyHeightLimits(entryBiome, entry.seed.baseHeight, entry.normalizedDistance);
+        const float keepOriginal = saturate(entryBiome.keepOriginalTerrain);
+        const float2 sitePos = float2((float)entry.seed.position.x, (float)entry.seed.position.y);
+
+        composition.aggregatedHeight += height * normalizedWeight;
+        composition.aggregatedRoughness += entryBiome.roughness * normalizedWeight;
+        composition.aggregatedHills += entryBiome.hills * normalizedWeight;
+        composition.aggregatedMountains += entryBiome.mountains * normalizedWeight;
+        composition.keepOriginalMix += keepOriginal * normalizedWeight;
+
+        if ((entryBiome.flags & kFarLodBiomeOcean) != 0u)
+        {
+            composition.oceanWeight += normalizedWeight;
+            composition.oceanHeight += height * normalizedWeight;
+            composition.oceanRoughness += entryBiome.roughness * normalizedWeight;
+            composition.oceanHills += entryBiome.hills * normalizedWeight;
+            composition.oceanMountains += entryBiome.mountains * normalizedWeight;
+            composition.oceanKeepOriginal += keepOriginal * normalizedWeight;
+            if (normalizedWeight > composition.oceanRepresentativeWeight)
+            {
+                composition.oceanRepresentativeBiome = entry.seed.biomeIndex;
+                composition.oceanRepresentativeWeight = normalizedWeight;
+                composition.oceanSitePos = sitePos;
+                composition.oceanSiteRadius = max(entry.seed.radius, 1.0f);
+            }
+        }
+        else
+        {
+            composition.landWeight += normalizedWeight;
+            composition.landHeight += height * normalizedWeight;
+            composition.landRoughness += entryBiome.roughness * normalizedWeight;
+            composition.landHills += entryBiome.hills * normalizedWeight;
+            composition.landMountains += entryBiome.mountains * normalizedWeight;
+            composition.landKeepOriginal += keepOriginal * normalizedWeight;
+            if (normalizedWeight > composition.landRepresentativeWeight)
+            {
+                composition.landRepresentativeBiome = entry.seed.biomeIndex;
+                composition.landRepresentativeWeight = normalizedWeight;
+                composition.landSitePos = sitePos;
+                composition.landSiteRadius = max(entry.seed.radius, 1.0f);
+            }
+        }
+    }
+
+    if (composition.landWeight > kClimateEpsilon)
+    {
+        composition.landHeight /= composition.landWeight;
+        composition.landRoughness /= composition.landWeight;
+        composition.landHills /= composition.landWeight;
+        composition.landMountains /= composition.landWeight;
+        composition.landKeepOriginal /= composition.landWeight;
+    }
+    if (composition.oceanWeight > kClimateEpsilon)
+    {
+        composition.oceanHeight /= composition.oceanWeight;
+        composition.oceanRoughness /= composition.oceanWeight;
+        composition.oceanHills /= composition.oceanWeight;
+        composition.oceanMountains /= composition.oceanWeight;
+        composition.oceanKeepOriginal /= composition.oceanWeight;
+    }
+
+    composition.prefersOcean = composition.oceanWeight > composition.landWeight ? 1u : 0u;
+}
+
+uint sampleSmoothedDomain(int worldX, int worldZ)
+{
+    int oceanCount = 0;
+    uint centerRaw = 0u;
+
+    for (int dz = -1; dz <= 1; ++dz)
+    {
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            ClimateComposition composition;
+            accumulateClimateComposition(worldX + dx, worldZ + dz, composition);
+            if (dx == 0 && dz == 0)
+            {
+                centerRaw = composition.prefersOcean;
+            }
+            oceanCount += composition.prefersOcean != 0u ? 1 : 0;
+        }
+    }
+
+    if (oceanCount >= 6)
+    {
+        return 1u;
+    }
+    if (oceanCount <= 3)
+    {
+        return 0u;
+    }
+    return centerRaw;
+}
+
+void resolveClimatePointNoTransition(int worldX, int worldZ, out ClimateResolvedPoint resolvedPoint)
+{
+    const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
+
+    ClimateComposition composition;
+    accumulateClimateComposition(worldX, worldZ, composition);
+
+    bool useOceanDomain = sampleSmoothedDomain(worldX, worldZ) != 0u;
+    if ((useOceanDomain && composition.oceanWeight <= kClimateEpsilon)
+        || (!useOceanDomain && composition.landWeight <= kClimateEpsilon))
+    {
+        useOceanDomain = composition.prefersOcean != 0u;
+    }
+
+    resolveRepresentativeFromComposition(composition, useOceanDomain, resolvedPoint);
+
+    const int halo = max(header.maxTransitionWidth + 8, (int)ceil(header.coastDistanceFieldRange));
+    const uint targetValue = resolvedPoint.dominantIsOcean != 0u ? 0u : 1u;
+    float coastDistance = kHugeFloat;
+
+    for (int dz = -halo; dz <= halo; ++dz)
+    {
+        for (int dx = -halo; dx <= halo; ++dx)
+        {
+            if (sampleSmoothedDomain(worldX + dx, worldZ + dz) != targetValue)
+            {
+                continue;
+            }
+
+            const float candidateDistance = gridDistance(dx, dz);
+            if (candidateDistance < coastDistance)
+            {
+                coastDistance = candidateDistance;
+            }
+        }
+    }
+
+    if (!(coastDistance < kHugeFloat) || coastDistance > (float)halo)
+    {
+        resolvedPoint.distanceToCoast = kHugeFloat;
+        resolvedPoint.signedDistanceToCoast = resolvedPoint.dominantIsOcean != 0u ? -kHugeFloat : kHugeFloat;
+    }
+    else
+    {
+        resolvedPoint.distanceToCoast = coastDistance;
+        resolvedPoint.signedDistanceToCoast = resolvedPoint.dominantIsOcean != 0u ? -coastDistance : coastDistance;
+    }
+}
+
+void applyTransitionBiomeAtPoint(int worldX, int worldZ, inout ClimateResolvedPoint resolvedPoint)
+{
+    const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
+    if (header.maxTransitionWidth <= 0)
+    {
+        return;
+    }
+
+    const FarLodGpuBiome baseBiome = gBiomes[resolvedPoint.biomeIndex];
+    if (baseBiome.transitionCount == 0u)
+    {
+        return;
+    }
+
+    float strongestTransition = 0.0f;
+    const float coastDistance = resolvedPoint.distanceToCoast;
+
+    for (uint transitionIndex = 0u; transitionIndex < baseBiome.transitionCount; ++transitionIndex)
+    {
+        const FarLodGpuTransitionBiome transition = gTransitionBiomes[baseBiome.transitionOffset + transitionIndex];
+        const FarLodGpuBiome target = gBiomes[transition.biomeIndex];
+        if ((target.flags & kFarLodBiomeBeach) != 0u)
+        {
+            continue;
+        }
+
+        const int radius = clamp(transition.width, 0, header.maxTransitionWidth);
+        uint neighborMask = 0u;
+        bool hasOceanNeighbor = false;
+
+        for (int dz = -radius; dz <= radius; ++dz)
+        {
+            for (int dx = -radius; dx <= radius; ++dx)
+            {
+                ClimateResolvedPoint neighborPoint;
+                resolveClimatePointNoTransition(worldX + dx, worldZ + dz, neighborPoint);
+                neighborMask |= neighborPoint.biomePropertyBits;
+                if (neighborPoint.dominantIsOcean != 0u)
+                {
+                    hasOceanNeighbor = true;
+                }
+            }
+        }
+
+        const uint requiredBits = transition.propertyBits;
+        const uint matched = neighborMask & requiredBits;
+        const uint spread = matched | (matched >> 1u) | (matched >> 2u);
+        const uint requiredGroups = groupPresenceMask(requiredBits);
+        const uint availableGroups = groupPresenceMask(spread);
+        if ((availableGroups & requiredGroups) != requiredGroups)
+        {
+            continue;
+        }
+
+        const bool targetIsCoast = (target.propertyBits & kPropLand) != 0u && (target.propertyBits & kPropOcean) != 0u;
+        const bool targetIsMountainCoast = targetIsCoast
+            && (target.propertyBits & kPropMountain) != 0u
+            && (target.flags & kFarLodBiomeOcean) == 0u;
+        if (!isfinite(coastDistance))
+        {
+            continue;
+        }
+        if ((targetIsCoast || (target.flags & kFarLodBiomeOcean) != 0u) && !hasOceanNeighbor)
+        {
+            continue;
+        }
+        if ((target.flags & kFarLodBiomeOcean) != 0u && resolvedPoint.dominantIsOcean == 0u)
+        {
+            continue;
+        }
+        if (targetIsMountainCoast && resolvedPoint.dominantIsOcean != 0u)
+        {
+            continue;
+        }
+
+        uint hashSeed = hashCombine(
+            header.seed,
+            hashCombine((uint)worldX, hashCombine((uint)worldZ, (uint)transition.width)));
+
+        const float transitionWidth = (float)max(transition.width, 1);
+        float range = transitionWidth * 6.0f;
+        if ((target.flags & kFarLodBiomeOcean) != 0u)
+        {
+            range = max(range, 32.0f);
+        }
+        else if (targetIsMountainCoast)
+        {
+            range = max(range, 26.0f);
+        }
+        else if (targetIsCoast)
+        {
+            range = max(range, 18.0f);
+        }
+        else
+        {
+            range = max(range, 12.0f);
+        }
+
+        const float edgeNoise = unitPerlinNoise(worldX, worldZ, hashSeed ^ 0xA53C9E21u, 0.03f);
+        const float effectiveRange = range * lerp(0.85f, 1.15f, edgeNoise);
+        float transitionStrength = smoothFactorFromDistance(coastDistance, effectiveRange);
+        transitionStrength *= saturate(transition.chance);
+        if (transitionStrength <= 0.01f)
+        {
+            continue;
+        }
+
+        if (transitionStrength > strongestTransition)
+        {
+            resolvedPoint.biomeIndex = transition.biomeIndex;
+            resolvedPoint.biomeFlags = target.flags;
+            resolvedPoint.biomePropertyBits = target.propertyBits;
+            resolvedPoint.representativeWeight = max(resolvedPoint.representativeWeight, transitionStrength);
+            resolvedPoint.dominantSitePos = float2((float)worldX, (float)worldZ);
+            resolvedPoint.dominantSiteRadius = biomeMaxRadius(target);
+            strongestTransition = transitionStrength;
+        }
+    }
+}
+
+SamplePoint samplePoint(int worldX, int worldZ)
+{
+    return samplePointLegacy(worldX, worldZ);
 }
 
 void resolveCenterMaterialAndWater(FarLodGpuBiome biome,

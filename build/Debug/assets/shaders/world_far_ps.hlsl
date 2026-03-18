@@ -35,6 +35,7 @@ struct PSInput
     float2 lightChannels : TEXCOORD3;
     float ao : TEXCOORD4;
     uint materialFlags : TEXCOORD5;
+    float farVoxelScale : TEXCOORD6;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
@@ -88,7 +89,13 @@ float4 main(PSInput input) : SV_TARGET
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
-    clip(textureSample.a - 0.5f);
+    // Far LOD tiles are expected to behave like a sealed opaque terrain shell. Applying the
+    // same alpha cutout threshold used by exact voxel geometry turns atlas mip bleed into
+    // screen-door holes across the distant terrain, especially on grass and snow edges.
+    if (!((input.materialFlags & kMaterialFlagFarLod) != 0u))
+    {
+        clip(textureSample.a - 0.5f);
+    }
 
     const float skyLight = saturate(input.lightChannels.x);
     const float blockLight = saturate(input.lightChannels.y);
@@ -135,6 +142,22 @@ float4 main(PSInput input) : SV_TARGET
         color = waterTint * (indirect * 0.62f + baseBounce * 1.35f + directLight * 0.32f);
         color += skyReflection * (0.10f + fresnel * 0.28f);
         color += uSunColor.rgb * (0.02f + 0.05f * shimmer) * fresnel;
+    }
+    else if ((input.materialFlags & kMaterialFlagFarLod) != 0u)
+    {
+        // Optional far-only block edge hint for very coarse voxel scales. Near far levels rely on
+        // greedy-merge clamping for blockiness to avoid a dense checker overlay.
+        const float voxelScale = max(input.farVoxelScale, 1.0f);
+        if (voxelScale >= 8.0f)
+        {
+            const float2 cell = input.tileCoord / voxelScale;
+            const float2 f = frac(cell);
+            const float2 distToEdge = min(f, 1.0f - f);
+            const float edgeDist = min(distToEdge.x, distToEdge.y);
+            const float edgeWidth = max(max(fwidth(cell.x), fwidth(cell.y)) * 1.45f, 1e-4f);
+            const float edgeMask = 1.0f - smoothstep(0.0f, edgeWidth, edgeDist);
+            color *= (1.0f - edgeMask * 0.12f);
+        }
     }
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);

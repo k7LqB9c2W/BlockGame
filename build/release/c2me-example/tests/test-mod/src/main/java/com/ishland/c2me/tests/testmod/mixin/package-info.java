@@ -1,1 +1,0 @@
-package com.ishland.c2me.tests.testmod.mixin;

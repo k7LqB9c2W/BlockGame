@@ -9,6 +9,7 @@
 #include "terrain/surface_map.h"
 #include "terrain/terrain_generator.h"
 #include "terrain/worldgen_profile.h"
+#include "shader_manifest.h"
 
 #include <algorithm>
 #include <array>
@@ -813,10 +814,22 @@ Microsoft::WRL::ComPtr<ID3D12Resource> createReadbackBuffer(ID3D12Device* device
     return resource;
 }
 
-Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFileLocal(const std::string& path,
-                                                            const char* entryPoint,
-                                                            const char* target)
+Microsoft::WRL::ComPtr<ID3DBlob> loadShaderBytecodeLocal(const std::string& path,
+                                                         const char* entryPoint,
+                                                         const char* target)
 {
+#if defined(BLOCKGAME_USE_PRECOMPILED_SHADERS)
+    Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+    const std::filesystem::path compiledPath =
+        compiledShaderPathForSource(std::filesystem::path(path), entryPoint, target);
+    const std::wstring wideCompiledPath = compiledPath.wstring();
+    const HRESULT hr = D3DReadFileToBlob(wideCompiledPath.c_str(), &bytecode);
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("failed to load precompiled shader blob: " + compiledPath.string());
+    }
+    return bytecode;
+#else
     UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifndef NDEBUG
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
@@ -846,6 +859,7 @@ Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFileLocal(const std::string& p
     }
 
     return bytecode;
+#endif
 }
 
 D3D12_RESOURCE_BARRIER transitionBarrier(ID3D12Resource* resource,
@@ -2039,21 +2053,21 @@ private:
     {
         const std::filesystem::path shaderRoot = std::filesystem::current_path() / "assets" / "shaders";
         atlasUpdateShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_column_atlas_update_canonical_cs.hlsl").string(), "FarLodColumnAtlasUpdateMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_column_atlas_update_canonical_cs.hlsl").string(), "FarLodColumnAtlasUpdateMain", "cs_5_0");
         synthColumnShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_synth_cs.hlsl").string(), "FarLodChunkSynthMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_synth_cs.hlsl").string(), "FarLodChunkSynthMain", "cs_5_0");
         stampShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_structure_stamp_cs.hlsl").string(), "FarLodChunkStructureStampMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_structure_stamp_cs.hlsl").string(), "FarLodChunkStructureStampMain", "cs_5_0");
         faceCountShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_face_count_cs.hlsl").string(), "FarLodChunkFaceCountMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_count_cs.hlsl").string(), "FarLodChunkFaceCountMain", "cs_5_0");
         facePrefixGroupShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixGroupMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixGroupMain", "cs_5_0");
         facePrefixScanShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixScanMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixScanMain", "cs_5_0");
         facePrefixAddShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixAddMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixAddMain", "cs_5_0");
         faceEmitShader_ =
-            compileShaderFromFileLocal((shaderRoot / "far_lod_chunk_face_emit_cs.hlsl").string(), "FarLodChunkFaceEmitMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_emit_cs.hlsl").string(), "FarLodChunkFaceEmitMain", "cs_5_0");
     }
 
     void createPipelines()
@@ -5107,6 +5121,7 @@ private:
         PendingRenderMesh pendingMesh{};
         bool fallbackOnly{false};
         std::uint64_t seamSignature{0};
+        std::uint64_t lastBuiltAtlasDependencyRevision{0};
         std::uint64_t lastTouchedStamp{0};
         std::uint32_t buildVersion{1};
         bool active{false};
@@ -5315,6 +5330,8 @@ private:
         std::size_t newFallbackActivations{0};
         std::size_t staleReleaseCount{0};
         std::size_t atlasUpdateCells{0};
+        std::size_t gpuDispatchBudgetUnits{0};
+        std::size_t maxGpuSubmissions{0};
     };
 
     struct FarLodLevelAtlasState
@@ -5327,6 +5344,7 @@ private:
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
         bool initialized{false};
         std::vector<AtlasUpdateRect> pendingDirtyRects;
+        std::unordered_map<std::uint64_t, std::uint64_t> cellRevisions;
 
         [[nodiscard]] std::uint32_t elementCount() const noexcept
         {
@@ -5463,6 +5481,49 @@ private:
             }
         }
         return hash;
+    }
+
+    [[nodiscard]] static std::uint64_t packAtlasCellKey(int cellX, int cellZ) noexcept
+    {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cellX)) << 32u) |
+               static_cast<std::uint32_t>(cellZ);
+    }
+
+    [[nodiscard]] static std::uint64_t staggeredChunkUpdateHash(const FarLodChunkKey& key) noexcept
+    {
+        std::uint64_t hash = 1469598103934665603ull;
+        const auto mix = [&hash](std::uint64_t value) noexcept
+        {
+            hash ^= value;
+            hash *= 1099511628211ull;
+        };
+        mix(static_cast<std::uint32_t>(key.level));
+        mix(static_cast<std::uint32_t>(key.coord.x));
+        mix(static_cast<std::uint32_t>(key.coord.y));
+        mix(static_cast<std::uint32_t>(key.coord.z));
+        return hash;
+    }
+
+    [[nodiscard]] static int atlasOriginSnapStrideChunks(const FarLodLevelConfig& level) noexcept
+    {
+        return level.level >= 3 ? 2 : 1;
+    }
+
+    [[nodiscard]] static std::uint64_t residentRefreshCadenceUpdates(const FarLodLevelConfig& level) noexcept
+    {
+        if (level.level >= 5)
+        {
+            return 4u;
+        }
+        if (level.level >= 4)
+        {
+            return 3u;
+        }
+        if (level.level >= 3)
+        {
+            return 2u;
+        }
+        return 1u;
     }
 
     [[nodiscard]] static PackedFarLodVoxelGpu packGpuVoxel(const FarLodVoxel& voxel) noexcept
@@ -5976,6 +6037,7 @@ private:
         chunk.residentBoundsMax = chunk.cpu.boundsMax;
         chunk.pendingMesh = {};
         chunk.fallbackOnly = false;
+        chunk.lastBuiltAtlasDependencyRevision = 0;
         chunk.gpu.columnBuffer = createDefaultBuffer(device_.Get(),
                                                      static_cast<std::uint64_t>(kLogicalSize * kLogicalSize *
                                                                                 sizeof(GpuTerrainColumnDescriptor)),
@@ -6470,8 +6532,14 @@ private:
         const auto it = levelActivationOuterRadiusChunks_.find(level.level);
         const int activeOuterRadiusChunks =
             (it != levelActivationOuterRadiusChunks_.end()) ? it->second : level.innerRadiusChunks;
-        const int chunkMinX = floorDiv(cameraChunk_.x - activeOuterRadiusChunks, level.blockScale) - 1;
-        const int chunkMinZ = floorDiv(cameraChunk_.z - activeOuterRadiusChunks, level.blockScale) - 1;
+        int chunkMinX = floorDiv(cameraChunk_.x - activeOuterRadiusChunks, level.blockScale) - 1;
+        int chunkMinZ = floorDiv(cameraChunk_.z - activeOuterRadiusChunks, level.blockScale) - 1;
+        const int snapStrideChunks = atlasOriginSnapStrideChunks(level);
+        if (snapStrideChunks > 1)
+        {
+            chunkMinX = floorDiv(chunkMinX, snapStrideChunks) * snapStrideChunks;
+            chunkMinZ = floorDiv(chunkMinZ, snapStrideChunks) * snapStrideChunks;
+        }
         return glm::ivec2(chunkMinX * kLogicalSize, chunkMinZ * kLogicalSize);
     }
 
@@ -6506,6 +6574,8 @@ private:
             budget.newFallbackActivations = 2;
             budget.staleReleaseCount = 4;
             budget.atlasUpdateCells = 8u * 1024u;
+            budget.gpuDispatchBudgetUnits = 8;
+            budget.maxGpuSubmissions = 2;
         }
         else if (totalBacklog > 256 || exactMissing > 24 || exactPendingUploads > 24)
         {
@@ -6515,6 +6585,8 @@ private:
             budget.newFallbackActivations = 4;
             budget.staleReleaseCount = 8;
             budget.atlasUpdateCells = 16u * 1024u;
+            budget.gpuDispatchBudgetUnits = 12;
+            budget.maxGpuSubmissions = 3;
         }
         else if (totalBacklog > 96 || exactMissing > 8 || exactPendingUploads > 8)
         {
@@ -6524,6 +6596,8 @@ private:
             budget.newFallbackActivations = 6;
             budget.staleReleaseCount = 16;
             budget.atlasUpdateCells = 32u * 1024u;
+            budget.gpuDispatchBudgetUnits = 18;
+            budget.maxGpuSubmissions = 4;
         }
         else
         {
@@ -6533,6 +6607,8 @@ private:
             budget.newFallbackActivations = 8;
             budget.staleReleaseCount = 24;
             budget.atlasUpdateCells = 96u * 1024u;
+            budget.gpuDispatchBudgetUnits = 24;
+            budget.maxGpuSubmissions = 5;
         }
         return budget;
     }
@@ -6717,6 +6793,53 @@ private:
         mergeAtlasUpdateRect(rects, *clipped);
     }
 
+    void markAtlasCellsUpdated(FarLodLevelAtlasState& atlas, const AtlasUpdateRect& rect)
+    {
+        if (!atlasRectValid(rect))
+        {
+            return;
+        }
+
+        const std::uint64_t revision = ++atlasRevisionCounter_;
+        const int maxCellZ = rect.originCell.y + rect.sizeCells.y;
+        const int maxCellX = rect.originCell.x + rect.sizeCells.x;
+        for (int cellZ = rect.originCell.y; cellZ < maxCellZ; ++cellZ)
+        {
+            for (int cellX = rect.originCell.x; cellX < maxCellX; ++cellX)
+            {
+                atlas.cellRevisions[packAtlasCellKey(cellX, cellZ)] = revision;
+            }
+        }
+    }
+
+    [[nodiscard]] std::uint64_t currentAtlasDependencyRevision(const FarLodChunkRecord& chunk) const
+    {
+        const auto atlasIt = levelAtlases_.find(chunk.level.level);
+        if (atlasIt == levelAtlases_.end())
+        {
+            return 0;
+        }
+
+        const FarLodLevelAtlasState& atlas = atlasIt->second;
+        const int cellOriginX = (chunk.key.coord.x - 1) * kLogicalSize;
+        const int cellOriginZ = (chunk.key.coord.z - 1) * kLogicalSize;
+        const int cellMaxX = cellOriginX + (kLogicalSize * 3);
+        const int cellMaxZ = cellOriginZ + (kLogicalSize * 3);
+        std::uint64_t revision = 0;
+        for (int cellZ = cellOriginZ; cellZ < cellMaxZ; ++cellZ)
+        {
+            for (int cellX = cellOriginX; cellX < cellMaxX; ++cellX)
+            {
+                const auto revisionIt = atlas.cellRevisions.find(packAtlasCellKey(cellX, cellZ));
+                if (revisionIt != atlas.cellRevisions.end())
+                {
+                    revision = std::max(revision, revisionIt->second);
+                }
+            }
+        }
+        return revision;
+    }
+
     void appendAtlasUpdates(const std::deque<GpuSynthesisRequest>& requests, std::size_t atlasCellBudget)
     {
         atlasCellBudget = std::min(atlasCellBudget, kMaxFarLodAtlasUpdateCellsPerSubmission);
@@ -6822,6 +6945,7 @@ private:
                                                 static_cast<std::uint32_t>(worldgenTables_.surfacePermutation.size()),
                                                 atlas.buffer.Get(),
                                                 atlas.elementCount());
+                markAtlasCellsUpdated(atlas, uploadRect);
                 const std::size_t uploadedCells =
                     static_cast<std::size_t>(uploadRect.sizeCells.x) * static_cast<std::size_t>(uploadRect.sizeCells.y);
                 atlasCellBudget = (uploadedCells >= atlasCellBudget) ? 0 : (atlasCellBudget - uploadedCells);
@@ -7683,6 +7807,19 @@ private:
             const int nearBuildGraceChunks = std::max(2, chunk.level.blockScale * 2);
             const bool keepNearbyStable = ringDistanceChunks <= nearBuildGraceChunks;
 
+            if (keepResidentStable)
+            {
+                const std::uint64_t cadence = residentRefreshCadenceUpdates(chunk.level);
+                if (cadence > 1u && ringDistanceChunks > nearBuildGraceChunks)
+                {
+                    const std::uint64_t stagger = staggeredChunkUpdateHash(key) % cadence;
+                    if ((updateStamp_ + stagger) % cadence != 0u)
+                    {
+                        continue;
+                    }
+                }
+            }
+
             if (!keepResidentStable && !keepNearbyStable)
             {
                 const glm::vec3 boundsMin = chunkDrawBoundsMin(chunk);
@@ -7908,13 +8045,13 @@ private:
             return;
         }
 
-        appendAtlasUpdates(requests, computeWorkBudget().atlasUpdateCells);
+        const FarLodWorkBudget workBudget = computeWorkBudget();
+        appendAtlasUpdates(requests, workBudget.atlasUpdateCells);
 
         std::vector<PendingGpuParityReadback> pendingReadbacks;
         std::vector<PendingGpuMeshCountReadback> pendingCountReadbacks;
         std::vector<FarLodChunkKey> submittedKeys;
         std::vector<FarLodChunkKey> stagedGpuMeshes;
-        static constexpr std::size_t kMaxGpuSynthSubmitsPerUpdate = 4;
         static constexpr std::uint64_t kFaceCountReadbackSizeBytes = sizeof(std::uint32_t) * 2u;
         static constexpr std::uint64_t kLastFaceWordOffset =
             static_cast<std::uint64_t>(kVoxelCount - 1u) * sizeof(std::uint32_t);
@@ -7926,6 +8063,8 @@ private:
         std::size_t submittedCount = 0;
         std::size_t synthSubmittedCount = 0;
         std::size_t faceBuildSamples = 0;
+        std::size_t remainingGpuBudgetUnits = std::max<std::size_t>(workBudget.gpuDispatchBudgetUnits, 1);
+        const std::size_t maxGpuSubmissions = std::max<std::size_t>(workBudget.maxGpuSubmissions, 1);
         auto computeMaxMergeExtent = [](int blockScale) noexcept
         {
             return (blockScale <= 2)   ? 2u
@@ -7936,11 +8075,15 @@ private:
 
         while (!pendingEmitRequests.empty())
         {
-            if (submittedCount >= kMaxGpuSynthSubmitsPerUpdate)
+            if (submittedCount >= maxGpuSubmissions)
             {
                 break;
             }
             if (std::chrono::duration<double, std::milli>(SteadyClock::now() - submitStart).count() >= budgetLimit)
+            {
+                break;
+            }
+            if (remainingGpuBudgetUnits < 3u)
             {
                 break;
             }
@@ -8122,12 +8265,13 @@ private:
             }
 
             stagedGpuMeshes.push_back(emitRequest.key);
+            remainingGpuBudgetUnits -= 3u;
             ++submittedCount;
         }
 
         while (!requests.empty())
         {
-            if (submittedCount >= kMaxGpuSynthSubmitsPerUpdate)
+            if (submittedCount >= maxGpuSubmissions)
             {
                 break;
             }
@@ -8207,6 +8351,12 @@ private:
                 chunk.gpu.faceCountBuffer != nullptr &&
                 chunk.gpu.facePrefixBuffer != nullptr &&
                 chunk.gpu.faceGroupSumBuffer != nullptr;
+            const std::size_t synthCostUnits = canBuildGpuMesh ? 5u : 2u;
+            if (remainingGpuBudgetUnits < synthCostUnits)
+            {
+                requests.push_front(std::move(request));
+                break;
+            }
             if (canBuildGpuMesh)
             {
                 ID3D12Resource* neighborPosX = emptyVoxelBuffer_.Get();
@@ -8352,6 +8502,7 @@ private:
             }
 
             submittedKeys.push_back(request.key);
+            remainingGpuBudgetUnits -= synthCostUnits;
             ++synthSubmittedCount;
             ++submittedCount;
         }
@@ -8548,13 +8699,35 @@ private:
                 continue;
             }
 
+            const std::uint64_t currentDependencyRevision = currentAtlasDependencyRevision(chunk);
             const bool staged =
                 chunk.pendingMesh.valid() &&
                 chunk.pendingMesh.gpuGenerated &&
                 chunk.pendingMesh.epoch == result.epoch &&
                 chunk.pendingMesh.buildVersion == result.buildVersion;
+            const bool canPreserveResidentMesh =
+                chunk.gpu.resident &&
+                chunk.gpu.indexCount > 0 &&
+                chunk.lastBuiltAtlasDependencyRevision != 0 &&
+                currentDependencyRevision == chunk.lastBuiltAtlasDependencyRevision;
             if (!staged)
             {
+                if (canPreserveResidentMesh)
+                {
+                    chunk.dirty = false;
+                    ++skippedTilesLastUpdate_;
+                    if (lodVisibilityDebugLoggingEnabled())
+                    {
+                        std::ostringstream stream;
+                        stream << "lodvis apply_skip_unchanged_gpu_mesh level=" << chunk.key.level
+                               << " coord=[" << chunk.key.coord.x << "," << chunk.key.coord.y << "," << chunk.key.coord.z << "]"
+                               << " resident=y"
+                               << " indexCount=" << chunk.gpu.indexCount
+                               << " dependencyRevision=" << currentDependencyRevision;
+                        lodVisibilityDebugLog(stream.str());
+                    }
+                    continue;
+                }
                 // Keep the old resident allocation alive; this chunk remains dirty until a replacement commits.
                 chunk.dirty = true;
                 ++skippedTilesLastUpdate_;
@@ -8571,6 +8744,7 @@ private:
             }
 
             chunk.dirty = false;
+            chunk.lastBuiltAtlasDependencyRevision = currentDependencyRevision;
             if (lodVisibilityDebugLoggingEnabled())
             {
                 std::ostringstream stream;
@@ -9379,6 +9553,7 @@ private:
     std::uint32_t blockUvCount_{0};
     Microsoft::WRL::ComPtr<ID3D12Resource> emptyVoxelBuffer_;
     std::unordered_map<int, FarLodLevelAtlasState> levelAtlases_;
+    std::uint64_t atlasRevisionCounter_{1};
     mutable std::mutex structureRegionMutex_;
     StructureSampleColumnFn structureSampleColumnFn_{};
     StructureSurfaceBlockFn structureSurfaceBlockFn_{};

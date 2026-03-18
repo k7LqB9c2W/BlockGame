@@ -177,6 +177,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Project>{5233929B-C3BC-38CE-B374-322EF6573A3A}</Project>
       <Name>blockgame</Name>
     </ProjectReference>
+    <ProjectReference Include="C:\Users\Jacob\Documents\code\BlockGame\build\blockgame_shader_precompiler.vcxproj">
+      <Project>{7166E354-3A2D-3112-B6D6-C0C79148B416}</Project>
+      <Name>blockgame_shader_precompiler</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

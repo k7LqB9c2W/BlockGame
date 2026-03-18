@@ -33,6 +33,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "renderer.h"
+#include "shader_manifest.h"
 
 namespace
 {
@@ -704,10 +705,22 @@ void setResourceDebugName(ID3D12Object* object, const std::wstring& name)
     }
 }
 
-Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFile(const std::string& path,
-                                                       const char* entryPoint,
-                                                       const char* target)
+Microsoft::WRL::ComPtr<ID3DBlob> loadShaderBytecode(const std::string& path,
+                                                    const char* entryPoint,
+                                                    const char* target)
 {
+#if defined(BLOCKGAME_USE_PRECOMPILED_SHADERS)
+    Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+    const std::filesystem::path compiledPath =
+        compiledShaderPathForSource(std::filesystem::path(path), entryPoint, target);
+    const std::wstring wideCompiledPath = compiledPath.wstring();
+    const HRESULT hr = D3DReadFileToBlob(wideCompiledPath.c_str(), &bytecode);
+    if (FAILED(hr))
+    {
+        throwRenderError("failed to load precompiled shader blob: " + compiledPath.string());
+    }
+    return bytecode;
+#else
     UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifndef NDEBUG
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
@@ -737,6 +750,7 @@ Microsoft::WRL::ComPtr<ID3DBlob> compileShaderFromFile(const std::string& path,
     }
 
     return bytecode;
+#endif
 }
 
 Microsoft::WRL::ComPtr<IDXGIAdapter1> chooseHardwareAdapter(IDXGIFactory6* factory)
@@ -1955,29 +1969,29 @@ void Renderer::createPipelines()
                   "failed to create fullscreen root signature");
 
     Microsoft::WRL::ComPtr<ID3DBlob> worldVs =
-        compileShaderFromFile(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
+        loadShaderBytecode(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> shadowVs =
-        compileShaderFromFile(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
+        loadShaderBytecode(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
-        compileShaderFromFile(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
+        loadShaderBytecode(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
-          compileShaderFromFile(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
+          loadShaderBytecode(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> depthPyramidCs =
-          compileShaderFromFile(shaderPath("depth_pyramid.hlsl"), "DepthPyramidMain", "cs_5_0");
+          loadShaderBytecode(shaderPath("depth_pyramid.hlsl"), "DepthPyramidMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> lodCullCs =
-          compileShaderFromFile(shaderPath("lod_gpu_cull.hlsl"), "LodCullMain", "cs_5_0");
+          loadShaderBytecode(shaderPath("lod_gpu_cull.hlsl"), "LodCullMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> lodIndirectCs =
-          compileShaderFromFile(shaderPath("lod_gpu_cull.hlsl"), "LodIndirectBuildMain", "cs_5_0");
+          loadShaderBytecode(shaderPath("lod_gpu_cull.hlsl"), "LodIndirectBuildMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
-          compileShaderFromFile(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
+          loadShaderBytecode(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> baseSkyPs =
-          compileShaderFromFile(shaderPath("base_sky_ps.hlsl"), "main", "ps_5_0");
+          loadShaderBytecode(shaderPath("base_sky_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> cloudsVs =
-          compileShaderFromFile(shaderPath("clouds_vs.hlsl"), "main", "vs_5_0");
+          loadShaderBytecode(shaderPath("clouds_vs.hlsl"), "main", "vs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> cloudsPs =
-          compileShaderFromFile(shaderPath("clouds_ps.hlsl"), "main", "ps_5_0");
+          loadShaderBytecode(shaderPath("clouds_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
-          compileShaderFromFile(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
+          loadShaderBytecode(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 6> inputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -3757,17 +3771,17 @@ void Renderer::AtmosphereRenderer::ensureResources(Renderer& renderer)
 void Renderer::AtmosphereRenderer::createPipelines(Renderer& renderer)
 {
     Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
-        compileShaderFromFile(renderer.shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
+        loadShaderBytecode(renderer.shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> transPs =
-        compileShaderFromFile(renderer.shaderPath("atmosphere_transmittance_ps.hlsl"), "main", "ps_5_0");
+        loadShaderBytecode(renderer.shaderPath("atmosphere_transmittance_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> multiPs =
-        compileShaderFromFile(renderer.shaderPath("atmosphere_multiscattering_ps.hlsl"), "main", "ps_5_0");
+        loadShaderBytecode(renderer.shaderPath("atmosphere_multiscattering_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> skyViewPs =
-        compileShaderFromFile(renderer.shaderPath("atmosphere_skyview_ps.hlsl"), "main", "ps_5_0");
+        loadShaderBytecode(renderer.shaderPath("atmosphere_skyview_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> skyPs =
-        compileShaderFromFile(renderer.shaderPath("atmosphere_sky_ps.hlsl"), "main", "ps_5_0");
+        loadShaderBytecode(renderer.shaderPath("atmosphere_sky_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> aerialPs =
-        compileShaderFromFile(renderer.shaderPath("atmosphere_aerial_perspective_ps.hlsl"), "main", "ps_5_0");
+        loadShaderBytecode(renderer.shaderPath("atmosphere_aerial_perspective_ps.hlsl"), "main", "ps_5_0");
 
     auto makePso = [&](ID3DBlob* ps, DXGI_FORMAT rtvFormat) -> Microsoft::WRL::ComPtr<ID3D12PipelineState>
     {

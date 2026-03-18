@@ -121,7 +121,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets</Message>
+      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/Debug/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/debug/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -151,6 +151,15 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=Debug -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -190,13 +199,13 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <UseFullPaths>false</UseFullPaths>
       <UseStandardPreprocessor>true</UseStandardPreprocessor>
       <WarningLevel>Level4</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;GLFW_DLL;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;BLOCKGAME_USE_PRECOMPILED_SHADERS=1;GLFW_DLL;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ProgramDataBaseFileName>C:\Users\Jacob\Documents\code\BlockGame\build\release\blockgame.pdb</ProgramDataBaseFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;GLFW_DLL;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;BLOCKGAME_USE_PRECOMPILED_SHADERS=1;GLFW_DLL;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Users\Jacob\Documents\code\BlockGame\include;C:\Users\Jacob\Documents\code\BlockGame\src;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -208,7 +217,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets</Message>
+      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/Release/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -238,6 +247,15 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=Release -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Release/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -298,7 +316,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets</Message>
+      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -328,6 +346,15 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=MinSizeRel -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -385,7 +412,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets</Message>
+      <Message>	Copying runtime DLLs	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -415,6 +442,15 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=RelWithDebInfo -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -514,6 +550,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Name>ZERO_CHECK</Name>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+    <ProjectReference Include="C:\Users\Jacob\Documents\code\BlockGame\build\blockgame_shader_precompiler.vcxproj">
+      <Project>{7166E354-3A2D-3112-B6D6-C0C79148B416}</Project>
+      <Name>blockgame_shader_precompiler</Name>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

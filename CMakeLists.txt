@@ -47,7 +47,17 @@ set(BLOCKGAME_SOURCES
 
 add_executable(blockgame ${BLOCKGAME_SOURCES})
 
+add_executable(blockgame_shader_precompiler
+    ${CMAKE_SOURCE_DIR}/tools/shader_precompiler.cpp
+)
+
 target_include_directories(blockgame
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${SRC_ROOT}
+)
+
+target_include_directories(blockgame_shader_precompiler
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${SRC_ROOT}
@@ -58,9 +68,23 @@ target_compile_definitions(blockgame
         NOMINMAX
         WIN32_LEAN_AND_MEAN
         _CRT_SECURE_NO_WARNINGS
+        $<$<CONFIG:Release>:BLOCKGAME_USE_PRECOMPILED_SHADERS=1>
+)
+
+target_compile_definitions(blockgame_shader_precompiler
+    PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _CRT_SECURE_NO_WARNINGS
 )
 
 target_compile_options(blockgame
+    PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /Zc:preprocessor /FS>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
+)
+
+target_compile_options(blockgame_shader_precompiler
     PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /Zc:preprocessor /FS>
         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
@@ -113,6 +137,13 @@ target_link_libraries(blockgame
         advapi32
 )
 
+target_link_libraries(blockgame_shader_precompiler
+    PRIVATE
+        d3dcompiler
+)
+
+add_dependencies(blockgame blockgame_shader_precompiler)
+
 add_custom_command(TARGET blockgame POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_RUNTIME_DLLS:blockgame>
@@ -138,5 +169,15 @@ if (EXISTS "${CMAKE_SOURCE_DIR}/assets")
         COMMENT "Copying runtime assets"
     )
 endif()
+
+add_custom_command(TARGET blockgame POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -DBUILD_CONFIG=$<CONFIG>
+        -DSHADER_COMPILER_EXE=$<TARGET_FILE:blockgame_shader_precompiler>
+        -DSHADER_SOURCE_DIR=$<TARGET_FILE_DIR:blockgame>/assets/shaders
+        -DSHADER_OUTPUT_DIR=$<TARGET_FILE_DIR:blockgame>/assets/shaders/compiled
+        -P "${CMAKE_SOURCE_DIR}/cmake/precompile_shaders.cmake"
+    COMMENT "Precompiling Release shaders"
+)
 
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${BLOCKGAME_SOURCES})

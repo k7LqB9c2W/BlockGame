@@ -54,6 +54,11 @@ bool intersectsFrustum(float3 boundsMin, float3 boundsMax)
 
 bool passesOcclusion(float3 boundsMin, float3 boundsMax)
 {
+    // Keep the hybrid-path shell conservative until the cubic LOD bounds and Hi-Z test agree on all
+    // terrain cases. Frustum rejection still runs; this temporarily disables hole-causing occlusion
+    // rejects while we stabilize the reference representation before later optimization passes.
+    return true;
+
     if (gDepthMipCount == 0u)
     {
         return true;

@@ -8,6 +8,12 @@
 *.tlog
 *.lastbuildstate
 *.vcxproj.user
+*.ipch
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.dmp
 
 # Local executables and DLLs in the repo root
 /blockgame.exe
@@ -17,8 +23,6 @@
 /glfw3.dll
 
 # Generated logs and crash dumps
-*.log
-*.dmp
 /debug_output.txt
 /output.txt
 /test_output.txt

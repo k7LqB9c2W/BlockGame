@@ -5,6 +5,7 @@
 - `include/` bundles third-party headers (GLFW, GLM, stb_image, glad) consumed by the MSVC build.
 - `libs/` stores prebuilt GLFW binaries; keep DLLs beside `blockgame.exe` for runtime stability.
 - Root assets (`block_atlas.png`, guides, compiled `.obj` intermediates) support rendering validation; avoid checking new binaries without need.
+- If they are installed, prefer `rg` for text search, `fd` for file discovery, and `bat` for file viewing.
 
 ## Build, Test, and Development Commands
 - Configure the project with CMake: `cmake -S . -B build`. Pass `-DCMAKE_BUILD_TYPE=Release` (default) or `-DCMAKE_BUILD_TYPE=Debug` when using single-config generators like Ninja.

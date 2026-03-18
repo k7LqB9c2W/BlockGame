@@ -1,4 +1,0 @@
-C:/Users/Jacob/Documents/code/BlockGame/build_nodxc/CMakeFiles/blockgame.dir
-C:/Users/Jacob/Documents/code/BlockGame/build_nodxc/CMakeFiles/blockgame_shader_precompiler.dir
-C:/Users/Jacob/Documents/code/BlockGame/build_nodxc/CMakeFiles/ALL_BUILD.dir
-C:/Users/Jacob/Documents/code/BlockGame/build_nodxc/CMakeFiles/ZERO_CHECK.dir

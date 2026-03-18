@@ -1,3 +1,35 @@
-blockgame_crash.dmp
-artifacts/
-gpudebug.log
+# Visual Studio / MSVC intermediates
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.tlog
+*.lastbuildstate
+*.vcxproj.user
+
+# Local executables and DLLs in the repo root
+/blockgame.exe
+/blockgame.pdb
+/blockgame_shader_precompiler.exe
+/blockgame_shader_precompiler.pdb
+/glfw3.dll
+
+# Generated logs and crash dumps
+*.log
+*.dmp
+/debug_output.txt
+/output.txt
+/test_output.txt
+/gpudebug.log
+/loddebug.log
+/debug_terrain.log
+/blockgame_crash.log
+/blockgame_crash.dmp
+
+# Generated benchmark / capture artifacts
+/artifacts/
+
+# Legacy helper output
+/build_blockgame.bat

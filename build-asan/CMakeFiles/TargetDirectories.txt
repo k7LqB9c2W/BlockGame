@@ -1,3 +1,0 @@
-C:/Users/Jacob/Documents/code/BlockGame/build-asan/CMakeFiles/blockgame.dir
-C:/Users/Jacob/Documents/code/BlockGame/build-asan/CMakeFiles/ALL_BUILD.dir
-C:/Users/Jacob/Documents/code/BlockGame/build-asan/CMakeFiles/ZERO_CHECK.dir

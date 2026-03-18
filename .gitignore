@@ -27,6 +27,8 @@
 /debug_terrain.log
 /blockgame_crash.log
 /blockgame_crash.dmp
+/build/release/*.log
+/build/release/*.txt
 
 # Generated benchmark / capture artifacts
 /artifacts/

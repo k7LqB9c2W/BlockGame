@@ -1085,275 +1085,16 @@ uint selectBiomeIndex(float temperature01, float moisture01, float fertility01, 
     return bestBiomeIndex;
 }
 
-SamplePoint samplePointLegacy(int worldX, int worldZ)
+// Keep the atlas sample pass seed-cache-only. Falling back to the legacy
+// generator here drags the old selection/sub-biome path into this shader.
+SamplePoint samplePointSeedCacheFallback()
 {
-    const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
-    const int2 worldPos = int2(worldX, worldZ);
-    const int chunkX = floorDivExact(worldX, header.chunkSpan);
-    const int chunkZ = floorDivExact(worldZ, header.chunkSpan);
-
-    WeightedSeed weightedSeeds[kMaxWeightedSeeds];
-    uint weightedCount = 0u;
-    float nearestLandEdge = 3.402823466e+38F;
-    float nearestOceanEdge = 3.402823466e+38F;
-
-    [loop]
-    for (int dz = -header.neighborRadius; dz <= header.neighborRadius; ++dz)
-    {
-        [loop]
-        for (int dx = -header.neighborRadius; dx <= header.neighborRadius; ++dx)
-        {
-            ExactBiomeSeed chunkSeeds[kMaxChunkSeeds];
-            uint chunkSeedCount = 0u;
-            buildChunkSeeds(chunkX + dx, chunkZ + dz, chunkSeeds, chunkSeedCount);
-
-            [loop]
-            for (uint seedIndex = 0u; seedIndex < chunkSeedCount; ++seedIndex)
-            {
-                const ExactBiomeSeed seed = chunkSeeds[seedIndex];
-                const FarLodGpuBiome seedBiome = gBiomes[seed.biomeIndex];
-                const float2 delta = float2(worldPos - seed.position);
-                const float distance = length(delta);
-                const float normalized = distance / max(seed.radius, 1.0f);
-                const float blended = saturate(1.0f - normalized);
-                const float influence = smoothStep(blended);
-
-                const float edgeDistance = abs(distance - seed.radius);
-                if ((seedBiome.flags & kFarLodBiomeOcean) != 0u)
-                {
-                    nearestOceanEdge = min(nearestOceanEdge, edgeDistance);
-                }
-                else
-                {
-                    nearestLandEdge = min(nearestLandEdge, edgeDistance);
-                }
-
-                if (influence <= 1.192092896e-07f)
-                {
-                    continue;
-                }
-
-                const float blendFactor = evaluateInterpolationCurve(1.0f - normalized, seedBiome.interpolationCurve);
-                const float adjustedWeight = influence * blendFactor * seedBiome.interpolationWeight;
-                if (adjustedWeight <= 1.192092896e-07f)
-                {
-                    continue;
-                }
-
-                WeightedSeed candidate;
-                candidate.seed = seed;
-                candidate.weight = adjustedWeight;
-                candidate.normalizedDistance = normalized;
-                insertWeightedSeed(weightedSeeds, weightedCount, candidate);
-            }
-        }
-    }
-
-    uint biomeIndex = 0u;
-    float aggregatedHeight = 0.0f;
-    float aggregatedRoughness = 0.0f;
-    float aggregatedHills = 0.0f;
-    float aggregatedMountains = 0.0f;
-    float keepOriginal = 0.0f;
-    float landWeight = 0.0f;
-    float oceanWeight = 0.0f;
-    float landHeight = 0.0f;
-    float oceanHeight = 0.0f;
-    float landRoughness = 0.0f;
-    float oceanRoughness = 0.0f;
-    float landHills = 0.0f;
-    float oceanHills = 0.0f;
-    float landMountains = 0.0f;
-    float oceanMountains = 0.0f;
-    float landKeepOriginal = 0.0f;
-    float oceanKeepOriginal = 0.0f;
-    uint landRepresentativeBiome = 0xFFFFFFFFu;
-    uint oceanRepresentativeBiome = 0xFFFFFFFFu;
-    float landRepresentativeWeight = 0.0f;
-    float oceanRepresentativeWeight = 0.0f;
-
-    if (weightedCount == 0u)
-    {
-        const FarLodGpuBiome fallbackBiome = gBiomes[0];
-        biomeIndex = 0u;
-        aggregatedHeight = applyHeightLimits(fallbackBiome, fallbackBiome.minHeight, 0.0f);
-        aggregatedRoughness = fallbackBiome.roughness;
-        aggregatedHills = fallbackBiome.hills;
-        aggregatedMountains = fallbackBiome.mountains;
-        keepOriginal = saturate(fallbackBiome.keepOriginalTerrain);
-        if ((fallbackBiome.flags & kFarLodBiomeOcean) != 0u)
-        {
-            oceanWeight = 1.0f;
-            oceanHeight = aggregatedHeight;
-            oceanRoughness = aggregatedRoughness;
-            oceanHills = aggregatedHills;
-            oceanMountains = aggregatedMountains;
-            oceanKeepOriginal = keepOriginal;
-            oceanRepresentativeBiome = 0u;
-            oceanRepresentativeWeight = 1.0f;
-        }
-        else
-        {
-            landWeight = 1.0f;
-            landHeight = aggregatedHeight;
-            landRoughness = aggregatedRoughness;
-            landHills = aggregatedHills;
-            landMountains = aggregatedMountains;
-            landKeepOriginal = keepOriginal;
-            landRepresentativeBiome = 0u;
-            landRepresentativeWeight = 1.0f;
-        }
-    }
-    else
-    {
-        float totalWeight = 0.0f;
-        [unroll]
-        for (uint weightIndex = 0u; weightIndex < kMaxWeightedSeeds; ++weightIndex)
-        {
-            if (weightIndex >= weightedCount)
-            {
-                break;
-            }
-            totalWeight += weightedSeeds[weightIndex].weight;
-        }
-        totalWeight = max(totalWeight, 1.0e-06f);
-
-        [unroll]
-        for (uint aggregateIndex = 0u; aggregateIndex < kMaxWeightedSeeds; ++aggregateIndex)
-        {
-            if (aggregateIndex >= weightedCount)
-            {
-                break;
-            }
-
-            const WeightedSeed entry = weightedSeeds[aggregateIndex];
-            const FarLodGpuBiome entryBiome = gBiomes[entry.seed.biomeIndex];
-            const float normalizedWeight = entry.weight / totalWeight;
-            const float height = applyHeightLimits(entryBiome, entry.seed.baseHeight, entry.normalizedDistance);
-
-            aggregatedHeight += height * normalizedWeight;
-            aggregatedRoughness += entryBiome.roughness * normalizedWeight;
-            aggregatedHills += entryBiome.hills * normalizedWeight;
-            aggregatedMountains += entryBiome.mountains * normalizedWeight;
-            keepOriginal += saturate(entryBiome.keepOriginalTerrain) * normalizedWeight;
-
-            if ((entryBiome.flags & kFarLodBiomeOcean) != 0u)
-            {
-                oceanWeight += normalizedWeight;
-                oceanHeight += height * normalizedWeight;
-                oceanRoughness += entryBiome.roughness * normalizedWeight;
-                oceanHills += entryBiome.hills * normalizedWeight;
-                oceanMountains += entryBiome.mountains * normalizedWeight;
-                oceanKeepOriginal += saturate(entryBiome.keepOriginalTerrain) * normalizedWeight;
-                if (normalizedWeight > oceanRepresentativeWeight)
-                {
-                    oceanRepresentativeBiome = entry.seed.biomeIndex;
-                    oceanRepresentativeWeight = normalizedWeight;
-                }
-            }
-            else
-            {
-                landWeight += normalizedWeight;
-                landHeight += height * normalizedWeight;
-                landRoughness += entryBiome.roughness * normalizedWeight;
-                landHills += entryBiome.hills * normalizedWeight;
-                landMountains += entryBiome.mountains * normalizedWeight;
-                landKeepOriginal += saturate(entryBiome.keepOriginalTerrain) * normalizedWeight;
-                if (normalizedWeight > landRepresentativeWeight)
-                {
-                    landRepresentativeBiome = entry.seed.biomeIndex;
-                    landRepresentativeWeight = normalizedWeight;
-                }
-            }
-        }
-
-        if (landWeight > 1.192092896e-07f)
-        {
-            landHeight /= landWeight;
-            landRoughness /= landWeight;
-            landHills /= landWeight;
-            landMountains /= landWeight;
-            landKeepOriginal /= landWeight;
-        }
-        if (oceanWeight > 1.192092896e-07f)
-        {
-            oceanHeight /= oceanWeight;
-            oceanRoughness /= oceanWeight;
-            oceanHills /= oceanWeight;
-            oceanMountains /= oceanWeight;
-            oceanKeepOriginal /= oceanWeight;
-        }
-    }
-
-    const bool dominantIsOcean = oceanWeight > landWeight;
-    if (dominantIsOcean && oceanRepresentativeBiome != 0xFFFFFFFFu)
-    {
-        biomeIndex = oceanRepresentativeBiome;
-    }
-    else if (landRepresentativeBiome != 0xFFFFFFFFu)
-    {
-        biomeIndex = landRepresentativeBiome;
-    }
-    else if (oceanRepresentativeBiome != 0xFFFFFFFFu)
-    {
-        biomeIndex = oceanRepresentativeBiome;
-    }
-
-    const FarLodGpuBiome biome = gBiomes[biomeIndex];
-    const float groupHeight = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanHeight :
-                              (landWeight > 1.192092896e-07f ? landHeight : aggregatedHeight);
-    const float groupRoughness = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanRoughness :
-                                 (landWeight > 1.192092896e-07f ? landRoughness : aggregatedRoughness);
-    const float groupHills = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanHills :
-                             (landWeight > 1.192092896e-07f ? landHills : aggregatedHills);
-    const float groupMountains = dominantIsOcean && oceanWeight > 1.192092896e-07f ? oceanMountains :
-                                 (landWeight > 1.192092896e-07f ? landMountains : aggregatedMountains);
-    const float landBaseHeight = landWeight > 1.192092896e-07f ? landHeight : groupHeight;
-    const float oceanBaseHeight = oceanWeight > 1.192092896e-07f ? oceanHeight : groupHeight;
-    const float signedDistanceToCoast = dominantIsOcean ? -nearestLandEdge : nearestOceanEdge;
-    const float distanceToCoast = abs(signedDistanceToCoast);
-
-    float roughStrength = max(groupRoughness, 0.0f);
-    float hillStrength = max(groupHills, 0.0f);
-    float mountainStrength = max(groupMountains, 0.0f);
-    const CoastProfileSettings coastSettings = coastProfileSettings(biome.coastProfile);
-    const float absCoastDistance = isfinite(signedDistanceToCoast) ? abs(signedDistanceToCoast) : 3.402823466e+38F;
-    float baseHeight = solveShorelineBaseHeight(signedDistanceToCoast,
-                                                landBaseHeight,
-                                                oceanBaseHeight,
-                                                (float)header.seaLevel,
-                                                coastSettings);
-    roughStrength *= shorelineNoiseFactor(absCoastDistance, coastSettings.roughFadeDistance, coastSettings.roughFloor);
-    hillStrength *= shorelineNoiseFactor(absCoastDistance, coastSettings.hillFadeDistance, coastSettings.hillFloor);
-    mountainStrength *= shorelineNoiseFactor(absCoastDistance, coastSettings.mountainFadeDistance, coastSettings.mountainFloor);
-
-    const float worldXF = (float)worldX;
-    const float worldZF = (float)worldZ;
-    const float warpSample =
-        fbm2(worldXF,
-             worldZF,
-             header.mainFrequency,
-             header.mainOctaves,
-             header.mainGain,
-             header.mainLacunarity,
-             header.warpFrequency / max(header.mainFrequency, 1.0e-6f));
-    const float warpedX = worldXF + warpSample * header.warpAmplitude;
-    const float warpedZ = worldZF + warpSample * header.warpAmplitude;
-
-    const float roughNoise = fbm2(warpedX, warpedZ, header.detailFrequency, header.detailOctaves, header.detailGain, header.detailLacunarity, 1.0f);
-    const float hillNoise = fbm2(warpedX, warpedZ, header.mediumFrequency, header.mediumOctaves, header.mediumGain, header.mediumLacunarity, 1.0f);
-    const float mountainNoise = ridge2(warpedX, warpedZ, header.mountainFrequency, header.mountainOctaves, header.mountainLacunarity, header.mountainGain);
-
-    float surfaceHeight = baseHeight;
-    surfaceHeight += (roughNoise - 0.5f) * 4.0f * roughStrength;
-    surfaceHeight += (hillNoise - 0.5f) * 6.0f * hillStrength;
-    surfaceHeight += mountainNoise * 12.0f * mountainStrength;
-
+    const FarLodGpuBiome fallbackBiome = gBiomes[0];
     SamplePoint result;
-    result.biomeIndex = biomeIndex;
-    result.biomeFlags = biome.flags;
-    result.surfaceY = (int)round(surfaceHeight);
-    result.distanceToShore = distanceToCoast;
+    result.biomeIndex = 0u;
+    result.biomeFlags = fallbackBiome.flags;
+    result.surfaceY = (int)round(applyHeightLimits(fallbackBiome, fallbackBiome.minHeight, 0.0f));
+    result.distanceToShore = kHugeFloat;
     return result;
 }
 
@@ -1365,7 +1106,7 @@ SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
     const int chunkZ = floorDivExact(worldZ, header.chunkSpan);
     if (gSeedCacheSizeX <= 0 || gSeedCacheSizeZ <= 0)
     {
-        return samplePointLegacy(worldX, worldZ);
+        return samplePointSeedCacheFallback();
     }
 
     const uint seedCacheWidth = (uint)gSeedCacheSizeX;
@@ -1374,7 +1115,7 @@ SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
     const uint totalSeedCount = totalSeedCacheChunks * kMaxChunkSeeds;
     if (totalSeedCacheChunks == 0u || totalSeedCount / kMaxChunkSeeds != totalSeedCacheChunks)
     {
-        return samplePointLegacy(worldX, worldZ);
+        return samplePointSeedCacheFallback();
     }
 
     WeightedSeed weightedSeeds[kMaxWeightedSeeds];
@@ -1391,13 +1132,13 @@ SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
             const uint cacheIndex = seedCacheIndex(int2(chunkX + dx, chunkZ + dz));
             if (cacheIndex >= totalSeedCacheChunks)
             {
-                return samplePointLegacy(worldX, worldZ);
+                return samplePointSeedCacheFallback();
             }
             const GpuChunkSeedCacheHeader cacheHeader = gChunkSeedCacheHeaders[cacheIndex];
             const uint seedBaseIndex = cacheHeader.baseSeedIndex;
             if (seedBaseIndex >= totalSeedCount)
             {
-                return samplePointLegacy(worldX, worldZ);
+                return samplePointSeedCacheFallback();
             }
 
             const uint chunkSeedCount = min(cacheHeader.seedCount, min(kMaxChunkSeeds, totalSeedCount - seedBaseIndex));

@@ -10,7 +10,21 @@ endif()
 
 project(BlockGame VERSION 0.1.0 LANGUAGES C CXX)
 
-set(BLOCKGAME_DXC_EXE "" CACHE FILEPATH "Optional path to dxc.exe for shader precompilation")
+set(BLOCKGAME_DEFAULT_DXC_EXE "D:/dxc_2026_02_20/bin/x64/dxc.exe")
+find_program(BLOCKGAME_DXC_FALLBACK_EXE
+    NAMES dxc.exe dxc
+    HINTS "D:/dxc_2026_02_20/bin/x64"
+)
+if (NOT DEFINED BLOCKGAME_DXC_EXE OR BLOCKGAME_DXC_EXE STREQUAL "")
+    if (EXISTS "${BLOCKGAME_DEFAULT_DXC_EXE}")
+        set(BLOCKGAME_DXC_EXE "${BLOCKGAME_DEFAULT_DXC_EXE}" CACHE FILEPATH "Path to dxc.exe used by shader precompilation" FORCE)
+    elseif (BLOCKGAME_DXC_FALLBACK_EXE)
+        set(BLOCKGAME_DXC_EXE "${BLOCKGAME_DXC_FALLBACK_EXE}" CACHE FILEPATH "Path to dxc.exe used by shader precompilation" FORCE)
+    else()
+        set(BLOCKGAME_DXC_EXE "dxc.exe" CACHE FILEPATH "Path to dxc.exe used by shader precompilation" FORCE)
+    endif()
+endif()
+message(STATUS "BlockGame shader compiler backend: ${BLOCKGAME_DXC_EXE}")
 
 if(NOT CMAKE_GENERATOR MATCHES "Ninja")
     message(STATUS "Generator is '${CMAKE_GENERATOR}'. For fastest incremental builds consider running: cmake -G Ninja -S . -B build")

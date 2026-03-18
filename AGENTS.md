@@ -12,6 +12,7 @@
 - Clean artifacts via `cmake --build build --target clean` if you need a fresh compile.
 - Run the produced `blockgame.exe` from the `build` output directory for quick smoke tests.
 - The legacy `build_blockgame.bat` script is deprecated; do not use it going forward.
+- `dxc` is the default shader compiler backend. `blockgame_shader_precompiler.exe` remains the manifest/incremental wrapper and should call `dxc` unless a developer is explicitly investigating the legacy compiler path.
 
 ## Coding Style & Naming Conventions
 - Mirror the existing C++20 style: 4-space indentation, braces on their own lines, and standard headers before local includes.

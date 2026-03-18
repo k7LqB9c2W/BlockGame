@@ -16,8 +16,18 @@ endif()
 
 file(MAKE_DIRECTORY "${SHADER_OUTPUT_DIR}")
 
+set(shader_precompile_command
+    "${SHADER_COMPILER_EXE}"
+    "${SHADER_SOURCE_DIR}"
+    "${SHADER_OUTPUT_DIR}"
+)
+
+if (DEFINED SHADER_DXC_EXE AND NOT SHADER_DXC_EXE STREQUAL "")
+    list(APPEND shader_precompile_command "${SHADER_DXC_EXE}")
+endif()
+
 execute_process(
-    COMMAND "${SHADER_COMPILER_EXE}" "${SHADER_SOURCE_DIR}" "${SHADER_OUTPUT_DIR}"
+    COMMAND ${shader_precompile_command}
     RESULT_VARIABLE shader_compile_result
     COMMAND_ECHO STDOUT
 )

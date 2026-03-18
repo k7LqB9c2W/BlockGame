@@ -470,6 +470,7 @@ private:
 };
 
 constexpr std::size_t kMaxFarLodAtlasUpdateCellsPerSubmission = 1024u;
+constexpr std::uint32_t kFarLodChunkSeedCountPerCacheEntry = 64u;
 }
 
 float computeFarPlaneForViewDistance(int viewDistance) noexcept
@@ -1200,7 +1201,9 @@ public:
         facePrefixScanPipelineState_.Reset();
         facePrefixAddPipelineState_.Reset();
         faceEmitPipelineState_.Reset();
-        atlasUpdateRootSignature_.Reset();
+        atlasSeedRootSignature_.Reset();
+        atlasSampleRootSignature_.Reset();
+        atlasFinalizeRootSignature_.Reset();
         synthColumnRootSignature_.Reset();
         stampRootSignature_.Reset();
         faceCountRootSignature_.Reset();
@@ -1397,7 +1400,80 @@ public:
         hasCommands_ = true;
     }
 
-    void bindAtlasCommonDescriptors(UINT descriptorIndex,
+    void setAtlasBindings(ID3D12RootSignature* rootSignature,
+                          ID3D12PipelineState* pipelineState,
+                          const std::array<std::uint32_t, 14>& constants,
+                          UINT srvDescriptorIndex,
+                          UINT uavDescriptorIndex)
+    {
+        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
+        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
+        commandList_->SetPipelineState(pipelineState);
+        commandList_->SetComputeRootSignature(rootSignature);
+        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
+        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
+        srvHandle.ptr += static_cast<UINT64>(srvDescriptorIndex) * descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
+        uavHandle.ptr += static_cast<UINT64>(uavDescriptorIndex) * descriptorSize_;
+        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
+    }
+
+    void bindAtlasSeedDescriptors(UINT srvDescriptorIndex,
+                                  UINT uavDescriptorIndex,
+                                  ID3D12Resource* worldgenHeaderBuffer,
+                                  ID3D12Resource* worldgenBiomeBuffer,
+                                  std::uint32_t biomeCount,
+                                  ID3D12Resource* biomeSelectionBuffer,
+                                  std::uint32_t biomeSelectionCount,
+                                  ID3D12Resource* oceanSelectionBuffer,
+                                  std::uint32_t oceanSelectionCount,
+                                  ID3D12Resource* subBiomeBuffer,
+                                  std::uint32_t subBiomeCount,
+                                  ID3D12Resource* seedHeaderUavBuffer,
+                                  std::uint32_t seedHeaderElementCount,
+                                  ID3D12Resource* seedDataUavBuffer,
+                                  std::uint32_t seedDataElementCount)
+    {
+        writeStructuredSrvDescriptor(srvDescriptorIndex,
+                                     worldgenHeaderBuffer,
+                                     0,
+                                     1,
+                                     static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuWorldgenHeader)));
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 1u,
+                                     worldgenBiomeBuffer,
+                                     0,
+                                     biomeCount,
+                                     static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuBiome)));
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 2u,
+                                     biomeSelectionBuffer,
+                                     0,
+                                     biomeSelectionCount,
+                                     kGpuContextBiomeSelectionStrideBytes);
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 3u,
+                                     oceanSelectionBuffer,
+                                     0,
+                                     oceanSelectionCount,
+                                     kGpuContextBiomeSelectionStrideBytes);
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 4u,
+                                     subBiomeBuffer,
+                                     0,
+                                     subBiomeCount,
+                                     kGpuContextSubBiomeStrideBytes);
+        writeStructuredUavDescriptor(uavDescriptorIndex,
+                                     seedHeaderUavBuffer,
+                                     0,
+                                     seedHeaderElementCount,
+                                     kGpuContextChunkSeedCacheHeaderStrideBytes);
+        writeStructuredUavDescriptor(uavDescriptorIndex + 1u,
+                                     seedDataUavBuffer,
+                                     0,
+                                     seedDataElementCount,
+                                     kGpuContextChunkSeedStrideBytes);
+    }
+
+    void bindAtlasSampleDescriptors(UINT srvDescriptorIndex,
+                                    UINT uavDescriptorIndex,
                                     ID3D12Resource* worldgenHeaderBuffer,
                                     ID3D12Resource* worldgenBiomeBuffer,
                                     std::uint32_t biomeCount,
@@ -1405,96 +1481,101 @@ public:
                                     std::uint32_t biomeSelectionCount,
                                     ID3D12Resource* oceanSelectionBuffer,
                                     std::uint32_t oceanSelectionCount,
-                                    ID3D12Resource* transitionBiomeBuffer,
-                                    std::uint32_t transitionBiomeCount,
                                     ID3D12Resource* subBiomeBuffer,
                                     std::uint32_t subBiomeCount,
                                     ID3D12Resource* permutationBuffer,
                                     std::uint32_t permutationCount,
-                                    ID3D12Resource* seedBuffer,
-                                    std::uint32_t seedElementCount,
-                                    ID3D12Resource* sampleBuffer,
-                                    std::uint32_t sampleElementCount,
-                                    ID3D12Resource* atlasBuffer,
-                                    std::uint32_t atlasElementCount)
+                                    ID3D12Resource* seedHeaderSrvBuffer,
+                                    std::uint32_t seedHeaderElementCount,
+                                    ID3D12Resource* seedDataSrvBuffer,
+                                    std::uint32_t seedDataElementCount,
+                                    ID3D12Resource* sampleUavBuffer,
+                                    std::uint32_t sampleUavElementCount)
     {
-        writeStructuredSrvDescriptor(descriptorIndex,
+        writeStructuredSrvDescriptor(srvDescriptorIndex,
                                      worldgenHeaderBuffer,
                                      0,
                                      1,
                                      static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuWorldgenHeader)));
-        writeStructuredSrvDescriptor(descriptorIndex + 1u,
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 1u,
                                      worldgenBiomeBuffer,
                                      0,
                                      biomeCount,
                                      static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuBiome)));
-        writeStructuredSrvDescriptor(descriptorIndex + 2u,
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 2u,
                                      biomeSelectionBuffer,
                                      0,
                                      biomeSelectionCount,
                                      kGpuContextBiomeSelectionStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 3u,
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 3u,
                                      oceanSelectionBuffer,
                                      0,
                                      oceanSelectionCount,
                                      kGpuContextBiomeSelectionStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 4u,
-                                     transitionBiomeBuffer,
-                                     0,
-                                     transitionBiomeCount,
-                                     kGpuContextTransitionBiomeStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 5u,
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 4u,
                                      subBiomeBuffer,
                                      0,
                                      subBiomeCount,
                                      kGpuContextSubBiomeStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 6u,
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 5u,
                                      permutationBuffer,
                                      0,
                                      permutationCount,
                                      kGpuContextPermutationStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 7u,
-                                     seedBuffer,
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 6u,
+                                     seedHeaderSrvBuffer,
                                      0,
-                                     seedElementCount,
-                                     kGpuContextChunkSeedCacheStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 8u,
-                                     sampleBuffer,
+                                     seedHeaderElementCount,
+                                     kGpuContextChunkSeedCacheHeaderStrideBytes);
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 7u,
+                                     seedDataSrvBuffer,
                                      0,
-                                     sampleElementCount,
+                                     seedDataElementCount,
+                                     kGpuContextChunkSeedStrideBytes);
+        writeStructuredUavDescriptor(uavDescriptorIndex,
+                                     sampleUavBuffer,
+                                     0,
+                                     sampleUavElementCount,
                                      kGpuContextAtlasSamplePointCacheStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 9u,
-                                     seedBuffer,
-                                     0,
-                                     seedElementCount,
-                                     kGpuContextChunkSeedCacheStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 10u,
-                                     sampleBuffer,
-                                     0,
-                                     sampleElementCount,
-                                     kGpuContextAtlasSamplePointCacheStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 11u,
-                                     atlasBuffer,
-                                     0,
-                                     atlasElementCount,
-                                     kGpuContextAtlasSampleStrideBytes);
     }
 
-    void setAtlasCommonBindings(ID3D12PipelineState* pipelineState,
-                                const std::array<std::uint32_t, 14>& constants,
-                                UINT descriptorIndex)
+    void bindAtlasFinalizeDescriptors(UINT srvDescriptorIndex,
+                                      UINT uavDescriptorIndex,
+                                      ID3D12Resource* worldgenHeaderBuffer,
+                                      ID3D12Resource* worldgenBiomeBuffer,
+                                      std::uint32_t biomeCount,
+                                      ID3D12Resource* permutationBuffer,
+                                      std::uint32_t permutationCount,
+                                      ID3D12Resource* sampleSrvBuffer,
+                                      std::uint32_t sampleSrvElementCount,
+                                      ID3D12Resource* atlasUavBuffer,
+                                      std::uint32_t atlasUavElementCount)
     {
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
-        commandList_->SetPipelineState(pipelineState);
-        commandList_->SetComputeRootSignature(atlasUpdateRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 9u;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
+        writeStructuredSrvDescriptor(srvDescriptorIndex,
+                                     worldgenHeaderBuffer,
+                                     0,
+                                     1,
+                                     static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuWorldgenHeader)));
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 1u,
+                                     worldgenBiomeBuffer,
+                                     0,
+                                     biomeCount,
+                                     static_cast<std::uint32_t>(sizeof(terrain::FarLodGpuBiome)));
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 2u,
+                                     permutationBuffer,
+                                     0,
+                                     permutationCount,
+                                     kGpuContextPermutationStrideBytes);
+        writeStructuredSrvDescriptor(srvDescriptorIndex + 3u,
+                                     sampleSrvBuffer,
+                                     0,
+                                     sampleSrvElementCount,
+                                     kGpuContextAtlasSamplePointCacheStrideBytes);
+        writeStructuredUavDescriptor(uavDescriptorIndex,
+                                     atlasUavBuffer,
+                                     0,
+                                     atlasUavElementCount,
+                                     kGpuContextAtlasSampleStrideBytes);
     }
 
     void dispatchSeedCacheUpdate(const glm::ivec2& updateOriginChunk,
@@ -1508,25 +1589,61 @@ public:
                                  std::uint32_t biomeSelectionCount,
                                  ID3D12Resource* oceanSelectionBuffer,
                                  std::uint32_t oceanSelectionCount,
-                                 ID3D12Resource* transitionBiomeBuffer,
-                                 std::uint32_t transitionBiomeCount,
                                  ID3D12Resource* subBiomeBuffer,
                                  std::uint32_t subBiomeCount,
-                                 ID3D12Resource* permutationBuffer,
-                                 std::uint32_t permutationCount,
-                                 ID3D12Resource* seedBuffer,
-                                 std::uint32_t seedElementCount,
-                                 ID3D12Resource* sampleBuffer,
-                                 std::uint32_t sampleElementCount,
-                                 ID3D12Resource* atlasBuffer,
-                                 std::uint32_t atlasElementCount)
+                                 ID3D12Resource* seedHeaderBuffer,
+                                 std::uint32_t seedHeaderElementCount,
+                                 ID3D12Resource* seedDataBuffer,
+                                 std::uint32_t seedDataElementCount)
     {
         if (!open_ || worldgenHeaderBuffer == nullptr || worldgenBiomeBuffer == nullptr ||
             biomeSelectionBuffer == nullptr || oceanSelectionBuffer == nullptr ||
-            transitionBiomeBuffer == nullptr || subBiomeBuffer == nullptr ||
-            permutationBuffer == nullptr || seedBuffer == nullptr || sampleBuffer == nullptr ||
-            atlasBuffer == nullptr || updateSizeChunks.x <= 0 || updateSizeChunks.y <= 0)
+            subBiomeBuffer == nullptr || seedHeaderBuffer == nullptr || seedDataBuffer == nullptr ||
+            updateSizeChunks.x <= 0 || updateSizeChunks.y <= 0)
         {
+            return;
+        }
+        if (seedHeaderElementCount == 0 || seedDataElementCount == 0)
+        {
+            if (chunkManagerDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "Far LOD seed dispatch skipped due to empty seed buffers"
+                       << " seedHeader=" << seedHeaderElementCount
+                       << " seedData=" << seedDataElementCount;
+                chunkManagerDebugLog(stream.str());
+            }
+            return;
+        }
+        if (seedSizeChunks.x <= 0 || seedSizeChunks.y <= 0)
+        {
+            if (chunkManagerDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "Far LOD seed dispatch skipped due to invalid seed cache dimensions"
+                       << " seedOrigin=[" << seedOriginChunk.x << "," << seedOriginChunk.y << "]"
+                       << " seedSize=[" << seedSizeChunks.x << "," << seedSizeChunks.y << "]";
+                chunkManagerDebugLog(stream.str());
+            }
+            return;
+        }
+        const std::uint64_t expectedSeedHeaderElementCount =
+            static_cast<std::uint64_t>(seedSizeChunks.x) * static_cast<std::uint64_t>(seedSizeChunks.y);
+        const std::uint64_t expectedSeedDataElementCount =
+            expectedSeedHeaderElementCount * static_cast<std::uint64_t>(kGpuContextChunkSeedCountPerCacheEntry);
+        if (static_cast<std::uint64_t>(seedHeaderElementCount) < expectedSeedHeaderElementCount ||
+            static_cast<std::uint64_t>(seedDataElementCount) < expectedSeedDataElementCount)
+        {
+            if (chunkManagerDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "Far LOD seed dispatch skipped due to undersized seed buffers"
+                       << " expectedHeader=" << expectedSeedHeaderElementCount
+                       << " expectedData=" << expectedSeedDataElementCount
+                       << " actualHeader=" << seedHeaderElementCount
+                       << " actualData=" << seedDataElementCount;
+                chunkManagerDebugLog(stream.str());
+            }
             return;
         }
 
@@ -1542,28 +1659,28 @@ public:
             static_cast<std::uint32_t>(seedOriginChunk.y),
             static_cast<std::uint32_t>(seedSizeChunks.x),
             static_cast<std::uint32_t>(seedSizeChunks.y)};
-        const UINT descriptorIndex = allocateDescriptorRange(12);
-        bindAtlasCommonDescriptors(descriptorIndex,
-                                   worldgenHeaderBuffer,
-                                   worldgenBiomeBuffer,
-                                   biomeCount,
-                                   biomeSelectionBuffer,
-                                   biomeSelectionCount,
-                                   oceanSelectionBuffer,
-                                   oceanSelectionCount,
-                                   transitionBiomeBuffer,
-                                   transitionBiomeCount,
-                                   subBiomeBuffer,
-                                   subBiomeCount,
-                                   permutationBuffer,
-                                   permutationCount,
-                                   seedBuffer,
-                                   seedElementCount,
-                                   sampleBuffer,
-                                   sampleElementCount,
-                                   atlasBuffer,
-                                   atlasElementCount);
-        setAtlasCommonBindings(atlasSeedCachePipelineState_.Get(), constants, descriptorIndex);
+        const UINT srvDescriptorIndex = allocateDescriptorRange(5);
+        const UINT uavDescriptorIndex = allocateDescriptorRange(2);
+        bindAtlasSeedDescriptors(srvDescriptorIndex,
+                                 uavDescriptorIndex,
+                                 worldgenHeaderBuffer,
+                                 worldgenBiomeBuffer,
+                                 biomeCount,
+                                 biomeSelectionBuffer,
+                                 biomeSelectionCount,
+                                 oceanSelectionBuffer,
+                                 oceanSelectionCount,
+                                 subBiomeBuffer,
+                                 subBiomeCount,
+                                 seedHeaderBuffer,
+                                 seedHeaderElementCount,
+                                 seedDataBuffer,
+                                 seedDataElementCount);
+        setAtlasBindings(atlasSeedRootSignature_.Get(),
+                         atlasSeedCachePipelineState_.Get(),
+                         constants,
+                         srvDescriptorIndex,
+                         uavDescriptorIndex);
         commandList_->Dispatch(static_cast<UINT>((updateSizeChunks.x + 7) / 8),
                                static_cast<UINT>((updateSizeChunks.y + 7) / 8),
                                1);
@@ -1584,25 +1701,53 @@ public:
                                         std::uint32_t biomeSelectionCount,
                                         ID3D12Resource* oceanSelectionBuffer,
                                         std::uint32_t oceanSelectionCount,
-                                        ID3D12Resource* transitionBiomeBuffer,
-                                        std::uint32_t transitionBiomeCount,
                                         ID3D12Resource* subBiomeBuffer,
                                         std::uint32_t subBiomeCount,
                                         ID3D12Resource* permutationBuffer,
                                         std::uint32_t permutationCount,
-                                        ID3D12Resource* seedBuffer,
-                                        std::uint32_t seedElementCount,
+                                        ID3D12Resource* seedHeaderBuffer,
+                                        std::uint32_t seedHeaderElementCount,
+                                        ID3D12Resource* seedDataBuffer,
+                                        std::uint32_t seedDataElementCount,
                                         ID3D12Resource* sampleBuffer,
-                                        std::uint32_t sampleElementCount,
-                                        ID3D12Resource* atlasBuffer,
-                                        std::uint32_t atlasElementCount)
+                                        std::uint32_t sampleElementCount)
     {
         if (!open_ || worldgenHeaderBuffer == nullptr || worldgenBiomeBuffer == nullptr ||
-            biomeSelectionBuffer == nullptr || oceanSelectionBuffer == nullptr ||
-            transitionBiomeBuffer == nullptr || subBiomeBuffer == nullptr ||
-            permutationBuffer == nullptr || seedBuffer == nullptr || sampleBuffer == nullptr ||
-            atlasBuffer == nullptr || updateSizeCells.x <= 0 || updateSizeCells.y <= 0)
+            biomeSelectionBuffer == nullptr || oceanSelectionBuffer == nullptr || subBiomeBuffer == nullptr ||
+            permutationBuffer == nullptr || seedHeaderBuffer == nullptr || seedDataBuffer == nullptr ||
+            sampleBuffer == nullptr || updateSizeCells.x <= 0 || updateSizeCells.y <= 0)
         {
+            return;
+        }
+        if (seedSizeChunks.x <= 0 || seedSizeChunks.y <= 0)
+        {
+            if (chunkManagerDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "Far LOD sample dispatch skipped due to invalid seed cache dimensions"
+                       << " seedOrigin=[" << seedOriginChunk.x << "," << seedOriginChunk.y << "]"
+                       << " seedSize=[" << seedSizeChunks.x << "," << seedSizeChunks.y << "]";
+                chunkManagerDebugLog(stream.str());
+            }
+            return;
+        }
+        const std::uint64_t expectedSeedHeaderElementCount =
+            static_cast<std::uint64_t>(seedSizeChunks.x) * static_cast<std::uint64_t>(seedSizeChunks.y);
+        const std::uint64_t expectedSeedDataElementCount =
+            expectedSeedHeaderElementCount * static_cast<std::uint64_t>(kGpuContextChunkSeedCountPerCacheEntry);
+        if (static_cast<std::uint64_t>(seedHeaderElementCount) < expectedSeedHeaderElementCount ||
+            static_cast<std::uint64_t>(seedDataElementCount) < expectedSeedDataElementCount)
+        {
+            if (chunkManagerDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "Far LOD sample dispatch skipped due to undersized seed buffers"
+                       << " expectedHeader=" << expectedSeedHeaderElementCount
+                       << " expectedData=" << expectedSeedDataElementCount
+                       << " actualHeader=" << seedHeaderElementCount
+                       << " actualData=" << seedDataElementCount;
+                chunkManagerDebugLog(stream.str());
+            }
             return;
         }
 
@@ -1621,8 +1766,10 @@ public:
             static_cast<std::uint32_t>(seedOriginChunk.y),
             static_cast<std::uint32_t>(seedSizeChunks.x),
             static_cast<std::uint32_t>(seedSizeChunks.y)};
-        const UINT descriptorIndex = allocateDescriptorRange(12);
-        bindAtlasCommonDescriptors(descriptorIndex,
+        const UINT srvDescriptorIndex = allocateDescriptorRange(8);
+        const UINT uavDescriptorIndex = allocateDescriptorRange(1);
+        bindAtlasSampleDescriptors(srvDescriptorIndex,
+                                   uavDescriptorIndex,
                                    worldgenHeaderBuffer,
                                    worldgenBiomeBuffer,
                                    biomeCount,
@@ -1630,19 +1777,21 @@ public:
                                    biomeSelectionCount,
                                    oceanSelectionBuffer,
                                    oceanSelectionCount,
-                                   transitionBiomeBuffer,
-                                   transitionBiomeCount,
                                    subBiomeBuffer,
                                    subBiomeCount,
                                    permutationBuffer,
                                    permutationCount,
-                                   seedBuffer,
-                                   seedElementCount,
+                                   seedHeaderBuffer,
+                                   seedHeaderElementCount,
+                                   seedDataBuffer,
+                                   seedDataElementCount,
                                    sampleBuffer,
-                                   sampleElementCount,
-                                   atlasBuffer,
-                                   atlasElementCount);
-        setAtlasCommonBindings(atlasSampleCachePipelineState_.Get(), constants, descriptorIndex);
+                                   sampleElementCount);
+        setAtlasBindings(atlasSampleRootSignature_.Get(),
+                         atlasSampleCachePipelineState_.Get(),
+                         constants,
+                         srvDescriptorIndex,
+                         uavDescriptorIndex);
         commandList_->Dispatch(static_cast<UINT>((updateSizeCells.x + 7) / 8),
                                static_cast<UINT>((updateSizeCells.y + 7) / 8),
                                1);
@@ -1658,27 +1807,15 @@ public:
                              ID3D12Resource* worldgenHeaderBuffer,
                              ID3D12Resource* worldgenBiomeBuffer,
                              std::uint32_t biomeCount,
-                             ID3D12Resource* biomeSelectionBuffer,
-                             std::uint32_t biomeSelectionCount,
-                             ID3D12Resource* oceanSelectionBuffer,
-                             std::uint32_t oceanSelectionCount,
-                             ID3D12Resource* transitionBiomeBuffer,
-                             std::uint32_t transitionBiomeCount,
-                             ID3D12Resource* subBiomeBuffer,
-                             std::uint32_t subBiomeCount,
                              ID3D12Resource* permutationBuffer,
                              std::uint32_t permutationCount,
-                             ID3D12Resource* seedBuffer,
-                             std::uint32_t seedElementCount,
                              ID3D12Resource* sampleBuffer,
                              std::uint32_t sampleElementCount,
                              ID3D12Resource* atlasBuffer,
                              std::uint32_t atlasElementCount)
     {
         if (!open_ || worldgenHeaderBuffer == nullptr || worldgenBiomeBuffer == nullptr ||
-            biomeSelectionBuffer == nullptr || oceanSelectionBuffer == nullptr ||
-            transitionBiomeBuffer == nullptr || subBiomeBuffer == nullptr ||
-            permutationBuffer == nullptr || seedBuffer == nullptr || sampleBuffer == nullptr ||
+            permutationBuffer == nullptr || sampleBuffer == nullptr ||
             atlasBuffer == nullptr || updateSizeCells.x <= 0 || updateSizeCells.y <= 0)
         {
             return;
@@ -1699,28 +1836,24 @@ public:
             0u,
             0u,
             0u};
-        const UINT descriptorIndex = allocateDescriptorRange(12);
-        bindAtlasCommonDescriptors(descriptorIndex,
-                                   worldgenHeaderBuffer,
-                                   worldgenBiomeBuffer,
-                                   biomeCount,
-                                   biomeSelectionBuffer,
-                                   biomeSelectionCount,
-                                   oceanSelectionBuffer,
-                                   oceanSelectionCount,
-                                   transitionBiomeBuffer,
-                                   transitionBiomeCount,
-                                   subBiomeBuffer,
-                                   subBiomeCount,
-                                   permutationBuffer,
-                                   permutationCount,
-                                   seedBuffer,
-                                   seedElementCount,
-                                   sampleBuffer,
-                                   sampleElementCount,
-                                   atlasBuffer,
-                                   atlasElementCount);
-        setAtlasCommonBindings(atlasUpdatePipelineState_.Get(), constants, descriptorIndex);
+        const UINT srvDescriptorIndex = allocateDescriptorRange(4);
+        const UINT uavDescriptorIndex = allocateDescriptorRange(1);
+        bindAtlasFinalizeDescriptors(srvDescriptorIndex,
+                                     uavDescriptorIndex,
+                                     worldgenHeaderBuffer,
+                                     worldgenBiomeBuffer,
+                                     biomeCount,
+                                     permutationBuffer,
+                                     permutationCount,
+                                     sampleBuffer,
+                                     sampleElementCount,
+                                     atlasBuffer,
+                                     atlasElementCount);
+        setAtlasBindings(atlasFinalizeRootSignature_.Get(),
+                         atlasUpdatePipelineState_.Get(),
+                         constants,
+                         srvDescriptorIndex,
+                         uavDescriptorIndex);
         if (chunkManagerDebugLoggingEnabled())
         {
             std::ostringstream stream;
@@ -1729,7 +1862,7 @@ public:
                    << " atlasOrigin=[" << atlasOriginCell.x << "," << atlasOriginCell.y << "]"
                    << " atlasSize=[" << atlasSizeCells.x << "," << atlasSizeCells.y << "]"
                    << " blockScale=" << blockScale
-                   << " descriptorBase=" << descriptorIndex;
+                   << " descriptorBase=" << srvDescriptorIndex;
             chunkManagerDebugLog(stream.str());
         }
         commandList_->Dispatch(static_cast<UINT>((updateSizeCells.x + 7) / 8),
@@ -2177,9 +2310,12 @@ public:
     [[nodiscard]] bool ready() const noexcept
     {
         return device_ != nullptr && queue_ != nullptr && allocator_ != nullptr && commandList_ != nullptr &&
+               descriptorHeap_ != nullptr && descriptorSize_ > 0 &&
+               atlasSeedRootSignature_ != nullptr && atlasSampleRootSignature_ != nullptr &&
+               atlasFinalizeRootSignature_ != nullptr &&
                atlasSeedCachePipelineState_ != nullptr && atlasSampleCachePipelineState_ != nullptr &&
-               atlasUpdatePipelineState_ != nullptr && synthColumnPipelineState_ != nullptr &&
-               stampPipelineState_ != nullptr &&
+                atlasUpdatePipelineState_ != nullptr && synthColumnPipelineState_ != nullptr &&
+                stampPipelineState_ != nullptr &&
                faceCountPipelineState_ != nullptr &&
                facePrefixGroupPipelineState_ != nullptr &&
                facePrefixScanPipelineState_ != nullptr &&
@@ -2232,7 +2368,9 @@ private:
     static constexpr std::uint32_t kGpuContextTransitionBiomeStrideBytes = 16u;
     static constexpr std::uint32_t kGpuContextSubBiomeStrideBytes = 16u;
     static constexpr std::uint32_t kGpuContextFaceDescriptorStrideBytes = 16u;
-    static constexpr std::uint32_t kGpuContextChunkSeedCacheStrideBytes = 1296u;
+    static constexpr std::uint32_t kGpuContextChunkSeedCacheHeaderStrideBytes = 16u;
+    static constexpr std::uint32_t kGpuContextChunkSeedCountPerCacheEntry = 64u;
+    static constexpr std::uint32_t kGpuContextChunkSeedStrideBytes = 20u;
     static constexpr std::uint32_t kGpuContextPermutationStrideBytes = 4u;
     static constexpr std::uint32_t kGpuContextStructureInstanceStrideBytes = 64u;
     static constexpr std::uint32_t kGpuContextPackedVoxelStrideBytes = 4u;
@@ -2272,7 +2410,7 @@ private:
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Format = DXGI_FORMAT_UNKNOWN;
         srvDesc.Buffer.FirstElement = byteOffset / strideBytes;
-        srvDesc.Buffer.NumElements = elementCount;
+        srvDesc.Buffer.NumElements = std::max(elementCount, 1u);
         srvDesc.Buffer.StructureByteStride = strideBytes;
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
         D3D12_CPU_DESCRIPTOR_HANDLE handle = descriptorHeap_->GetCPUDescriptorHandleForHeapStart();
@@ -2290,7 +2428,7 @@ private:
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uavDesc.Format = DXGI_FORMAT_UNKNOWN;
         uavDesc.Buffer.FirstElement = byteOffset / strideBytes;
-        uavDesc.Buffer.NumElements = elementCount;
+        uavDesc.Buffer.NumElements = std::max(elementCount, 1u);
         uavDesc.Buffer.StructureByteStride = strideBytes;
         uavDesc.Buffer.CounterOffsetInBytes = 0;
         uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
@@ -2346,46 +2484,114 @@ private:
                             createMessage.c_str());
         };
 
-        D3D12_DESCRIPTOR_RANGE atlasSrvRange{};
-        atlasSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        atlasSrvRange.NumDescriptors = 9;
-        atlasSrvRange.BaseShaderRegister = 0;
-        atlasSrvRange.OffsetInDescriptorsFromTableStart = 0;
-        D3D12_DESCRIPTOR_RANGE atlasUavRange{};
-        atlasUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        atlasUavRange.NumDescriptors = 3;
-        atlasUavRange.BaseShaderRegister = 0;
-        atlasUavRange.OffsetInDescriptorsFromTableStart = 0;
+        D3D12_DESCRIPTOR_RANGE atlasSeedSrvRanges[2]{};
+        atlasSeedSrvRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasSeedSrvRanges[0].NumDescriptors = 4;
+        atlasSeedSrvRanges[0].BaseShaderRegister = 0;
+        atlasSeedSrvRanges[0].OffsetInDescriptorsFromTableStart = 0;
+        atlasSeedSrvRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasSeedSrvRanges[1].NumDescriptors = 1;
+        atlasSeedSrvRanges[1].BaseShaderRegister = 5;
+        atlasSeedSrvRanges[1].OffsetInDescriptorsFromTableStart = 4;
+        D3D12_DESCRIPTOR_RANGE atlasSeedUavRange{};
+        atlasSeedUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        atlasSeedUavRange.NumDescriptors = 2;
+        atlasSeedUavRange.BaseShaderRegister = 0;
+        atlasSeedUavRange.OffsetInDescriptorsFromTableStart = 0;
 
-        std::array<D3D12_ROOT_PARAMETER, 3> atlasParams{};
-        atlasParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        atlasParams[0].Constants.ShaderRegister = 0;
-        atlasParams[0].Constants.Num32BitValues = 14;
-        atlasParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        atlasParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        atlasParams[1].DescriptorTable.pDescriptorRanges = &atlasSrvRange;
-        atlasParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        atlasParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        atlasParams[2].DescriptorTable.pDescriptorRanges = &atlasUavRange;
-        D3D12_ROOT_SIGNATURE_DESC atlasDesc{};
-        atlasDesc.NumParameters = static_cast<UINT>(atlasParams.size());
-        atlasDesc.pParameters = atlasParams.data();
-        createRootSignature(atlasDesc, atlasUpdateRootSignature_, "far lod atlas update root signature");
+        std::array<D3D12_ROOT_PARAMETER, 3> atlasSeedParams{};
+        atlasSeedParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        atlasSeedParams[0].Constants.ShaderRegister = 0;
+        atlasSeedParams[0].Constants.Num32BitValues = 14;
+        atlasSeedParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        atlasSeedParams[1].DescriptorTable.NumDescriptorRanges = static_cast<UINT>(std::size(atlasSeedSrvRanges));
+        atlasSeedParams[1].DescriptorTable.pDescriptorRanges = atlasSeedSrvRanges;
+        atlasSeedParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        atlasSeedParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        atlasSeedParams[2].DescriptorTable.pDescriptorRanges = &atlasSeedUavRange;
+        D3D12_ROOT_SIGNATURE_DESC atlasSeedDesc{};
+        atlasSeedDesc.NumParameters = static_cast<UINT>(atlasSeedParams.size());
+        atlasSeedDesc.pParameters = atlasSeedParams.data();
+        createRootSignature(atlasSeedDesc, atlasSeedRootSignature_, "far lod atlas seed root signature");
 
         D3D12_COMPUTE_PIPELINE_STATE_DESC atlasSeedPso{};
-        atlasSeedPso.pRootSignature = atlasUpdateRootSignature_.Get();
+        atlasSeedPso.pRootSignature = atlasSeedRootSignature_.Get();
         atlasSeedPso.CS = {atlasSeedCacheShader_->GetBufferPointer(), atlasSeedCacheShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&atlasSeedPso, IID_PPV_ARGS(&atlasSeedCachePipelineState_)),
                         "failed to create far lod atlas seed cache pipeline");
 
+        D3D12_DESCRIPTOR_RANGE atlasSampleSrvRanges[2]{};
+        atlasSampleSrvRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasSampleSrvRanges[0].NumDescriptors = 4;
+        atlasSampleSrvRanges[0].BaseShaderRegister = 0;
+        atlasSampleSrvRanges[0].OffsetInDescriptorsFromTableStart = 0;
+        atlasSampleSrvRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasSampleSrvRanges[1].NumDescriptors = 4;
+        atlasSampleSrvRanges[1].BaseShaderRegister = 5;
+        atlasSampleSrvRanges[1].OffsetInDescriptorsFromTableStart = 4;
+        D3D12_DESCRIPTOR_RANGE atlasSampleUavRange{};
+        atlasSampleUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        atlasSampleUavRange.NumDescriptors = 1;
+        atlasSampleUavRange.BaseShaderRegister = 2;
+        atlasSampleUavRange.OffsetInDescriptorsFromTableStart = 0;
+
+        std::array<D3D12_ROOT_PARAMETER, 3> atlasSampleParams{};
+        atlasSampleParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        atlasSampleParams[0].Constants.ShaderRegister = 0;
+        atlasSampleParams[0].Constants.Num32BitValues = 14;
+        atlasSampleParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        atlasSampleParams[1].DescriptorTable.NumDescriptorRanges = static_cast<UINT>(std::size(atlasSampleSrvRanges));
+        atlasSampleParams[1].DescriptorTable.pDescriptorRanges = atlasSampleSrvRanges;
+        atlasSampleParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        atlasSampleParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        atlasSampleParams[2].DescriptorTable.pDescriptorRanges = &atlasSampleUavRange;
+        D3D12_ROOT_SIGNATURE_DESC atlasSampleDesc{};
+        atlasSampleDesc.NumParameters = static_cast<UINT>(atlasSampleParams.size());
+        atlasSampleDesc.pParameters = atlasSampleParams.data();
+        createRootSignature(atlasSampleDesc, atlasSampleRootSignature_, "far lod atlas sample root signature");
+
         D3D12_COMPUTE_PIPELINE_STATE_DESC atlasSamplePso{};
-        atlasSamplePso.pRootSignature = atlasUpdateRootSignature_.Get();
+        atlasSamplePso.pRootSignature = atlasSampleRootSignature_.Get();
         atlasSamplePso.CS = {atlasSampleCacheShader_->GetBufferPointer(), atlasSampleCacheShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&atlasSamplePso, IID_PPV_ARGS(&atlasSampleCachePipelineState_)),
                         "failed to create far lod atlas sample cache pipeline");
 
+        D3D12_DESCRIPTOR_RANGE atlasFinalizeSrvRanges[3]{};
+        atlasFinalizeSrvRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasFinalizeSrvRanges[0].NumDescriptors = 2;
+        atlasFinalizeSrvRanges[0].BaseShaderRegister = 0;
+        atlasFinalizeSrvRanges[0].OffsetInDescriptorsFromTableStart = 0;
+        atlasFinalizeSrvRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasFinalizeSrvRanges[1].NumDescriptors = 1;
+        atlasFinalizeSrvRanges[1].BaseShaderRegister = 6;
+        atlasFinalizeSrvRanges[1].OffsetInDescriptorsFromTableStart = 2;
+        atlasFinalizeSrvRanges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        atlasFinalizeSrvRanges[2].NumDescriptors = 1;
+        atlasFinalizeSrvRanges[2].BaseShaderRegister = 9;
+        atlasFinalizeSrvRanges[2].OffsetInDescriptorsFromTableStart = 3;
+        D3D12_DESCRIPTOR_RANGE atlasFinalizeUavRange{};
+        atlasFinalizeUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        atlasFinalizeUavRange.NumDescriptors = 1;
+        atlasFinalizeUavRange.BaseShaderRegister = 3;
+        atlasFinalizeUavRange.OffsetInDescriptorsFromTableStart = 0;
+
+        std::array<D3D12_ROOT_PARAMETER, 3> atlasFinalizeParams{};
+        atlasFinalizeParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        atlasFinalizeParams[0].Constants.ShaderRegister = 0;
+        atlasFinalizeParams[0].Constants.Num32BitValues = 14;
+        atlasFinalizeParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        atlasFinalizeParams[1].DescriptorTable.NumDescriptorRanges = static_cast<UINT>(std::size(atlasFinalizeSrvRanges));
+        atlasFinalizeParams[1].DescriptorTable.pDescriptorRanges = atlasFinalizeSrvRanges;
+        atlasFinalizeParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        atlasFinalizeParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        atlasFinalizeParams[2].DescriptorTable.pDescriptorRanges = &atlasFinalizeUavRange;
+        D3D12_ROOT_SIGNATURE_DESC atlasFinalizeDesc{};
+        atlasFinalizeDesc.NumParameters = static_cast<UINT>(atlasFinalizeParams.size());
+        atlasFinalizeDesc.pParameters = atlasFinalizeParams.data();
+        createRootSignature(atlasFinalizeDesc, atlasFinalizeRootSignature_, "far lod atlas finalize root signature");
+
         D3D12_COMPUTE_PIPELINE_STATE_DESC atlasPso{};
-        atlasPso.pRootSignature = atlasUpdateRootSignature_.Get();
+        atlasPso.pRootSignature = atlasFinalizeRootSignature_.Get();
         atlasPso.CS = {atlasUpdateShader_->GetBufferPointer(), atlasUpdateShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&atlasPso, IID_PPV_ARGS(&atlasUpdatePipelineState_)),
                         "failed to create far lod atlas update pipeline");
@@ -2619,7 +2825,9 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> facePrefixScanShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> facePrefixAddShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> faceEmitShader_;
-    Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasUpdateRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasSeedRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasSampleRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasFinalizeRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> synthColumnRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> stampRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> faceCountRootSignature_;
@@ -5500,15 +5708,14 @@ private:
     };
     static_assert(sizeof(GpuChunkSeedCacheSeed) == 20u);
 
-    struct GpuChunkSeedCacheEntry
+    struct GpuChunkSeedCacheHeader
     {
         std::uint32_t seedCount{0};
+        std::uint32_t baseSeedIndex{0};
         std::uint32_t reserved0{0};
         std::uint32_t reserved1{0};
-        std::uint32_t reserved2{0};
-        std::array<GpuChunkSeedCacheSeed, 64> seeds{};
     };
-    static_assert(sizeof(GpuChunkSeedCacheEntry) == 1296u);
+    static_assert(sizeof(GpuChunkSeedCacheHeader) == 16u);
 
     struct GpuSynthesisRequest
     {
@@ -5661,12 +5868,14 @@ private:
         glm::ivec2 originCell{0};
         Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> sampleBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> seedHeaderBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> seedDataBuffer;
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES sampleState{D3D12_RESOURCE_STATE_COMMON};
         glm::ivec2 seedOriginChunk{0};
         glm::ivec2 seedSizeChunks{0};
-        Microsoft::WRL::ComPtr<ID3D12Resource> seedBuffer;
-        D3D12_RESOURCE_STATES seedState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES seedHeaderState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES seedDataState{D3D12_RESOURCE_STATE_COMMON};
         bool initialized{false};
         bool seedInitialized{false};
         std::vector<AtlasUpdateRect> pendingDirtyRects;
@@ -5680,11 +5889,16 @@ private:
                        : 0u;
         }
 
-        [[nodiscard]] std::uint32_t seedElementCount() const noexcept
+        [[nodiscard]] std::uint32_t seedHeaderElementCount() const noexcept
         {
             return seedSizeChunks.x > 0 && seedSizeChunks.y > 0
                        ? static_cast<std::uint32_t>(seedSizeChunks.x * seedSizeChunks.y)
                        : 0u;
+        }
+
+        [[nodiscard]] std::uint32_t seedDataElementCount() const noexcept
+        {
+            return seedHeaderElementCount() * kFarLodChunkSeedCountPerCacheEntry;
         }
     };
 
@@ -7022,7 +7236,8 @@ private:
         const glm::ivec2 requiredSeedSize = computeSeedCacheSizeChunks(level);
         if (atlas.buffer != nullptr &&
             atlas.sampleBuffer != nullptr &&
-            atlas.seedBuffer != nullptr &&
+            atlas.seedHeaderBuffer != nullptr &&
+            atlas.seedDataBuffer != nullptr &&
             atlas.blockScale == level.blockScale &&
             atlas.atlasSizeCells == requiredSize &&
             atlas.seedSizeChunks == requiredSeedSize)
@@ -7041,9 +7256,12 @@ private:
         const std::uint64_t sampleBufferBytes =
             static_cast<std::uint64_t>(requiredSize.x) * static_cast<std::uint64_t>(requiredSize.y) *
             sizeof(GpuAtlasSampleCacheEntry);
-        const std::uint64_t seedBufferBytes =
+        const std::uint64_t seedHeaderBufferBytes =
             static_cast<std::uint64_t>(requiredSeedSize.x) * static_cast<std::uint64_t>(requiredSeedSize.y) *
-            sizeof(GpuChunkSeedCacheEntry);
+            sizeof(GpuChunkSeedCacheHeader);
+        const std::uint64_t seedDataBufferBytes =
+            static_cast<std::uint64_t>(requiredSeedSize.x) * static_cast<std::uint64_t>(requiredSeedSize.y) *
+            kFarLodChunkSeedCountPerCacheEntry * sizeof(GpuChunkSeedCacheSeed);
         atlas.buffer = createDefaultBuffer(device_.Get(),
                                            bufferBytes,
                                            D3D12_RESOURCE_STATE_COMMON,
@@ -7052,10 +7270,14 @@ private:
                                                  sampleBufferBytes,
                                                  D3D12_RESOURCE_STATE_COMMON,
                                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        atlas.seedBuffer = createDefaultBuffer(device_.Get(),
-                                               seedBufferBytes,
-                                               D3D12_RESOURCE_STATE_COMMON,
-                                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        atlas.seedHeaderBuffer = createDefaultBuffer(device_.Get(),
+                                                     seedHeaderBufferBytes,
+                                                     D3D12_RESOURCE_STATE_COMMON,
+                                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        atlas.seedDataBuffer = createDefaultBuffer(device_.Get(),
+                                                   seedDataBufferBytes,
+                                                   D3D12_RESOURCE_STATE_COMMON,
+                                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         if (atlas.buffer != nullptr)
         {
             std::wostringstream name;
@@ -7068,15 +7290,22 @@ private:
             name << L"FarLodAtlasSamples_L" << level.level;
             setDebugObjectName(atlas.sampleBuffer.Get(), name.str());
         }
-        if (atlas.seedBuffer != nullptr)
+        if (atlas.seedHeaderBuffer != nullptr)
         {
             std::wostringstream name;
-            name << L"FarLodChunkSeedCache_L" << level.level;
-            setDebugObjectName(atlas.seedBuffer.Get(), name.str());
+            name << L"FarLodChunkSeedHeaders_L" << level.level;
+            setDebugObjectName(atlas.seedHeaderBuffer.Get(), name.str());
+        }
+        if (atlas.seedDataBuffer != nullptr)
+        {
+            std::wostringstream name;
+            name << L"FarLodChunkSeedData_L" << level.level;
+            setDebugObjectName(atlas.seedDataBuffer.Get(), name.str());
         }
         atlas.state = D3D12_RESOURCE_STATE_COMMON;
         atlas.sampleState = D3D12_RESOURCE_STATE_COMMON;
-        atlas.seedState = D3D12_RESOURCE_STATE_COMMON;
+        atlas.seedHeaderState = D3D12_RESOURCE_STATE_COMMON;
+        atlas.seedDataState = D3D12_RESOURCE_STATE_COMMON;
         atlas.originCell = computeDesiredAtlasOriginCell(level);
         atlas.seedOriginChunk = computeDesiredSeedOriginChunk(level, atlas.originCell);
         atlas.initialized = false;
@@ -7237,6 +7466,59 @@ private:
         return AtlasUpdateRect{{minX, minZ}, {maxX - minX, maxZ - minZ}};
     }
 
+    [[nodiscard]] static std::optional<AtlasUpdateRect> intersectAtlasUpdateRect(const AtlasUpdateRect& a,
+                                                                                 const AtlasUpdateRect& b) noexcept
+    {
+        const int minX = std::max(a.originCell.x, b.originCell.x);
+        const int minZ = std::max(a.originCell.y, b.originCell.y);
+        const int maxX = std::min(a.originCell.x + a.sizeCells.x, b.originCell.x + b.sizeCells.x);
+        const int maxZ = std::min(a.originCell.y + a.sizeCells.y, b.originCell.y + b.sizeCells.y);
+        if (maxX <= minX || maxZ <= minZ)
+        {
+            return std::nullopt;
+        }
+        return AtlasUpdateRect{{minX, minZ}, {maxX - minX, maxZ - minZ}};
+    }
+
+    static void subtractAtlasUpdateRect(const AtlasUpdateRect& rect,
+                                        const AtlasUpdateRect& cut,
+                                        std::vector<AtlasUpdateRect>& leftovers)
+    {
+        const std::optional<AtlasUpdateRect> intersection = intersectAtlasUpdateRect(rect, cut);
+        if (!intersection.has_value())
+        {
+            leftovers.push_back(rect);
+            return;
+        }
+
+        const AtlasUpdateRect& overlap = *intersection;
+        const int rectMinX = rect.originCell.x;
+        const int rectMinZ = rect.originCell.y;
+        const int rectMaxX = rect.originCell.x + rect.sizeCells.x;
+        const int rectMaxZ = rect.originCell.y + rect.sizeCells.y;
+        const int cutMinX = overlap.originCell.x;
+        const int cutMinZ = overlap.originCell.y;
+        const int cutMaxX = overlap.originCell.x + overlap.sizeCells.x;
+        const int cutMaxZ = overlap.originCell.y + overlap.sizeCells.y;
+
+        if (cutMinZ > rectMinZ)
+        {
+            leftovers.push_back(AtlasUpdateRect{{rectMinX, rectMinZ}, {rect.sizeCells.x, cutMinZ - rectMinZ}});
+        }
+        if (cutMaxZ < rectMaxZ)
+        {
+            leftovers.push_back(AtlasUpdateRect{{rectMinX, cutMaxZ}, {rect.sizeCells.x, rectMaxZ - cutMaxZ}});
+        }
+        if (cutMinX > rectMinX)
+        {
+            leftovers.push_back(AtlasUpdateRect{{rectMinX, cutMinZ}, {cutMinX - rectMinX, overlap.sizeCells.y}});
+        }
+        if (cutMaxX < rectMaxX)
+        {
+            leftovers.push_back(AtlasUpdateRect{{cutMaxX, cutMinZ}, {rectMaxX - cutMaxX, overlap.sizeCells.y}});
+        }
+    }
+
     static void mergeAtlasUpdateRect(std::vector<AtlasUpdateRect>& rects, const AtlasUpdateRect& rect)
     {
         if (!atlasRectValid(rect))
@@ -7339,6 +7621,24 @@ private:
         return revision;
     }
 
+    [[nodiscard]] AtlasUpdateRect computeSeedRectForAtlasUpdate(const FarLodLevelConfig& level,
+                                                                const AtlasUpdateRect& rect) const
+    {
+        const terrain::FarLodGpuWorldgenHeader& header = worldgenTables_.header;
+        const int blockScale = std::max(level.blockScale, 1);
+        const int worldMinX = rect.originCell.x * blockScale;
+        const int worldMinZ = rect.originCell.y * blockScale;
+        const int worldMaxX = (rect.originCell.x + rect.sizeCells.x - 1) * blockScale + (blockScale - 1);
+        const int worldMaxZ = (rect.originCell.y + rect.sizeCells.y - 1) * blockScale + (blockScale - 1);
+        const int chunkMinX = floorDiv(worldMinX, header.chunkSpan) - header.neighborRadius;
+        const int chunkMinZ = floorDiv(worldMinZ, header.chunkSpan) - header.neighborRadius;
+        const int chunkMaxX = floorDiv(worldMaxX, header.chunkSpan) + header.neighborRadius;
+        const int chunkMaxZ = floorDiv(worldMaxZ, header.chunkSpan) + header.neighborRadius;
+        return AtlasUpdateRect{
+            {chunkMinX, chunkMinZ},
+            {chunkMaxX - chunkMinX + 1, chunkMaxZ - chunkMinZ + 1}};
+    }
+
     void appendAtlasUpdates(const std::deque<GpuSynthesisRequest>& requests, std::size_t atlasCellBudget)
     {
         atlasCellBudget = std::min(atlasCellBudget, kMaxFarLodAtlasUpdateCellsPerSubmission);
@@ -7369,7 +7669,8 @@ private:
             }
 
             FarLodLevelAtlasState& atlas = atlasIt->second;
-            if (atlas.buffer == nullptr || atlas.sampleBuffer == nullptr || atlas.seedBuffer == nullptr)
+            if (atlas.buffer == nullptr || atlas.sampleBuffer == nullptr ||
+                atlas.seedHeaderBuffer == nullptr || atlas.seedDataBuffer == nullptr)
             {
                 continue;
             }
@@ -7395,50 +7696,17 @@ private:
                 appendClippedAtlasUpdateRect(seedRects, rect, atlas.seedOriginChunk, atlas.seedSizeChunks);
             }
             atlas.pendingSeedDirtyRects.clear();
-            if (!seedRects.empty())
+
+            if (atlasCellBudget == 0 || rects.empty())
             {
-                gpuContext_.transition(atlas.seedBuffer.Get(), atlas.seedState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                atlas.seedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-                for (const AtlasUpdateRect& seedRect : seedRects)
+                for (const AtlasUpdateRect& rect : rects)
                 {
-                    gpuContext_.dispatchSeedCacheUpdate(seedRect.originCell,
-                                                        seedRect.sizeCells,
-                                                        atlas.seedOriginChunk,
-                                                        atlas.seedSizeChunks,
-                                                        worldgenHeaderBuffer_.Get(),
-                                                        worldgenBiomeBuffer_.Get(),
-                                                        worldgenTables_.header.biomeCount,
-                                                        worldgenBiomeSelectionBuffer_.Get(),
-                                                        worldgenTables_.header.biomeSelectionCount,
-                                                        worldgenOceanSelectionBuffer_.Get(),
-                                                        worldgenTables_.header.oceanSelectionCount,
-                                                        worldgenTransitionBuffer_.Get(),
-                                                        worldgenTables_.header.transitionCount,
-                                                        worldgenSubBiomeBuffer_.Get(),
-                                                        worldgenTables_.header.subBiomeCount,
-                                                        worldgenPermutationBuffer_.Get(),
-                                                        static_cast<std::uint32_t>(worldgenTables_.surfacePermutation.size()),
-                                                        atlas.seedBuffer.Get(),
-                                                        atlas.seedElementCount(),
-                                                        atlas.sampleBuffer.Get(),
-                                                        atlas.elementCount(),
-                                                        atlas.buffer.Get(),
-                                                        atlas.elementCount());
+                    mergeAtlasUpdateRect(atlas.pendingDirtyRects, rect);
                 }
-                gpuContext_.uavBarrier(atlas.seedBuffer.Get());
-                gpuContext_.transition(atlas.seedBuffer.Get(),
-                                       atlas.seedState,
-                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                atlas.seedState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-            }
-
-            if (atlasCellBudget == 0)
-            {
-                continue;
-            }
-
-            if (rects.empty())
-            {
+                for (const AtlasUpdateRect& rect : seedRects)
+                {
+                    mergeAtlasUpdateRect(atlas.pendingSeedDirtyRects, rect);
+                }
                 continue;
             }
 
@@ -7478,7 +7746,103 @@ private:
 
             if (uploadRects.empty())
             {
+                for (const AtlasUpdateRect& rect : seedRects)
+                {
+                    mergeAtlasUpdateRect(atlas.pendingSeedDirtyRects, rect);
+                }
                 continue;
+            }
+
+            std::vector<AtlasUpdateRect> requiredSeedRects;
+            for (const AtlasUpdateRect& uploadRect : uploadRects)
+            {
+                appendClippedAtlasUpdateRect(requiredSeedRects,
+                                            computeSeedRectForAtlasUpdate(level, uploadRect),
+                                            atlas.seedOriginChunk,
+                                            atlas.seedSizeChunks);
+            }
+
+            std::vector<AtlasUpdateRect> seedUploadRects;
+            for (const AtlasUpdateRect& seedRect : seedRects)
+            {
+                std::vector<AtlasUpdateRect> remainingParts{seedRect};
+                for (const AtlasUpdateRect& requiredRect : requiredSeedRects)
+                {
+                    std::vector<AtlasUpdateRect> nextParts;
+                    for (const AtlasUpdateRect& part : remainingParts)
+                    {
+                        const std::optional<AtlasUpdateRect> overlap = intersectAtlasUpdateRect(part, requiredRect);
+                        if (!overlap.has_value())
+                        {
+                            nextParts.push_back(part);
+                            continue;
+                        }
+
+                        mergeAtlasUpdateRect(seedUploadRects, *overlap);
+                        subtractAtlasUpdateRect(part, *overlap, nextParts);
+                    }
+                    remainingParts = std::move(nextParts);
+                    if (remainingParts.empty())
+                    {
+                        break;
+                    }
+                }
+
+                for (const AtlasUpdateRect& remainingRect : remainingParts)
+                {
+                    mergeAtlasUpdateRect(atlas.pendingSeedDirtyRects, remainingRect);
+                }
+            }
+
+            if (!seedUploadRects.empty())
+            {
+                if (chunkManagerDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "Far LOD seed dispatch: biome=" << worldgenTables_.header.biomeCount
+                           << " biomeSel=" << worldgenTables_.header.biomeSelectionCount
+                           << " oceanSel=" << worldgenTables_.header.oceanSelectionCount
+                           << " subBiome=" << worldgenTables_.header.subBiomeCount
+                           << " seedHeader=" << atlas.seedHeaderElementCount()
+                           << " seedData=" << atlas.seedDataElementCount()
+                           << " rects=" << seedUploadRects.size();
+                    chunkManagerDebugLog(stream.str());
+                }
+
+                gpuContext_.transition(atlas.seedHeaderBuffer.Get(), atlas.seedHeaderState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                atlas.seedHeaderState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                gpuContext_.transition(atlas.seedDataBuffer.Get(), atlas.seedDataState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                atlas.seedDataState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                for (const AtlasUpdateRect& seedRect : seedUploadRects)
+                {
+                    gpuContext_.dispatchSeedCacheUpdate(seedRect.originCell,
+                                                        seedRect.sizeCells,
+                                                        atlas.seedOriginChunk,
+                                                        atlas.seedSizeChunks,
+                                                        worldgenHeaderBuffer_.Get(),
+                                                        worldgenBiomeBuffer_.Get(),
+                                                        worldgenTables_.header.biomeCount,
+                                                        worldgenBiomeSelectionBuffer_.Get(),
+                                                        worldgenTables_.header.biomeSelectionCount,
+                                                        worldgenOceanSelectionBuffer_.Get(),
+                                                        worldgenTables_.header.oceanSelectionCount,
+                                                        worldgenSubBiomeBuffer_.Get(),
+                                                        worldgenTables_.header.subBiomeCount,
+                                                        atlas.seedHeaderBuffer.Get(),
+                                                        atlas.seedHeaderElementCount(),
+                                                        atlas.seedDataBuffer.Get(),
+                                                        atlas.seedDataElementCount());
+                }
+                gpuContext_.uavBarrier(atlas.seedHeaderBuffer.Get());
+                gpuContext_.uavBarrier(atlas.seedDataBuffer.Get());
+                gpuContext_.transition(atlas.seedHeaderBuffer.Get(),
+                                       atlas.seedHeaderState,
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                atlas.seedHeaderState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                gpuContext_.transition(atlas.seedDataBuffer.Get(),
+                                       atlas.seedDataState,
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                atlas.seedDataState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             }
 
             gpuContext_.transition(atlas.sampleBuffer.Get(), atlas.sampleState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -7499,17 +7863,15 @@ private:
                                                            worldgenTables_.header.biomeSelectionCount,
                                                            worldgenOceanSelectionBuffer_.Get(),
                                                            worldgenTables_.header.oceanSelectionCount,
-                                                           worldgenTransitionBuffer_.Get(),
-                                                           worldgenTables_.header.transitionCount,
                                                            worldgenSubBiomeBuffer_.Get(),
                                                            worldgenTables_.header.subBiomeCount,
                                                            worldgenPermutationBuffer_.Get(),
                                                            static_cast<std::uint32_t>(worldgenTables_.surfacePermutation.size()),
-                                                           atlas.seedBuffer.Get(),
-                                                           atlas.seedElementCount(),
+                                                           atlas.seedHeaderBuffer.Get(),
+                                                           atlas.seedHeaderElementCount(),
+                                                           atlas.seedDataBuffer.Get(),
+                                                           atlas.seedDataElementCount(),
                                                            atlas.sampleBuffer.Get(),
-                                                           atlas.elementCount(),
-                                                           atlas.buffer.Get(),
                                                            atlas.elementCount());
             }
             gpuContext_.uavBarrier(atlas.sampleBuffer.Get());
@@ -7531,18 +7893,8 @@ private:
                                                 worldgenHeaderBuffer_.Get(),
                                                 worldgenBiomeBuffer_.Get(),
                                                 worldgenTables_.header.biomeCount,
-                                                worldgenBiomeSelectionBuffer_.Get(),
-                                                worldgenTables_.header.biomeSelectionCount,
-                                                worldgenOceanSelectionBuffer_.Get(),
-                                                worldgenTables_.header.oceanSelectionCount,
-                                                worldgenTransitionBuffer_.Get(),
-                                                worldgenTables_.header.transitionCount,
-                                                worldgenSubBiomeBuffer_.Get(),
-                                                worldgenTables_.header.subBiomeCount,
                                                 worldgenPermutationBuffer_.Get(),
                                                 static_cast<std::uint32_t>(worldgenTables_.surfacePermutation.size()),
-                                                atlas.seedBuffer.Get(),
-                                                atlas.seedElementCount(),
                                                 atlas.sampleBuffer.Get(),
                                                 atlas.elementCount(),
                                                 atlas.buffer.Get(),

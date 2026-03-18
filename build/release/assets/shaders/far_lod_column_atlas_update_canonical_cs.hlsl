@@ -267,13 +267,12 @@ struct WeightedSeed
     float normalizedDistance;
 };
 
-struct GpuChunkSeedCacheEntry
+struct GpuChunkSeedCacheHeader
 {
     uint seedCount;
+    uint baseSeedIndex;
     uint reserved0;
     uint reserved1;
-    uint reserved2;
-    ExactBiomeSeed seeds[kMaxChunkSeeds];
 };
 
 struct GpuSamplePointCacheEntry
@@ -281,11 +280,13 @@ struct GpuSamplePointCacheEntry
     SamplePoint points[9];
 };
 
-StructuredBuffer<GpuChunkSeedCacheEntry> gChunkSeedCache : register(t7);
-StructuredBuffer<GpuSamplePointCacheEntry> gSampleCache : register(t8);
-RWStructuredBuffer<GpuChunkSeedCacheEntry> gChunkSeedCacheOut : register(u0);
-RWStructuredBuffer<GpuSamplePointCacheEntry> gSampleCacheOut : register(u1);
-RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u2);
+StructuredBuffer<GpuChunkSeedCacheHeader> gChunkSeedCacheHeaders : register(t7);
+StructuredBuffer<ExactBiomeSeed> gChunkSeeds : register(t8);
+StructuredBuffer<GpuSamplePointCacheEntry> gSampleCache : register(t9);
+RWStructuredBuffer<GpuChunkSeedCacheHeader> gChunkSeedCacheHeadersOut : register(u0);
+RWStructuredBuffer<ExactBiomeSeed> gChunkSeedsOut : register(u1);
+RWStructuredBuffer<GpuSamplePointCacheEntry> gSampleCacheOut : register(u2);
+RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u3);
 
 uint2 xor64(uint2 a, uint2 b)
 {
@@ -779,6 +780,10 @@ void insertWeightedSeed(inout WeightedSeed weighted[kMaxWeightedSeeds], inout ui
 
 int positiveModulo(int value, int divisor)
 {
+    if (divisor == 0)
+    {
+        return 0;
+    }
     const int result = value % divisor;
     return result < 0 ? result + divisor : result;
 }
@@ -1358,6 +1363,19 @@ SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
     const int2 worldPos = int2(worldX, worldZ);
     const int chunkX = floorDivExact(worldX, header.chunkSpan);
     const int chunkZ = floorDivExact(worldZ, header.chunkSpan);
+    if (gSeedCacheSizeX <= 0 || gSeedCacheSizeZ <= 0)
+    {
+        return samplePointLegacy(worldX, worldZ);
+    }
+
+    const uint seedCacheWidth = (uint)gSeedCacheSizeX;
+    const uint seedCacheHeight = (uint)gSeedCacheSizeZ;
+    const uint totalSeedCacheChunks = seedCacheWidth * seedCacheHeight;
+    const uint totalSeedCount = totalSeedCacheChunks * kMaxChunkSeeds;
+    if (totalSeedCacheChunks == 0u || totalSeedCount / kMaxChunkSeeds != totalSeedCacheChunks)
+    {
+        return samplePointLegacy(worldX, worldZ);
+    }
 
     WeightedSeed weightedSeeds[kMaxWeightedSeeds];
     uint weightedCount = 0u;
@@ -1371,12 +1389,23 @@ SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
         for (int dx = -header.neighborRadius; dx <= header.neighborRadius; ++dx)
         {
             const uint cacheIndex = seedCacheIndex(int2(chunkX + dx, chunkZ + dz));
-            const uint chunkSeedCount = gChunkSeedCache[cacheIndex].seedCount;
+            if (cacheIndex >= totalSeedCacheChunks)
+            {
+                return samplePointLegacy(worldX, worldZ);
+            }
+            const GpuChunkSeedCacheHeader cacheHeader = gChunkSeedCacheHeaders[cacheIndex];
+            const uint seedBaseIndex = cacheHeader.baseSeedIndex;
+            if (seedBaseIndex >= totalSeedCount)
+            {
+                return samplePointLegacy(worldX, worldZ);
+            }
+
+            const uint chunkSeedCount = min(cacheHeader.seedCount, min(kMaxChunkSeeds, totalSeedCount - seedBaseIndex));
 
             [loop]
             for (uint seedIndex = 0u; seedIndex < chunkSeedCount; ++seedIndex)
             {
-                const ExactBiomeSeed seed = gChunkSeedCache[cacheIndex].seeds[seedIndex];
+                const ExactBiomeSeed seed = gChunkSeeds[seedBaseIndex + seedIndex];
                 const FarLodGpuBiome seedBiome = gBiomes[seed.biomeIndex];
                 const float2 delta = float2(worldPos - seed.position);
                 const float distance = length(delta);
@@ -2270,23 +2299,49 @@ void FarLodChunkSeedCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
+    if (gSeedCacheSizeX <= 0 || gSeedCacheSizeZ <= 0)
+    {
+        return;
+    }
+
+    const uint seedCacheWidth = (uint)gSeedCacheSizeX;
+    const uint seedCacheHeight = (uint)gSeedCacheSizeZ;
+    const uint totalSeedCacheChunks = seedCacheWidth * seedCacheHeight;
+    const uint totalSeedCount = totalSeedCacheChunks * kMaxChunkSeeds;
+    if (totalSeedCacheChunks == 0u || totalSeedCount / kMaxChunkSeeds != totalSeedCacheChunks)
+    {
+        return;
+    }
+
     const int2 chunkCoord = int2(gUpdateOriginCellX + (int)dispatchThreadId.x,
                                  gUpdateOriginCellZ + (int)dispatchThreadId.y);
-    GpuChunkSeedCacheEntry cacheEntry = (GpuChunkSeedCacheEntry)0;
+    GpuChunkSeedCacheHeader cacheHeader = (GpuChunkSeedCacheHeader)0;
     ExactBiomeSeed seeds[kMaxChunkSeeds];
     uint seedCount = 0u;
     buildChunkSeeds(chunkCoord.x, chunkCoord.y, seeds, seedCount);
-    cacheEntry.seedCount = seedCount;
+    const uint cacheIndex = seedCacheIndex(chunkCoord);
+    if (cacheIndex >= totalSeedCacheChunks)
+    {
+        return;
+    }
+    const uint seedBaseIndex = cacheIndex * kMaxChunkSeeds;
+    if (seedBaseIndex >= totalSeedCount)
+    {
+        return;
+    }
+    const uint maxWritableSeedCount = min(seedCount, min(kMaxChunkSeeds, totalSeedCount - seedBaseIndex));
+    cacheHeader.seedCount = maxWritableSeedCount;
+    cacheHeader.baseSeedIndex = seedBaseIndex;
     [unroll]
     for (uint seedIndex = 0u; seedIndex < kMaxChunkSeeds; ++seedIndex)
     {
-        if (seedIndex >= seedCount)
+        if (seedIndex >= maxWritableSeedCount)
         {
             break;
         }
-        cacheEntry.seeds[seedIndex] = seeds[seedIndex];
+        gChunkSeedsOut[seedBaseIndex + seedIndex] = seeds[seedIndex];
     }
-    gChunkSeedCacheOut[seedCacheIndex(chunkCoord)] = cacheEntry;
+    gChunkSeedCacheHeadersOut[cacheIndex] = cacheHeader;
 }
 
 [numthreads(8, 8, 1)]
@@ -2324,7 +2379,7 @@ void FarLodColumnSampleCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID,
             int2(maxSampleX, midZ),
         };
 
-        [unroll]
+        [loop]
         for (uint sampleIndex = 0u; sampleIndex < 9u; ++sampleIndex)
         {
             gSharedSampleTile[sharedIndex].points[sampleIndex] =

@@ -10,6 +10,8 @@ endif()
 
 project(BlockGame VERSION 0.1.0 LANGUAGES C CXX)
 
+set(BLOCKGAME_DXC_EXE "" CACHE FILEPATH "Optional path to dxc.exe for shader precompilation")
+
 if(NOT CMAKE_GENERATOR MATCHES "Ninja")
     message(STATUS "Generator is '${CMAKE_GENERATOR}'. For fastest incremental builds consider running: cmake -G Ninja -S . -B build")
 endif()
@@ -174,8 +176,9 @@ add_custom_command(TARGET blockgame POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DBUILD_CONFIG=$<CONFIG>
         -DSHADER_COMPILER_EXE=$<TARGET_FILE:blockgame_shader_precompiler>
-        -DSHADER_SOURCE_DIR=$<TARGET_FILE_DIR:blockgame>/assets/shaders
+        -DSHADER_SOURCE_DIR=${CMAKE_SOURCE_DIR}/assets/shaders
         -DSHADER_OUTPUT_DIR=$<TARGET_FILE_DIR:blockgame>/assets/shaders/compiled
+        -DSHADER_DXC_EXE=${BLOCKGAME_DXC_EXE}
         -P "${CMAKE_SOURCE_DIR}/cmake/precompile_shaders.cmake"
     COMMENT "Precompiling Release shaders"
 )

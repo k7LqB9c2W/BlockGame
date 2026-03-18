@@ -159,7 +159,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=Debug -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=Debug -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -255,7 +255,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=Release -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Release/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=Release -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Release/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -354,7 +354,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=MinSizeRel -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=MinSizeRel -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -450,7 +450,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=RelWithDebInfo -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets/shaders/compiled -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_CONFIG=RelWithDebInfo -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone

@@ -14,6 +14,9 @@
 # EXTERNAL cache entries
 ########################
 
+//Optional path to dxc.exe for shader precompilation
+BLOCKGAME_DXC_EXE:FILEPATH=D:/dxc_2026_02_20/bin/x64/dxc.exe
+
 //Value Computed by CMake
 BlockGame_BINARY_DIR:STATIC=C:/Users/Jacob/Documents/code/BlockGame/build
 

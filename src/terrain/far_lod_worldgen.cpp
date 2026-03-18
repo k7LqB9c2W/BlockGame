@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <glm/common.hpp>
 
@@ -16,6 +18,7 @@ namespace terrain
 {
 namespace
 {
+constexpr float kCoastDistanceFieldRange = 96.0f;
 constexpr float kOceanThreshold = -0.08f;
 constexpr float kCoastDistanceScale = 72.0f;
 constexpr float kTemperatureScale = 0.11f;
@@ -265,6 +268,20 @@ FarLodCoastProfile mapCoastProfile(BiomeDefinition::TerrainSettings::CoastProfil
     }
 }
 
+std::uint32_t mapInterpolationCurve(BiomeDefinition::InterpolationCurve curve) noexcept
+{
+    switch (curve)
+    {
+    case BiomeDefinition::InterpolationCurve::Step:
+        return 0u;
+    case BiomeDefinition::InterpolationCurve::Linear:
+        return 1u;
+    case BiomeDefinition::InterpolationCurve::Square:
+    default:
+        return 2u;
+    }
+}
+
 std::array<float, 2> warpPosition(const FarLodGpuWorldgenHeader& header, int worldX, int worldZ) noexcept
 {
     const float worldXF = static_cast<float>(worldX);
@@ -293,8 +310,23 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
     tables.header.treeDensityOctaves = 4u;
     tables.header.treeDensityGain = 0.55f;
     tables.header.treeDensityLacunarity = 2.0f;
+    tables.header.coastDistanceFieldRange = kCoastDistanceFieldRange;
+
+    const int chunkSpan =
+        std::max(64, static_cast<int>(std::ceil(biomeDatabase.maxBiomeRadius() * 1.75f)));
+    const int alignment = 32;
+    tables.header.chunkSpan = std::max(alignment, ((chunkSpan + alignment - 1) / alignment) * alignment);
+    tables.header.neighborRadius =
+        std::max(2, static_cast<int>(std::ceil(biomeDatabase.maxBiomeRadius() /
+                                               static_cast<float>(tables.header.chunkSpan))) + 1);
+
+    std::unordered_map<const BiomeDefinition*, std::uint32_t> biomeIndexByPtr;
+    biomeIndexByPtr.reserve(biomeDatabase.biomeCount());
 
     tables.biomes.reserve(biomeDatabase.biomeCount());
+    tables.transitionBiomes.reserve(biomeDatabase.biomeCount() * 2u);
+    tables.subBiomes.reserve(biomeDatabase.biomeCount() * 2u);
+    std::uint32_t biomeIndex = 0u;
     for (const BiomeDefinition& biome : biomeDatabase.definitions())
     {
         FarLodGpuBiome packed{};
@@ -321,6 +353,14 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
         {
             packed.flags |= kFarLodBiomeGeneratesTrees;
         }
+        if (biome.hasFlag("beach"))
+        {
+            packed.flags |= kFarLodBiomeBeach;
+        }
+        if (biome.hasFlag("coastal"))
+        {
+            packed.flags |= kFarLodBiomeCoastal;
+        }
         packed.coastProfile = static_cast<std::uint32_t>(mapCoastProfile(biome.effectiveCoastProfile()));
         packed.propertyBits = biome.properties.value();
         packed.waterMaxDepth = biome.terrainSettings.waterFill.maxDepth;
@@ -334,13 +374,149 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
         packed.mountains = biome.mountains;
         packed.keepOriginalTerrain = biome.keepOriginalTerrain;
         packed.interpolationWeight = biome.interpolationWeight;
+        packed.interpolationCurve = mapInterpolationCurve(biome.interpolationCurve);
+        packed.radius = biome.radius;
+        packed.radiusVariation = biome.radiusVariation;
+        packed.fixedRadius = biome.fixedRadius ? 1u : 0u;
+        packed.treeDensityMultiplier = biome.treeDensityMultiplier;
+        packed.maxSubBiomeCount = biome.maxSubBiomeCount;
+        packed.subBiomeTotalChance = biome.subBiomeTotalChance;
+        packed.minHeightLimit = biome.minHeightLimit.value_or(0);
+        packed.maxHeightLimit = biome.maxHeightLimit.value_or(0);
+        packed.hasMinHeightLimit = biome.minHeightLimit.has_value() ? 1u : 0u;
+        packed.hasMaxHeightLimit = biome.maxHeightLimit.has_value() ? 1u : 0u;
         packed.baseSlopeBias = biome.baseSlopeBias;
         packed.maxGradient = biome.maxGradient;
         packed.footprintMultiplier = biome.footprintMultiplier;
+        for (const auto& transition : biome.transitionBiomes)
+        {
+            tables.header.maxTransitionWidth =
+                std::max(tables.header.maxTransitionWidth, static_cast<std::int32_t>(transition.width));
+        }
         tables.biomes.push_back(packed);
+        biomeIndexByPtr.emplace(&biome, biomeIndex++);
+    }
+
+    for (std::size_t index = 0; index < biomeDatabase.definitions().size(); ++index)
+    {
+        const BiomeDefinition& biome = biomeDatabase.definitions()[index];
+        FarLodGpuBiome& packed = tables.biomes[index];
+        packed.transitionOffset = static_cast<std::uint32_t>(tables.transitionBiomes.size());
+        packed.subBiomeOffset = static_cast<std::uint32_t>(tables.subBiomes.size());
+
+        for (const auto& transition : biome.transitionBiomes)
+        {
+            if (!transition.biome)
+            {
+                continue;
+            }
+
+            const auto it = biomeIndexByPtr.find(transition.biome);
+            if (it == biomeIndexByPtr.end())
+            {
+                continue;
+            }
+
+            FarLodGpuTransitionBiome packedTransition{};
+            packedTransition.biomeIndex = it->second;
+            packedTransition.chance = transition.chance;
+            packedTransition.width = transition.width;
+            packedTransition.propertyBits = transition.propertyMask.value();
+            tables.transitionBiomes.push_back(packedTransition);
+        }
+        packed.transitionCount =
+            static_cast<std::uint32_t>(tables.transitionBiomes.size()) - packed.transitionOffset;
+
+        for (const auto& sub : biome.subBiomes)
+        {
+            if (!sub.biome)
+            {
+                continue;
+            }
+
+            const auto it = biomeIndexByPtr.find(sub.biome);
+            if (it == biomeIndexByPtr.end())
+            {
+                continue;
+            }
+
+            FarLodGpuSubBiome packedSub{};
+            packedSub.biomeIndex = it->second;
+            packedSub.chance = sub.chance;
+            packedSub.minRadius = sub.minRadius;
+            packedSub.maxRadius = sub.maxRadius;
+            tables.subBiomes.push_back(packedSub);
+        }
+        packed.subBiomeCount =
+            static_cast<std::uint32_t>(tables.subBiomes.size()) - packed.subBiomeOffset;
+    }
+
+    for (std::uint32_t index = 0; index < tables.biomes.size(); ++index)
+    {
+        const BiomeDefinition& biome = biomeDatabase.definitionByIndex(index);
+        if (biome.spawnChance <= 0.0f)
+        {
+            continue;
+        }
+
+        const float radiusScale = std::max(biome.radius, 1.0f);
+        float weight = std::max(biome.spawnChance * biome.footprintMultiplier, 0.0f);
+        weight /= std::max(radiusScale, 1.0f);
+        const auto& props = biome.generationProperties();
+        if (props.has(BiomeDefinition::GenerationProperties::kOcean))
+        {
+            weight *= 1.25f;
+        }
+        if (props.has(BiomeDefinition::GenerationProperties::kMountain))
+        {
+            weight *= 0.85f;
+        }
+        if (props.has(BiomeDefinition::GenerationProperties::kLowTerrain))
+        {
+            weight *= 1.1f;
+        }
+        if (weight <= 0.0f)
+        {
+            continue;
+        }
+
+        tables.header.totalSpawnWeight += weight;
+        tables.biomeSelections.push_back(FarLodGpuBiomeSelection{
+            index,
+            tables.header.totalSpawnWeight,
+            0u,
+            0u});
+
+        if (biome.isOcean())
+        {
+            tables.header.totalOceanWeight += weight;
+            tables.oceanSelections.push_back(FarLodGpuBiomeSelection{
+                index,
+                tables.header.totalOceanWeight,
+                0u,
+                0u});
+        }
+    }
+
+    tables.surfacePermutation.resize(512u);
+    std::array<std::uint32_t, 256> permutation{};
+    for (std::uint32_t i = 0; i < permutation.size(); ++i)
+    {
+        permutation[i] = i;
+    }
+    std::mt19937 rng(tables.header.seed ^ 0xA511E9B7u);
+    std::shuffle(permutation.begin(), permutation.end(), rng);
+    for (std::size_t i = 0; i < permutation.size(); ++i)
+    {
+        tables.surfacePermutation[i] = permutation[i];
+        tables.surfacePermutation[256u + i] = permutation[i];
     }
 
     tables.header.biomeCount = static_cast<std::uint32_t>(tables.biomes.size());
+    tables.header.biomeSelectionCount = static_cast<std::uint32_t>(tables.biomeSelections.size());
+    tables.header.oceanSelectionCount = static_cast<std::uint32_t>(tables.oceanSelections.size());
+    tables.header.transitionCount = static_cast<std::uint32_t>(tables.transitionBiomes.size());
+    tables.header.subBiomeCount = static_cast<std::uint32_t>(tables.subBiomes.size());
     return tables;
 }
 

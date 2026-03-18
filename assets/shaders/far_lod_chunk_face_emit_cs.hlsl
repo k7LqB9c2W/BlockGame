@@ -59,8 +59,9 @@ StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegX : register(t2);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosZ : register(t3);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegZ : register(t4);
 StructuredBuffer<uint> gFaceCounts : register(t5);
-StructuredBuffer<uint> gFacePrefixes : register(t6);
-StructuredBuffer<GpuBlockFaceUv> gBlockFaceUvs : register(t7);
+StructuredBuffer<uint> gFaceAnalysis : register(t6);
+StructuredBuffer<uint> gFacePrefixes : register(t7);
+StructuredBuffer<GpuBlockFaceUv> gBlockFaceUvs : register(t8);
 RWStructuredBuffer<WorldVertex> gVertices : register(u0);
 RWStructuredBuffer<uint> gIndices : register(u1);
 RWStructuredBuffer<GpuCullRecord> gDrawRecords : register(u2);
@@ -78,11 +79,18 @@ static const uint kLayerCanopy = 2u;
 static const uint kTopPlaneCount = 3u;
 static const uint kSideSlicesPerLayer = 64u;
 static const uint kPlaneCount = kTopPlaneCount + 3u * kSideSlicesPerLayer;
+static const uint kTopPlaneKeyCount = kTopPlaneCount * kLogicalSize * kLogicalSize;
+static const uint kFaceAnalysisClosureFloorOffset = 0u;
+static const uint kFaceAnalysisTopKeysOffset = 1u;
+static const uint kFaceAnalysisSideKeysOffset = kFaceAnalysisTopKeysOffset + kTopPlaneKeyCount;
 static const uint kFaceTop = 0u;
 static const uint kFaceNorth = 2u;
 static const uint kFaceSouth = 3u;
 static const uint kFaceEast = 4u;
 static const uint kFaceWest = 5u;
+
+groupshared GpuTerrainColumnDescriptor gSharedColumns[kLogicalSize * kLogicalSize];
+groupshared int gSharedTileClosureFloorY;
 
 uint columnIndex(uint x, uint z)
 {
@@ -91,7 +99,17 @@ uint columnIndex(uint x, uint z)
 
 GpuTerrainColumnDescriptor sampleLocal(uint x, uint z)
 {
-    return gColumnBuffer[columnIndex(x, z)];
+    return gSharedColumns[columnIndex(x, z)];
+}
+
+uint topAnalysisIndex(uint layerId, uint x, uint z)
+{
+    return kFaceAnalysisTopKeysOffset + layerId * (kLogicalSize * kLogicalSize) + z * kLogicalSize + x;
+}
+
+uint sideAnalysisBase(uint planeIndex)
+{
+    return kFaceAnalysisSideKeysOffset + (planeIndex - kTopPlaneCount) * kLogicalSize;
 }
 
 bool layerActive(GpuTerrainColumnDescriptor column, uint layerId)
@@ -151,34 +169,7 @@ bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
 
 int computeTileClosureFloorY()
 {
-    int floorY = 2147483647;
-    [loop]
-    for (uint z = 0u; z < kLogicalSize; ++z)
-    {
-        [loop]
-        for (uint x = 0u; x < kLogicalSize; ++x)
-        {
-            const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
-            if ((column.flags & kColumnFlagTerrain) != 0u)
-            {
-                floorY = min(floorY, column.terrainTopY - gBlockScale);
-            }
-            if ((column.flags & kColumnFlagWater) != 0u)
-            {
-                floorY = min(floorY, column.waterBottomY);
-            }
-            if ((column.flags & kColumnFlagCanopy) != 0u)
-            {
-                floorY = min(floorY, column.canopyBottomY);
-            }
-        }
-    }
-
-    if (floorY == 2147483647)
-    {
-        return gWorldMinY;
-    }
-    return floorY;
+    return gSharedTileClosureFloorY;
 }
 
 bool sideSegment(GpuTerrainColumnDescriptor current,
@@ -239,43 +230,6 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
     segmentBottom = max(currentBottom, occluderTop + 1);
     segmentTopExclusive = currentTop + 1;
     return segmentTopExclusive > segmentBottom;
-}
-
-uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
-{
-    if (!topFaceVisible(column, layerId))
-    {
-        return 0u;
-    }
-
-    uint h = 2166136261u;
-    h = (h ^ layerTopBlock(column, layerId)) * 16777619u;
-    h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
-    h = (h ^ asuint(layerTopY(column, layerId))) * 16777619u;
-    return h | 1u;
-}
-
-uint hashSideKey(GpuTerrainColumnDescriptor current,
-                 GpuTerrainColumnDescriptor neighbor,
-                 uint layerId,
-                 int tileClosureFloorY,
-                 out bool visible)
-{
-    visible = false;
-    int segmentBottom = 0;
-    int segmentTopExclusive = 0;
-    if (!sideSegment(current, neighbor, layerId, tileClosureFloorY, segmentBottom, segmentTopExclusive))
-    {
-        return 0u;
-    }
-
-    uint h = 2166136261u;
-    h = (h ^ layerSideBlock(current, layerId)) * 16777619u;
-    h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
-    h = (h ^ asuint(segmentBottom)) * 16777619u;
-    h = (h ^ asuint(segmentTopExclusive)) * 16777619u;
-    visible = true;
-    return h | 1u;
 }
 
 void decodePlane(uint planeIndex, out uint layerId, out bool isTopPlane, out uint dirId, out uint slice)
@@ -390,7 +344,7 @@ void emitTopPlane(uint planeIndex, uint layerId)
     {
         for (uint x = 0u; x < 16u; ++x)
         {
-            keys[fillZ * 16u + x] = hashTopKey(sampleLocal(x, fillZ), layerId);
+            keys[fillZ * 16u + x] = gFaceAnalysis[topAnalysisIndex(layerId, x, fillZ)];
         }
     }
 
@@ -481,63 +435,12 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
     const uint maxExtent = clamp(gMaxMergeExtent, 1u, 16u);
     const uint faceBase = gFacePrefixes[planeIndex];
     const int tileClosureFloorY = computeTileClosureFloorY();
+    const uint analysisBase = sideAnalysisBase(planeIndex);
     uint keys[16];
     [unroll]
     for (uint i = 0u; i < 16u; ++i)
     {
-        GpuTerrainColumnDescriptor current = (GpuTerrainColumnDescriptor)0;
-        GpuTerrainColumnDescriptor neighbor = (GpuTerrainColumnDescriptor)0;
-        if (dirId == 0u)
-        {
-            current = sampleLocal(slice, i);
-            if (slice + 1u < 16u)
-            {
-                neighbor = sampleLocal(slice + 1u, i);
-            }
-            else
-            {
-                neighbor = gNeighborPosX[columnIndex(0u, i)];
-            }
-        }
-        else if (dirId == 1u)
-        {
-            current = sampleLocal(slice, i);
-            if (slice > 0u)
-            {
-                neighbor = sampleLocal(slice - 1u, i);
-            }
-            else
-            {
-                neighbor = gNeighborNegX[columnIndex(kLogicalSize - 1u, i)];
-            }
-        }
-        else if (dirId == 2u)
-        {
-            current = sampleLocal(i, slice);
-            if (slice + 1u < 16u)
-            {
-                neighbor = sampleLocal(i, slice + 1u);
-            }
-            else
-            {
-                neighbor = gNeighborPosZ[columnIndex(i, 0u)];
-            }
-        }
-        else
-        {
-            current = sampleLocal(i, slice);
-            if (slice > 0u)
-            {
-                neighbor = sampleLocal(i, slice - 1u);
-            }
-            else
-            {
-                neighbor = gNeighborNegZ[columnIndex(i, kLogicalSize - 1u)];
-            }
-        }
-
-        bool visible = false;
-        keys[i] = hashSideKey(current, neighbor, layerId, tileClosureFloorY, visible);
+        keys[i] = gFaceAnalysis[analysisBase + i];
     }
 
     uint emitted = 0u;
@@ -677,13 +580,23 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
 }
 
 [numthreads(64, 1, 1)]
-void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID,
+                             uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint linearIndex = dispatchThreadId.x;
-    if (linearIndex >= kVoxelCount)
+    const uint groupIndex = groupThreadId.x;
+    for (uint loadIndex = groupIndex; loadIndex < (kLogicalSize * kLogicalSize); loadIndex += 64u)
     {
-        return;
+        const uint x = loadIndex & 15u;
+        const uint z = loadIndex >> 4u;
+        gSharedColumns[loadIndex] = gColumnBuffer[columnIndex(x, z)];
     }
+    GroupMemoryBarrierWithGroupSync();
+    if (groupIndex == 0u)
+    {
+        gSharedTileClosureFloorY = asint(gFaceAnalysis[kFaceAnalysisClosureFloorOffset]);
+    }
+    GroupMemoryBarrierWithGroupSync();
 
     if (linearIndex < kPlaneCount)
     {
@@ -702,9 +615,9 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
     }
 
-    if (linearIndex == (kVoxelCount - 1u))
+    if (linearIndex == 0u)
     {
-        const uint totalFaces = gFacePrefixes[linearIndex] + gFaceCounts[linearIndex];
+        const uint totalFaces = gFacePrefixes[kPlaneCount - 1u] + gFaceCounts[kPlaneCount - 1u];
         const int tileClosureFloorY = computeTileClosureFloorY();
         int boundsMinY = 2147483647;
         int boundsMaxY = -2147483647;

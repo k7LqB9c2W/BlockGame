@@ -28,6 +28,7 @@ StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegX : register(t2);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborPosZ : register(t3);
 StructuredBuffer<GpuTerrainColumnDescriptor> gNeighborNegZ : register(t4);
 RWStructuredBuffer<uint> gFaceCounts : register(u0);
+RWStructuredBuffer<uint> gFaceAnalysis : register(u1);
 
 static const uint kLogicalSize = 16u;
 static const uint kColumnFlagTerrain = 0x01u;
@@ -41,6 +42,13 @@ static const uint kLayerCanopy = 2u;
 static const uint kTopPlaneCount = 3u;
 static const uint kSideSlicesPerLayer = 64u;
 static const uint kPlaneCount = kTopPlaneCount + 3u * kSideSlicesPerLayer;
+static const uint kTopPlaneKeyCount = kTopPlaneCount * kLogicalSize * kLogicalSize;
+static const uint kFaceAnalysisClosureFloorOffset = 0u;
+static const uint kFaceAnalysisTopKeysOffset = 1u;
+static const uint kFaceAnalysisSideKeysOffset = kFaceAnalysisTopKeysOffset + kTopPlaneKeyCount;
+
+groupshared GpuTerrainColumnDescriptor gSharedColumns[kLogicalSize * kLogicalSize];
+groupshared int gSharedTileClosureFloorY;
 
 uint columnIndex(uint x, uint z)
 {
@@ -49,7 +57,17 @@ uint columnIndex(uint x, uint z)
 
 GpuTerrainColumnDescriptor sampleLocal(uint x, uint z)
 {
-    return gColumnBuffer[columnIndex(x, z)];
+    return gSharedColumns[columnIndex(x, z)];
+}
+
+uint topAnalysisIndex(uint layerId, uint x, uint z)
+{
+    return kFaceAnalysisTopKeysOffset + layerId * (kLogicalSize * kLogicalSize) + z * kLogicalSize + x;
+}
+
+uint sideAnalysisBase(uint planeIndex)
+{
+    return kFaceAnalysisSideKeysOffset + (planeIndex - kTopPlaneCount) * kLogicalSize;
 }
 
 bool layerActive(GpuTerrainColumnDescriptor column, uint layerId)
@@ -115,34 +133,7 @@ bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
 
 int computeTileClosureFloorY()
 {
-    int floorY = 2147483647;
-    [loop]
-    for (uint z = 0u; z < kLogicalSize; ++z)
-    {
-        [loop]
-        for (uint x = 0u; x < kLogicalSize; ++x)
-        {
-            const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
-            if ((column.flags & kColumnFlagTerrain) != 0u)
-            {
-                floorY = min(floorY, column.terrainTopY - gBlockScale);
-            }
-            if ((column.flags & kColumnFlagWater) != 0u)
-            {
-                floorY = min(floorY, column.waterBottomY);
-            }
-            if ((column.flags & kColumnFlagCanopy) != 0u)
-            {
-                floorY = min(floorY, column.canopyBottomY);
-            }
-        }
-    }
-
-    if (floorY == 2147483647)
-    {
-        return gWorldMinY;
-    }
-    return floorY;
+    return gSharedTileClosureFloorY;
 }
 
 uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
@@ -276,7 +267,9 @@ uint countTopQuads(uint layerId)
         for (uint x = 0u; x < 16u; ++x)
         {
             const GpuTerrainColumnDescriptor column = sampleLocal(x, fillZ);
-            keys[fillZ * 16u + x] = hashTopKey(column, layerId);
+            const uint key = hashTopKey(column, layerId);
+            keys[fillZ * 16u + x] = key;
+            gFaceAnalysis[topAnalysisIndex(layerId, x, fillZ)] = key;
         }
     }
 
@@ -342,9 +335,10 @@ uint countTopQuads(uint layerId)
     return quadCount;
 }
 
-uint countSideRuns(uint layerId, uint dirId, uint slice)
+uint countSideRuns(uint planeIndex, uint layerId, uint dirId, uint slice)
 {
     const int tileClosureFloorY = computeTileClosureFloorY();
+    const uint analysisBase = sideAnalysisBase(planeIndex);
     uint keys[16];
     [unroll]
     for (uint i = 0u; i < 16u; ++i)
@@ -401,7 +395,9 @@ uint countSideRuns(uint layerId, uint dirId, uint slice)
         }
 
         bool visible = false;
-        keys[i] = hashSideKey(current, neighbor, layerId, tileClosureFloorY, visible);
+        const uint key = hashSideKey(current, neighbor, layerId, tileClosureFloorY, visible);
+        keys[i] = key;
+        gFaceAnalysis[analysisBase + i] = key;
     }
 
     uint runCount = 0u;
@@ -430,17 +426,53 @@ uint countSideRuns(uint layerId, uint dirId, uint slice)
 }
 
 [numthreads(64, 1, 1)]
-void FarLodChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+void FarLodChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID,
+                              uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint linearIndex = dispatchThreadId.x;
-    if (linearIndex >= kLogicalSize * kLogicalSize * kLogicalSize)
+    const uint groupIndex = groupThreadId.x;
+    for (uint loadIndex = groupIndex; loadIndex < (kLogicalSize * kLogicalSize); loadIndex += 64u)
     {
-        return;
+        const uint x = loadIndex & 15u;
+        const uint z = loadIndex >> 4u;
+        gSharedColumns[loadIndex] = gColumnBuffer[columnIndex(x, z)];
     }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (groupIndex == 0u)
+    {
+        int floorY = 2147483647;
+        [loop]
+        for (uint z = 0u; z < kLogicalSize; ++z)
+        {
+            [loop]
+            for (uint x = 0u; x < kLogicalSize; ++x)
+            {
+                const GpuTerrainColumnDescriptor column = sampleLocal(x, z);
+                if ((column.flags & kColumnFlagTerrain) != 0u)
+                {
+                    floorY = min(floorY, column.terrainTopY - gBlockScale);
+                }
+                if ((column.flags & kColumnFlagWater) != 0u)
+                {
+                    floorY = min(floorY, column.waterBottomY);
+                }
+                if ((column.flags & kColumnFlagCanopy) != 0u)
+                {
+                    floorY = min(floorY, column.canopyBottomY);
+                }
+            }
+        }
+        gSharedTileClosureFloorY = (floorY == 2147483647) ? gWorldMinY : floorY;
+        if (linearIndex == 0u)
+        {
+            gFaceAnalysis[kFaceAnalysisClosureFloorOffset] = asuint(gSharedTileClosureFloorY);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
 
     if (linearIndex >= kPlaneCount)
     {
-        gFaceCounts[linearIndex] = 0u;
         return;
     }
 
@@ -449,5 +481,5 @@ void FarLodChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     uint dirId;
     uint slice;
     decodePlane(linearIndex, layerId, isTopPlane, dirId, slice);
-    gFaceCounts[linearIndex] = isTopPlane ? countTopQuads(layerId) : countSideRuns(layerId, dirId, slice);
+    gFaceCounts[linearIndex] = isTopPlane ? countTopQuads(layerId) : countSideRuns(linearIndex, layerId, dirId, slice);
 }

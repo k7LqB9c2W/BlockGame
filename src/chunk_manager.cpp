@@ -1627,11 +1627,12 @@ public:
                            ID3D12Resource* neighborNegX,
                            ID3D12Resource* neighborPosZ,
                            ID3D12Resource* neighborNegZ,
-                           ID3D12Resource* faceCountBuffer)
+                           ID3D12Resource* faceCountBuffer,
+                           ID3D12Resource* faceAnalysisBuffer)
     {
         if (!open_ || voxelBuffer == nullptr || neighborPosX == nullptr ||
             neighborNegX == nullptr || neighborPosZ == nullptr || neighborNegZ == nullptr ||
-            faceCountBuffer == nullptr)
+            faceCountBuffer == nullptr || faceAnalysisBuffer == nullptr)
         {
             return;
         }
@@ -1641,7 +1642,7 @@ public:
             static_cast<std::uint32_t>(blockScale),
             reservedFlags,
             maxMergeExtent};
-        const UINT descriptorIndex = allocateDescriptorRange(6);
+        const UINT descriptorIndex = allocateDescriptorRange(7);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      voxelBuffer,
                                      0,
@@ -1670,7 +1671,12 @@ public:
         writeStructuredUavDescriptor(descriptorIndex + 5u,
                                      faceCountBuffer,
                                      0,
-                                     kGpuContextVoxelCount,
+                                     kGpuContextPlaneCount,
+                                     kGpuContextPackedVoxelStrideBytes);
+        writeStructuredUavDescriptor(descriptorIndex + 6u,
+                                     faceAnalysisBuffer,
+                                     0,
+                                     kGpuContextFaceAnalysisEntryCount,
                                      kGpuContextPackedVoxelStrideBytes);
         ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
         commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
@@ -1683,7 +1689,7 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
         uavHandle.ptr += descriptorSize_ * 5u;
         commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch((kGpuContextVoxelCount + 63u) / 64u, 1, 1);
+        commandList_->Dispatch(kGpuContextPlaneDispatchGroupCount, 1, 1);
         hasCommands_ = true;
     }
 
@@ -1700,12 +1706,12 @@ public:
         writeStructuredSrvDescriptor(descriptorIndex,
                                      faceCountBuffer,
                                      0,
-                                     kGpuContextVoxelCount,
+                                     kGpuContextPlaneCount,
                                      kGpuContextPackedVoxelStrideBytes);
         writeStructuredUavDescriptor(descriptorIndex + 1u,
                                      facePrefixBuffer,
                                      0,
-                                     kGpuContextVoxelCount,
+                                     kGpuContextPlaneCount,
                                      kGpuContextPackedVoxelStrideBytes);
         writeStructuredUavDescriptor(descriptorIndex + 2u,
                                      faceGroupSumBuffer,
@@ -1749,7 +1755,7 @@ public:
         writeStructuredUavDescriptor(descriptorIndex + 1u,
                                      facePrefixBuffer,
                                      0,
-                                     kGpuContextVoxelCount,
+                                     kGpuContextPlaneCount,
                                      kGpuContextPackedVoxelStrideBytes);
         D3D12_GPU_DESCRIPTOR_HANDLE addSrvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
         addSrvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
@@ -1777,6 +1783,7 @@ public:
                           ID3D12Resource* neighborPosZ,
                           ID3D12Resource* neighborNegZ,
                           ID3D12Resource* faceCountBuffer,
+                          ID3D12Resource* faceAnalysisBuffer,
                           ID3D12Resource* facePrefixBuffer,
                           ID3D12Resource* blockUvBuffer,
                           std::uint32_t blockUvCount,
@@ -1789,7 +1796,8 @@ public:
                           std::uint32_t drawRecordCount)
     {
         if (!open_ || voxelBuffer == nullptr || neighborPosX == nullptr || neighborNegX == nullptr ||
-            neighborPosZ == nullptr || neighborNegZ == nullptr || faceCountBuffer == nullptr || facePrefixBuffer == nullptr ||
+            neighborPosZ == nullptr || neighborNegZ == nullptr || faceCountBuffer == nullptr ||
+            faceAnalysisBuffer == nullptr || facePrefixBuffer == nullptr ||
             blockUvBuffer == nullptr || vertexBuffer == nullptr || indexBuffer == nullptr || drawRecordBuffer == nullptr)
         {
             return;
@@ -1805,7 +1813,7 @@ public:
             indexBase,
             recordIndex,
             reservedFlags};
-        const UINT descriptorIndex = allocateDescriptorRange(11);
+        const UINT descriptorIndex = allocateDescriptorRange(12);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      voxelBuffer,
                                      0,
@@ -1834,29 +1842,34 @@ public:
         writeStructuredSrvDescriptor(descriptorIndex + 5u,
                                      faceCountBuffer,
                                      0,
-                                     kGpuContextVoxelCount,
+                                     kGpuContextPlaneCount,
                                      kGpuContextPackedVoxelStrideBytes);
         writeStructuredSrvDescriptor(descriptorIndex + 6u,
-                                     facePrefixBuffer,
+                                     faceAnalysisBuffer,
                                      0,
-                                     kGpuContextVoxelCount,
+                                     kGpuContextFaceAnalysisEntryCount,
                                      kGpuContextPackedVoxelStrideBytes);
         writeStructuredSrvDescriptor(descriptorIndex + 7u,
+                                     facePrefixBuffer,
+                                     0,
+                                     kGpuContextPlaneCount,
+                                     kGpuContextPackedVoxelStrideBytes);
+        writeStructuredSrvDescriptor(descriptorIndex + 8u,
                                      blockUvBuffer,
                                      0,
                                      blockUvCount,
                                      blockUvStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 8u,
+        writeStructuredUavDescriptor(descriptorIndex + 9u,
                                      vertexBuffer,
                                      0,
                                      vertexBufferCount,
                                      static_cast<std::uint32_t>(sizeof(Vertex)));
-        writeStructuredUavDescriptor(descriptorIndex + 9u,
+        writeStructuredUavDescriptor(descriptorIndex + 10u,
                                      indexBuffer,
                                      0,
                                      indexBufferCount,
                                      static_cast<std::uint32_t>(sizeof(std::uint32_t)));
-        writeStructuredUavDescriptor(descriptorIndex + 10u,
+        writeStructuredUavDescriptor(descriptorIndex + 11u,
                                      drawRecordBuffer,
                                      0,
                                      drawRecordCount,
@@ -1870,9 +1883,9 @@ public:
         srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
         commandList_->SetComputeRootDescriptorTable(1, srvHandle);
         D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 8u;
+        uavHandle.ptr += descriptorSize_ * 9u;
         commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch((kGpuContextVoxelCount + 63u) / 64u, 1, 1);
+        commandList_->Dispatch(kGpuContextPlaneDispatchGroupCount, 1, 1);
         hasCommands_ = true;
     }
 
@@ -1977,7 +1990,19 @@ private:
     static constexpr std::uint32_t kGpuContextColumnCount = kGpuContextLogicalSize * kGpuContextLogicalSize;
     static constexpr std::uint32_t kGpuContextVoxelCount = kGpuContextLogicalSize * kGpuContextLogicalSize * kGpuContextLogicalSize;
     static constexpr std::uint32_t kGpuContextFacePrefixGroupSize = 256u;
-    static constexpr std::uint32_t kGpuContextFacePrefixGroupCount = kGpuContextVoxelCount / kGpuContextFacePrefixGroupSize;
+    static constexpr std::uint32_t kGpuContextTopPlaneCount = 3u;
+    static constexpr std::uint32_t kGpuContextSideSlicesPerLayer = 64u;
+    static constexpr std::uint32_t kGpuContextPlaneCount =
+        kGpuContextTopPlaneCount + 3u * kGpuContextSideSlicesPerLayer;
+    static constexpr std::uint32_t kGpuContextPlaneDispatchGroupCount = (kGpuContextPlaneCount + 63u) / 64u;
+    static constexpr std::uint32_t kGpuContextFacePrefixGroupCount =
+        (kGpuContextPlaneCount + kGpuContextFacePrefixGroupSize - 1u) / kGpuContextFacePrefixGroupSize;
+    static constexpr std::uint32_t kGpuContextTopPlaneKeyCount =
+        kGpuContextTopPlaneCount * kGpuContextColumnCount;
+    static constexpr std::uint32_t kGpuContextSidePlaneKeyCount =
+        (kGpuContextPlaneCount - kGpuContextTopPlaneCount) * kGpuContextLogicalSize;
+    static constexpr std::uint32_t kGpuContextFaceAnalysisEntryCount =
+        1u + kGpuContextTopPlaneKeyCount + kGpuContextSidePlaneKeyCount;
     static constexpr std::uint32_t kGpuContextColumnDescriptorStrideBytes = 48u;
     static constexpr std::uint32_t kGpuContextAtlasSampleStrideBytes = 48u;
     static constexpr std::uint32_t kGpuContextBiomeSelectionStrideBytes = 16u;
@@ -2195,7 +2220,7 @@ private:
         faceCountSrvRange.OffsetInDescriptorsFromTableStart = 0;
         D3D12_DESCRIPTOR_RANGE faceCountUavRange{};
         faceCountUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        faceCountUavRange.NumDescriptors = 1;
+        faceCountUavRange.NumDescriptors = 2;
         faceCountUavRange.BaseShaderRegister = 0;
         faceCountUavRange.OffsetInDescriptorsFromTableStart = 0;
 
@@ -2301,7 +2326,7 @@ private:
 
         D3D12_DESCRIPTOR_RANGE faceEmitSrvRange{};
         faceEmitSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        faceEmitSrvRange.NumDescriptors = 8;
+        faceEmitSrvRange.NumDescriptors = 9;
         faceEmitSrvRange.BaseShaderRegister = 0;
         faceEmitSrvRange.OffsetInDescriptorsFromTableStart = 0;
         D3D12_DESCRIPTOR_RANGE faceEmitUavRange{};
@@ -4118,9 +4143,14 @@ public:
     static constexpr std::size_t kMaxFarVerticesPerTile = kMaxFarFacesPerTile * 4u;
     static constexpr std::size_t kMaxFarIndicesPerTile = kMaxFarFacesPerTile * 6u;
     static constexpr std::uint32_t kInvalidFarDrawRecordIndex = std::numeric_limits<std::uint32_t>::max();
+    static constexpr std::uint32_t kTopPlaneCount = 3u;
+    static constexpr std::uint32_t kSideSlicesPerLayer = 64u;
+    static constexpr std::uint32_t kPlaneCount = kTopPlaneCount + 3u * kSideSlicesPerLayer;
     static constexpr std::uint32_t kFacePrefixGroupSize = 256u;
     static constexpr std::uint32_t kFacePrefixGroupCount =
-        static_cast<std::uint32_t>(kVoxelCount / kFacePrefixGroupSize);
+        static_cast<std::uint32_t>((kPlaneCount + kFacePrefixGroupSize - 1u) / kFacePrefixGroupSize);
+    static constexpr std::uint32_t kFaceAnalysisEntryCount =
+        1u + (kTopPlaneCount * kLogicalSize * kLogicalSize) + ((kPlaneCount - kTopPlaneCount) * kLogicalSize);
 
     struct FarLodChunkKey
     {
@@ -4220,9 +4250,11 @@ public:
         Microsoft::WRL::ComPtr<ID3D12Resource> voxelBuffer;
         D3D12_RESOURCE_STATES voxelState{D3D12_RESOURCE_STATE_COMMON};
         Microsoft::WRL::ComPtr<ID3D12Resource> faceCountBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> faceAnalysisBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> facePrefixBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> faceGroupSumBuffer;
         D3D12_RESOURCE_STATES faceCountState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES faceAnalysisState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES facePrefixState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES faceGroupSumState{D3D12_RESOURCE_STATE_COMMON};
         UINT64 voxelFenceValue{0};
@@ -6044,11 +6076,16 @@ private:
                                                      D3D12_RESOURCE_STATE_COMMON,
                                                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         chunk.gpu.faceCountBuffer = createDefaultBuffer(device_.Get(),
-                                                        static_cast<std::uint64_t>(kVoxelCount * sizeof(std::uint32_t)),
+                                                        static_cast<std::uint64_t>(kPlaneCount * sizeof(std::uint32_t)),
                                                         D3D12_RESOURCE_STATE_COMMON,
                                                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        chunk.gpu.faceAnalysisBuffer = createDefaultBuffer(device_.Get(),
+                                                           static_cast<std::uint64_t>(kFaceAnalysisEntryCount *
+                                                                                      sizeof(std::uint32_t)),
+                                                           D3D12_RESOURCE_STATE_COMMON,
+                                                           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         chunk.gpu.facePrefixBuffer = createDefaultBuffer(device_.Get(),
-                                                         static_cast<std::uint64_t>(kVoxelCount * sizeof(std::uint32_t)),
+                                                         static_cast<std::uint64_t>(kPlaneCount * sizeof(std::uint32_t)),
                                                          D3D12_RESOURCE_STATE_COMMON,
                                                          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         chunk.gpu.faceGroupSumBuffer = createDefaultBuffer(device_.Get(),
@@ -6073,6 +6110,15 @@ private:
                  << L"_" << chunk.key.coord.z;
             setDebugObjectName(chunk.gpu.faceCountBuffer.Get(), name.str());
         }
+        if (chunk.gpu.faceAnalysisBuffer != nullptr)
+        {
+            std::wostringstream name;
+            name << L"FarLodFaceAnalysis_L" << chunk.key.level
+                 << L"_" << chunk.key.coord.x
+                 << L"_" << chunk.key.coord.y
+                 << L"_" << chunk.key.coord.z;
+            setDebugObjectName(chunk.gpu.faceAnalysisBuffer.Get(), name.str());
+        }
         if (chunk.gpu.facePrefixBuffer != nullptr)
         {
             std::wostringstream name;
@@ -6093,6 +6139,7 @@ private:
         }
         chunk.gpu.columnState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_COMMON;
+        chunk.gpu.faceAnalysisState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.facePrefixState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.faceGroupSumState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.voxelFenceValue = 0;
@@ -6502,9 +6549,11 @@ private:
         chunk.gpu.voxelBuffer.Reset();
         chunk.gpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.faceCountBuffer.Reset();
+        chunk.gpu.faceAnalysisBuffer.Reset();
         chunk.gpu.facePrefixBuffer.Reset();
         chunk.gpu.faceGroupSumBuffer.Reset();
         chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_COMMON;
+        chunk.gpu.faceAnalysisState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.facePrefixState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.faceGroupSumState = D3D12_RESOURCE_STATE_COMMON;
         chunk.gpu.voxelFenceValue = 0;
@@ -8054,7 +8103,7 @@ private:
         std::vector<FarLodChunkKey> stagedGpuMeshes;
         static constexpr std::uint64_t kFaceCountReadbackSizeBytes = sizeof(std::uint32_t) * 2u;
         static constexpr std::uint64_t kLastFaceWordOffset =
-            static_cast<std::uint64_t>(kVoxelCount - 1u) * sizeof(std::uint32_t);
+            static_cast<std::uint64_t>(kPlaneCount - 1u) * sizeof(std::uint32_t);
         const double budgetLimit = budgetMs <= 0.0 ? std::numeric_limits<double>::max() : budgetMs;
         const SteadyClock::time_point submitStart = SteadyClock::now();
         double totalGpuSynthesisMs = 0.0;
@@ -8104,6 +8153,7 @@ private:
                 emitRequest.buildVersion != chunk.buildVersion ||
                 chunk.gpu.columnBuffer == nullptr ||
                 chunk.gpu.faceCountBuffer == nullptr ||
+                chunk.gpu.faceAnalysisBuffer == nullptr ||
                 chunk.gpu.facePrefixBuffer == nullptr ||
                 emitRequest.faceCount == 0u)
             {
@@ -8182,6 +8232,10 @@ private:
                                    chunk.gpu.faceCountState,
                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            gpuContext_.transition(chunk.gpu.faceAnalysisBuffer.Get(),
+                                   chunk.gpu.faceAnalysisState,
+                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            chunk.gpu.faceAnalysisState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             gpuContext_.transition(chunk.gpu.facePrefixBuffer.Get(),
                                    chunk.gpu.facePrefixState,
                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -8227,6 +8281,7 @@ private:
                                          neighborPosZ,
                                          neighborNegZ,
                                          chunk.gpu.faceCountBuffer.Get(),
+                                         chunk.gpu.faceAnalysisBuffer.Get(),
                                          chunk.gpu.facePrefixBuffer.Get(),
                                          blockUvBuffer_.Get(),
                                          blockUvCount_,
@@ -8349,6 +8404,7 @@ private:
                 blockUvCount_ > 0 &&
                 emptyVoxelBuffer_ != nullptr &&
                 chunk.gpu.faceCountBuffer != nullptr &&
+                chunk.gpu.faceAnalysisBuffer != nullptr &&
                 chunk.gpu.facePrefixBuffer != nullptr &&
                 chunk.gpu.faceGroupSumBuffer != nullptr;
             const std::size_t synthCostUnits = canBuildGpuMesh ? 5u : 2u;
@@ -8407,6 +8463,10 @@ private:
                                        chunk.gpu.faceCountState,
                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                gpuContext_.transition(chunk.gpu.faceAnalysisBuffer.Get(),
+                                       chunk.gpu.faceAnalysisState,
+                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                chunk.gpu.faceAnalysisState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
                 gpuContext_.transition(chunk.gpu.facePrefixBuffer.Get(),
                                        chunk.gpu.facePrefixState,
                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -8427,8 +8487,10 @@ private:
                                               neighborNegX,
                                               neighborPosZ,
                                               neighborNegZ,
-                                              chunk.gpu.faceCountBuffer.Get());
+                                              chunk.gpu.faceCountBuffer.Get(),
+                                              chunk.gpu.faceAnalysisBuffer.Get());
                 gpuContext_.uavBarrier(chunk.gpu.faceCountBuffer.Get());
+                gpuContext_.uavBarrier(chunk.gpu.faceAnalysisBuffer.Get());
                 gpuContext_.dispatchFacePrefix(chunk.gpu.faceCountBuffer.Get(),
                                                chunk.gpu.facePrefixBuffer.Get(),
                                                chunk.gpu.faceGroupSumBuffer.Get());
@@ -8451,6 +8513,10 @@ private:
                                        chunk.gpu.faceCountState,
                                        D3D12_RESOURCE_STATE_COPY_SOURCE);
                 chunk.gpu.faceCountState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                gpuContext_.transition(chunk.gpu.faceAnalysisBuffer.Get(),
+                                       chunk.gpu.faceAnalysisState,
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                chunk.gpu.faceAnalysisState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
                 gpuContext_.copyBuffer(readbackBuffer.Get(),
                                        0,
                                        chunk.gpu.facePrefixBuffer.Get(),

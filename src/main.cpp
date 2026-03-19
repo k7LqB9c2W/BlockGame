@@ -2132,6 +2132,7 @@ void applyCameraPose(Camera& camera,
     camera.position = position;
     camera.velocity = glm::vec3(0.0f);
     camera.onGround = true;
+    camera.flyMode = false;
     camera.yaw = yawDegrees;
     camera.pitch = std::clamp(pitchDegrees, -89.0f, 89.0f);
     camera.updateVectors();
@@ -2294,6 +2295,7 @@ bool applyTeleportInput(Camera& camera, const std::string& input)
     camera.position = glm::vec3(x, y, z);
     camera.velocity = glm::vec3(0.0f);
     camera.onGround = false;
+    camera.flyMode = false;
     return true;
 }
 
@@ -2538,10 +2540,11 @@ void updatePhysics(Camera& camera,
                    const PlayerInputState& inputState,
                    float dt)
 {
-    camera.velocity.y += kGravity * dt;
-    if (camera.velocity.y < kTerminalVelocity)
+    if (inputState.toggleFlightPressed)
     {
-        camera.velocity.y = kTerminalVelocity;
+        camera.flyMode = !camera.flyMode;
+        camera.velocity = glm::vec3(0.0f);
+        camera.onGround = false;
     }
 
     const glm::vec2 horizontalInput(inputState.moveDirection.x, inputState.moveDirection.z);
@@ -2566,7 +2569,29 @@ void updatePhysics(Camera& camera,
         }
     }
 
-    if (inputState.jumpHeld && camera.onGround)
+    if (camera.flyMode)
+    {
+        float verticalDirection = 0.0f;
+        if (inputState.ascendHeld)
+        {
+            verticalDirection += 1.0f;
+        }
+        if (inputState.descendHeld)
+        {
+            verticalDirection -= 1.0f;
+        }
+        camera.velocity.y = verticalDirection * camera.moveSpeed;
+    }
+    else
+    {
+        camera.velocity.y += kGravity * dt;
+        if (camera.velocity.y < kTerminalVelocity)
+        {
+            camera.velocity.y = kTerminalVelocity;
+        }
+    }
+
+    if (!camera.flyMode && inputState.jumpHeld && camera.onGround)
     {
         camera.velocity.y = kJumpVelocity;
         camera.onGround = false;
@@ -2597,13 +2622,13 @@ void updatePhysics(Camera& camera,
     if (std::abs(moveY.actualMove - desiredMove.y) > kAxisCollisionEpsilon)
     {
         camera.velocity.y = 0.0f;
-        if (desiredMove.y < 0.0f && moveY.actualMove > desiredMove.y)
+        if (!camera.flyMode && desiredMove.y < 0.0f && moveY.actualMove > desiredMove.y)
         {
             groundedThisStep = true;
         }
     }
 
-    camera.onGround = groundedThisStep;
+    camera.onGround = !camera.flyMode && groundedThisStep;
     if (camera.onGround)
     {
         applyGroundSnap(camera, chunkManager);
@@ -2815,6 +2840,7 @@ int runGame()
     camera.position = chunkManager.findSafeSpawnPosition(camera.position.x, camera.position.z);
     camera.velocity = glm::vec3(0.0f);
     camera.onGround = false;
+    camera.flyMode = false;
 
     std::cout << "Player spawned at: (" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")" << std::endl;
     benchmarkState.spawnPosition = camera.position;
@@ -2854,7 +2880,7 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    std::cout << "Controls: WASD to move, mouse to look, . to toggle mouse/UI control, SPACE to jump, N to set exact/total render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, double-tap SPACE to toggle flight, SHIFT to descend while flying, . to toggle mouse/UI control, N to set exact/total render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -3536,6 +3562,7 @@ int runGame()
              debugStream << "XYZ: " << camera.position.x << ", "
                          << camera.position.y << ", "
                          << camera.position.z << '\n';
+             debugStream << "Move Mode: " << (camera.flyMode ? "Fly" : (camera.onGround ? "Ground" : "Air")) << '\n';
              debugStream << "Yaw/Pitch: " << camera.yaw << ", "
                          << camera.pitch << '\n';
              debugStream << std::setprecision(3);
@@ -3648,6 +3675,7 @@ int runGame()
             snapshotStream.setf(std::ios::fixed, std::ios::floatfield);
             snapshotStream << std::setprecision(1);
             snapshotStream << "XYZ: " << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << '\n';
+            snapshotStream << "Move Mode: " << (camera.flyMode ? "Fly" : (camera.onGround ? "Ground" : "Air")) << '\n';
             snapshotStream << "Yaw/Pitch: " << camera.yaw << ", " << camera.pitch << '\n';
             snapshotStream << "Hit Block: " << hitBlockSummary;
             if (hitBlockType != "none")
@@ -3828,6 +3856,8 @@ int runGame()
                 "Controls\n"
                 "W/A/S/D: Move\n"
                 "Space: Jump\n"
+                "Double-tap Space: Toggle flight\n"
+                "Flight: Space up, Shift down\n"
                 "Mouse: Look\n"
                 "Left Mouse: Break block\n"
                 "Right Mouse: Place block\n"

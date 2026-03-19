@@ -122,6 +122,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
                                          ChunkManager& chunkManager)
 {
     (void)chunkManager;
+    static constexpr double kFlightToggleDoubleTapSeconds = 0.30;
     PlayerInputState state;
 
     bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
@@ -177,8 +178,30 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     const bool captureMouse = isGameplayMouseCaptured(inputContext);
     glfwSetInputMode(window, GLFW_CURSOR, captureMouse ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 
+    const bool spaceCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+    inputContext.spaceJustPressed = spaceCurrentlyPressed && !inputContext.spacePressed;
+    inputContext.spacePressed = spaceCurrentlyPressed;
+
+    const bool shiftCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
+                                       (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+
     if (captureMouse)
     {
+        if (inputContext.spaceJustPressed)
+        {
+            const double nowSeconds = glfwGetTime();
+            if (inputContext.lastSpacePressTimeSeconds >= 0.0 &&
+                (nowSeconds - inputContext.lastSpacePressTimeSeconds) <= kFlightToggleDoubleTapSeconds)
+            {
+                state.toggleFlightPressed = true;
+                inputContext.lastSpacePressTimeSeconds = -1.0;
+            }
+            else
+            {
+                inputContext.lastSpacePressTimeSeconds = nowSeconds;
+            }
+        }
+
         glm::vec3 forward = camera.front();
         forward.y = 0.0f;
         if (glm::length(forward) > kEpsilon)
@@ -213,11 +236,23 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
             state.moveDirection += right;
         }
 
-        state.jumpHeld = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+        if (camera.flyMode)
+        {
+            state.ascendHeld = spaceCurrentlyPressed;
+            state.descendHeld = shiftCurrentlyPressed;
+        }
+        else
+        {
+            state.jumpHeld = spaceCurrentlyPressed;
+        }
     }
     else
     {
         state.jumpHeld = false;
+        state.ascendHeld = false;
+        state.descendHeld = false;
+        state.toggleFlightPressed = false;
+        inputContext.lastSpacePressTimeSeconds = -1.0;
     }
 
     return state;

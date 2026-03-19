@@ -31,12 +31,15 @@ struct InputContext
     bool hKeyJustPressed{false};
     bool lKeyPressed{false};
     bool lKeyJustPressed{false};
+    bool spacePressed{false};
+    bool spaceJustPressed{false};
     bool cameraMouseCaptured{true};
     bool placeLampMode{false};
     bool showDebugOverlay{false};
     bool showControlsOverlay{false};
     bool showRenderDistanceGUI{false};
     bool showTeleportGUI{false};
+    double lastSpacePressTimeSeconds{-1.0};
     std::string inputBuffer{};
     std::string teleportBuffer{};
 };
@@ -52,6 +55,9 @@ struct PlayerInputState
 {
     glm::vec3 moveDirection{0.0f};
     bool jumpHeld{false};
+    bool ascendHeld{false};
+    bool descendHeld{false};
+    bool toggleFlightPressed{false};
 };
 
 void framebufferSizeCallback(GLFWwindow* window, int width, int height);

@@ -14,6 +14,7 @@ public:
     // Physics properties
     glm::vec3 velocity{0.0f, 0.0f, 0.0f};
     bool onGround{false};
+    bool flyMode{false};
 
     const glm::vec3& front() const noexcept;
     const glm::vec3& up() const noexcept;

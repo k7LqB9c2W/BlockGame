@@ -1,6 +1,6 @@
 # BlockGame
 
-<img width="1919" height="992" alt="BlockGame screenshot" src="https://github.com/user-attachments/assets/0a21b184-a01f-4011-9130-0ac2cd4deaaf" />
+<img width="1920" height="1005" alt="image" src="https://github.com/user-attachments/assets/939ebb8c-8bf9-4fc3-93b6-949205f24f8d" />
 
 BlockGame is a Windows voxel sandbox prototype written in C++20. It features procedural terrain generation, chunk streaming, block interaction, far-terrain rendering, and an in-game Dear ImGui debug UI.
 

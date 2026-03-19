@@ -351,6 +351,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> blockOutlinePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> depthPyramidPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> lodCullPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> lodIndirectPipelineState_;

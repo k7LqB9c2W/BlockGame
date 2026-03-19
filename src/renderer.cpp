@@ -1058,6 +1058,7 @@ void Renderer::shutdown()
     shadowPipelineState_.Reset();
     nearPipelineState_.Reset();
     farPipelineState_.Reset();
+    blockOutlinePipelineState_.Reset();
     lodIndirectPipelineState_.Reset();
     lodCullPipelineState_.Reset();
     depthPyramidPipelineState_.Reset();
@@ -1970,12 +1971,16 @@ void Renderer::createPipelines()
 
     Microsoft::WRL::ComPtr<ID3DBlob> worldVs =
         loadShaderBytecode(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> blockOutlineVs =
+        loadShaderBytecode(shaderPath("block_outline_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> shadowVs =
         loadShaderBytecode(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
         loadShaderBytecode(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
           loadShaderBytecode(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> blockOutlinePs =
+          loadShaderBytecode(shaderPath("block_outline_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> depthPyramidCs =
           loadShaderBytecode(shaderPath("depth_pyramid.hlsl"), "DepthPyramidMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> lodCullCs =
@@ -2053,6 +2058,28 @@ void Renderer::createPipelines()
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
                   "failed to create far pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC blockOutlinePso{};
+    blockOutlinePso.pRootSignature = shadowRootSignature_.Get();
+    blockOutlinePso.VS = {blockOutlineVs->GetBufferPointer(), blockOutlineVs->GetBufferSize()};
+    blockOutlinePso.PS = {blockOutlinePs->GetBufferPointer(), blockOutlinePs->GetBufferSize()};
+    blockOutlinePso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    blockOutlinePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    blockOutlinePso.RasterizerState.FrontCounterClockwise = TRUE;
+    blockOutlinePso.RasterizerState.DepthClipEnable = TRUE;
+    blockOutlinePso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    blockOutlinePso.SampleMask = UINT_MAX;
+    blockOutlinePso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+    blockOutlinePso.NumRenderTargets = 1;
+    blockOutlinePso.RTVFormats[0] = kSceneColorFormat;
+    blockOutlinePso.DSVFormat = kDepthBufferDsvFormat;
+    blockOutlinePso.SampleDesc.Count = 1;
+    blockOutlinePso.DepthStencilState.DepthEnable = TRUE;
+    blockOutlinePso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    blockOutlinePso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&blockOutlinePso,
+                                                       IID_PPV_ARGS(&blockOutlinePipelineState_)),
+                  "failed to create block outline pipeline");
 
       D3D12_INDIRECT_ARGUMENT_DESC drawIndexedArgument{};
       drawIndexedArgument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
@@ -3423,14 +3450,27 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             FrameResource& frame = frameResources_[currentBackBufferIndex_];
             const std::uint64_t indirectBufferOffset =
                 indirectGpuAddress - frame.constantBuffer->GetGPUVirtualAddress();
-            commandList_->ExecuteIndirect(drawIndexedCommandSignature_.Get(),
-                                          static_cast<UINT>(commandCount),
-                                          frame.constantBuffer.Get(),
-                                          indirectBufferOffset,
-                                          nullptr,
-                                          0);
+                commandList_->ExecuteIndirect(drawIndexedCommandSignature_.Get(),
+                                              static_cast<UINT>(commandCount),
+                                              frame.constantBuffer.Get(),
+                                              indirectBufferOffset,
+                                              nullptr,
+                                              0);
         }
     }
+
+    if (renderData.hasHighlight)
+    {
+        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(shadowRootSignature_.Get());
+        commandList_->SetPipelineState(blockOutlinePipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+        commandList_->DrawInstanced(24, 1, 0, 0);
+    }
+
     profilingSnapshot_.worldDrawMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldStart).count();
 

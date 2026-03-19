@@ -7357,9 +7357,9 @@ private:
             budget.newChunkActivations = std::max<std::size_t>(workerBudget * 8, 16);
             budget.newFallbackActivations = 6;
             budget.staleReleaseCount = 16;
-            budget.atlasUpdateCells = 32u * 1024u;
-            budget.gpuDispatchBudgetUnits = 18;
-            budget.maxGpuSubmissions = 4;
+            budget.atlasUpdateCells = 48u * 1024u;
+            budget.gpuDispatchBudgetUnits = 24;
+            budget.maxGpuSubmissions = 5;
         }
         else
         {
@@ -7368,9 +7368,9 @@ private:
             budget.newChunkActivations = std::max<std::size_t>(workerBudget * 12, 32);
             budget.newFallbackActivations = 8;
             budget.staleReleaseCount = 24;
-            budget.atlasUpdateCells = 96u * 1024u;
-            budget.gpuDispatchBudgetUnits = 24;
-            budget.maxGpuSubmissions = 5;
+            budget.atlasUpdateCells = 160u * 1024u;
+            budget.gpuDispatchBudgetUnits = 36;
+            budget.maxGpuSubmissions = 8;
         }
         return budget;
     }
@@ -12444,8 +12444,21 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     if (renderSettings_.totalChunks > renderSettings_.exactChunks)
     {
-        const double lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.35, 0.35, 1.5);
         const std::size_t exactPendingUploads = estimateUploadQueueSize();
+        const int farQueuedTiles = farTerrainManager_.queuedTileCount();
+        const int farPendingUploadTiles = farTerrainManager_.pendingUploadTileCount();
+        const bool exactUnderPressure = missingChunks > 8 || exactPendingUploads > 8;
+        double lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.50, 0.50, 2.00);
+        if (!exactUnderPressure && (farQueuedTiles > 32 || farPendingUploadTiles > 12))
+        {
+            // When the far shell is already backlogged, spend more of the frame draining queued work
+            // instead of letting completed tiles wait multiple frames before they become resident.
+            lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.90 + 0.50, 1.25, 4.00);
+        }
+        else if (farQueuedTiles > 12 || farPendingUploadTiles > 4)
+        {
+            lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.70 + 0.25, 0.75, 2.75);
+        }
         const int farWorkerBudget =
             (missingChunks > 32 || exactPendingUploads > 24) ? 1 :
             ((missingChunks > 8 || exactPendingUploads > 8) ? std::min(farWorkerCount_, 2) : farWorkerCount_);

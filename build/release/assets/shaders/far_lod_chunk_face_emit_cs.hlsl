@@ -8,7 +8,7 @@ cbuffer FaceEmitParams : register(b0)
     uint gVertexBase;
     uint gIndexBase;
     uint gRecordIndex;
-    uint gReserved0;
+    uint gReservedFaceCapacity;
 };
 
 struct GpuBlockFaceUv
@@ -91,6 +91,8 @@ static const uint kFaceNorth = 2u;
 static const uint kFaceSouth = 3u;
 static const uint kFaceEast = 4u;
 static const uint kFaceWest = 5u;
+static const uint kDrawRecordOverflowFlag = 0x80000000u;
+static const uint kDrawRecordFaceCountMask = 0x7fffffffu;
 
 groupshared GpuTerrainColumnDescriptor gSharedColumns[kLogicalSize * kLogicalSize];
 groupshared int gSharedTileClosureFloorY;
@@ -378,7 +380,10 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID,
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (linearIndex < kPlaneCount)
+    const uint totalFaces = gFacePrefixes[kPlaneCount - 1u] + gFaceCounts[kPlaneCount - 1u];
+    const bool overflowed = totalFaces > gReservedFaceCapacity;
+
+    if (!overflowed && linearIndex < kPlaneCount)
     {
         uint layerId;
         bool isTopPlane;
@@ -397,7 +402,6 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID,
 
     if (linearIndex == 0u)
     {
-        const uint totalFaces = gFacePrefixes[kPlaneCount - 1u] + gFaceCounts[kPlaneCount - 1u];
         const int tileClosureFloorY = computeTileClosureFloorY();
         int boundsMinY = 2147483647;
         int boundsMaxY = -2147483647;
@@ -437,10 +441,11 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID,
                                   (float)boundsMaxY,
                                   (float)(gWorldMinZ + int(kLogicalSize) * gBlockScale),
                                   1.0f);
-        record.indexCount = totalFaces * 6u;
+        record.indexCount = overflowed ? 0u : (totalFaces * 6u);
         record.firstIndexLocation = gIndexBase;
         record.baseVertex = (int)gVertexBase;
-        record.reserved = 0u;
+        record.reserved = (totalFaces & kDrawRecordFaceCountMask) |
+                          (overflowed ? kDrawRecordOverflowFlag : 0u);
         gDrawRecords[gRecordIndex] = record;
     }
 }

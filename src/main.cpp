@@ -213,8 +213,6 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableGpuBreak = false;
     bool enableGpuValidation = false;
     bool enableLodVisibilityDebug = false;
-    bool disableFarGpuCull = false;
-    bool disableLodGpuSynth = false;
     for (int i = 1; i < argc; ++i)
     {
         if (argv[i] == nullptr)
@@ -250,19 +248,9 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
-        if (arg == "--no-far-gpu-cull")
-        {
-            disableFarGpuCull = true;
-            continue;
-        }
-
-        if (arg == "--no-lod-gpu-synth" || arg == "--no-gpu-synth")
-        {
-            disableLodGpuSynth = true;
-        }
     }
 
-    if (!enableGpuDebug && !enableLodVisibilityDebug && !disableFarGpuCull && !disableLodGpuSynth)
+    if (!enableGpuDebug && !enableLodVisibilityDebug)
     {
         return;
     }
@@ -287,16 +275,6 @@ void applyLaunchDebugOptions(int argc, char** argv)
         }
     }
 
-    if (disableFarGpuCull)
-    {
-        setProcessEnvironmentVariable("BLOCKGAME_DISABLE_LOD_GPU_CULL", "1");
-    }
-
-    if (disableLodGpuSynth)
-    {
-        setProcessEnvironmentVariable("BLOCKGAME_ENABLE_LOD_GPU_SYNTH", "0");
-    }
-
     if (enableLodVisibilityDebug)
     {
         setProcessEnvironmentVariable("BLOCKGAME_LOD_VIS_DEBUG", "1");
@@ -319,14 +297,6 @@ void applyLaunchDebugOptions(int argc, char** argv)
         {
             enabledOptions.emplace_back("break-on-error");
         }
-    }
-    if (disableFarGpuCull)
-    {
-        enabledOptions.emplace_back("far GPU cull disabled");
-    }
-    if (disableLodGpuSynth)
-    {
-        enabledOptions.emplace_back("LOD GPU synth disabled");
     }
     if (enableLodVisibilityDebug)
     {

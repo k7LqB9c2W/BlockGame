@@ -3316,7 +3316,6 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             }
         }
 
-        const bool gpuFarCullDisabled = std::getenv("BLOCKGAME_DISABLE_LOD_GPU_CULL") != nullptr;
         bool shouldUseGpuFarCull = false;
         std::size_t farBatchCount = 0;
         std::size_t farCullEligibleBatchCount = 0;
@@ -3324,7 +3323,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
             ++farBatchCount;
-            if (!gpuFarCullDisabled && batch.supportsGpuCull &&
+            if (batch.supportsGpuCull &&
                 batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
                 shouldUseGpuFarCull = true;
@@ -3336,7 +3335,6 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         {
             std::ostringstream stream;
             stream << "lodvis render_world far_batches=" << farBatchCount
-                   << " gpu_cull_disabled=" << (gpuFarCullDisabled ? "y" : "n")
                    << " gpu_cull_enabled=" << (shouldUseGpuFarCull ? "y" : "n")
                    << " cull_eligible_batches=" << farCullEligibleBatchCount
                    << " cull_eligible_records=" << farCullEligibleRecordCount;
@@ -3349,7 +3347,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             std::uint64_t maxIndirectBytes = 0;
             for (const ChunkRenderBatch& batch : renderData.farBatches)
             {
-                if (gpuFarCullDisabled || !batch.supportsGpuCull ||
+                if (!batch.supportsGpuCull ||
                     batch.gpuCullRecordBuffer == nullptr || batch.gpuCullRecordCount == 0)
                 {
                     continue;
@@ -3389,7 +3387,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootConstantBufferView(0, farCb);
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
-            if (!gpuFarCullDisabled && batch.supportsGpuCull &&
+            if (batch.supportsGpuCull &&
                 batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
                 renderFarBatchGpuCull(batch,

@@ -4899,9 +4899,6 @@ public:
         const char* parityEnv = std::getenv("BLOCKGAME_ENABLE_LOD_GPU_PARITY");
         gpuParityEnabled_ =
             (parityEnv != nullptr && std::string_view(parityEnv) != "0" && std::string_view(parityEnv) != "false");
-        const char* gpuSynthEnv = std::getenv("BLOCKGAME_ENABLE_LOD_GPU_SYNTH");
-        gpuSynthesisEnabled_ =
-            (gpuSynthEnv == nullptr || (std::string_view(gpuSynthEnv) != "0" && std::string_view(gpuSynthEnv) != "false"));
     }
 
     ~FarTerrainManager()
@@ -9091,18 +9088,6 @@ private:
 
     void submitGpuSynthesisRequests(double budgetMs)
     {
-        if (!gpuSynthesisEnabled_)
-        {
-            lastAverageGpuSynthesisMs_ = 0.0;
-            lastAverageGpuStampMs_ = 0.0;
-            lastAverageGpuFaceBuildMs_ = 0.0;
-            std::lock_guard<std::mutex> lock(gpuRequestMutex_);
-            gpuSynthesisRequests_.clear();
-            clearPendingGpuMeshCountReadbacks();
-            pendingGpuParityReadbacks_.clear();
-            return;
-        }
-
         std::deque<GpuSynthesisRequest> requests;
         std::deque<PendingGpuMeshEmitRequest> pendingEmitRequests;
         {
@@ -10704,7 +10689,6 @@ private:
     std::vector<std::pair<int, int>> lastTouchLevelPlanLevels_;
     std::unordered_map<int, TouchLevelCacheState> touchLevelCaches_;
     bool gpuParityEnabled_{false};
-    bool gpuSynthesisEnabled_{false};
     std::uint32_t rollingGpuParityMismatchCount_{0};
 };
 

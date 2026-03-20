@@ -4420,6 +4420,22 @@ constexpr std::uint32_t kInvalidChunkBufferPage = std::numeric_limits<std::uint3
 
 struct Chunk
 {
+    struct PendingRenderMesh
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::size_t vertexOffset{0};
+        std::size_t indexOffset{0};
+        std::size_t vertexCount{0};
+        std::size_t indexCount{0};
+        std::uint32_t meshVersion{0};
+        UINT64 uploadFenceValue{0};
+
+        [[nodiscard]] bool valid() const noexcept
+        {
+            return pageIndex != kInvalidChunkBufferPage;
+        }
+    };
+
     explicit Chunk(const glm::ivec3& c)
         : coord(c),
           minWorldY(c.y * kChunkSizeY),
@@ -4466,6 +4482,8 @@ struct Chunk
         initialReadyRecorded.store(false, std::memory_order_relaxed);
         lightBoundaryDirtyMask = 0;
         pendingMeshRefresh.store(false, std::memory_order_relaxed);
+        meshVersion.store(0, std::memory_order_relaxed);
+        pendingMesh = {};
     }
 
 
@@ -4492,6 +4510,8 @@ struct Chunk
     std::atomic<bool> initialReadyRecorded{false};
     std::uint8_t lightBoundaryDirtyMask{0};
     std::atomic<bool> pendingMeshRefresh{false};
+    std::atomic<std::uint32_t> meshVersion{0};
+    PendingRenderMesh pendingMesh{};
 };
 
 struct ProfilingCounters
@@ -11034,6 +11054,15 @@ private:
     void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk);
     void requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront);
 
+    enum class ChunkBufferPageState : std::uint8_t
+    {
+        Available = 0,
+        PendingOpen,
+        PendingUploaded,
+        Resident,
+        Retiring
+    };
+
     struct ChunkBufferPage
     {
         struct Range
@@ -11056,9 +11085,12 @@ private:
         std::size_t indexCapacity{0};
         std::size_t vertexCursor{0};
         std::size_t indexCursor{0};
-        std::vector<Range> freeVertices;
-        std::vector<Range> freeIndices;
-        std::size_t activeChunks{0};
+        std::size_t residentChunks{0};
+        std::size_t pendingChunks{0};
+        UINT64 pendingBatchId{0};
+        UINT64 uploadFenceValue{0};
+        UINT64 retireFenceValue{0};
+        ChunkBufferPageState state{ChunkBufferPageState::Available};
     };
 
     struct ChunkAllocation
@@ -11068,9 +11100,31 @@ private:
         std::size_t indexOffset{0};
     };
 
+    struct DeferredPendingChunkRelease
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::size_t vertexOffset{0};
+        std::size_t indexOffset{0};
+        std::size_t vertexCount{0};
+        std::size_t indexCount{0};
+        UINT64 uploadFenceValue{0};
+    };
+
     static std::size_t nextPowerOfTwo(std::size_t value) noexcept;
     ChunkBufferPage createBufferPage(std::size_t vertexCount, std::size_t indexCount);
-    ChunkAllocation acquireChunkAllocation(std::size_t vertexCount, std::size_t indexCount);
+    ChunkAllocation acquireChunkAllocation(std::size_t vertexCount, std::size_t indexCount, UINT64 uploadBatchId);
+    static void resetChunkBufferPage(ChunkBufferPage& page) noexcept;
+    void sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT64 uploadFenceValue);
+    void collectReusableChunkBufferPages();
+    void releaseChunkAllocationRange(std::uint32_t pageIndex,
+                                     std::size_t vertexOffset,
+                                     std::size_t vertexCount,
+                                     std::size_t indexOffset,
+                                     std::size_t indexCount,
+                                     bool residentAllocation);
+    void collectDeferredPendingChunkReleases();
+    void deferPendingChunkRelease(const Chunk::PendingRenderMesh& pendingMesh);
+    void commitPendingChunkUploads();
     void releaseChunkAllocation(Chunk& chunk);
     void recycleChunkGPU(Chunk& chunk);
     void destroyBufferPages();
@@ -11131,7 +11185,7 @@ private:
     void removeDistantChunks(const glm::ivec3& center, int horizontalThreshold, int verticalThreshold);
     bool ensureChunkAsync(const glm::ivec3& coord);
     void uploadReadyMeshes();
-    void uploadChunkMesh(Chunk& chunk);
+    bool uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId);
     void buildChunkMeshAsync(Chunk& chunk);
     static glm::ivec3 worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept;
     static std::size_t estimateChunkRetainedBytes(const Chunk& chunk) noexcept;
@@ -11362,6 +11416,10 @@ private:
     int uploadChunkLimitThisFrame_{1};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
     double uploadBudgetMsThisFrame_{4.0};
+    UINT64 nextUploadBatchId_{1};
+    ID3D12Fence* renderFence_{nullptr};
+    UINT64 renderFenceValue_{0};
+    std::deque<DeferredPendingChunkRelease> deferredPendingChunkReleases_{};
     double updateMsLastFrame_{0.0};
     double verticalRadiusMsLastFrame_{0.0};
     double priorityUpdateMsLastFrame_{0.0};
@@ -12058,18 +12116,20 @@ void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
 
 void ChunkManager::Impl::setRenderSynchronization(ID3D12Fence* graphicsFence, std::uint64_t graphicsFenceValue)
 {
-    uploadContext_.setGraphicsFenceDependency(graphicsFence, static_cast<UINT64>(graphicsFenceValue));
+    renderFence_ = graphicsFence;
+    renderFenceValue_ = static_cast<UINT64>(graphicsFenceValue);
+    uploadContext_.setGraphicsFenceDependency(nullptr, 0);
     farTerrainManager_.setRenderSynchronization(graphicsFence, static_cast<UINT64>(graphicsFenceValue));
 }
 
 ID3D12Fence* ChunkManager::Impl::uploadFence() const noexcept
 {
-    return uploadContext_.fence();
+    return nullptr;
 }
 
 std::uint64_t ChunkManager::Impl::lastSubmittedUploadFenceValue() const noexcept
 {
-    return static_cast<std::uint64_t>(uploadContext_.lastSubmittedFenceValue());
+    return 0;
 }
 
 ID3D12Fence* ChunkManager::Impl::farUploadFence() const noexcept
@@ -12730,6 +12790,17 @@ void ChunkManager::Impl::clear()
     {
         std::lock_guard<std::mutex> lock(uploadQueueMutex_);
         uploadQueue_.clear();
+    }
+    uploadContext_.waitForIdle();
+    deferredPendingChunkReleases_.clear();
+    renderFence_ = nullptr;
+    renderFenceValue_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(bufferPageMutex_);
+        for (ChunkBufferPage& page : bufferPages_)
+        {
+            resetChunkBufferPage(page);
+        }
     }
     {
         std::lock_guard<std::mutex> lock(pendingRelightMutex_);
@@ -13919,6 +13990,7 @@ void ChunkManager::Impl::processJob(const Job& job)
         const auto meshEnd = SteadyClock::now();
         const auto meshMicros =
             std::chrono::duration_cast<std::chrono::microseconds>(meshEnd - meshStart).count();
+        chunk->meshVersion.fetch_add(1, std::memory_order_acq_rel);
         profilingCounters_.meshingMicros.fetch_add(meshMicros, std::memory_order_relaxed);
         profilingCounters_.meshedChunks.fetch_add(1, std::memory_order_relaxed);
         if (benchmarkMetrics_.isEnabled())
@@ -14126,133 +14198,241 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
     page.indexView.BufferLocation = page.indexBuffer ? page.indexBuffer->GetGPUVirtualAddress() : 0;
     page.indexView.SizeInBytes = static_cast<UINT>(page.indexCapacity * sizeof(std::uint32_t));
     page.indexView.Format = DXGI_FORMAT_R32_UINT;
+    resetChunkBufferPage(page);
 
     return page;
 }
 
+void ChunkManager::Impl::resetChunkBufferPage(ChunkBufferPage& page) noexcept
+{
+    page.vertexCursor = 0;
+    page.indexCursor = 0;
+    page.residentChunks = 0;
+    page.pendingChunks = 0;
+    page.pendingBatchId = 0;
+    page.uploadFenceValue = 0;
+    page.retireFenceValue = 0;
+    page.state = ChunkBufferPageState::Available;
+}
+
 ChunkManager::Impl::ChunkAllocation ChunkManager::Impl::acquireChunkAllocation(std::size_t vertexCount,
-                                                                               std::size_t indexCount)
+                                                                               std::size_t indexCount,
+                                                                               UINT64 uploadBatchId)
 {
     ChunkAllocation allocation{};
-    if (vertexCount == 0 || indexCount == 0)
+    if (vertexCount == 0 || indexCount == 0 || uploadBatchId == 0)
     {
         return allocation;
     }
 
-    auto tryAllocateRange = [](std::vector<ChunkBufferPage::Range>& ranges,
-                               std::size_t& cursor,
-                               std::size_t capacity,
-                               std::size_t count,
-                               std::size_t& outOffset) -> bool
+    auto tryAllocateInPage = [&](ChunkBufferPage& page, std::uint32_t pageIndex) -> bool
     {
-        if (count == 0)
+        if (page.state == ChunkBufferPageState::Retiring ||
+            page.state == ChunkBufferPageState::Resident ||
+            page.state == ChunkBufferPageState::PendingUploaded)
         {
-            outOffset = cursor;
-            return true;
+            return false;
         }
 
-        for (auto it = ranges.begin(); it != ranges.end(); ++it)
+        if (page.state == ChunkBufferPageState::Available)
         {
-            if (it->size >= count)
-            {
-                outOffset = it->offset;
-                it->offset += count;
-                it->size -= count;
-                if (it->size == 0)
-                {
-                    ranges.erase(it);
-                }
-                return true;
-            }
+            resetChunkBufferPage(page);
+            page.state = ChunkBufferPageState::PendingOpen;
+            page.pendingBatchId = uploadBatchId;
         }
 
-        if (cursor + count <= capacity)
+        if (page.state != ChunkBufferPageState::PendingOpen || page.pendingBatchId != uploadBatchId)
         {
-            outOffset = cursor;
-            cursor += count;
-            return true;
+            return false;
         }
 
-        return false;
-    };
-
-    auto mergeRange = [](std::vector<ChunkBufferPage::Range>& ranges,
-                         std::size_t offset,
-                         std::size_t size)
-    {
-        if (size == 0)
+        if (page.vertexCursor + vertexCount > page.vertexCapacity ||
+            page.indexCursor + indexCount > page.indexCapacity)
         {
-            return;
+            return false;
         }
 
-        ChunkBufferPage::Range range{offset, size};
-        auto it = std::lower_bound(ranges.begin(), ranges.end(), range.offset,
-                                   [](const ChunkBufferPage::Range& lhs, std::size_t value)
-                                   {
-                                       return lhs.offset < value;
-                                   });
-        it = ranges.insert(it, range);
-
-        if (it != ranges.begin())
-        {
-            auto prev = std::prev(it);
-            if (prev->offset + prev->size == it->offset)
-            {
-                prev->size += it->size;
-                it = ranges.erase(it);
-                it = prev;
-            }
-        }
-
-        auto next = std::next(it);
-        if (next != ranges.end() && it->offset + it->size == next->offset)
-        {
-            it->size += next->size;
-            ranges.erase(next);
-        }
+        allocation.pageIndex = pageIndex;
+        allocation.vertexOffset = page.vertexCursor;
+        allocation.indexOffset = page.indexCursor;
+        page.vertexCursor += vertexCount;
+        page.indexCursor += indexCount;
+        ++page.pendingChunks;
+        return true;
     };
 
     std::lock_guard<std::mutex> lock(bufferPageMutex_);
     for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
     {
         ChunkBufferPage& page = bufferPages_[pageIndex];
-        std::size_t vertexOffset = 0;
-        if (!tryAllocateRange(page.freeVertices, page.vertexCursor, page.vertexCapacity, vertexCount, vertexOffset))
+        if (tryAllocateInPage(page, pageIndex))
         {
-            continue;
+            return allocation;
         }
-
-        std::size_t indexOffset = 0;
-        if (!tryAllocateRange(page.freeIndices, page.indexCursor, page.indexCapacity, indexCount, indexOffset))
-        {
-            mergeRange(page.freeVertices, vertexOffset, vertexCount);
-            continue;
-        }
-
-        ++page.activeChunks;
-        allocation.pageIndex = pageIndex;
-        allocation.vertexOffset = vertexOffset;
-        allocation.indexOffset = indexOffset;
-        return allocation;
     }
 
     ChunkBufferPage newPage = createBufferPage(vertexCount, indexCount);
+    newPage.state = ChunkBufferPageState::PendingOpen;
+    newPage.pendingBatchId = uploadBatchId;
     bufferPages_.push_back(std::move(newPage));
     const std::uint32_t newIndex = static_cast<std::uint32_t>(bufferPages_.size() - 1);
     ChunkBufferPage& page = bufferPages_.back();
-
-    std::size_t vertexOffset = 0;
-    std::size_t indexOffset = 0;
-    const bool vertexSuccess = tryAllocateRange(page.freeVertices, page.vertexCursor, page.vertexCapacity, vertexCount, vertexOffset);
-    const bool indexSuccess = tryAllocateRange(page.freeIndices, page.indexCursor, page.indexCapacity, indexCount, indexOffset);
-    (void)vertexSuccess;
-    (void)indexSuccess;
-
-    ++page.activeChunks;
-    allocation.pageIndex = newIndex;
-    allocation.vertexOffset = vertexOffset;
-    allocation.indexOffset = indexOffset;
+    const bool allocated = tryAllocateInPage(page, newIndex);
+    (void)allocated;
     return allocation;
+}
+
+void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT64 uploadFenceValue)
+{
+    if (uploadBatchId == 0 || uploadFenceValue == 0)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    for (ChunkBufferPage& page : bufferPages_)
+    {
+        if (page.state != ChunkBufferPageState::PendingOpen || page.pendingBatchId != uploadBatchId)
+        {
+            continue;
+        }
+
+        page.state = ChunkBufferPageState::PendingUploaded;
+        page.pendingBatchId = 0;
+        page.uploadFenceValue = uploadFenceValue;
+    }
+}
+
+void ChunkManager::Impl::collectReusableChunkBufferPages()
+{
+    const UINT64 completedRenderFenceValue = (renderFence_ != nullptr)
+        ? renderFence_->GetCompletedValue()
+        : std::numeric_limits<UINT64>::max();
+
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    for (ChunkBufferPage& page : bufferPages_)
+    {
+        if (page.state == ChunkBufferPageState::Retiring && completedRenderFenceValue >= page.retireFenceValue)
+        {
+            resetChunkBufferPage(page);
+        }
+    }
+}
+
+void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
+                                                     std::size_t vertexOffset,
+                                                     std::size_t vertexCount,
+                                                     std::size_t indexOffset,
+                                                     std::size_t indexCount,
+                                                     bool residentAllocation)
+{
+    (void)vertexOffset;
+    (void)vertexCount;
+    (void)indexOffset;
+    (void)indexCount;
+    if (pageIndex == kInvalidChunkBufferPage)
+    {
+        return;
+    }
+
+    const UINT64 completedRenderFenceValue = (renderFence_ != nullptr)
+        ? renderFence_->GetCompletedValue()
+        : std::numeric_limits<UINT64>::max();
+
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    if (pageIndex >= bufferPages_.size())
+    {
+        return;
+    }
+
+    ChunkBufferPage& page = bufferPages_[pageIndex];
+    if (residentAllocation)
+    {
+        if (page.residentChunks > 0)
+        {
+            --page.residentChunks;
+        }
+
+        if (page.residentChunks == 0)
+        {
+            if (page.pendingChunks > 0)
+            {
+                page.state = ChunkBufferPageState::PendingUploaded;
+            }
+            else if (renderFence_ != nullptr &&
+                     renderFenceValue_ > 0 &&
+                     completedRenderFenceValue < renderFenceValue_)
+            {
+                page.state = ChunkBufferPageState::Retiring;
+                page.retireFenceValue = renderFenceValue_;
+            }
+            else
+            {
+                resetChunkBufferPage(page);
+            }
+        }
+        return;
+    }
+
+    if (page.pendingChunks > 0)
+    {
+        --page.pendingChunks;
+    }
+
+    if (page.pendingChunks == 0)
+    {
+        if (page.residentChunks > 0)
+        {
+            page.state = ChunkBufferPageState::Resident;
+            page.uploadFenceValue = 0;
+            page.pendingBatchId = 0;
+        }
+        else
+        {
+            resetChunkBufferPage(page);
+        }
+    }
+}
+
+void ChunkManager::Impl::collectDeferredPendingChunkReleases()
+{
+    const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+    std::deque<DeferredPendingChunkRelease> stillPending;
+    while (!deferredPendingChunkReleases_.empty())
+    {
+        DeferredPendingChunkRelease pending = deferredPendingChunkReleases_.front();
+        deferredPendingChunkReleases_.pop_front();
+        if (pending.uploadFenceValue != 0 && completedUploadFenceValue < pending.uploadFenceValue)
+        {
+            stillPending.push_back(pending);
+            continue;
+        }
+
+        releaseChunkAllocationRange(pending.pageIndex,
+                                    pending.vertexOffset,
+                                    pending.vertexCount,
+                                    pending.indexOffset,
+                                    pending.indexCount,
+                                    false);
+    }
+
+    deferredPendingChunkReleases_.swap(stillPending);
+}
+
+void ChunkManager::Impl::deferPendingChunkRelease(const Chunk::PendingRenderMesh& pendingMesh)
+{
+    if (!pendingMesh.valid())
+    {
+        return;
+    }
+
+    deferredPendingChunkReleases_.push_back(DeferredPendingChunkRelease{
+        pendingMesh.pageIndex,
+        pendingMesh.vertexOffset,
+        pendingMesh.indexOffset,
+        pendingMesh.vertexCount,
+        pendingMesh.indexCount,
+        pendingMesh.uploadFenceValue});
 }
 
 void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
@@ -14277,65 +14457,40 @@ void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
     chunk.indexCount.store(0, std::memory_order_release);
     chunk.vertexOffset.store(0, std::memory_order_release);
     chunk.indexOffset.store(0, std::memory_order_release);
-
-    auto mergeRange = [](std::vector<ChunkBufferPage::Range>& ranges,
-                         std::size_t offset,
-                         std::size_t size)
-    {
-        if (size == 0)
-        {
-            return;
-        }
-
-        ChunkBufferPage::Range range{offset, size};
-        auto it = std::lower_bound(ranges.begin(), ranges.end(), range.offset,
-                                   [](const ChunkBufferPage::Range& lhs, std::size_t value)
-                                   {
-                                       return lhs.offset < value;
-                                   });
-        it = ranges.insert(it, range);
-
-        if (it != ranges.begin())
-        {
-            auto prev = std::prev(it);
-            if (prev->offset + prev->size == it->offset)
-            {
-                prev->size += it->size;
-                it = ranges.erase(it);
-                it = prev;
-            }
-        }
-
-        auto next = std::next(it);
-        if (next != ranges.end() && it->offset + it->size == next->offset)
-        {
-            it->size += next->size;
-            ranges.erase(next);
-        }
-    };
-
-    std::lock_guard<std::mutex> lock(bufferPageMutex_);
-    if (pageIndex >= bufferPages_.size())
-    {
-        return;
-    }
-
-    ChunkBufferPage& page = bufferPages_[pageIndex];
-    mergeRange(page.freeVertices, vertexOffset, vertexCount);
-    mergeRange(page.freeIndices, indexOffset, indexCount);
-    if (page.activeChunks > 0)
-    {
-        --page.activeChunks;
-    }
+    releaseChunkAllocationRange(pageIndex, vertexOffset, vertexCount, indexOffset, indexCount, true);
 }
 
 void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
 {
-    std::lock_guard<std::mutex> lock(chunk.meshMutex);
-    releaseChunkAllocation(chunk);
-    chunk.meshData.clear();
-    chunk.meshReady.store(false, std::memory_order_release);
-    chunk.queuedForUpload.store(false, std::memory_order_release);
+    Chunk::PendingRenderMesh pendingMesh;
+    {
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        releaseChunkAllocation(chunk);
+        pendingMesh = chunk.pendingMesh;
+        chunk.pendingMesh = {};
+        chunk.meshData.clear();
+        chunk.meshReady.store(false, std::memory_order_release);
+        chunk.queuedForUpload.store(false, std::memory_order_release);
+    }
+
+    if (!pendingMesh.valid())
+    {
+        return;
+    }
+
+    const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+    if (pendingMesh.uploadFenceValue != 0 && completedUploadFenceValue < pendingMesh.uploadFenceValue)
+    {
+        deferPendingChunkRelease(pendingMesh);
+        return;
+    }
+
+    releaseChunkAllocationRange(pendingMesh.pageIndex,
+                                pendingMesh.vertexOffset,
+                                pendingMesh.vertexCount,
+                                pendingMesh.indexOffset,
+                                pendingMesh.indexCount,
+                                false);
 }
 
 std::size_t ChunkManager::Impl::estimateChunkRetainedBytes(const Chunk& chunk) noexcept
@@ -15317,12 +15472,16 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
 void ChunkManager::Impl::uploadReadyMeshes()
 {
+    commitPendingChunkUploads();
+
     const std::size_t initialBudget = uploadBudgetBytesThisFrame_;
     std::size_t remainingBudget = initialBudget;
     bool uploadedAnything = false;
     int uploadedChunkCount = 0;
     std::unordered_map<glm::ivec2, int, ColumnHasher> uploadsPerColumn;
     std::size_t attempts = 0;
+    const UINT64 uploadBatchId = nextUploadBatchId_++;
+    std::vector<std::shared_ptr<Chunk>> stagedChunks;
     const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
     const int chunkUploadLimit = std::max(1, uploadChunkLimitThisFrame_);
     const auto uploadStart = std::chrono::steady_clock::now();
@@ -15352,6 +15511,15 @@ void ChunkManager::Impl::uploadReadyMeshes()
             chunk->state.load(std::memory_order_acquire) != ChunkState::Ready)
         {
             continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+            if (chunk->pendingMesh.valid())
+            {
+                requeueChunkForUpload(chunk, false);
+                continue;
+            }
         }
 
         const glm::ivec2 columnKey{chunk->coord.x, chunk->coord.z};
@@ -15385,13 +15553,21 @@ void ChunkManager::Impl::uploadReadyMeshes()
         }
 
         const auto uploadChunkStart = benchmarkMetrics_.isEnabled() ? SteadyClock::now() : SteadyClock::time_point{};
-        uploadChunkMesh(*chunk);
+        if (!uploadChunkMesh(*chunk, uploadBatchId))
+        {
+            requeueChunkForUpload(chunk, true);
+            if (uploadedAnything)
+            {
+                break;
+            }
+            continue;
+        }
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
         chunk->meshReady.store(false, std::memory_order_release);
         uploadedAnything = true;
         ++uploadedChunkCount;
         ++columnUploads;
-        noteChunkReadyLatency(*chunk);
+        stagedChunks.push_back(chunk);
 
         profilingCounters_.uploadedChunks.fetch_add(1, std::memory_order_relaxed);
         profilingCounters_.uploadedBytes.fetch_add(totalBytes, std::memory_order_relaxed);
@@ -15423,6 +15599,24 @@ void ChunkManager::Impl::uploadReadyMeshes()
     }
 
     uploadContext_.flush();
+    if (uploadedAnything)
+    {
+        const UINT64 submittedFenceValue = uploadContext_.lastSubmittedFenceValue();
+        sealPendingChunkUploadPages(uploadBatchId, submittedFenceValue);
+        for (const std::shared_ptr<Chunk>& chunk : stagedChunks)
+        {
+            if (!chunk)
+            {
+                continue;
+            }
+
+            std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+            if (chunk->pendingMesh.valid() && chunk->pendingMesh.uploadFenceValue == 0)
+            {
+                chunk->pendingMesh.uploadFenceValue = submittedFenceValue;
+            }
+        }
+    }
 
     if (initialBudget > remainingBudget)
     {
@@ -15438,7 +15632,126 @@ void ChunkManager::Impl::uploadReadyMeshes()
     pendingUploadsLastFrame_ = estimateUploadQueueSize();
 }
 
-void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
+void ChunkManager::Impl::commitPendingChunkUploads()
+{
+    collectReusableChunkBufferPages();
+    collectDeferredPendingChunkReleases();
+
+    const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        chunks.reserve(chunks_.size());
+        for (const auto& [coord, chunk] : chunks_)
+        {
+            (void)coord;
+            chunks.push_back(chunk);
+        }
+    }
+
+    for (const std::shared_ptr<Chunk>& chunk : chunks)
+    {
+        if (!chunk)
+        {
+            continue;
+        }
+
+        Chunk::PendingRenderMesh pendingMesh{};
+        std::uint32_t currentMeshVersion = 0;
+        std::uint32_t oldPageIndex = kInvalidChunkBufferPage;
+        std::size_t oldVertexOffset = 0;
+        std::size_t oldIndexOffset = 0;
+        std::size_t oldVertexCount = 0;
+        std::size_t oldIndexCount = 0;
+        bool stalePending = false;
+
+        {
+            std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+            if (!chunk->pendingMesh.valid())
+            {
+                continue;
+            }
+
+            if (chunk->pendingMesh.uploadFenceValue != 0 &&
+                completedUploadFenceValue < chunk->pendingMesh.uploadFenceValue)
+            {
+                continue;
+            }
+
+            pendingMesh = chunk->pendingMesh;
+            chunk->pendingMesh = {};
+            currentMeshVersion = chunk->meshVersion.load(std::memory_order_acquire);
+            stalePending = currentMeshVersion != pendingMesh.meshVersion;
+            if (!stalePending)
+            {
+                oldPageIndex = chunk->bufferPageIndex.load(std::memory_order_acquire);
+                oldVertexOffset = chunk->vertexOffset.load(std::memory_order_acquire);
+                oldIndexOffset = chunk->indexOffset.load(std::memory_order_acquire);
+                oldVertexCount = chunk->vertexCount.load(std::memory_order_acquire);
+                oldIndexCount = static_cast<std::size_t>(chunk->indexCount.load(std::memory_order_acquire));
+                chunk->bufferPageIndex.store(pendingMesh.pageIndex, std::memory_order_release);
+                chunk->vertexOffset.store(pendingMesh.vertexOffset, std::memory_order_release);
+                chunk->indexOffset.store(pendingMesh.indexOffset, std::memory_order_release);
+                chunk->vertexCount.store(pendingMesh.vertexCount, std::memory_order_release);
+                chunk->indexCount.store(static_cast<std::uint32_t>(pendingMesh.indexCount), std::memory_order_release);
+            }
+        }
+
+        if (!stalePending && pendingMesh.pageIndex < bufferPages_.size())
+        {
+            std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+            if (pendingMesh.pageIndex < bufferPages_.size())
+            {
+                ChunkBufferPage& page = bufferPages_[pendingMesh.pageIndex];
+                if (page.pendingChunks > 0)
+                {
+                    --page.pendingChunks;
+                }
+                if (!stalePending)
+                {
+                    ++page.residentChunks;
+                    page.state = ChunkBufferPageState::Resident;
+                    page.uploadFenceValue = 0;
+                    page.pendingBatchId = 0;
+                }
+            }
+        }
+
+        if (stalePending)
+        {
+            if (pendingMesh.pageIndex != kInvalidChunkBufferPage)
+            {
+                releaseChunkAllocationRange(pendingMesh.pageIndex,
+                                            pendingMesh.vertexOffset,
+                                            pendingMesh.vertexCount,
+                                            pendingMesh.indexOffset,
+                                            pendingMesh.indexCount,
+                                            false);
+            }
+            if (chunk->meshReady.load(std::memory_order_acquire) &&
+                chunk->state.load(std::memory_order_acquire) == ChunkState::Ready)
+            {
+                queueChunkForUpload(chunk);
+            }
+            continue;
+        }
+
+        if (oldPageIndex != kInvalidChunkBufferPage)
+        {
+            releaseChunkAllocationRange(oldPageIndex,
+                                        oldVertexOffset,
+                                        oldVertexCount,
+                                        oldIndexOffset,
+                                        oldIndexCount,
+                                        true);
+        }
+
+        noteChunkReadyLatency(*chunk);
+    }
+}
+
+bool ChunkManager::Impl::uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId)
 {
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
     const std::uint32_t oldPageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
@@ -15446,8 +15759,6 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
 
     if (chunk.meshData.empty())
     {
-        releaseChunkAllocation(chunk);
-        chunk.meshData.clear();
         if (shouldTrackRecentEditChunk(chunk.coord))
         {
             std::ostringstream stream;
@@ -15456,17 +15767,16 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                    << " oldIdx=" << oldIndexCount;
             appendRecentEditDebugEvent(stream.str());
         }
-        return;
+        return false;
     }
 
     const std::size_t vertexCount = chunk.meshData.vertices.size();
     const std::size_t indexCount = chunk.meshData.indices.size();
+    const std::uint32_t meshVersion = chunk.meshVersion.load(std::memory_order_acquire);
 
-    releaseChunkAllocation(chunk);
-    ChunkAllocation allocation = acquireChunkAllocation(vertexCount, indexCount);
+    ChunkAllocation allocation = acquireChunkAllocation(vertexCount, indexCount, uploadBatchId);
     if (allocation.pageIndex == kInvalidChunkBufferPage)
     {
-        chunk.meshData.clear();
         if (shouldTrackRecentEditChunk(chunk.coord))
         {
             std::ostringstream stream;
@@ -15476,53 +15786,52 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
                    << " idx=" << indexCount;
             appendRecentEditDebugEvent(stream.str());
         }
-        return;
+        return false;
     }
 
-    chunk.bufferPageIndex.store(allocation.pageIndex, std::memory_order_release);
-    chunk.vertexOffset.store(allocation.vertexOffset, std::memory_order_release);
-    chunk.indexOffset.store(allocation.indexOffset, std::memory_order_release);
-    chunk.vertexCount.store(vertexCount, std::memory_order_release);
+    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+    if (allocation.pageIndex >= bufferPages_.size())
     {
-        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-        if (allocation.pageIndex < bufferPages_.size())
+        return false;
+    }
+
+    ChunkBufferPage& page = bufferPages_[allocation.pageIndex];
+    if (page.mappedVertexData != nullptr && vertexCount > 0)
+    {
+        std::memcpy(page.mappedVertexData + allocation.vertexOffset * sizeof(Vertex),
+                    chunk.meshData.vertices.data(),
+                    vertexCount * sizeof(Vertex));
+        if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
         {
-            ChunkBufferPage& page = bufferPages_[allocation.pageIndex];
-            if (page.mappedVertexData != nullptr && vertexCount > 0)
-            {
-                const std::size_t chunkVertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
-                std::memcpy(page.mappedVertexData + chunkVertexOffset * sizeof(Vertex),
-                            chunk.meshData.vertices.data(),
-                            vertexCount * sizeof(Vertex));
-                if (uploadContext_.ready() && page.vertexUploadBuffer != nullptr && page.vertexBuffer != nullptr)
-                {
-                    uploadContext_.copyBuffer(page.vertexBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunkVertexOffset * sizeof(Vertex)),
-                                              page.vertexUploadBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunkVertexOffset * sizeof(Vertex)),
-                                              static_cast<std::uint64_t>(vertexCount * sizeof(Vertex)));
-                }
-            }
-            if (page.mappedIndexData != nullptr && indexCount > 0)
-            {
-                const std::size_t chunkIndexOffset = chunk.indexOffset.load(std::memory_order_acquire);
-                std::memcpy(page.mappedIndexData + chunkIndexOffset * sizeof(std::uint32_t),
-                            chunk.meshData.indices.data(),
-                            indexCount * sizeof(std::uint32_t));
-                if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
-                {
-                    uploadContext_.copyBuffer(page.indexBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunkIndexOffset * sizeof(std::uint32_t)),
-                                              page.indexUploadBuffer.Get(),
-                                              static_cast<std::uint64_t>(chunkIndexOffset * sizeof(std::uint32_t)),
-                                              static_cast<std::uint64_t>(indexCount * sizeof(std::uint32_t)));
-                }
-            }
+            uploadContext_.copyBuffer(page.vertexBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.vertexOffset * sizeof(Vertex)),
+                                      page.vertexUploadBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.vertexOffset * sizeof(Vertex)),
+                                      static_cast<std::uint64_t>(vertexCount * sizeof(Vertex)));
+        }
+    }
+    if (page.mappedIndexData != nullptr && indexCount > 0)
+    {
+        std::memcpy(page.mappedIndexData + allocation.indexOffset * sizeof(std::uint32_t),
+                    chunk.meshData.indices.data(),
+                    indexCount * sizeof(std::uint32_t));
+        if (uploadContext_.ready() && page.indexUploadBuffer != nullptr && page.indexBuffer != nullptr)
+        {
+            uploadContext_.copyBuffer(page.indexBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.indexOffset * sizeof(std::uint32_t)),
+                                      page.indexUploadBuffer.Get(),
+                                      static_cast<std::uint64_t>(allocation.indexOffset * sizeof(std::uint32_t)),
+                                      static_cast<std::uint64_t>(indexCount * sizeof(std::uint32_t)));
         }
     }
 
-    chunk.indexCount.store(static_cast<std::uint32_t>(indexCount), std::memory_order_release);
-
+    chunk.pendingMesh.pageIndex = allocation.pageIndex;
+    chunk.pendingMesh.vertexOffset = allocation.vertexOffset;
+    chunk.pendingMesh.indexOffset = allocation.indexOffset;
+    chunk.pendingMesh.vertexCount = vertexCount;
+    chunk.pendingMesh.indexCount = indexCount;
+    chunk.pendingMesh.meshVersion = meshVersion;
+    chunk.pendingMesh.uploadFenceValue = 0;
     chunk.meshData.clear();
 
     if (shouldTrackRecentEditChunk(chunk.coord))
@@ -15530,10 +15839,11 @@ void ChunkManager::Impl::uploadChunkMesh(Chunk& chunk)
         std::ostringstream stream;
         stream << "upload complete chunk=(" << chunk.coord.x << ", " << chunk.coord.y << ", " << chunk.coord.z
                << ") oldPage=" << oldPageIndex
-               << " newPage=" << allocation.pageIndex
+               << " pendingPage=" << allocation.pageIndex
                << " idx=" << indexCount;
         appendRecentEditDebugEvent(stream.str());
     }
+    return true;
 }
 
 ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNeighborhoodSnapshot(

@@ -13106,13 +13106,13 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         {
             lodUploadBudgetMs = std::clamp(uploadBudgets.timeBudgetMs * 0.70 + 0.25, 0.75, 2.75);
         }
-        const int farWorkerBudget =
-            (missingChunks > 32 || exactPendingUploads > 24) ? 1 :
-            ((missingChunks > 8 || exactPendingUploads > 8) ? std::min(farWorkerCount_, 2) : farWorkerCount_);
         farTerrainManager_.setEnabled(true);
         farTerrainManager_.setDistanceBlocks(chunksToBlocks(renderSettings_.totalChunks));
         farTerrainManager_.setSeaLevel(globalSeaLevel_);
-        farTerrainManager_.setWorkerCount(static_cast<std::size_t>(std::max(farWorkerBudget, 1)));
+        // Keep the far-LOD worker pool stable. Changing the count tears down the workers and
+        // clears the queued LOD work, which can prevent the shell from ever filling under
+        // fluctuating exact-streaming pressure.
+        farTerrainManager_.setWorkerCount(static_cast<std::size_t>(std::max(farWorkerCount_, 1)));
         farTerrainManager_.setBacklogPressure(missingChunks, exactPendingUploads);
         farTerrainManager_.update(centerChunk,
                                   lastCameraForward_,

@@ -71,6 +71,8 @@ struct FarLodGpuBiome
 {
     std::uint32_t surfaceBlock{0};
     std::uint32_t fillerBlock{0};
+    std::uint32_t canopyBlock{0};
+    std::uint32_t secondaryCanopyBlock{0};
     std::uint32_t flags{0};
     std::uint32_t coastProfile{0};
     std::uint32_t propertyBits{0};
@@ -90,6 +92,7 @@ struct FarLodGpuBiome
     float radiusVariation{0.0f};
     std::uint32_t fixedRadius{0};
     float treeDensityMultiplier{0.0f};
+    float secondaryCanopyChance{0.0f};
     float maxSubBiomeCount{0.0f};
     float subBiomeTotalChance{0.0f};
     std::int32_t minHeightLimit{0};

@@ -126,6 +126,8 @@ enum class BlockId : std::uint8_t
     DebugLamp = 10,
     DarkOakLog = 11,
     DarkOakLeaves = 12,
+    BirchLog = 13,
+    BirchLeaves = 14,
     Count
 };
 

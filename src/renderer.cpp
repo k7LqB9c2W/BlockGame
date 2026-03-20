@@ -53,11 +53,12 @@ constexpr DXGI_FORMAT kAtmosphereFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
 constexpr UINT kFrameConstantBufferSize = 64u * 1024u;
 constexpr UINT kShadowMapResolution = 2048u;
-constexpr UINT kRtvIndexSceneColor = 2;
-constexpr UINT kRtvIndexTransmittance = 3;
-constexpr UINT kRtvIndexMultiScattering = 4;
-constexpr UINT kRtvIndexSkyView = 5;
-constexpr UINT kRtvIndexAerialPerspectiveBase = 6;
+constexpr UINT kRtvIndexSkyBackground = 2;
+constexpr UINT kRtvIndexSceneColor = 3;
+constexpr UINT kRtvIndexTransmittance = 4;
+constexpr UINT kRtvIndexMultiScattering = 5;
+constexpr UINT kRtvIndexSkyView = 6;
+constexpr UINT kRtvIndexAerialPerspectiveBase = 7;
 constexpr UINT kAerialPerspectiveSliceCount = 32;
 constexpr UINT kRtvHeapCapacity = kRtvIndexAerialPerspectiveBase + kAerialPerspectiveSliceCount;
 constexpr int kAtlasMinimumPaddingPixels = 2;
@@ -1019,6 +1020,7 @@ void Renderer::initialize(GLFWwindow* window, int width, int height)
     createDepthPyramid();
     createShadowResources();
     createFrameResources();
+    createSkyBackground();
     createSceneColor();
     createPipelines();
     atmosphere_ = std::make_unique<AtmosphereRenderer>();
@@ -1051,9 +1053,11 @@ void Renderer::shutdown()
     }
 
       destroySceneColor();
+      destroySkyBackground();
       destroyFrameResources();
       toneMapPipelineState_.Reset();
       cloudPipelineState_.Reset();
+      backgroundCloudPipelineState_.Reset();
       baseSkyPipelineState_.Reset();
     shadowPipelineState_.Reset();
     nearPipelineState_.Reset();
@@ -1797,6 +1801,59 @@ void Renderer::createSceneColor()
     sceneColorClearLogged_ = false;
 }
 
+void Renderer::createSkyBackground()
+{
+    destroySkyBackground();
+
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = kSceneColorFormat;
+    const D3D12_RESOURCE_DESC skyDesc =
+        texture2DDesc(kSceneColorFormat,
+                      static_cast<UINT>(width_),
+                      static_cast<UINT>(height_),
+                      1,
+                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
+                                                   D3D12_HEAP_FLAG_NONE,
+                                                   &skyDesc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                   &clearValue,
+                                                   IID_PPV_ARGS(&skyBackground_)),
+                  "failed to create sky background color");
+    setResourceDebugName(skyBackground_.Get(), L"SkyBackgroundHDR");
+
+    skyBackgroundRtv_ = rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, kRtvIndexSkyBackground);
+    device_->CreateRenderTargetView(skyBackground_.Get(), nullptr, skyBackgroundRtv_);
+
+    const UINT descriptorIndex = allocateSrvDescriptor();
+    skyBackgroundSrvIndex_ = static_cast<int>(descriptorIndex);
+    skyBackgroundSrvCpu_ = srvCpuHandle(descriptorIndex);
+    skyBackgroundSrvGpu_ = srvGpuHandle(descriptorIndex);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = kSceneColorFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(skyBackground_.Get(), &srvDesc, skyBackgroundSrvCpu_);
+    skyBackgroundState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void Renderer::destroySkyBackground()
+{
+    if (skyBackgroundSrvIndex_ >= 0)
+    {
+        freeSrvDescriptor(static_cast<UINT>(skyBackgroundSrvIndex_));
+        skyBackgroundSrvIndex_ = -1;
+    }
+    skyBackgroundSrvCpu_ = {};
+    skyBackgroundSrvGpu_ = {};
+    skyBackgroundRtv_ = {};
+    skyBackground_.Reset();
+    skyBackgroundState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
 void Renderer::destroySceneColor()
 {
     if (sceneColorSrvIndex_ >= 0)
@@ -1851,8 +1908,12 @@ void Renderer::createPipelines()
     worldShadowRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     worldShadowRange.NumDescriptors = 1;
     worldShadowRange.BaseShaderRegister = 2;
+    D3D12_DESCRIPTOR_RANGE worldSkyBackgroundRange{};
+    worldSkyBackgroundRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    worldSkyBackgroundRange.NumDescriptors = 1;
+    worldSkyBackgroundRange.BaseShaderRegister = 3;
 
-    std::array<D3D12_ROOT_PARAMETER, 4> worldRootParams{};
+    std::array<D3D12_ROOT_PARAMETER, 5> worldRootParams{};
     worldRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     worldRootParams[0].Descriptor.ShaderRegister = 0;
     worldRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -1868,6 +1929,10 @@ void Renderer::createPipelines()
     worldRootParams[3].DescriptorTable.NumDescriptorRanges = 1;
     worldRootParams[3].DescriptorTable.pDescriptorRanges = &worldShadowRange;
     worldRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    worldRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    worldRootParams[4].DescriptorTable.NumDescriptorRanges = 1;
+    worldRootParams[4].DescriptorTable.pDescriptorRanges = &worldSkyBackgroundRange;
+    worldRootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> worldSamplers{};
     worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -2233,6 +2298,15 @@ void Renderer::createPipelines()
       throwIfFailed(device_->CreateGraphicsPipelineState(&cloudPso, IID_PPV_ARGS(&cloudPipelineState_)),
                     "failed to create cloud pipeline");
 
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC backgroundCloudPso = cloudPso;
+      backgroundCloudPso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+      backgroundCloudPso.DepthStencilState.DepthEnable = FALSE;
+      backgroundCloudPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+      backgroundCloudPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+      throwIfFailed(device_->CreateGraphicsPipelineState(&backgroundCloudPso,
+                                                         IID_PPV_ARGS(&backgroundCloudPipelineState_)),
+                    "failed to create background cloud pipeline");
+
       D3D12_GRAPHICS_PIPELINE_STATE_DESC tonePso{};
       tonePso.pRootSignature = fullscreenRootSignature_.Get();
       tonePso.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
@@ -2331,6 +2405,7 @@ void Renderer::resize(int width, int height)
 
     waitForGpu();
     destroySceneColor();
+    destroySkyBackground();
     destroyDepthPyramid();
     destroyDepthBuffer();
     destroyRenderTargets();
@@ -2350,6 +2425,7 @@ void Renderer::resize(int width, int height)
     createRenderTargets();
     createDepthBuffer();
     createDepthPyramid();
+    createSkyBackground();
     createSceneColor();
     if (atmosphere_)
     {
@@ -2811,7 +2887,8 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                                      D3D12_GPU_VIRTUAL_ADDRESS farConstantsGpuAddress,
                                      D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
                                      D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
-                                     D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv)
+                                     D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                                     D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv)
 {
     if (batch.gpuCullRecordBuffer == nullptr ||
         batch.gpuCullRecordCount == 0 ||
@@ -2989,6 +3066,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     commandList_->SetGraphicsRootDescriptorTable(1, atlasSrv);
     commandList_->SetGraphicsRootDescriptorTable(2, aerialPerspectiveSrv);
     commandList_->SetGraphicsRootDescriptorTable(3, shadowSrv);
+    commandList_->SetGraphicsRootDescriptorTable(4, skyBackgroundSrv);
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
     commandList_->IASetIndexBuffer(&batch.indexBufferView);
@@ -3272,8 +3350,82 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     nearConstants->shadowParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
     nearConstants->terrainDebug = glm::vec4(environment.debug.directSunEnabled ? 1.0f : 0.0f,
                                             static_cast<float>(static_cast<int>(environment.debug.terrainDebugView)),
-                                            0.0f,
+                                            skyPassEnabled ? 1.0f : 0.0f,
                                             0.0f);
+    const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
+
+    const auto drawBaseSkyToTarget = [&](D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                                         ID3D12Resource* resource,
+                                         D3D12_RESOURCE_STATES& state)
+    {
+        if (resource == nullptr)
+        {
+            return;
+        }
+        if (state != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(resource, state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandList_->ResourceBarrier(1, &barrier);
+            state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        void* skyCpu = nullptr;
+        const std::uint64_t skyCb = allocateFrameConstantBytes(sizeof(BaseSkyConstants), &skyCpu);
+        auto* skyConstants = static_cast<BaseSkyConstants*>(skyCpu);
+        skyConstants->topSkyColor = glm::vec4(baseSkyTopColor, 0.0f);
+        skyConstants->horizonSkyColor = glm::vec4(baseSkyHorizonColor, 0.0f);
+        skyConstants->invViewProj = glm::inverse(viewProj);
+        skyConstants->cameraPos = glm::vec4(cameraPos, 0.0f);
+
+        commandList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
+        commandList_->SetPipelineState(baseSkyPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, skyCb);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        commandList_->DrawInstanced(3, 1, 0, 0);
+    };
+
+    const auto drawCloudsToTarget = [&](D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                                        ID3D12Resource* resource,
+                                        D3D12_RESOURCE_STATES& state,
+                                        ID3D12PipelineState* pipelineState,
+                                        bool useDepth)
+    {
+        if (!environment.debug.skyPassEnabled || pipelineState == nullptr || resource == nullptr)
+        {
+            return;
+        }
+        if (state != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(resource, state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandList_->ResourceBarrier(1, &barrier);
+            state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        void* cloudCpu = nullptr;
+        const std::uint64_t cloudCb = allocateFrameConstantBytes(sizeof(CloudConstants), &cloudCpu);
+        auto* cloudConstants = static_cast<CloudConstants*>(cloudCpu);
+        cloudConstants->viewProj = viewProj;
+        cloudConstants->cameraPosTime = glm::vec4(cameraPos, static_cast<float>(glfwGetTime()));
+        cloudConstants->layerParams = glm::vec4(300.0f, 4.0f, 56.0f, 8.0f);
+        cloudConstants->shapeParams = glm::vec4(0.57f, 1.55f, 0.0f, 0.0f);
+        cloudConstants->topColor = glm::vec4(cloudTopColor, 0.82f);
+        cloudConstants->bottomColor = glm::vec4(cloudBottomColor, 0.72f);
+
+        commandList_->OMSetRenderTargets(1, &rtv, FALSE, useDepth ? &depthHandle : nullptr);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
+        commandList_->SetPipelineState(pipelineState);
+        commandList_->SetGraphicsRootConstantBufferView(0, cloudCb);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        constexpr UINT kCloudPrismCount = 17u * 17u * 3u;
+        commandList_->DrawInstanced(36, kCloudPrismCount, 0, 0);
+    };
 
     if (environment.debug.shadowsEnabled)
     {
@@ -3291,31 +3443,25 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     }
     else
     {
-        void* skyCpu = nullptr;
-        const std::uint64_t skyCb = allocateFrameConstantBytes(sizeof(BaseSkyConstants), &skyCpu);
-        auto* skyConstants = static_cast<BaseSkyConstants*>(skyCpu);
-        skyConstants->topSkyColor = glm::vec4(baseSkyTopColor, 0.0f);
-        skyConstants->horizonSkyColor = glm::vec4(baseSkyHorizonColor, 0.0f);
-        skyConstants->params = glm::vec4(daylight, 0.0f, 0.0f, 0.0f);
-        skyConstants->sunColor = glm::vec4(sunColor, 0.0f);
-
-        const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
-        sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
-        commandList_->RSSetViewports(1, &viewport_);
-        commandList_->RSSetScissorRects(1, &scissorRect_);
-        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
-        commandList_->SetPipelineState(baseSkyPipelineState_.Get());
-        commandList_->SetGraphicsRootConstantBufferView(0, skyCb);
-        commandList_->SetGraphicsRootDescriptorTable(1, sceneColorSrvGpu_);
-        commandList_->SetGraphicsRootDescriptorTable(2, sceneColorSrvGpu_);
-        commandList_->SetGraphicsRootDescriptorTable(3, sceneColorSrvGpu_);
-        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        commandList_->DrawInstanced(3, 1, 0, 0);
+        drawBaseSkyToTarget(skyBackgroundRtv_, skyBackground_.Get(), skyBackgroundState_);
+        drawCloudsToTarget(skyBackgroundRtv_,
+                           skyBackground_.Get(),
+                           skyBackgroundState_,
+                           backgroundCloudPipelineState_.Get(),
+                           false);
+        if (skyBackgroundState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+        {
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(skyBackground_.Get(),
+                                  skyBackgroundState_,
+                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            commandList_->ResourceBarrier(1, &barrier);
+            skyBackgroundState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        drawBaseSkyToTarget(sceneColorRtv_, sceneColor_.Get(), sceneColorState_);
     }
 
     const auto worldStart = std::chrono::steady_clock::now();
-    const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
     sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
     commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
     commandList_->RSSetViewports(1, &viewport_);
@@ -3325,6 +3471,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     commandList_->SetGraphicsRootDescriptorTable(1, atlasTexture.srvGpu);
     commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
     commandList_->SetGraphicsRootDescriptorTable(3, shadowMapSrvGpu_);
+    commandList_->SetGraphicsRootDescriptorTable(4, skyBackgroundSrvGpu_);
 
     if (environment.debug.worldPassEnabled)
     {
@@ -3424,7 +3571,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                       farCb,
                                       atlasTexture.srvGpu,
                                       atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
-                                      shadowMapSrvGpu_);
+                                      shadowMapSrvGpu_,
+                                      skyBackgroundSrvGpu_);
                 continue;
             }
 
@@ -3478,26 +3626,11 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
     if (environment.debug.skyPassEnabled)
     {
-        void* cloudCpu = nullptr;
-        const std::uint64_t cloudCb = allocateFrameConstantBytes(sizeof(CloudConstants), &cloudCpu);
-        auto* cloudConstants = static_cast<CloudConstants*>(cloudCpu);
-        cloudConstants->viewProj = viewProj;
-        cloudConstants->cameraPosTime = glm::vec4(cameraPos, static_cast<float>(glfwGetTime()));
-        cloudConstants->layerParams = glm::vec4(300.0f, 4.0f, 56.0f, 8.0f);
-        cloudConstants->shapeParams = glm::vec4(0.57f, 1.55f, 0.0f, 0.0f);
-        cloudConstants->topColor = glm::vec4(cloudTopColor, 0.82f);
-        cloudConstants->bottomColor = glm::vec4(cloudBottomColor, 0.72f);
-
-        sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
-        commandList_->RSSetViewports(1, &viewport_);
-        commandList_->RSSetScissorRects(1, &scissorRect_);
-        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
-        commandList_->SetPipelineState(cloudPipelineState_.Get());
-        commandList_->SetGraphicsRootConstantBufferView(0, cloudCb);
-        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        constexpr UINT kCloudPrismCount = 17u * 17u * 3u;
-        commandList_->DrawInstanced(36, kCloudPrismCount, 0, 0);
+        drawCloudsToTarget(sceneColorRtv_,
+                           sceneColor_.Get(),
+                           sceneColorState_,
+                           cloudPipelineState_.Get(),
+                           true);
     }
 
     if (sceneColorState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)

@@ -1,0 +1,49 @@
+id = "birch_forest"
+name = "Birch Forest"
+surface_block = "grass"
+filler_block = "grass"
+generates_trees = true
+tree_density_multiplier = 3.5
+radius = 300.0
+radius_variation = 70.0
+spawn_chance = 0.7
+min_height = 28
+max_height = 62
+roughness = 0.5
+hills = 0.3
+min_height_limit = 24
+max_height_limit = 64
+base_slope_bias = 0.45
+max_gradient = 9.0
+footprint_multiplier = 1.0
+flags = ["land"]
+coast_profile = "gentle_beach"
+smooth_beaches = true
+keep_original_terrain = 0.55
+properties = ["temperate", "land", "wet", "overgrown"]
+
+max_sub_biome_count = 2.0
+sub_biome_total_chance = 0.18
+
+[[sub_biomes]]
+id = "grasslands"
+chance = 0.18
+min_radius = 40.0
+max_radius = 120.0
+
+[soil_creep]
+strength = 0.4
+max_step = 2
+max_depth = 3
+
+[stripes]
+enabled = false
+block = "grass"
+period = 5
+thickness = 1
+noise_threshold = 0.5
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

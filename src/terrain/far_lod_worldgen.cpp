@@ -332,7 +332,10 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
         FarLodGpuBiome packed{};
         packed.surfaceBlock = static_cast<std::uint32_t>(biome.surfaceBlock);
         packed.fillerBlock = static_cast<std::uint32_t>(biome.fillerBlock);
+        packed.canopyBlock = 0u;
+        packed.secondaryCanopyBlock = 0u;
         packed.flags = 0u;
+        packed.secondaryCanopyChance = 0.0f;
         if (biome.isOcean())
         {
             packed.flags |= kFarLodBiomeOcean;
@@ -348,10 +351,24 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
         if (biome.id == "taiga")
         {
             packed.flags |= kFarLodBiomeTaiga;
+            packed.canopyBlock = static_cast<std::uint32_t>(BlockId::SpruceLeaves);
         }
         if (biome.generatesTrees)
         {
             packed.flags |= kFarLodBiomeGeneratesTrees;
+            if (packed.canopyBlock == 0u)
+            {
+                packed.canopyBlock = static_cast<std::uint32_t>(BlockId::Leaves);
+            }
+        }
+        if (biome.id == "birch_forest")
+        {
+            packed.canopyBlock = static_cast<std::uint32_t>(BlockId::BirchLeaves);
+        }
+        if (biome.id == "forest")
+        {
+            packed.secondaryCanopyBlock = static_cast<std::uint32_t>(BlockId::BirchLeaves);
+            packed.secondaryCanopyChance = 0.30f;
         }
         if (biome.hasFlag("beach"))
         {

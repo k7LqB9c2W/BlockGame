@@ -3,6 +3,7 @@
 Texture2D gAtlas : register(t0);
 Texture2DArray gAerialPerspective : register(t1);
 Texture2D gShadowMap : register(t2);
+Texture2D gSkyBackground : register(t3);
 
 SamplerState gTerrainSampler : register(s0);
 SamplerState gLinearClamp : register(s1);
@@ -174,10 +175,13 @@ float4 main(PSInput input) : SV_TARGET
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
     const float horizontalDistanceBlocks = distance(input.worldPos.xz, uCameraPos.xz);
     const float3 fogViewDir = normalize(input.worldPos - uCameraPos.xyz);
-    const float3 fogColor = computeTerrainFogColor(fogViewDir, uSkyTopColor.rgb, uSkyHorizonColor.rgb);
+    const float2 screenUv = input.position.xy * uParams0.zw;
+    const bool useAnalyticFogBackground = uTerrainDebug.z > 0.5f;
+    const float3 fogColor = useAnalyticFogBackground
+                                ? computeTerrainFogColor(fogViewDir, uSkyTopColor.rgb, uSkyHorizonColor.rgb)
+                                : gSkyBackground.SampleLevel(gLinearClamp, screenUv, 0.0f).rgb;
     if (uParams0.x > 0.5f)
     {
-        const float2 screenUv = input.position.xy * uParams0.zw;
         const float4 aerial = sampleAerialPerspective(screenUv, distanceBlocks * 0.001f, uParams1.y);
         const float transmittance = saturate(max(aerial.a, 0.18f));
         color = color * transmittance + aerial.rgb;

@@ -21,6 +21,11 @@ float3 computeSkyGradientFromViewY(float viewY, float3 topSkyColorSrgb, float3 h
     return skyColor;
 }
 
+float3 computeSkyGradientFromViewDir(float3 viewDir, float3 topSkyColorSrgb, float3 horizonSkyColorSrgb)
+{
+    return computeSkyGradientFromViewY(max(viewDir.y, 0.0f), topSkyColorSrgb, horizonSkyColorSrgb);
+}
+
 float3 computeSkyGradientFromScreenUv(float uvY, float3 topSkyColorSrgb, float3 horizonSkyColorSrgb)
 {
     return computeSkyGradientFromViewY(1.0f - saturate(uvY), topSkyColorSrgb, horizonSkyColorSrgb);

@@ -2182,6 +2182,14 @@ struct CaptureOverridesConfig
     {
         return BlockId::DarkOakLeaves;
     }
+    if (text == "birch_log" || text == "birchlog")
+    {
+        return BlockId::BirchLog;
+    }
+    if (text == "birch_leaves" || text == "birchleaves")
+    {
+        return BlockId::BirchLeaves;
+    }
     if (text == "podzol")
     {
         return BlockId::Podzol;
@@ -2251,6 +2259,10 @@ struct CaptureOverridesConfig
         return "DarkOakLog";
     case BlockId::DarkOakLeaves:
         return "DarkOakLeaves";
+    case BlockId::BirchLog:
+        return "BirchLog";
+    case BlockId::BirchLeaves:
+        return "BirchLeaves";
     case BlockId::Podzol:
         return "Podzol";
     case BlockId::DebugLamp:
@@ -2261,7 +2273,7 @@ struct CaptureOverridesConfig
     }
 }
 
-[[nodiscard]] constexpr std::array<BlockId, 12> placeableBlockOptions() noexcept
+[[nodiscard]] constexpr std::array<BlockId, 14> placeableBlockOptions() noexcept
 {
     return {
         BlockId::Grass,
@@ -2274,6 +2286,8 @@ struct CaptureOverridesConfig
         BlockId::SpruceLeaves,
         BlockId::DarkOakLog,
         BlockId::DarkOakLeaves,
+        BlockId::BirchLog,
+        BlockId::BirchLeaves,
         BlockId::Podzol,
         BlockId::DebugLamp
     };

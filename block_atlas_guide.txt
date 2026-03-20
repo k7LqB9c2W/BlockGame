@@ -32,6 +32,9 @@ Current Tile Assignments
 - `{0,14}` Dark oak log top and bottom
 - `{0,15}` Dark oak log side
 - `{0,16}` Dark oak leaves
+- `{0,17}` Birch log top and bottom
+- `{0,18}` Birch log side
+- `{0,19}` Birch leaves
 
 Adding Blocks
 -------------

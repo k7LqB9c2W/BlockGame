@@ -66,6 +66,8 @@ struct FarLodGpuBiome
 {
     uint surfaceBlock;
     uint fillerBlock;
+    uint canopyBlock;
+    uint secondaryCanopyBlock;
     uint flags;
     uint coastProfile;
     uint propertyBits;
@@ -85,6 +87,7 @@ struct FarLodGpuBiome
     float radiusVariation;
     uint fixedRadius;
     float treeDensityMultiplier;
+    float secondaryCanopyChance;
     float maxSubBiomeCount;
     float subBiomeTotalChance;
     int minHeightLimit;
@@ -246,6 +249,7 @@ static const uint kBlockSand = 4u;
 static const uint kBlockPodzol = 9u;
 static const uint kBlockLeaves = 3u;
 static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockBirchLeaves = 14u;
 static const uint kMaxChunkSeeds = 64u;
 static const uint kMaxWeightedSeeds = 4u;
 static const float kClimateEpsilon = 1.0e-6f;
@@ -2239,9 +2243,20 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float averageDensity = densitySum / (float)densityCount;
         if (averageDensity >= 0.32f)
         {
+            uint canopyBlock = centerBiome.canopyBlock != 0u ? centerBiome.canopyBlock : kBlockLeaves;
+            if (!taigaCanopy &&
+                centerBiome.secondaryCanopyBlock != 0u &&
+                centerBiome.secondaryCanopyChance > 0.0f)
+            {
+                const float canopyRoll = hashToUnitFloat(centerX, sample.maxSurfaceY + 271, centerZ);
+                if (canopyRoll < centerBiome.secondaryCanopyChance)
+                {
+                    canopyBlock = centerBiome.secondaryCanopyBlock;
+                }
+            }
             sample.canopyBottomY = sample.maxSurfaceY + (taigaCanopy ? 4 : 3);
             sample.canopyTopY = sample.canopyBottomY + (taigaCanopy ? 8 : 6);
-            sample.canopyBlock = taigaCanopy ? kBlockSpruceLeaves : kBlockLeaves;
+            sample.canopyBlock = taigaCanopy ? kBlockSpruceLeaves : canopyBlock;
             sample.canopyStrength = (uint)clamp(round(averageDensity * 255.0f), 0.0f, 255.0f);
         }
     }

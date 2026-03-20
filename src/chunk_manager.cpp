@@ -3456,6 +3456,8 @@ constexpr std::array<BlockLightingProperties, toIndex(BlockId::Count)> kBlockLig
     {true, kMaxLightLevel, 14, true},  // DebugLamp
     {true, kMaxLightLevel, 0, true},   // DarkOakLog
     {false, 1, 0, true},               // DarkOakLeaves
+    {true, kMaxLightLevel, 0, true},   // BirchLog
+    {false, 1, 0, true},               // BirchLeaves
 }};
 
 inline const BlockLightingProperties& blockLightingProperties(BlockId block) noexcept
@@ -3536,7 +3538,8 @@ inline bool isAlphaCutoutBlock(BlockId block) noexcept
 {
     return block == BlockId::Leaves ||
            block == BlockId::SpruceLeaves ||
-           block == BlockId::DarkOakLeaves;
+           block == BlockId::DarkOakLeaves ||
+           block == BlockId::BirchLeaves;
 }
 
 inline bool isNonOpaqueBlock(BlockId block) noexcept
@@ -3595,6 +3598,14 @@ struct DefaultTreeCandidate
     int groundWorldY{0};
     int trunkHeight{0};
     float priority{0.0f};
+    BlockId trunkBlock{BlockId::Wood};
+    BlockId leavesBlock{BlockId::Leaves};
+};
+
+struct DefaultTreeBlockPalette
+{
+    BlockId trunkBlock{BlockId::Wood};
+    BlockId leavesBlock{BlockId::Leaves};
 };
 
 inline glm::ivec2 taigaSpruceOriginForCell(int cellX, int cellZ) noexcept
@@ -3730,6 +3741,28 @@ inline int defaultTreeTrunkHeight(int worldX, int groundWorldY, int worldZ) noex
     return std::clamp(height, kDefaultTreeMinHeight, kDefaultTreeMaxHeight);
 }
 
+inline DefaultTreeBlockPalette defaultTreeBlockPaletteForBiome(const BiomeDefinition& biome,
+                                                               int worldX,
+                                                               int groundWorldY,
+                                                               int worldZ) noexcept
+{
+    if (biome.id == "birch_forest")
+    {
+        return DefaultTreeBlockPalette{BlockId::BirchLog, BlockId::BirchLeaves};
+    }
+
+    if (biome.id == "forest")
+    {
+        const float birchRoll = hashToUnitFloat(worldX, groundWorldY + 313, worldZ);
+        if (birchRoll < 0.30f)
+        {
+            return DefaultTreeBlockPalette{BlockId::BirchLog, BlockId::BirchLeaves};
+        }
+    }
+
+    return DefaultTreeBlockPalette{};
+}
+
 inline float defaultTreeSpawnThreshold(const BiomeDefinition& biome, float normalizedDensity) noexcept
 {
     const float spawnThresholdBase = 0.015f + normalizedDensity * 0.02f;
@@ -3762,11 +3795,13 @@ inline bool forEachDefaultTreeBlock(int originX,
                                     int originZ,
                                     int groundWorldY,
                                     int trunkHeight,
+                                    BlockId trunkBlock,
+                                    BlockId leavesBlock,
                                     Callback&& callback)
 {
     for (int dy = 0; dy < trunkHeight; ++dy)
     {
-        if (callback(originX, groundWorldY + dy, originZ, BlockId::Wood))
+        if (callback(originX, groundWorldY + dy, originZ, trunkBlock))
         {
             return true;
         }
@@ -3802,7 +3837,7 @@ inline bool forEachDefaultTreeBlock(int originX,
                     continue;
                 }
 
-                if (callback(originX + dx, worldY, originZ + dz, BlockId::Leaves))
+                if (callback(originX + dx, worldY, originZ + dz, leavesBlock))
                 {
                     return true;
                 }
@@ -3846,11 +3881,15 @@ inline bool defaultTreesTouchOrOverlap(const DefaultTreeCandidate& a,
                                    a.originZ,
                                    a.groundWorldY,
                                    a.trunkHeight,
+                                   a.trunkBlock,
+                                   a.leavesBlock,
                                    [&](int ax, int ay, int az, BlockId) {
                                        return forEachDefaultTreeBlock(b.originX,
                                                                       b.originZ,
                                                                       b.groundWorldY,
                                                                       b.trunkHeight,
+                                                                      b.trunkBlock,
+                                                                      b.leavesBlock,
                                                                       [&](int bx, int by, int bz, BlockId) {
                                                                           const int dx = std::abs(ax - bx);
                                                                           const int dy = std::abs(ay - by);
@@ -3920,6 +3959,9 @@ inline bool tryBuildDefaultTreeCandidate(int originX,
     outCandidate.groundWorldY = groundWorldY;
     outCandidate.trunkHeight = defaultTreeTrunkHeight(originX, groundWorldY, originZ);
     outCandidate.priority = defaultTreePriority(originX, groundWorldY, originZ);
+    const DefaultTreeBlockPalette palette = defaultTreeBlockPaletteForBiome(biome, originX, groundWorldY, originZ);
+    outCandidate.trunkBlock = palette.trunkBlock;
+    outCandidate.leavesBlock = palette.leavesBlock;
     return true;
 }
 
@@ -3998,6 +4040,8 @@ struct StructureInstance
     int bareTrunkHeight{0};
     float priority{0.0f};
     int maxLodLevel{3};
+    BlockId trunkBlock{BlockId::Wood};
+    BlockId leavesBlock{BlockId::Leaves};
 };
 
 template <typename Callback>
@@ -4077,6 +4121,8 @@ inline bool forEachStructureVoxel(const StructureInstance& instance, Callback&& 
                                    instance.origin.z,
                                    instance.origin.y,
                                    instance.trunkHeight,
+                                   instance.trunkBlock,
+                                   instance.leavesBlock,
                                    std::forward<Callback>(callback));
 }
 
@@ -4409,6 +4455,8 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
             instance.trunkHeight = candidate.trunkHeight;
             instance.priority = candidate.priority;
             instance.maxLodLevel = 3;
+            instance.trunkBlock = candidate.trunkBlock;
+            instance.leavesBlock = candidate.leavesBlock;
             instance.bounds.min = glm::ivec3(candidate.originX - kDefaultTreeMaxRadius,
                                              candidate.groundWorldY,
                                              candidate.originZ - kDefaultTreeMaxRadius);
@@ -6697,11 +6745,13 @@ private:
 
     [[nodiscard]] static int structureMaterialPriority(BlockId block) noexcept
     {
-        if (block == BlockId::SpruceLog || block == BlockId::Wood || block == BlockId::DarkOakLog)
+        if (block == BlockId::SpruceLog || block == BlockId::Wood ||
+            block == BlockId::DarkOakLog || block == BlockId::BirchLog)
         {
             return 4;
         }
-        if (block == BlockId::SpruceLeaves || block == BlockId::Leaves || block == BlockId::DarkOakLeaves)
+        if (block == BlockId::SpruceLeaves || block == BlockId::Leaves ||
+            block == BlockId::DarkOakLeaves || block == BlockId::BirchLeaves)
         {
             return 3;
         }
@@ -12749,6 +12799,18 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const BlockTextureAtlasConfi
     for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
     {
         assignFace(BlockId::DarkOakLeaves, face, {0, 16});
+    }
+
+    assignFace(BlockId::BirchLog, BlockFace::Top, {0, 17});
+    assignFace(BlockId::BirchLog, BlockFace::Bottom, {0, 17});
+    for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::BirchLog, face, {0, 18});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::BirchLeaves, face, {0, 19});
     }
 
     blockAtlasConfigured_ = true;
@@ -19759,8 +19821,10 @@ void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBl
                             instance.origin.z,
                             instance.origin.y,
                             instance.trunkHeight,
+                            instance.trunkBlock,
+                            instance.leavesBlock,
                             [&](int blockX, int blockY, int blockZ, BlockId block) {
-                                setLocalBlock(blockX, blockY, blockZ, block, block == BlockId::Wood);
+                                setLocalBlock(blockX, blockY, blockZ, block, block == instance.trunkBlock);
                                 return false;
                             });
 }

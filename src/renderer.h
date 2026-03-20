@@ -184,8 +184,8 @@ private:
     {
         glm::vec4 topSkyColor{0.0f};
         glm::vec4 horizonSkyColor{0.0f};
-        glm::vec4 params{0.0f};
-        glm::vec4 sunColor{0.0f};
+        glm::mat4 invViewProj{1.0f};
+        glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     struct CloudConstants
@@ -294,6 +294,8 @@ private:
     void ensureFrameStarted() const;
     void createFrameResources();
     void destroyFrameResources();
+    void createSkyBackground();
+    void destroySkyBackground();
     void createSceneColor();
     void destroySceneColor();
     void ensureScreenshotReadbackBuffer();
@@ -308,7 +310,8 @@ private:
                                D3D12_GPU_VIRTUAL_ADDRESS farConstantsGpuAddress,
                                D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
                                D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
-                               D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv);
+                               D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                               D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv);
     void renderShadowMap(const WorldRenderData& renderData,
                          const glm::mat4& view,
                          const glm::vec3& cameraPos,
@@ -361,6 +364,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> lodIndirectPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedCommandSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> backgroundCloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
@@ -370,10 +374,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> depthPyramid_;
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> skyBackground_;
     Microsoft::WRL::ComPtr<ID3D12Resource> sceneColor_;
     Microsoft::WRL::ComPtr<ID3D12Resource> screenshotReadbackBuffer_;
     D3D12_RESOURCE_STATES shadowMapState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES depthPyramidState_{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES skyBackgroundState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES sceneColorState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT screenshotReadbackLayout_{};
 
@@ -385,6 +391,9 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE shadowMapDsv_{};
     D3D12_CPU_DESCRIPTOR_HANDLE shadowMapSrvCpu_{};
     D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE skyBackgroundRtv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE skyBackgroundSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrvGpu_{};
     D3D12_CPU_DESCRIPTOR_HANDLE sceneColorRtv_{};
     D3D12_CPU_DESCRIPTOR_HANDLE sceneColorSrvCpu_{};
     D3D12_GPU_DESCRIPTOR_HANDLE sceneColorSrvGpu_{};
@@ -400,6 +409,7 @@ private:
     int depthSrvIndex_{-1};
     int depthPyramidSrvIndex_{-1};
     int shadowMapSrvIndex_{-1};
+    int skyBackgroundSrvIndex_{-1};
     std::vector<UINT> depthPyramidUavIndices_{};
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> depthPyramidUavCpuHandles_{};
     std::vector<D3D12_GPU_DESCRIPTOR_HANDLE> depthPyramidUavGpuHandles_{};

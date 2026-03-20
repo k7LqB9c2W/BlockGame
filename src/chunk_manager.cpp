@@ -5025,6 +5025,8 @@ public:
     std::vector<Job> stop();
     bool empty() const;
     std::size_t size() const;
+    std::size_t size(JobType type) const;
+    std::size_t outstanding(JobType type) const;
     void updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     bool tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     void setWorkerConcurrency(std::size_t workerCount) noexcept;
@@ -11987,6 +11989,19 @@ std::size_t JobQueue::size() const
     return queuedJobCount_.load(std::memory_order_relaxed);
 }
 
+std::size_t JobQueue::size(JobType type) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queues_[jobTypeIndex(type)].size();
+}
+
+std::size_t JobQueue::outstanding(JobType type) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t index = jobTypeIndex(type);
+    return queues_[index].size() + activeCounts_[index];
+}
+
 void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -12888,12 +12903,24 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         computeGenerationBudget(targetViewDistance_, verticalRadius, backlogSteps);
     const int ringBudget = computeRingExpansionBudget(missingChunks);
 
-    lastGenerationBudget_ = generationBudgetTarget;
+    const std::size_t workerSlots = std::max<std::size_t>(workerThreadCount_, 1);
+    const std::size_t outstandingGenerateCap = std::clamp<std::size_t>(
+        64u + workerSlots * 24u + static_cast<std::size_t>(std::max(verticalRadius, 0)) * 4u,
+        64u,
+        384u);
+    const std::size_t outstandingGenerateJobs = jobQueue_.outstanding(JobType::Generate);
+    const int generationHeadroom = (outstandingGenerateJobs >= outstandingGenerateCap)
+        ? 0
+        : static_cast<int>(std::min<std::size_t>(outstandingGenerateCap - outstandingGenerateJobs,
+                                                 static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    const int effectiveGenerationBudgetTarget = std::min(generationBudgetTarget, generationHeadroom);
+
+    lastGenerationBudget_ = effectiveGenerationBudgetTarget;
     lastRingBudget_ = ringBudget;
     lastColumnCap_ = generationColumnCapThisFrame_;
     lastBacklogSteps_ = backlogSteps;
 
-    int jobBudget = generationBudgetTarget;
+    int jobBudget = effectiveGenerationBudgetTarget;
     ensureVolumeMsLastFrame_ = 0.0;
     const auto timedEnsureVolume = [&](int horizontalRadius)
     {
@@ -12942,7 +12969,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     schedulingMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedulingStart).count();
 
-    lastGenerationJobsIssued_ = std::clamp(generationBudgetTarget - jobBudget, 0, generationBudgetTarget);
+    lastGenerationJobsIssued_ =
+        std::clamp(effectiveGenerationBudgetTarget - jobBudget, 0, effectiveGenerationBudgetTarget);
     lastRingExpansionsUsed_ = ringsExpanded;
     lastMissingChunks_ = std::max(0, missingChunks - lastGenerationJobsIssued_);
     cachedExactReadyChunks_ = visibleCoverage.ready;
@@ -19778,10 +19806,13 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
         scratch.setWorldBlock(edit.worldPos.x, edit.worldPos.y, edit.worldPos.z, edit.block, edit.replaceSolid);
     }
 
-    const bool anySolid =
-        std::any_of(scratch.highestSolidWorlds.begin(),
-                    scratch.highestSolidWorlds.end(),
-                    [](int highestWorldY) { return highestWorldY != ColumnManager::kNoHeight; });
+    // `hasBlocks` controls whether the chunk enters relight/mesh/upload. Water-only
+    // slabs and canopy-only slabs must count here even though they do not raise the
+    // column manager's "highest solid" height.
+    const bool anyBlocks =
+        std::any_of(scratch.blocks.begin(),
+                    scratch.blocks.end(),
+                    [](BlockId block) { return block != BlockId::Air; });
 
     const auto meshLockStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     {
@@ -19811,7 +19842,7 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
 
         // Publish the fully built block slab in one short handoff so upload/commit only contends on swaps.
         chunk.blocks = std::move(scratch.blocks);
-        chunk.hasBlocks.store(anySolid, std::memory_order_release);
+        chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
     }
     if (benchmarkEnabled)
     {

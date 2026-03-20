@@ -212,10 +212,12 @@ struct ChunkProfilingSnapshot
     double priorityUpdateMsLastFrame{0.0};
     double uploadBudgetMsLastFrame{0.0};
     double missingScanMsLastFrame{0.0};
+    double ensureVolumeMsLastFrame{0.0};
     double schedulingMsLastFrame{0.0};
     double evictionMsLastFrame{0.0};
     double relightMsLastFrame{0.0};
     double uploadMsLastFrame{0.0};
+    double uploadQueuePickMsLastFrame{0.0};
     double poolTrimMsLastFrame{0.0};
     double startupStateMsLastFrame{0.0};
     double benchmarkBookkeepingMsLastFrame{0.0};
@@ -310,6 +312,13 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats relightStage{};
     BenchmarkStageStats meshStage{};
     BenchmarkStageStats uploadStage{};
+    BenchmarkStageStats updateStage{};
+    BenchmarkStageStats visibleScanStage{};
+    BenchmarkStageStats ensureVolumeStage{};
+    BenchmarkStageStats schedulingStage{};
+    BenchmarkStageStats evictionStage{};
+    BenchmarkStageStats uploadDrainStage{};
+    BenchmarkStageStats uploadQueuePickStage{};
     BenchmarkStageStats farBuildStage{};
     BenchmarkStageStats lodGpuSynthesisStage{};
     BenchmarkStageStats lodGpuStampStage{};

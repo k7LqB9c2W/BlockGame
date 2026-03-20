@@ -502,6 +502,13 @@ struct ChunkBenchmarkMetrics
         relightStage.reset();
         meshStage.reset();
         uploadStage.reset();
+        updateStage.reset();
+        visibleScanStage.reset();
+        ensureVolumeStage.reset();
+        schedulingStage.reset();
+        evictionStage.reset();
+        uploadDrainStage.reset();
+        uploadQueuePickStage.reset();
         farBuildStage.reset();
         lodGpuSynthesisStage.reset();
         lodGpuStampStage.reset();
@@ -538,6 +545,13 @@ struct ChunkBenchmarkMetrics
         report.relightStage = relightStage.snapshot();
         report.meshStage = meshStage.snapshot();
         report.uploadStage = uploadStage.snapshot();
+        report.updateStage = updateStage.snapshot();
+        report.visibleScanStage = visibleScanStage.snapshot();
+        report.ensureVolumeStage = ensureVolumeStage.snapshot();
+        report.schedulingStage = schedulingStage.snapshot();
+        report.evictionStage = evictionStage.snapshot();
+        report.uploadDrainStage = uploadDrainStage.snapshot();
+        report.uploadQueuePickStage = uploadQueuePickStage.snapshot();
         report.farBuildStage = farBuildStage.snapshot();
         report.lodGpuSynthesisStage = lodGpuSynthesisStage.snapshot();
         report.lodGpuStampStage = lodGpuStampStage.snapshot();
@@ -572,6 +586,13 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram relightStage{};
     AtomicLatencyHistogram meshStage{};
     AtomicLatencyHistogram uploadStage{};
+    AtomicLatencyHistogram updateStage{};
+    AtomicLatencyHistogram visibleScanStage{};
+    AtomicLatencyHistogram ensureVolumeStage{};
+    AtomicLatencyHistogram schedulingStage{};
+    AtomicLatencyHistogram evictionStage{};
+    AtomicLatencyHistogram uploadDrainStage{};
+    AtomicLatencyHistogram uploadQueuePickStage{};
     AtomicLatencyHistogram farBuildStage{};
     AtomicLatencyHistogram lodGpuSynthesisStage{};
     AtomicLatencyHistogram lodGpuStampStage{};
@@ -11640,11 +11661,13 @@ private:
     double priorityUpdateMsLastFrame_{0.0};
     double uploadBudgetPrepMsLastFrame_{0.0};
     double missingScanMsLastFrame_{0.0};
+    double ensureVolumeMsLastFrame_{0.0};
     double schedulingMsLastFrame_{0.0};
     double evictionMsLastFrame_{0.0};
     double relightMsLastFrame_{0.0};
     std::size_t lastUploadBytesUsed_{0};
     std::size_t pendingUploadsLastFrame_{0};
+    double uploadQueuePickMsLastFrame_{0.0};
     double poolTrimMsLastFrame_{0.0};
     double startupStateMsLastFrame_{0.0};
     double benchmarkBookkeepingMsLastFrame_{0.0};
@@ -12486,6 +12509,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos)
 void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cameraForward)
 {
     const auto updateStart = std::chrono::steady_clock::now();
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     lastCameraPosition_ = cameraPos;
     if (glm::dot(cameraForward, cameraForward) > kEpsilon)
     {
@@ -12541,7 +12565,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verticalRadiusStart).count();
     lastVerticalRadiusDelta_ = std::abs(verticalRadius - previousVerticalRadius);
     lastVerticalRadius_ = verticalRadius;
-    if (benchmarkMetrics_.isEnabled())
+    if (benchmarkEnabled)
     {
         benchmarkMetrics_.verticalRadiusDelta.record(static_cast<std::uint64_t>(lastVerticalRadiusDelta_));
     }
@@ -12627,11 +12651,25 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     lastBacklogSteps_ = backlogSteps;
 
     int jobBudget = generationBudgetTarget;
+    ensureVolumeMsLastFrame_ = 0.0;
+    const auto timedEnsureVolume = [&](int horizontalRadius)
+    {
+        if (!benchmarkEnabled)
+        {
+            return ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget);
+        }
+
+        const auto ensureVolumeStart = std::chrono::steady_clock::now();
+        RingProgress progress = ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget);
+        ensureVolumeMsLastFrame_ +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ensureVolumeStart).count();
+        return progress;
+    };
 
     const auto schedulingStart = std::chrono::steady_clock::now();
     for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
     {
-        RingProgress progress = ensureVolume(centerChunk, ring, verticalRadius, jobBudget);
+        RingProgress progress = timedEnsureVolume(ring);
         if (progress.budgetExhausted)
         {
             break;
@@ -12642,7 +12680,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < ringBudget)
     {
         const int nextRing = viewDistance_ + 1;
-        RingProgress progress = ensureVolume(centerChunk, nextRing, verticalRadius, jobBudget);
+        RingProgress progress = timedEnsureVolume(nextRing);
 
         if (progress.budgetExhausted)
         {
@@ -12825,7 +12863,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startupStateStart).count();
 
     benchmarkBookkeepingMsLastFrame_ = 0.0;
-    if (benchmarkMetrics_.isEnabled())
+    if (benchmarkEnabled)
     {
         const auto benchmarkMetricsStart = std::chrono::steady_clock::now();
         benchmarkMetrics_.jobQueueDepth.record(jobQueue_.size());
@@ -12841,6 +12879,21 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     updateMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
+    if (benchmarkEnabled)
+    {
+        const auto toMicros = [](double milliseconds) -> std::uint64_t
+        {
+            return static_cast<std::uint64_t>(std::max(0.0, milliseconds) * 1000.0);
+        };
+
+        benchmarkMetrics_.updateStage.recordMicros(toMicros(updateMsLastFrame_));
+        benchmarkMetrics_.visibleScanStage.recordMicros(toMicros(missingScanMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeStage.recordMicros(toMicros(ensureVolumeMsLastFrame_));
+        benchmarkMetrics_.schedulingStage.recordMicros(toMicros(schedulingMsLastFrame_));
+        benchmarkMetrics_.evictionStage.recordMicros(toMicros(evictionMsLastFrame_));
+        benchmarkMetrics_.uploadDrainStage.recordMicros(toMicros(lastUploadMsUsed_));
+        benchmarkMetrics_.uploadQueuePickStage.recordMicros(toMicros(uploadQueuePickMsLastFrame_));
+    }
 }
 
 WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) const
@@ -13942,10 +13995,12 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.priorityUpdateMsLastFrame = priorityUpdateMsLastFrame_;
     snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
     snapshot.missingScanMsLastFrame = missingScanMsLastFrame_;
+    snapshot.ensureVolumeMsLastFrame = ensureVolumeMsLastFrame_;
     snapshot.schedulingMsLastFrame = schedulingMsLastFrame_;
     snapshot.evictionMsLastFrame = evictionMsLastFrame_;
     snapshot.relightMsLastFrame = relightMsLastFrame_;
     snapshot.uploadMsLastFrame = lastUploadMsUsed_;
+    snapshot.uploadQueuePickMsLastFrame = uploadQueuePickMsLastFrame_;
     snapshot.poolTrimMsLastFrame = poolTrimMsLastFrame_;
     snapshot.startupStateMsLastFrame = startupStateMsLastFrame_;
     snapshot.benchmarkBookkeepingMsLastFrame = benchmarkBookkeepingMsLastFrame_;
@@ -15941,6 +15996,8 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
 void ChunkManager::Impl::uploadReadyMeshes()
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    uploadQueuePickMsLastFrame_ = 0.0;
     commitPendingChunkUploads();
 
     const std::size_t initialBudget = uploadBudgetBytesThisFrame_;
@@ -15970,7 +16027,18 @@ void ChunkManager::Impl::uploadReadyMeshes()
         }
 
         ++attempts;
-        std::shared_ptr<Chunk> chunk = popNextChunkForUpload();
+        std::shared_ptr<Chunk> chunk;
+        if (benchmarkEnabled)
+        {
+            const auto uploadPickStart = SteadyClock::now();
+            chunk = popNextChunkForUpload();
+            uploadQueuePickMsLastFrame_ +=
+                std::chrono::duration<double, std::milli>(SteadyClock::now() - uploadPickStart).count();
+        }
+        else
+        {
+            chunk = popNextChunkForUpload();
+        }
         if (!chunk)
         {
             break;
@@ -16021,7 +16089,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
             continue;
         }
 
-        const auto uploadChunkStart = benchmarkMetrics_.isEnabled() ? SteadyClock::now() : SteadyClock::time_point{};
+        const auto uploadChunkStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
         if (!uploadChunkMesh(*chunk, uploadBatchId))
         {
             requeueChunkForUpload(chunk, true);
@@ -16040,7 +16108,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
 
         profilingCounters_.uploadedChunks.fetch_add(1, std::memory_order_relaxed);
         profilingCounters_.uploadedBytes.fetch_add(totalBytes, std::memory_order_relaxed);
-        if (benchmarkMetrics_.isEnabled())
+        if (benchmarkEnabled)
         {
             const auto uploadChunkEnd = SteadyClock::now();
             const auto uploadMicros =

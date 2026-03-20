@@ -809,10 +809,12 @@ struct BenchmarkSpikeRecord
     double chunkPriorityUpdateMs{0.0};
     double chunkUploadBudgetMs{0.0};
     double chunkMissingScanMs{0.0};
+    double chunkEnsureVolumeMs{0.0};
     double chunkSchedulingMs{0.0};
     double chunkEvictionMs{0.0};
     double chunkRelightMs{0.0};
     double chunkUploadMs{0.0};
+    double chunkUploadQueuePickMs{0.0};
     double chunkPoolTrimMs{0.0};
     double chunkStartupStateMs{0.0};
     double chunkBenchmarkBookkeepingMs{0.0};
@@ -1149,11 +1151,13 @@ struct BenchmarkFrameSummary
     const double priorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
     const double uploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
     const double missingScanMs = chunkSnapshot.missingScanMsLastFrame;
+    const double ensureVolumeMs = chunkSnapshot.ensureVolumeMsLastFrame;
     const double schedulingMs = chunkSnapshot.schedulingMsLastFrame;
     const double evictionMs = chunkSnapshot.evictionMsLastFrame;
     const double relightMs = chunkSnapshot.relightMsLastFrame;
     const double presentMs = rendererSnapshot.presentMs;
     const double uploadMs = chunkSnapshot.uploadMsLastFrame;
+    const double uploadQueuePickMs = chunkSnapshot.uploadQueuePickMsLastFrame;
     const double poolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
     const double startupStateMs = chunkSnapshot.startupStateMsLastFrame;
     const double benchmarkBookkeepingMs = chunkSnapshot.benchmarkBookkeepingMsLastFrame;
@@ -1192,6 +1196,10 @@ struct BenchmarkFrameSummary
         {
             return "chunk_upload_budget";
         }
+        if (ensureVolumeMs >= 10.0 && ensureVolumeMs >= updateMs * 0.35)
+        {
+            return "chunk_ensure_volume";
+        }
         if (schedulingMs >= 10.0 && schedulingMs >= updateMs * 0.35)
         {
             return "chunk_scheduling";
@@ -1203,6 +1211,10 @@ struct BenchmarkFrameSummary
         if (relightMs >= 5.0 && relightMs >= updateMs * 0.2)
         {
             return "chunk_main_thread_relight";
+        }
+        if (uploadQueuePickMs >= 6.0 && uploadQueuePickMs >= updateMs * 0.25)
+        {
+            return "chunk_upload_queue_pick";
         }
         if (uploadMs >= 6.0 && uploadMs >= updateMs * 0.25)
         {
@@ -1313,10 +1325,12 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
     record.chunkPriorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
     record.chunkUploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
     record.chunkMissingScanMs = chunkSnapshot.missingScanMsLastFrame;
+    record.chunkEnsureVolumeMs = chunkSnapshot.ensureVolumeMsLastFrame;
     record.chunkSchedulingMs = chunkSnapshot.schedulingMsLastFrame;
     record.chunkEvictionMs = chunkSnapshot.evictionMsLastFrame;
     record.chunkRelightMs = chunkSnapshot.relightMsLastFrame;
     record.chunkUploadMs = chunkSnapshot.uploadMsLastFrame;
+    record.chunkUploadQueuePickMs = chunkSnapshot.uploadQueuePickMsLastFrame;
     record.chunkPoolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
     record.chunkStartupStateMs = chunkSnapshot.startupStateMsLastFrame;
     record.chunkBenchmarkBookkeepingMs = chunkSnapshot.benchmarkBookkeepingMsLastFrame;
@@ -1583,10 +1597,12 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
             << ",\"chunk_priority_update_ms\":" << spike.chunkPriorityUpdateMs
             << ",\"chunk_upload_budget_ms\":" << spike.chunkUploadBudgetMs
             << ",\"chunk_missing_scan_ms\":" << spike.chunkMissingScanMs
+            << ",\"chunk_ensure_volume_ms\":" << spike.chunkEnsureVolumeMs
             << ",\"chunk_scheduling_ms\":" << spike.chunkSchedulingMs
             << ",\"chunk_eviction_ms\":" << spike.chunkEvictionMs
             << ",\"chunk_relight_ms\":" << spike.chunkRelightMs
             << ",\"chunk_upload_ms\":" << spike.chunkUploadMs
+            << ",\"chunk_upload_queue_pick_ms\":" << spike.chunkUploadQueuePickMs
             << ",\"chunk_pool_trim_ms\":" << spike.chunkPoolTrimMs
             << ",\"chunk_startup_state_ms\":" << spike.chunkStartupStateMs
             << ",\"chunk_benchmark_bookkeeping_ms\":" << spike.chunkBenchmarkBookkeepingMs
@@ -1717,6 +1733,20 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.meshStage);
     out << ",\"upload\":";
     writeStageStatsJson(out, report.uploadStage);
+    out << ",\"update\":";
+    writeStageStatsJson(out, report.updateStage);
+    out << ",\"visible_scan\":";
+    writeStageStatsJson(out, report.visibleScanStage);
+    out << ",\"ensure_volume\":";
+    writeStageStatsJson(out, report.ensureVolumeStage);
+    out << ",\"scheduling\":";
+    writeStageStatsJson(out, report.schedulingStage);
+    out << ",\"eviction\":";
+    writeStageStatsJson(out, report.evictionStage);
+    out << ",\"upload_drain\":";
+    writeStageStatsJson(out, report.uploadDrainStage);
+    out << ",\"upload_queue_pick\":";
+    writeStageStatsJson(out, report.uploadQueuePickStage);
     out << ",\"far_build\":";
     writeStageStatsJson(out, report.farBuildStage);
     out << ",\"lod_gpu_synthesis\":";
@@ -1783,6 +1813,12 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"pooled_chunk_budget_bytes\":" << finalProfiling.pooledChunkBudgetBytes
         << ",\"vertical_radius\":" << finalProfiling.verticalRadius
         << ",\"vertical_radius_delta\":" << finalProfiling.verticalRadiusDelta
+        << ",\"visible_scan_ms\":" << finalProfiling.missingScanMsLastFrame
+        << ",\"ensure_volume_ms\":" << finalProfiling.ensureVolumeMsLastFrame
+        << ",\"scheduling_ms\":" << finalProfiling.schedulingMsLastFrame
+        << ",\"eviction_ms\":" << finalProfiling.evictionMsLastFrame
+        << ",\"upload_drain_ms\":" << finalProfiling.uploadMsLastFrame
+        << ",\"upload_queue_pick_ms\":" << finalProfiling.uploadQueuePickMsLastFrame
         << ",\"relight_region_chunks_last_frame\":" << finalProfiling.relightRegionChunks
         << ",\"relight_changed_chunks_last_frame\":" << finalProfiling.relightChangedChunks
         << ",\"relight_external_snapshot_chunks_last_frame\":" << finalProfiling.relightExternalSnapshotChunks

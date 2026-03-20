@@ -365,6 +365,17 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.stages.relight.avg_ms,
         $scenario.queues.upload_backlog.avg_depth,
         $scenario.queues.upload_backlog.p95_depth))
+    if ($scenario.stages.visible_scan -and $scenario.stages.ensure_volume -and $scenario.stages.eviction -and $scenario.stages.upload_drain) {
+        $summaryLines.Add(("  update_avg_ms={0:F2} visible_scan_avg_ms={1:F2} ensure_volume_avg_ms={2:F2} scheduling_avg_ms={3:F2}" -f `
+            $scenario.stages.update.avg_ms,
+            $scenario.stages.visible_scan.avg_ms,
+            $scenario.stages.ensure_volume.avg_ms,
+            $scenario.stages.scheduling.avg_ms))
+        $summaryLines.Add(("  eviction_avg_ms={0:F2} upload_drain_avg_ms={1:F2} upload_pick_avg_ms={2:F2}" -f `
+            $scenario.stages.eviction.avg_ms,
+            $scenario.stages.upload_drain.avg_ms,
+            $scenario.stages.upload_queue_pick.avg_ms))
+    }
     if ($scenario.relight_detail) {
         $summaryLines.Add(("  relight region_chunks avg={0:F2} p95={1:F2} changed_chunks avg={2:F2} p95={3:F2}" -f `
             $scenario.relight_detail.region_chunks.avg,
@@ -410,6 +421,15 @@ foreach ($scenario in $scenarioObjects) {
                 $worst.suspected_source,
                 $worst.chunk_update_ms,
                 $worst.renderer_present_ms))
+            if ($null -ne $worst.chunk_ensure_volume_ms) {
+                $summaryLines.Add(("  worst_spike detail scan_ms={0:F2} ensure_ms={1:F2} schedule_ms={2:F2} evict_ms={3:F2} upload_ms={4:F2} upload_pick_ms={5:F2}" -f `
+                    $worst.chunk_missing_scan_ms,
+                    $worst.chunk_ensure_volume_ms,
+                    $worst.chunk_scheduling_ms,
+                    $worst.chunk_eviction_ms,
+                    $worst.chunk_upload_ms,
+                    $worst.chunk_upload_queue_pick_ms))
+            }
             $summaryLines.Add(("  worst_spike relight region={0} changed={1} external={2} sky_scans={3} vertical_delta={4}" -f `
                 $worst.relight_region_chunks_this_frame,
                 $worst.relight_changed_chunks_this_frame,

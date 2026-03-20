@@ -352,6 +352,10 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats commitMeshStateStage{};
     BenchmarkStageStats commitPageStateStage{};
     BenchmarkStageStats commitReleaseStage{};
+    BenchmarkStageStats generateBlocksMeshLockStage{};
+    BenchmarkStageStats uploadChunkMeshLockStage{};
+    BenchmarkStageStats neighborhoodSnapshotLockStage{};
+    BenchmarkStageStats skyLightCacheLockStage{};
     BenchmarkStageStats startupStateStage{};
     BenchmarkStageStats benchmarkBookkeepingStage{};
     BenchmarkStageStats farBuildStage{};

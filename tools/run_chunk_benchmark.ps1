@@ -396,6 +396,11 @@ foreach ($scenario in $scenarioObjects) {
             $summaryLines.Add(("  commit_mesh_wait_avg_ms={0:F2} commit_mesh_locked_avg_ms={1:F2}" -f `
                 $scenario.stages.commit_mesh_lock_wait.avg_ms,
                 $scenario.stages.commit_mesh_locked.avg_ms))
+            $summaryLines.Add(("  generate_lock_avg_ms={0:F2} upload_mesh_lock_avg_ms={1:F2} neighborhood_lock_avg_ms={2:F2} skylight_cache_lock_avg_ms={3:F2}" -f `
+                $scenario.stages.generate_blocks_mesh_lock.avg_ms,
+                $scenario.stages.upload_chunk_mesh_lock.avg_ms,
+                $scenario.stages.neighborhood_snapshot_lock.avg_ms,
+                $scenario.stages.sky_light_cache_lock.avg_ms))
         }
     }
     if ($scenario.relight_detail) {

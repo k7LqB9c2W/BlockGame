@@ -1897,6 +1897,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.commitPageStateStage);
     out << ",\"commit_release\":";
     writeStageStatsJson(out, report.commitReleaseStage);
+    out << ",\"generate_blocks_mesh_lock\":";
+    writeStageStatsJson(out, report.generateBlocksMeshLockStage);
+    out << ",\"upload_chunk_mesh_lock\":";
+    writeStageStatsJson(out, report.uploadChunkMeshLockStage);
+    out << ",\"neighborhood_snapshot_lock\":";
+    writeStageStatsJson(out, report.neighborhoodSnapshotLockStage);
+    out << ",\"sky_light_cache_lock\":";
+    writeStageStatsJson(out, report.skyLightCacheLockStage);
     out << ",\"startup_state\":";
     writeStageStatsJson(out, report.startupStateStage);
     out << ",\"benchmark_bookkeeping\":";

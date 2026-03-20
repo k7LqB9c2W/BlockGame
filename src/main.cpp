@@ -213,6 +213,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableGpuBreak = false;
     bool enableGpuValidation = false;
     bool enableLodVisibilityDebug = false;
+    bool enableExactUploadDebug = false;
     for (int i = 1; i < argc; ++i)
     {
         if (argv[i] == nullptr)
@@ -248,9 +249,15 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--exact-upload-debug" || arg == "--chunk-upload-debug")
+        {
+            enableExactUploadDebug = true;
+            continue;
+        }
+
     }
 
-    if (!enableGpuDebug && !enableLodVisibilityDebug)
+    if (!enableGpuDebug && !enableLodVisibilityDebug && !enableExactUploadDebug)
     {
         return;
     }
@@ -283,6 +290,14 @@ void applyLaunchDebugOptions(int argc, char** argv)
                           "lod visibility debug enabled");
     }
 
+    if (enableExactUploadDebug)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_EXACT_UPLOAD_DEBUG", "1");
+        resetDebugLogFile("BLOCKGAME_EXACT_UPLOAD_DEBUG_FILE",
+                          "exactuploaddebug.log",
+                          "exact upload debug enabled");
+    }
+
     std::vector<std::string> enabledOptions;
     if (enableGpuDebug)
     {
@@ -301,6 +316,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (enableLodVisibilityDebug)
     {
         enabledOptions.emplace_back("LOD visibility debug (loddebug.log)");
+    }
+    if (enableExactUploadDebug)
+    {
+        enabledOptions.emplace_back("exact upload debug (exactuploaddebug.log)");
     }
 
     if (!enabledOptions.empty())

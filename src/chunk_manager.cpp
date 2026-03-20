@@ -565,6 +565,8 @@ inline constexpr double kChunkPoolUploadPressureDivisor = 32.0;
 
 [[nodiscard]] bool chunkManagerDebugLoggingEnabled() noexcept;
 void chunkManagerDebugLog(const std::string& message);
+[[nodiscard]] bool exactUploadDebugLoggingEnabled() noexcept;
+void exactUploadDebugLog(const std::string& message);
 [[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept;
 void lodVisibilityDebugLog(const std::string& message);
 [[nodiscard]] std::string hexU32(std::uint32_t value);
@@ -710,6 +712,27 @@ void chunkManagerDebugLog(const std::string& message)
     }
     std::cerr << message << std::endl;
     appendDebugLogLine("BLOCKGAME_RENDER_DEBUG_LOG_FILE", "gpudebug.log", message);
+}
+
+[[nodiscard]] bool exactUploadDebugLoggingEnabled() noexcept
+{
+    static const bool enabled = []()
+    {
+        const char* value = std::getenv("BLOCKGAME_EXACT_UPLOAD_DEBUG");
+        return value != nullptr && std::string_view(value) != "0" && std::string_view(value) != "false";
+    }();
+    return enabled;
+}
+
+void exactUploadDebugLog(const std::string& message)
+{
+    if (!exactUploadDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    std::cerr << message << std::endl;
+    appendDebugLogLine("BLOCKGAME_EXACT_UPLOAD_DEBUG_FILE", "exactuploaddebug.log", message);
 }
 
 [[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept
@@ -11112,6 +11135,10 @@ private:
 
     static std::size_t nextPowerOfTwo(std::size_t value) noexcept;
     ChunkBufferPage createBufferPage(std::size_t vertexCount, std::size_t indexCount);
+    [[nodiscard]] static const char* chunkBufferPageStateLabel(ChunkBufferPageState state) noexcept;
+    [[nodiscard]] std::string summarizeChunkBufferPagesLocked() const;
+    void ensureChunkBufferPageUploadBuffers(ChunkBufferPage& page);
+    static void releaseChunkBufferPageUploadBuffers(ChunkBufferPage& page) noexcept;
     ChunkAllocation acquireChunkAllocation(std::size_t vertexCount, std::size_t indexCount, UINT64 uploadBatchId);
     static void resetChunkBufferPage(ChunkBufferPage& page) noexcept;
     void sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT64 uploadFenceValue);
@@ -14187,10 +14214,121 @@ std::size_t ChunkManager::Impl::nextPowerOfTwo(std::size_t value) noexcept
     return value + 1;
 }
 
+const char* ChunkManager::Impl::chunkBufferPageStateLabel(ChunkBufferPageState state) noexcept
+{
+    switch (state)
+    {
+    case ChunkBufferPageState::Available: return "available";
+    case ChunkBufferPageState::PendingOpen: return "pending_open";
+    case ChunkBufferPageState::PendingUploaded: return "pending_uploaded";
+    case ChunkBufferPageState::Resident: return "resident";
+    case ChunkBufferPageState::Retiring: return "retiring";
+    default: return "unknown";
+    }
+}
+
+std::string ChunkManager::Impl::summarizeChunkBufferPagesLocked() const
+{
+    struct Totals
+    {
+        std::size_t count{0};
+        std::size_t residentChunks{0};
+        std::size_t pendingChunks{0};
+        std::uint64_t bytes{0};
+    };
+
+    Totals available{};
+    Totals pendingOpen{};
+    Totals pendingUploaded{};
+    Totals resident{};
+    Totals retiring{};
+
+    auto accumulate = [](Totals& totals, const ChunkBufferPage& page)
+    {
+        ++totals.count;
+        totals.residentChunks += page.residentChunks;
+        totals.pendingChunks += page.pendingChunks;
+        if (page.vertexBuffer != nullptr)
+        {
+            totals.bytes += static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex));
+        }
+        if (page.indexBuffer != nullptr)
+        {
+            totals.bytes += static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t));
+        }
+        if (page.vertexUploadBuffer != nullptr)
+        {
+            totals.bytes += static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex));
+        }
+        if (page.indexUploadBuffer != nullptr)
+        {
+            totals.bytes += static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t));
+        }
+    };
+
+    for (const ChunkBufferPage& page : bufferPages_)
+    {
+        switch (page.state)
+        {
+        case ChunkBufferPageState::Available: accumulate(available, page); break;
+        case ChunkBufferPageState::PendingOpen: accumulate(pendingOpen, page); break;
+        case ChunkBufferPageState::PendingUploaded: accumulate(pendingUploaded, page); break;
+        case ChunkBufferPageState::Resident: accumulate(resident, page); break;
+        case ChunkBufferPageState::Retiring: accumulate(retiring, page); break;
+        default: break;
+        }
+    }
+
+    auto appendTotals = [](std::ostringstream& stream, const char* label, const Totals& totals)
+    {
+        stream << ' ' << label
+               << "{pages=" << totals.count
+               << ",residentChunks=" << totals.residentChunks
+               << ",pendingChunks=" << totals.pendingChunks
+               << ",mib=" << std::fixed << std::setprecision(2)
+               << (static_cast<double>(totals.bytes) / (1024.0 * 1024.0))
+               << "}";
+    };
+
+    std::ostringstream stream;
+    stream << "exact upload pages total=" << bufferPages_.size();
+    appendTotals(stream, "available", available);
+    appendTotals(stream, "pending_open", pendingOpen);
+    appendTotals(stream, "pending_uploaded", pendingUploaded);
+    appendTotals(stream, "resident", resident);
+    appendTotals(stream, "retiring", retiring);
+    return stream.str();
+}
+
+void ChunkManager::Impl::ensureChunkBufferPageUploadBuffers(ChunkBufferPage& page)
+{
+    if (page.vertexUploadBuffer == nullptr)
+    {
+        page.vertexUploadBuffer = createUploadBuffer(device_.Get(),
+                                                     static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                                     page.mappedVertexData);
+    }
+
+    if (page.indexUploadBuffer == nullptr)
+    {
+        page.indexUploadBuffer = createUploadBuffer(device_.Get(),
+                                                    static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                                    page.mappedIndexData);
+    }
+}
+
+void ChunkManager::Impl::releaseChunkBufferPageUploadBuffers(ChunkBufferPage& page) noexcept
+{
+    page.vertexUploadBuffer.Reset();
+    page.indexUploadBuffer.Reset();
+    page.mappedVertexData = nullptr;
+    page.mappedIndexData = nullptr;
+}
+
 ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::size_t vertexCount, std::size_t indexCount)
 {
-    static constexpr std::size_t kDefaultVertexCapacity = 262144;
-    static constexpr std::size_t kDefaultIndexCapacity = 393216;
+    static constexpr std::size_t kDefaultVertexCapacity = 65536;
+    static constexpr std::size_t kDefaultIndexCapacity = 98304;
 
     ChunkBufferPage page;
     page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
@@ -14201,12 +14339,7 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
     page.indexBuffer = createDefaultBuffer(device_.Get(),
                                            static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
                                            D3D12_RESOURCE_STATE_COMMON);
-    page.vertexUploadBuffer = createUploadBuffer(device_.Get(),
-                                                 static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
-                                                 page.mappedVertexData);
-    page.indexUploadBuffer = createUploadBuffer(device_.Get(),
-                                                static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
-                                                page.mappedIndexData);
+    ensureChunkBufferPageUploadBuffers(page);
     page.vertexView.BufferLocation = page.vertexBuffer ? page.vertexBuffer->GetGPUVirtualAddress() : 0;
     page.vertexView.SizeInBytes = static_cast<UINT>(page.vertexCapacity * sizeof(Vertex));
     page.vertexView.StrideInBytes = sizeof(Vertex);
@@ -14214,6 +14347,20 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
     page.indexView.SizeInBytes = static_cast<UINT>(page.indexCapacity * sizeof(std::uint32_t));
     page.indexView.Format = DXGI_FORMAT_R32_UINT;
     resetChunkBufferPage(page);
+
+    if (exactUploadDebugLoggingEnabled())
+    {
+        std::ostringstream stream;
+        const std::uint64_t vertexBytes = static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex));
+        const std::uint64_t indexBytes = static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t));
+        stream << "exact upload page created"
+               << " vertexCapacity=" << page.vertexCapacity
+               << " indexCapacity=" << page.indexCapacity
+               << " totalPageMiB="
+               << std::fixed << std::setprecision(2)
+               << (static_cast<double>((vertexBytes + indexBytes) * 2ull) / (1024.0 * 1024.0));
+        exactUploadDebugLog(stream.str());
+    }
 
     return page;
 }
@@ -14261,6 +14408,8 @@ ChunkManager::Impl::ChunkAllocation ChunkManager::Impl::acquireChunkAllocation(s
             return false;
         }
 
+        ensureChunkBufferPageUploadBuffers(page);
+
         if (page.vertexCursor + vertexCount > page.vertexCapacity ||
             page.indexCursor + indexCount > page.indexCapacity)
         {
@@ -14286,7 +14435,26 @@ ChunkManager::Impl::ChunkAllocation ChunkManager::Impl::acquireChunkAllocation(s
         }
     }
 
-    ChunkBufferPage newPage = createBufferPage(vertexCount, indexCount);
+    ChunkBufferPage newPage{};
+    try
+    {
+        newPage = createBufferPage(vertexCount, indexCount);
+    }
+    catch (const std::exception& ex)
+    {
+        if (exactUploadDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact upload page creation failed"
+                   << " requestVerts=" << vertexCount
+                   << " requestIdx=" << indexCount
+                   << " uploadBatchId=" << uploadBatchId
+                   << " error=" << ex.what()
+                   << " | " << summarizeChunkBufferPagesLocked();
+            exactUploadDebugLog(stream.str());
+        }
+        throw;
+    }
     newPage.state = ChunkBufferPageState::PendingOpen;
     newPage.pendingBatchId = uploadBatchId;
     bufferPages_.push_back(std::move(newPage));
@@ -14315,6 +14483,17 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
         page.state = ChunkBufferPageState::PendingUploaded;
         page.pendingBatchId = 0;
         page.uploadFenceValue = uploadFenceValue;
+        if (exactUploadDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact upload page sealed"
+                   << " page=" << (&page - bufferPages_.data())
+                   << " uploadFence=" << uploadFenceValue
+                   << " residentChunks=" << page.residentChunks
+                   << " pendingChunks=" << page.pendingChunks
+                   << " state=" << chunkBufferPageStateLabel(page.state);
+            exactUploadDebugLog(stream.str());
+        }
     }
 }
 
@@ -14329,7 +14508,17 @@ void ChunkManager::Impl::collectReusableChunkBufferPages()
     {
         if (page.state == ChunkBufferPageState::Retiring && completedRenderFenceValue >= page.retireFenceValue)
         {
+            const std::uint32_t pageIndex = static_cast<std::uint32_t>(&page - bufferPages_.data());
+            releaseChunkBufferPageUploadBuffers(page);
             resetChunkBufferPage(page);
+            if (exactUploadDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact upload page recycled"
+                       << " page=" << pageIndex
+                       << " completedRenderFence=" << completedRenderFenceValue;
+                exactUploadDebugLog(stream.str());
+            }
         }
     }
 }
@@ -14373,6 +14562,15 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
             if (page.pendingChunks > 0)
             {
                 page.state = ChunkBufferPageState::PendingUploaded;
+                if (exactUploadDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "exact upload page returned to pending_uploaded"
+                           << " page=" << pageIndex
+                           << " residentChunks=" << page.residentChunks
+                           << " pendingChunks=" << page.pendingChunks;
+                    exactUploadDebugLog(stream.str());
+                }
             }
             else if (renderFence_ != nullptr &&
                      renderFenceValue_ > 0 &&
@@ -14380,10 +14578,26 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
             {
                 page.state = ChunkBufferPageState::Retiring;
                 page.retireFenceValue = renderFenceValue_;
+                if (exactUploadDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "exact upload page retiring"
+                           << " page=" << pageIndex
+                           << " retireFence=" << page.retireFenceValue;
+                    exactUploadDebugLog(stream.str());
+                }
             }
             else
             {
+                releaseChunkBufferPageUploadBuffers(page);
                 resetChunkBufferPage(page);
+                if (exactUploadDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "exact upload page released to available"
+                           << " page=" << pageIndex;
+                    exactUploadDebugLog(stream.str());
+                }
             }
         }
         return;
@@ -14401,10 +14615,27 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
             page.state = ChunkBufferPageState::Resident;
             page.uploadFenceValue = 0;
             page.pendingBatchId = 0;
+            releaseChunkBufferPageUploadBuffers(page);
+            if (exactUploadDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact upload page resident"
+                       << " page=" << pageIndex
+                       << " residentChunks=" << page.residentChunks;
+                exactUploadDebugLog(stream.str());
+            }
         }
         else
         {
+            releaseChunkBufferPageUploadBuffers(page);
             resetChunkBufferPage(page);
+            if (exactUploadDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact upload page pending release completed"
+                       << " page=" << pageIndex;
+                exactUploadDebugLog(stream.str());
+            }
         }
     }
 }
@@ -14584,10 +14815,7 @@ void ChunkManager::Impl::destroyBufferPages()
     {
         page.vertexBuffer.Reset();
         page.indexBuffer.Reset();
-        page.vertexUploadBuffer.Reset();
-        page.indexUploadBuffer.Reset();
-        page.mappedVertexData = nullptr;
-        page.mappedIndexData = nullptr;
+        releaseChunkBufferPageUploadBuffers(page);
     }
     bufferPages_.clear();
 }
@@ -15729,6 +15957,7 @@ void ChunkManager::Impl::commitPendingChunkUploads()
                     page.state = ChunkBufferPageState::Resident;
                     page.uploadFenceValue = 0;
                     page.pendingBatchId = 0;
+                    releaseChunkBufferPageUploadBuffers(page);
                 }
             }
         }
@@ -15792,6 +16021,18 @@ bool ChunkManager::Impl::uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId)
     ChunkAllocation allocation = acquireChunkAllocation(vertexCount, indexCount, uploadBatchId);
     if (allocation.pageIndex == kInvalidChunkBufferPage)
     {
+        if (exactUploadDebugLoggingEnabled())
+        {
+            std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+            std::ostringstream stream;
+            stream << "exact upload allocation failed"
+                   << " chunk=(" << chunk.coord.x << "," << chunk.coord.y << "," << chunk.coord.z << ")"
+                   << " requestVerts=" << vertexCount
+                   << " requestIdx=" << indexCount
+                   << " uploadBatchId=" << uploadBatchId
+                   << " | " << summarizeChunkBufferPagesLocked();
+            exactUploadDebugLog(stream.str());
+        }
         if (shouldTrackRecentEditChunk(chunk.coord))
         {
             std::ostringstream stream;

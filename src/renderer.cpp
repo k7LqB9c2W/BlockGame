@@ -3232,8 +3232,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const glm::mat4 viewProj = proj * view;
     const glm::vec3 lightDir = glm::normalize(environment.sunDirection);
     const float daylight = std::clamp(lightDir.y * 0.5f + 0.5f, 0.0f, 1.0f);
-    const glm::vec3 baseSkyTopColor = glm::vec3(0x78 / 255.0f, 0xA7 / 255.0f, 1.0f);
-    const glm::vec3 baseSkyHorizonColor = glm::vec3(0xBB / 255.0f, 0xD4 / 255.0f, 1.0f);
+    const glm::vec3 baseSkyTopColor = environment.baseSkyTopColorSrgb;
+    const glm::vec3 baseSkyHorizonColor = environment.baseSkyHorizonColorSrgb;
     const glm::vec3 cloudTopColor = glm::vec3(0.96f, 0.97f, 1.0f);
     const glm::vec3 cloudBottomColor = glm::vec3(0.82f, 0.87f, 0.96f);
     // The enhanced atmosphere path is intentionally optional. The default visual target
@@ -3267,6 +3267,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     nearConstants->sunColor = glm::vec4(sunColor, 0.0f);
     nearConstants->skyAmbient = glm::vec4(skyAmbient, 0.0f);
     nearConstants->groundAmbient = glm::vec4(groundAmbient, 0.0f);
+    nearConstants->skyTopColor = glm::vec4(baseSkyTopColor, 0.0f);
+    nearConstants->skyHorizonColor = glm::vec4(baseSkyHorizonColor, 0.0f);
     nearConstants->shadowParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
     nearConstants->terrainDebug = glm::vec4(environment.debug.directSunEnabled ? 1.0f : 0.0f,
                                             static_cast<float>(static_cast<int>(environment.debug.terrainDebugView)),

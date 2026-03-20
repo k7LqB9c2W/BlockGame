@@ -101,6 +101,8 @@ struct EnvironmentState
     bool atmosphereEnabled{kDefaultEnhancedAtmosphereEnabled};
     float fogStartBlocks{1400.0f};
     float farDistanceBlocks{4800.0f};
+    glm::vec3 baseSkyTopColorSrgb{120.0f / 255.0f, 167.0f / 255.0f, 255.0f / 255.0f};
+    glm::vec3 baseSkyHorizonColorSrgb{187.0f / 255.0f, 212.0f / 255.0f, 255.0f / 255.0f};
     AtmosphereSettings atmosphere{};
     TonemapSettings tonemap{};
     RenderDebugSettings debug{};
@@ -172,6 +174,8 @@ private:
         glm::vec4 sunColor{1.0f, 1.0f, 1.0f, 0.0f};
         glm::vec4 skyAmbient{0.1f, 0.12f, 0.16f, 0.0f};
         glm::vec4 groundAmbient{0.05f, 0.045f, 0.04f, 0.0f};
+        glm::vec4 skyTopColor{0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec4 skyHorizonColor{0.0f, 0.0f, 0.0f, 0.0f};
         glm::vec4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
         glm::vec4 terrainDebug{0.0f, 0.0f, 0.0f, 0.0f};
     };

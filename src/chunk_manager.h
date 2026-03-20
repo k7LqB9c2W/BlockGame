@@ -50,6 +50,7 @@ inline constexpr int kMaxExactRenderDistanceChunks = 48;
 inline constexpr int kMaxUserRenderDistance = kMaxExactRenderDistanceChunks;
 inline constexpr int kDefaultTotalRenderDistanceChunks = kDefaultNearRenderDistance;
 inline constexpr int kMaxTotalRenderDistanceChunks = 500;
+inline constexpr int kHiddenExactPreloadBufferChunks = 3;
 inline constexpr int kExtendedViewDistance = 320;
 inline constexpr int kDefaultFarFogStartBlocks = 1400;
 

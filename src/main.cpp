@@ -3827,24 +3827,31 @@ int runGame()
         const auto updateEnvironment = [&]()
         {
             const RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
+            const bool exactOnly = renderSettings.totalChunks <= renderSettings.exactChunks;
+            const int hiddenExactPreloadChunks = exactOnly ? kHiddenExactPreloadBufferChunks : 0;
             const float exactVisibleDistanceBlocks =
                 static_cast<float>(chunkRadiusToBlocks(renderSettings.exactChunks));
             const float totalVisibleDistanceBlocks =
                 static_cast<float>(chunkRadiusToBlocks(std::max(renderSettings.exactChunks, renderSettings.totalChunks)));
-            const float effectiveVisibleDistanceBlocks =
-                totalVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2);
+            const float hiddenExactPreloadBlocks =
+                static_cast<float>(chunkRadiusToBlocks(hiddenExactPreloadChunks));
+            const float effectiveVisibleDistanceBlocks = exactOnly
+                ? (exactVisibleDistanceBlocks + hiddenExactPreloadBlocks)
+                : (totalVisibleDistanceBlocks + static_cast<float>(kChunkSizeX * 2));
             const float configuredFogStartBlocks =
                 static_cast<float>(std::max(renderSettings.fogStartBlocks, 0));
-            const float minFogStartBlocks =
-                std::max(std::max(24.0f, exactVisibleDistanceBlocks * 0.35f),
-                         effectiveVisibleDistanceBlocks * 0.42f);
-            const float maxFogStartBlocks =
-                std::max(minFogStartBlocks + 16.0f, effectiveVisibleDistanceBlocks * 0.82f);
+            const float minFogStartBlocks = exactOnly
+                ? std::max(24.0f, exactVisibleDistanceBlocks * 0.48f)
+                : std::max(std::max(24.0f, exactVisibleDistanceBlocks * 0.35f),
+                           effectiveVisibleDistanceBlocks * 0.42f);
+            const float maxFogStartBlocks = exactOnly
+                ? std::max(minFogStartBlocks + 16.0f, exactVisibleDistanceBlocks - 12.0f)
+                : std::max(minFogStartBlocks + 16.0f, effectiveVisibleDistanceBlocks * 0.82f);
 
             environment.farDistanceBlocks = effectiveVisibleDistanceBlocks;
             environment.fogStartBlocks = std::min(
                 std::clamp(configuredFogStartBlocks, minFogStartBlocks, maxFogStartBlocks),
-                effectiveVisibleDistanceBlocks - 8.0f);
+                (exactOnly ? (exactVisibleDistanceBlocks - 8.0f) : (effectiveVisibleDistanceBlocks - 8.0f)));
 
             const float dayAngle = ((environment.timeOfDay - 6.0f) / 24.0f) * glm::two_pi<float>();
             const float elevation = std::sin(dayAngle);

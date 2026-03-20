@@ -16,5 +16,5 @@ struct PSInput
 
 float4 main(PSInput input) : SV_TARGET
 {
-    return float4(computeBaseGameSkyGradientFromScreenUv(input.uv.y), 1.0f);
+    return float4(computeSkyGradientFromScreenUv(input.uv.y, uTopSkyColor.rgb, uHorizonSkyColor.rgb), 1.0f);
 }

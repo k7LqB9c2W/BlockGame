@@ -12,6 +12,8 @@ cbuffer WorldConstants : register(b0)
     float4 uSunColor;
     float4 uSkyAmbient;
     float4 uGroundAmbient;
+    float4 uSkyTopColor;
+    float4 uSkyHorizonColor;
     float4 uShadowParams;
     float4 uTerrainDebug;
 };

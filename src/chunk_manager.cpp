@@ -63,7 +63,6 @@ constexpr std::uint64_t kRelightMaxBudgetUnits = 4'000'000ull;
 constexpr std::uint64_t kRelightMinBudgetUnits = 750'000ull;
 constexpr int kRelightMinBatchBudget = 2;
 constexpr int kRelightMaxBatchBudget = 8;
-
 using SteadyClock = std::chrono::steady_clock;
 
 [[nodiscard]] std::uint64_t steadyMicrosNow() noexcept
@@ -963,6 +962,23 @@ void chunkManagerDebugLog(const std::string& message)
     }
     std::cerr << message << std::endl;
     appendDebugLogLine("BLOCKGAME_RENDER_DEBUG_LOG_FILE", "gpudebug.log", message);
+}
+
+[[nodiscard]] int hiddenExactPreloadBufferChunks(const RenderDistanceSettings& renderSettings) noexcept
+{
+    return (renderSettings.totalChunks <= renderSettings.exactChunks) ? kHiddenExactPreloadBufferChunks : 0;
+}
+
+[[nodiscard]] float horizontalDistanceSqToAabb2D(float pointX,
+                                                 float pointZ,
+                                                 float minX,
+                                                 float minZ,
+                                                 float maxX,
+                                                 float maxZ) noexcept
+{
+    const float dx = (pointX < minX) ? (minX - pointX) : ((pointX > maxX) ? (pointX - maxX) : 0.0f);
+    const float dz = (pointZ < minZ) ? (minZ - pointZ) : ((pointZ > maxZ) ? (pointZ - maxZ) : 0.0f);
+    return dx * dx + dz * dz;
 }
 
 [[nodiscard]] bool exactUploadDebugLoggingEnabled() noexcept
@@ -12814,6 +12830,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     }
 
     targetViewDistance_ = std::clamp(startupState_.exactNearCurrentChunks, 1, renderSettings_.exactChunks);
+    const int preloadTargetViewDistance = std::clamp(targetViewDistance_ + hiddenExactPreloadBufferChunks(renderSettings_),
+                                                     1,
+                                                     kMaxExactRenderDistanceChunks);
 
     resetColumnBudgets();
     const auto verticalRadiusStart = std::chrono::steady_clock::now();
@@ -12877,9 +12896,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         }
     }
 
-    if (viewDistance_ > targetViewDistance_)
+    if (viewDistance_ > preloadTargetViewDistance)
     {
-        viewDistance_ = targetViewDistance_;
+        viewDistance_ = preloadTargetViewDistance;
     }
 
     const auto missingScanStart = std::chrono::steady_clock::now();
@@ -12947,7 +12966,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     }
 
     int ringsExpanded = 0;
-    while (jobBudget > 0 && viewDistance_ < targetViewDistance_ && ringsExpanded < ringBudget)
+    while (jobBudget > 0 && viewDistance_ < preloadTargetViewDistance && ringsExpanded < ringBudget)
     {
         const int nextRing = viewDistance_ + 1;
         RingProgress progress = timedEnsureVolume(nextRing);
@@ -12978,7 +12997,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     const auto evictionStart = std::chrono::steady_clock::now();
     removeDistantChunks(centerChunk,
-                        targetViewDistance_ + kVerticalStreamingConfig.horizontalEvictionSlack,
+                        preloadTargetViewDistance + kVerticalStreamingConfig.horizontalEvictionSlack,
                         verticalRadius);
     evictionMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evictionStart).count();
@@ -13212,6 +13231,10 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     renderData.highlightedBlock = highlightedBlock_;
     renderData.hasHighlight = hasHighlight_;
     farTerrainManager_.setVisibility(frustum, lastCameraPosition_);
+    const int exactDrawRadiusChunks =
+        std::max(targetViewDistance_ + hiddenExactPreloadBufferChunks(renderSettings_), targetViewDistance_);
+    const float exactDrawRadiusBlocks = static_cast<float>(chunksToBlocks(std::max(exactDrawRadiusChunks, 0)));
+    const float exactDrawRadiusSq = exactDrawRadiusBlocks * exactDrawRadiusBlocks;
 
     std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
     {
@@ -13261,6 +13284,18 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
                                   static_cast<float>((coord.z + 1) * kChunkSizeZ));
 
         if (!frustum.intersectsAABB(minCorner, maxCorner))
+        {
+            continue;
+        }
+
+        // Keep exact terrain alive a little past the user-facing horizon so fog hides the
+        // cutoff instead of the cutoff defining the visible edge.
+        if (horizontalDistanceSqToAabb2D(lastCameraPosition_.x,
+                                         lastCameraPosition_.z,
+                                         minCorner.x,
+                                         minCorner.z,
+                                         maxCorner.x,
+                                         maxCorner.z) > exactDrawRadiusSq)
         {
             continue;
         }

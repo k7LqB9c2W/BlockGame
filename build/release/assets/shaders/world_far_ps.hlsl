@@ -20,6 +20,8 @@ cbuffer WorldConstants : register(b0)
     float4 uSunColor;
     float4 uSkyAmbient;
     float4 uGroundAmbient;
+    float4 uSkyTopColor;
+    float4 uSkyHorizonColor;
     float4 uShadowParams;
     float4 uTerrainDebug;
 };
@@ -138,7 +140,10 @@ float4 main(PSInput input) : SV_TARGET
         const float fresnel = pow(1.0f - saturate(dot(normal, viewDir)), 4.0f);
         const float shimmer = saturate(0.45f + 0.55f * sin(input.worldPos.x * 0.006f + input.worldPos.z * 0.008f));
         const float3 waterTint = lerp(textureSample.rgb, float3(0.18f, 0.42f, 0.66f), 0.58f);
-        const float3 skyReflection = computeTerrainFogColor(normalize(float3(viewDir.x, abs(viewDir.y), viewDir.z)));
+        const float3 skyReflection =
+            computeTerrainFogColor(normalize(float3(viewDir.x, abs(viewDir.y), viewDir.z)),
+                                   uSkyTopColor.rgb,
+                                   uSkyHorizonColor.rgb);
         color = waterTint * (indirect * 0.62f + baseBounce * 1.35f + directLight * 0.32f);
         color += skyReflection * (0.10f + fresnel * 0.28f);
         color += uSunColor.rgb * (0.02f + 0.05f * shimmer) * fresnel;
@@ -161,7 +166,9 @@ float4 main(PSInput input) : SV_TARGET
     }
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
-    const float3 fogColor = computeTerrainFogColor(normalize(input.worldPos - uCameraPos.xyz));
+    const float horizontalDistanceBlocks = distance(input.worldPos.xz, uCameraPos.xz);
+    const float3 fogViewDir = normalize(input.worldPos - uCameraPos.xyz);
+    const float3 fogColor = computeTerrainFogColor(fogViewDir, uSkyTopColor.rgb, uSkyHorizonColor.rgb);
 
     if (uParams0.x > 0.5f)
     {
@@ -170,8 +177,9 @@ float4 main(PSInput input) : SV_TARGET
         const float transmittance = saturate(max(aerial.a, 0.16f));
         color = color * transmittance + aerial.rgb;
 
-        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
-                                                          normalize(input.worldPos - uCameraPos.xyz),
+        const FogBlendResult fogBlend = computeLayeredFog(distanceBlocks,
+                                                          horizontalDistanceBlocks,
+                                                          fogViewDir,
                                                           input.worldPos.y,
                                                           uCameraPos.y,
                                                           uParams1.z,
@@ -182,8 +190,9 @@ float4 main(PSInput input) : SV_TARGET
     }
     else if (uParams1.w > uParams1.z)
     {
-        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
-                                                          normalize(input.worldPos - uCameraPos.xyz),
+        const FogBlendResult fogBlend = computeLayeredFog(distanceBlocks,
+                                                          horizontalDistanceBlocks,
+                                                          fogViewDir,
                                                           input.worldPos.y,
                                                           uCameraPos.y,
                                                           uParams1.z,

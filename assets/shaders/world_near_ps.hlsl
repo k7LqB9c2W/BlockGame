@@ -20,6 +20,8 @@ cbuffer WorldConstants : register(b0)
     float4 uSunColor;
     float4 uSkyAmbient;
     float4 uGroundAmbient;
+    float4 uSkyTopColor;
+    float4 uSkyHorizonColor;
     float4 uShadowParams;
     float4 uTerrainDebug;
 };
@@ -170,7 +172,9 @@ float4 main(PSInput input) : SV_TARGET
     float3 color = textureSample.rgb * (indirect + baseBounce + directLight) + specularLight;
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
-    const float3 fogColor = computeTerrainFogColor(normalize(input.worldPos - uCameraPos.xyz));
+    const float horizontalDistanceBlocks = distance(input.worldPos.xz, uCameraPos.xz);
+    const float3 fogViewDir = normalize(input.worldPos - uCameraPos.xyz);
+    const float3 fogColor = computeTerrainFogColor(fogViewDir, uSkyTopColor.rgb, uSkyHorizonColor.rgb);
     if (uParams0.x > 0.5f)
     {
         const float2 screenUv = input.position.xy * uParams0.zw;
@@ -178,8 +182,9 @@ float4 main(PSInput input) : SV_TARGET
         const float transmittance = saturate(max(aerial.a, 0.18f));
         color = color * transmittance + aerial.rgb;
 
-        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
-                                                          viewDir,
+        const FogBlendResult fogBlend = computeLayeredFog(distanceBlocks,
+                                                          horizontalDistanceBlocks,
+                                                          fogViewDir,
                                                           input.worldPos.y,
                                                           uCameraPos.y,
                                                           uParams1.z,
@@ -190,8 +195,9 @@ float4 main(PSInput input) : SV_TARGET
     }
     else if (uParams1.w > uParams1.z)
     {
-        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
-                                                          viewDir,
+        const FogBlendResult fogBlend = computeLayeredFog(distanceBlocks,
+                                                          horizontalDistanceBlocks,
+                                                          fogViewDir,
                                                           input.worldPos.y,
                                                           uCameraPos.y,
                                                           uParams1.z,

@@ -128,7 +128,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool nKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS);
     inputContext.nKeyJustPressed = nKeyCurrentlyPressed && !inputContext.nKeyPressed;
     inputContext.nKeyPressed = nKeyCurrentlyPressed;
-    if (inputContext.nKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    if (inputContext.nKeyJustPressed && !isGameplayUiOpen(inputContext))
     {
         inputContext.showRenderDistanceGUI = true;
         inputContext.inputBuffer.clear();
@@ -138,7 +138,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool f2CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS);
     inputContext.f2JustPressed = f2CurrentlyPressed && !inputContext.f2Pressed;
     inputContext.f2Pressed = f2CurrentlyPressed;
-    if (inputContext.f2JustPressed && !inputContext.showTeleportGUI && !inputContext.showRenderDistanceGUI)
+    if (inputContext.f2JustPressed && !isGameplayUiOpen(inputContext))
     {
         inputContext.showTeleportGUI = true;
         inputContext.teleportBuffer.clear();
@@ -148,7 +148,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool periodCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_PERIOD) == GLFW_PRESS);
     inputContext.periodJustPressed = periodCurrentlyPressed && !inputContext.periodPressed;
     inputContext.periodPressed = periodCurrentlyPressed;
-    if (inputContext.periodJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    if (inputContext.periodJustPressed && !isGameplayUiOpen(inputContext))
     {
         inputContext.cameraMouseCaptured = !inputContext.cameraMouseCaptured;
         inputContext.firstMouse = true;
@@ -161,7 +161,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool hKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS);
     inputContext.hKeyJustPressed = hKeyCurrentlyPressed && !inputContext.hKeyPressed;
     inputContext.hKeyPressed = hKeyCurrentlyPressed;
-    if (inputContext.hKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    if (inputContext.hKeyJustPressed && !isGameplayUiOpen(inputContext))
     {
         inputContext.showControlsOverlay = !inputContext.showControlsOverlay;
         inputContext.firstMouse = true;
@@ -170,13 +170,40 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
     bool lKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS);
     inputContext.lKeyJustPressed = lKeyCurrentlyPressed && !inputContext.lKeyPressed;
     inputContext.lKeyPressed = lKeyCurrentlyPressed;
-    if (inputContext.lKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    if (inputContext.lKeyJustPressed && !isGameplayUiOpen(inputContext))
     {
         inputContext.placeLampMode = !inputContext.placeLampMode;
+        inputContext.selectedPlacementBlock =
+            inputContext.placeLampMode ? BlockId::DebugLamp : BlockId::Grass;
+    }
+
+    bool eKeyCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
+    inputContext.eKeyJustPressed = eKeyCurrentlyPressed && !inputContext.eKeyPressed;
+    inputContext.eKeyPressed = eKeyCurrentlyPressed;
+    if (inputContext.eKeyJustPressed && !inputContext.showRenderDistanceGUI && !inputContext.showTeleportGUI)
+    {
+        if (inputContext.showBlockPickerGUI)
+        {
+            inputContext.showBlockPickerGUI = false;
+        }
+        else
+        {
+            inputContext.showBlockPickerGUI = true;
+            inputContext.firstMouse = true;
+            inputContext.leftMousePressed = false;
+            inputContext.leftMouseJustPressed = false;
+            inputContext.rightMousePressed = false;
+            inputContext.rightMouseJustPressed = false;
+        }
     }
 
     const bool captureMouse = isGameplayMouseCaptured(inputContext);
     glfwSetInputMode(window, GLFW_CURSOR, captureMouse ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+
+    if (isGameplayUiOpen(inputContext))
+    {
+        return state;
+    }
 
     const bool spaceCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
     inputContext.spaceJustPressed = spaceCurrentlyPressed && !inputContext.spacePressed;

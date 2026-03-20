@@ -4,6 +4,9 @@
 
 #include <glm/glm.hpp>
 
+// Needed for BlockId defaults used by the placement picker.
+#include "chunk_manager.h"
+
 struct GLFWwindow;
 
 class Camera;
@@ -31,24 +34,34 @@ struct InputContext
     bool hKeyJustPressed{false};
     bool lKeyPressed{false};
     bool lKeyJustPressed{false};
+    bool eKeyPressed{false};
+    bool eKeyJustPressed{false};
     bool spacePressed{false};
     bool spaceJustPressed{false};
     bool cameraMouseCaptured{true};
     bool placeLampMode{false};
+    BlockId selectedPlacementBlock{BlockId::Grass};
     bool showDebugOverlay{false};
     bool showControlsOverlay{false};
     bool showRenderDistanceGUI{false};
     bool showTeleportGUI{false};
+    bool showBlockPickerGUI{false};
     double lastSpacePressTimeSeconds{-1.0};
     std::string inputBuffer{};
     std::string teleportBuffer{};
 };
 
+[[nodiscard]] inline bool isGameplayUiOpen(const InputContext& inputContext) noexcept
+{
+    return inputContext.showRenderDistanceGUI ||
+           inputContext.showTeleportGUI ||
+           inputContext.showBlockPickerGUI;
+}
+
 [[nodiscard]] inline bool isGameplayMouseCaptured(const InputContext& inputContext) noexcept
 {
     return inputContext.cameraMouseCaptured &&
-           !inputContext.showRenderDistanceGUI &&
-           !inputContext.showTeleportGUI;
+           !isGameplayUiOpen(inputContext);
 }
 
 struct PlayerInputState

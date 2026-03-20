@@ -503,12 +503,33 @@ struct ChunkBenchmarkMetrics
         meshStage.reset();
         uploadStage.reset();
         updateStage.reset();
+        updateResidualStage.reset();
+        verticalRadiusStage.reset();
+        priorityUpdateStage.reset();
+        uploadBudgetPrepStage.reset();
         visibleScanStage.reset();
         ensureVolumeStage.reset();
         schedulingStage.reset();
         evictionStage.reset();
+        mainThreadRelightStage.reset();
         uploadDrainStage.reset();
         uploadQueuePickStage.reset();
+        poolTrimStage.reset();
+        farTerrainUpdateStage.reset();
+        columnHeightLookupStage.reset();
+        columnHeightSampleStage.reset();
+        uploadPrepareStage.reset();
+        uploadContextBeginStage.reset();
+        uploadFinalizeStage.reset();
+        commitCollectStage.reset();
+        commitChunkScanStage.reset();
+        commitMeshLockWaitStage.reset();
+        commitMeshLockedStage.reset();
+        commitMeshStateStage.reset();
+        commitPageStateStage.reset();
+        commitReleaseStage.reset();
+        startupStateStage.reset();
+        benchmarkBookkeepingStage.reset();
         farBuildStage.reset();
         lodGpuSynthesisStage.reset();
         lodGpuStampStage.reset();
@@ -546,12 +567,33 @@ struct ChunkBenchmarkMetrics
         report.meshStage = meshStage.snapshot();
         report.uploadStage = uploadStage.snapshot();
         report.updateStage = updateStage.snapshot();
+        report.updateResidualStage = updateResidualStage.snapshot();
+        report.verticalRadiusStage = verticalRadiusStage.snapshot();
+        report.priorityUpdateStage = priorityUpdateStage.snapshot();
+        report.uploadBudgetPrepStage = uploadBudgetPrepStage.snapshot();
         report.visibleScanStage = visibleScanStage.snapshot();
         report.ensureVolumeStage = ensureVolumeStage.snapshot();
         report.schedulingStage = schedulingStage.snapshot();
         report.evictionStage = evictionStage.snapshot();
+        report.mainThreadRelightStage = mainThreadRelightStage.snapshot();
         report.uploadDrainStage = uploadDrainStage.snapshot();
         report.uploadQueuePickStage = uploadQueuePickStage.snapshot();
+        report.poolTrimStage = poolTrimStage.snapshot();
+        report.farTerrainUpdateStage = farTerrainUpdateStage.snapshot();
+        report.columnHeightLookupStage = columnHeightLookupStage.snapshot();
+        report.columnHeightSampleStage = columnHeightSampleStage.snapshot();
+        report.uploadPrepareStage = uploadPrepareStage.snapshot();
+        report.uploadContextBeginStage = uploadContextBeginStage.snapshot();
+        report.uploadFinalizeStage = uploadFinalizeStage.snapshot();
+        report.commitCollectStage = commitCollectStage.snapshot();
+        report.commitChunkScanStage = commitChunkScanStage.snapshot();
+        report.commitMeshLockWaitStage = commitMeshLockWaitStage.snapshot();
+        report.commitMeshLockedStage = commitMeshLockedStage.snapshot();
+        report.commitMeshStateStage = commitMeshStateStage.snapshot();
+        report.commitPageStateStage = commitPageStateStage.snapshot();
+        report.commitReleaseStage = commitReleaseStage.snapshot();
+        report.startupStateStage = startupStateStage.snapshot();
+        report.benchmarkBookkeepingStage = benchmarkBookkeepingStage.snapshot();
         report.farBuildStage = farBuildStage.snapshot();
         report.lodGpuSynthesisStage = lodGpuSynthesisStage.snapshot();
         report.lodGpuStampStage = lodGpuStampStage.snapshot();
@@ -587,12 +629,33 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram meshStage{};
     AtomicLatencyHistogram uploadStage{};
     AtomicLatencyHistogram updateStage{};
+    AtomicLatencyHistogram updateResidualStage{};
+    AtomicLatencyHistogram verticalRadiusStage{};
+    AtomicLatencyHistogram priorityUpdateStage{};
+    AtomicLatencyHistogram uploadBudgetPrepStage{};
     AtomicLatencyHistogram visibleScanStage{};
     AtomicLatencyHistogram ensureVolumeStage{};
     AtomicLatencyHistogram schedulingStage{};
     AtomicLatencyHistogram evictionStage{};
+    AtomicLatencyHistogram mainThreadRelightStage{};
     AtomicLatencyHistogram uploadDrainStage{};
     AtomicLatencyHistogram uploadQueuePickStage{};
+    AtomicLatencyHistogram poolTrimStage{};
+    AtomicLatencyHistogram farTerrainUpdateStage{};
+    AtomicLatencyHistogram columnHeightLookupStage{};
+    AtomicLatencyHistogram columnHeightSampleStage{};
+    AtomicLatencyHistogram uploadPrepareStage{};
+    AtomicLatencyHistogram uploadContextBeginStage{};
+    AtomicLatencyHistogram uploadFinalizeStage{};
+    AtomicLatencyHistogram commitCollectStage{};
+    AtomicLatencyHistogram commitChunkScanStage{};
+    AtomicLatencyHistogram commitMeshLockWaitStage{};
+    AtomicLatencyHistogram commitMeshLockedStage{};
+    AtomicLatencyHistogram commitMeshStateStage{};
+    AtomicLatencyHistogram commitPageStateStage{};
+    AtomicLatencyHistogram commitReleaseStage{};
+    AtomicLatencyHistogram startupStateStage{};
+    AtomicLatencyHistogram benchmarkBookkeepingStage{};
     AtomicLatencyHistogram farBuildStage{};
     AtomicLatencyHistogram lodGpuSynthesisStage{};
     AtomicLatencyHistogram lodGpuStampStage{};
@@ -11657,6 +11720,7 @@ private:
     UINT64 renderFenceValue_{0};
     std::deque<DeferredPendingChunkRelease> deferredPendingChunkReleases_{};
     double updateMsLastFrame_{0.0};
+    double updateResidualMsLastFrame_{0.0};
     double verticalRadiusMsLastFrame_{0.0};
     double priorityUpdateMsLastFrame_{0.0};
     double uploadBudgetPrepMsLastFrame_{0.0};
@@ -11669,6 +11733,19 @@ private:
     std::size_t pendingUploadsLastFrame_{0};
     double uploadQueuePickMsLastFrame_{0.0};
     double poolTrimMsLastFrame_{0.0};
+    double farTerrainUpdateMsLastFrame_{0.0};
+    double columnHeightLookupMsLastFrame_{0.0};
+    double columnHeightSampleMsLastFrame_{0.0};
+    double uploadPrepareMsLastFrame_{0.0};
+    double uploadContextBeginMsLastFrame_{0.0};
+    double uploadFinalizeMsLastFrame_{0.0};
+    double commitCollectMsLastFrame_{0.0};
+    double commitChunkScanMsLastFrame_{0.0};
+    double commitMeshLockWaitMsLastFrame_{0.0};
+    double commitMeshLockedMsLastFrame_{0.0};
+    double commitMeshStateMsLastFrame_{0.0};
+    double commitPageStateMsLastFrame_{0.0};
+    double commitReleaseMsLastFrame_{0.0};
     double startupStateMsLastFrame_{0.0};
     double benchmarkBookkeepingMsLastFrame_{0.0};
     int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
@@ -12736,6 +12813,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     poolTrimMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poolTrimStart).count();
 
+    const auto farTerrainUpdateStart = std::chrono::steady_clock::now();
     if (renderSettings_.totalChunks > renderSettings_.exactChunks)
     {
         const std::size_t exactPendingUploads = estimateUploadQueueSize();
@@ -12776,6 +12854,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         farTerrainManager_.setDistanceBlocks(0);
         farTerrainManager_.clear();
     }
+    farTerrainUpdateMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - farTerrainUpdateStart).count();
 
     const auto startupStateStart = std::chrono::steady_clock::now();
     if (startupEnabled_ && startupState_.preloadStarted)
@@ -12879,6 +12959,23 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     updateMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
+    const double accountedUpdateMs =
+        verticalRadiusMsLastFrame_ +
+        priorityUpdateMsLastFrame_ +
+        uploadBudgetPrepMsLastFrame_ +
+        missingScanMsLastFrame_ +
+        schedulingMsLastFrame_ +
+        evictionMsLastFrame_ +
+        relightMsLastFrame_ +
+        lastUploadMsUsed_ +
+        uploadPrepareMsLastFrame_ +
+        uploadContextBeginMsLastFrame_ +
+        uploadFinalizeMsLastFrame_ +
+        poolTrimMsLastFrame_ +
+        farTerrainUpdateMsLastFrame_ +
+        startupStateMsLastFrame_ +
+        benchmarkBookkeepingMsLastFrame_;
+    updateResidualMsLastFrame_ = std::max(0.0, updateMsLastFrame_ - accountedUpdateMs);
     if (benchmarkEnabled)
     {
         const auto toMicros = [](double milliseconds) -> std::uint64_t
@@ -12887,12 +12984,31 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         };
 
         benchmarkMetrics_.updateStage.recordMicros(toMicros(updateMsLastFrame_));
+        benchmarkMetrics_.updateResidualStage.recordMicros(toMicros(updateResidualMsLastFrame_));
+        benchmarkMetrics_.verticalRadiusStage.recordMicros(toMicros(verticalRadiusMsLastFrame_));
+        benchmarkMetrics_.priorityUpdateStage.recordMicros(toMicros(priorityUpdateMsLastFrame_));
+        benchmarkMetrics_.uploadBudgetPrepStage.recordMicros(toMicros(uploadBudgetPrepMsLastFrame_));
+        benchmarkMetrics_.uploadPrepareStage.recordMicros(toMicros(uploadPrepareMsLastFrame_));
+        benchmarkMetrics_.uploadContextBeginStage.recordMicros(toMicros(uploadContextBeginMsLastFrame_));
         benchmarkMetrics_.visibleScanStage.recordMicros(toMicros(missingScanMsLastFrame_));
         benchmarkMetrics_.ensureVolumeStage.recordMicros(toMicros(ensureVolumeMsLastFrame_));
         benchmarkMetrics_.schedulingStage.recordMicros(toMicros(schedulingMsLastFrame_));
         benchmarkMetrics_.evictionStage.recordMicros(toMicros(evictionMsLastFrame_));
+        benchmarkMetrics_.mainThreadRelightStage.recordMicros(toMicros(relightMsLastFrame_));
         benchmarkMetrics_.uploadDrainStage.recordMicros(toMicros(lastUploadMsUsed_));
         benchmarkMetrics_.uploadQueuePickStage.recordMicros(toMicros(uploadQueuePickMsLastFrame_));
+        benchmarkMetrics_.poolTrimStage.recordMicros(toMicros(poolTrimMsLastFrame_));
+        benchmarkMetrics_.farTerrainUpdateStage.recordMicros(toMicros(farTerrainUpdateMsLastFrame_));
+        benchmarkMetrics_.uploadFinalizeStage.recordMicros(toMicros(uploadFinalizeMsLastFrame_));
+        benchmarkMetrics_.commitCollectStage.recordMicros(toMicros(commitCollectMsLastFrame_));
+        benchmarkMetrics_.commitChunkScanStage.recordMicros(toMicros(commitChunkScanMsLastFrame_));
+        benchmarkMetrics_.commitMeshLockWaitStage.recordMicros(toMicros(commitMeshLockWaitMsLastFrame_));
+        benchmarkMetrics_.commitMeshLockedStage.recordMicros(toMicros(commitMeshLockedMsLastFrame_));
+        benchmarkMetrics_.commitMeshStateStage.recordMicros(toMicros(commitMeshStateMsLastFrame_));
+        benchmarkMetrics_.commitPageStateStage.recordMicros(toMicros(commitPageStateMsLastFrame_));
+        benchmarkMetrics_.commitReleaseStage.recordMicros(toMicros(commitReleaseMsLastFrame_));
+        benchmarkMetrics_.startupStateStage.recordMicros(toMicros(startupStateMsLastFrame_));
+        benchmarkMetrics_.benchmarkBookkeepingStage.recordMicros(toMicros(benchmarkBookkeepingMsLastFrame_));
     }
 }
 
@@ -13991,6 +14107,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
     snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
     snapshot.updateMsLastFrame = updateMsLastFrame_;
+    snapshot.updateResidualMsLastFrame = updateResidualMsLastFrame_;
     snapshot.verticalRadiusMsLastFrame = verticalRadiusMsLastFrame_;
     snapshot.priorityUpdateMsLastFrame = priorityUpdateMsLastFrame_;
     snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
@@ -14002,6 +14119,19 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadMsLastFrame = lastUploadMsUsed_;
     snapshot.uploadQueuePickMsLastFrame = uploadQueuePickMsLastFrame_;
     snapshot.poolTrimMsLastFrame = poolTrimMsLastFrame_;
+    snapshot.farTerrainUpdateMsLastFrame = farTerrainUpdateMsLastFrame_;
+    snapshot.columnHeightLookupMsLastFrame = columnHeightLookupMsLastFrame_;
+    snapshot.columnHeightSampleMsLastFrame = columnHeightSampleMsLastFrame_;
+    snapshot.uploadPrepareMsLastFrame = uploadPrepareMsLastFrame_;
+    snapshot.uploadContextBeginMsLastFrame = uploadContextBeginMsLastFrame_;
+    snapshot.uploadFinalizeMsLastFrame = uploadFinalizeMsLastFrame_;
+    snapshot.commitCollectMsLastFrame = commitCollectMsLastFrame_;
+    snapshot.commitChunkScanMsLastFrame = commitChunkScanMsLastFrame_;
+    snapshot.commitMeshLockWaitMsLastFrame = commitMeshLockWaitMsLastFrame_;
+    snapshot.commitMeshLockedMsLastFrame = commitMeshLockedMsLastFrame_;
+    snapshot.commitMeshStateMsLastFrame = commitMeshStateMsLastFrame_;
+    snapshot.commitPageStateMsLastFrame = commitPageStateMsLastFrame_;
+    snapshot.commitReleaseMsLastFrame = commitReleaseMsLastFrame_;
     snapshot.startupStateMsLastFrame = startupStateMsLastFrame_;
     snapshot.benchmarkBookkeepingMsLastFrame = benchmarkBookkeepingMsLastFrame_;
     const std::size_t pendingUploads = pendingUploadsLastFrame_;
@@ -15423,7 +15553,16 @@ bool ChunkManager::Impl::tryGetCachedColumnHeight(const glm::ivec2& column,
                                                   int worldZ,
                                                   int& outHeight) const
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const auto lookupStart = benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const int highest = columnManager_.highestSolidBlock(worldX, worldZ);
+    if (benchmarkEnabled)
+    {
+        benchmarkMetrics_.columnHeightLookupStage.recordMicros(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - lookupStart).count()));
+    }
     if (highest != ColumnManager::kNoHeight)
     {
         outHeight = highest;
@@ -15435,7 +15574,16 @@ bool ChunkManager::Impl::tryGetCachedColumnHeight(const glm::ivec2& column,
 
 int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const auto sampleStart = benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const ColumnSample sample = sampleColumn(worldX, worldZ);
+    if (benchmarkEnabled)
+    {
+        benchmarkMetrics_.columnHeightSampleStage.recordMicros(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - sampleStart).count()));
+    }
     const int height = sample.surfaceY;
     {
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
@@ -15998,7 +16146,21 @@ void ChunkManager::Impl::uploadReadyMeshes()
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     uploadQueuePickMsLastFrame_ = 0.0;
+    uploadPrepareMsLastFrame_ = 0.0;
+    uploadContextBeginMsLastFrame_ = 0.0;
+    uploadFinalizeMsLastFrame_ = 0.0;
+    commitCollectMsLastFrame_ = 0.0;
+    commitChunkScanMsLastFrame_ = 0.0;
+    commitMeshLockWaitMsLastFrame_ = 0.0;
+    commitMeshLockedMsLastFrame_ = 0.0;
+    commitMeshStateMsLastFrame_ = 0.0;
+    commitPageStateMsLastFrame_ = 0.0;
+    commitReleaseMsLastFrame_ = 0.0;
+
+    const auto uploadPrepareStart = std::chrono::steady_clock::now();
     commitPendingChunkUploads();
+    uploadPrepareMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadPrepareStart).count();
 
     const std::size_t initialBudget = uploadBudgetBytesThisFrame_;
     std::size_t remainingBudget = initialBudget;
@@ -16011,6 +16173,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
     const int columnUploadLimit = std::max(1, uploadColumnLimitThisFrame_);
     const int chunkUploadLimit = std::max(1, uploadChunkLimitThisFrame_);
     const auto uploadStart = std::chrono::steady_clock::now();
+    const auto uploadContextBeginStart = std::chrono::steady_clock::now();
     if (uploadContext_.ready() && !uploadContext_.begin())
     {
         lastUploadBytesUsed_ = 0;
@@ -16018,6 +16181,8 @@ void ChunkManager::Impl::uploadReadyMeshes()
         pendingUploadsLastFrame_ = estimateUploadQueueSize();
         return;
     }
+    uploadContextBeginMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadContextBeginStart).count();
 
     while ((remainingBudget > 0 || !uploadedAnything) && attempts < kUploadQueueScanLimit)
     {
@@ -16135,6 +16300,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         }
     }
 
+    const auto uploadFinalizeStart = std::chrono::steady_clock::now();
     uploadContext_.flush();
     if (uploadedAnything)
     {
@@ -16165,17 +16331,28 @@ void ChunkManager::Impl::uploadReadyMeshes()
     }
     lastUploadMsUsed_ = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - uploadStart).count();
+    uploadFinalizeMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadFinalizeStart).count();
 
     pendingUploadsLastFrame_ = estimateUploadQueueSize();
 }
 
 void ChunkManager::Impl::commitPendingChunkUploads()
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+
+    const auto commitCollectStart = benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     collectReusableChunkBufferPages();
     collectDeferredPendingChunkReleases();
-
     const UINT64 completedUploadFenceValue = uploadContext_.completedFenceValue();
+    if (benchmarkEnabled)
+    {
+        commitCollectMsLastFrame_ +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitCollectStart).count();
+    }
 
+    const auto commitChunkScanStart =
+        benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::vector<std::shared_ptr<Chunk>> chunks;
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
@@ -16185,6 +16362,11 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             (void)coord;
             chunks.push_back(chunk);
         }
+    }
+    if (benchmarkEnabled)
+    {
+        commitChunkScanMsLastFrame_ +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitChunkScanStart).count();
     }
 
     for (const std::shared_ptr<Chunk>& chunk : chunks)
@@ -16203,38 +16385,80 @@ void ChunkManager::Impl::commitPendingChunkUploads()
         std::size_t oldIndexCount = 0;
         bool stalePending = false;
 
+        const auto commitMeshLockWaitStart =
+            benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        std::unique_lock<std::mutex> meshLock(chunk->meshMutex);
+        if (benchmarkEnabled)
         {
-            std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
-            if (!chunk->pendingMesh.valid())
-            {
-                continue;
-            }
-
-            if (chunk->pendingMesh.uploadFenceValue != 0 &&
-                completedUploadFenceValue < chunk->pendingMesh.uploadFenceValue)
-            {
-                continue;
-            }
-
-            pendingMesh = chunk->pendingMesh;
-            chunk->pendingMesh = {};
-            currentMeshVersion = chunk->meshVersion.load(std::memory_order_acquire);
-            stalePending = currentMeshVersion != pendingMesh.meshVersion;
-            if (!stalePending)
-            {
-                oldPageIndex = chunk->bufferPageIndex.load(std::memory_order_acquire);
-                oldVertexOffset = chunk->vertexOffset.load(std::memory_order_acquire);
-                oldIndexOffset = chunk->indexOffset.load(std::memory_order_acquire);
-                oldVertexCount = chunk->vertexCount.load(std::memory_order_acquire);
-                oldIndexCount = static_cast<std::size_t>(chunk->indexCount.load(std::memory_order_acquire));
-                chunk->bufferPageIndex.store(pendingMesh.pageIndex, std::memory_order_release);
-                chunk->vertexOffset.store(pendingMesh.vertexOffset, std::memory_order_release);
-                chunk->indexOffset.store(pendingMesh.indexOffset, std::memory_order_release);
-                chunk->vertexCount.store(pendingMesh.vertexCount, std::memory_order_release);
-                chunk->indexCount.store(static_cast<std::uint32_t>(pendingMesh.indexCount), std::memory_order_release);
-            }
+            const double meshLockWaitMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          commitMeshLockWaitStart)
+                    .count();
+            commitMeshLockWaitMsLastFrame_ += meshLockWaitMs;
+            commitMeshStateMsLastFrame_ += meshLockWaitMs;
         }
 
+        const auto commitMeshStateStart =
+            benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (!chunk->pendingMesh.valid())
+        {
+            if (benchmarkEnabled)
+            {
+                const double meshLockedMs =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                              commitMeshStateStart)
+                        .count();
+                commitMeshLockedMsLastFrame_ += meshLockedMs;
+                commitMeshStateMsLastFrame_ += meshLockedMs;
+            }
+            continue;
+        }
+
+        if (chunk->pendingMesh.uploadFenceValue != 0 &&
+            completedUploadFenceValue < chunk->pendingMesh.uploadFenceValue)
+        {
+            if (benchmarkEnabled)
+            {
+                const double meshLockedMs =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                              commitMeshStateStart)
+                        .count();
+                commitMeshLockedMsLastFrame_ += meshLockedMs;
+                commitMeshStateMsLastFrame_ += meshLockedMs;
+            }
+            continue;
+        }
+
+        pendingMesh = chunk->pendingMesh;
+        chunk->pendingMesh = {};
+        currentMeshVersion = chunk->meshVersion.load(std::memory_order_acquire);
+        stalePending = currentMeshVersion != pendingMesh.meshVersion;
+        if (!stalePending)
+        {
+            oldPageIndex = chunk->bufferPageIndex.load(std::memory_order_acquire);
+            oldVertexOffset = chunk->vertexOffset.load(std::memory_order_acquire);
+            oldIndexOffset = chunk->indexOffset.load(std::memory_order_acquire);
+            oldVertexCount = chunk->vertexCount.load(std::memory_order_acquire);
+            oldIndexCount = static_cast<std::size_t>(chunk->indexCount.load(std::memory_order_acquire));
+            chunk->bufferPageIndex.store(pendingMesh.pageIndex, std::memory_order_release);
+            chunk->vertexOffset.store(pendingMesh.vertexOffset, std::memory_order_release);
+            chunk->indexOffset.store(pendingMesh.indexOffset, std::memory_order_release);
+            chunk->vertexCount.store(pendingMesh.vertexCount, std::memory_order_release);
+            chunk->indexCount.store(static_cast<std::uint32_t>(pendingMesh.indexCount), std::memory_order_release);
+        }
+        if (benchmarkEnabled)
+        {
+            const double meshLockedMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          commitMeshStateStart)
+                    .count();
+            commitMeshLockedMsLastFrame_ += meshLockedMs;
+            commitMeshStateMsLastFrame_ += meshLockedMs;
+        }
+        meshLock.unlock();
+
+        const auto commitPageStateStart =
+            benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (!stalePending && pendingMesh.pageIndex < bufferPages_.size())
         {
             std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
@@ -16255,7 +16479,15 @@ void ChunkManager::Impl::commitPendingChunkUploads()
                 }
             }
         }
+        if (benchmarkEnabled)
+        {
+            commitPageStateMsLastFrame_ +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitPageStateStart)
+                    .count();
+        }
 
+        const auto commitReleaseStart =
+            benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (stalePending)
         {
             if (pendingMesh.pageIndex != kInvalidChunkBufferPage)
@@ -16272,6 +16504,12 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             {
                 queueChunkForUpload(chunk);
             }
+            if (benchmarkEnabled)
+            {
+                commitReleaseMsLastFrame_ +=
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitReleaseStart)
+                        .count();
+            }
             continue;
         }
 
@@ -16286,6 +16524,12 @@ void ChunkManager::Impl::commitPendingChunkUploads()
         }
 
         noteChunkReadyLatency(*chunk);
+        if (benchmarkEnabled)
+        {
+            commitReleaseMsLastFrame_ +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitReleaseStart)
+                    .count();
+        }
     }
 }
 

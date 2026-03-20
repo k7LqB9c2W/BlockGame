@@ -366,15 +366,37 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.queues.upload_backlog.avg_depth,
         $scenario.queues.upload_backlog.p95_depth))
     if ($scenario.stages.visible_scan -and $scenario.stages.ensure_volume -and $scenario.stages.eviction -and $scenario.stages.upload_drain) {
-        $summaryLines.Add(("  update_avg_ms={0:F2} visible_scan_avg_ms={1:F2} ensure_volume_avg_ms={2:F2} scheduling_avg_ms={3:F2}" -f `
+        $summaryLines.Add(("  update_avg_ms={0:F2} residual_avg_ms={1:F2} visible_scan_avg_ms={2:F2} ensure_volume_avg_ms={3:F2}" -f `
             $scenario.stages.update.avg_ms,
+            $scenario.stages.update_residual.avg_ms,
             $scenario.stages.visible_scan.avg_ms,
-            $scenario.stages.ensure_volume.avg_ms,
-            $scenario.stages.scheduling.avg_ms))
-        $summaryLines.Add(("  eviction_avg_ms={0:F2} upload_drain_avg_ms={1:F2} upload_pick_avg_ms={2:F2}" -f `
+            $scenario.stages.ensure_volume.avg_ms))
+        $summaryLines.Add(("  scheduling_avg_ms={0:F2} eviction_avg_ms={1:F2} upload_drain_avg_ms={2:F2} upload_pick_avg_ms={3:F2}" -f `
+            $scenario.stages.scheduling.avg_ms,
             $scenario.stages.eviction.avg_ms,
             $scenario.stages.upload_drain.avg_ms,
             $scenario.stages.upload_queue_pick.avg_ms))
+        if ($scenario.stages.far_terrain_update) {
+            $summaryLines.Add(("  far_terrain_avg_ms={0:F2} pool_trim_avg_ms={1:F2} priority_avg_ms={2:F2} upload_prepare_avg_ms={3:F2}" -f `
+                $scenario.stages.far_terrain_update.avg_ms,
+                $scenario.stages.pool_trim.avg_ms,
+                $scenario.stages.priority_update.avg_ms,
+                $scenario.stages.upload_prepare.avg_ms))
+            $summaryLines.Add(("  upload_begin_avg_ms={0:F2} upload_finalize_avg_ms={1:F2} column_lookup_avg_ms={2:F2} column_sample_avg_ms={3:F2}" -f `
+                $scenario.stages.upload_context_begin.avg_ms,
+                $scenario.stages.upload_finalize.avg_ms,
+                $scenario.stages.column_height_lookup.avg_ms,
+                $scenario.stages.column_height_sample.avg_ms))
+            $summaryLines.Add(("  commit_collect_avg_ms={0:F2} commit_scan_avg_ms={1:F2} commit_mesh_avg_ms={2:F2} commit_page_avg_ms={3:F2} commit_release_avg_ms={4:F2}" -f `
+                $scenario.stages.commit_collect.avg_ms,
+                $scenario.stages.commit_chunk_scan.avg_ms,
+                $scenario.stages.commit_mesh_state.avg_ms,
+                $scenario.stages.commit_page_state.avg_ms,
+                $scenario.stages.commit_release.avg_ms))
+            $summaryLines.Add(("  commit_mesh_wait_avg_ms={0:F2} commit_mesh_locked_avg_ms={1:F2}" -f `
+                $scenario.stages.commit_mesh_lock_wait.avg_ms,
+                $scenario.stages.commit_mesh_locked.avg_ms))
+        }
     }
     if ($scenario.relight_detail) {
         $summaryLines.Add(("  relight region_chunks avg={0:F2} p95={1:F2} changed_chunks avg={2:F2} p95={3:F2}" -f `
@@ -422,13 +444,31 @@ foreach ($scenario in $scenarioObjects) {
                 $worst.chunk_update_ms,
                 $worst.renderer_present_ms))
             if ($null -ne $worst.chunk_ensure_volume_ms) {
-                $summaryLines.Add(("  worst_spike detail scan_ms={0:F2} ensure_ms={1:F2} schedule_ms={2:F2} evict_ms={3:F2} upload_ms={4:F2} upload_pick_ms={5:F2}" -f `
+                $summaryLines.Add(("  worst_spike detail residual_ms={0:F2} scan_ms={1:F2} ensure_ms={2:F2} schedule_ms={3:F2}" -f `
+                    $worst.chunk_update_residual_ms,
                     $worst.chunk_missing_scan_ms,
                     $worst.chunk_ensure_volume_ms,
-                    $worst.chunk_scheduling_ms,
+                    $worst.chunk_scheduling_ms))
+                $summaryLines.Add(("  worst_spike detail evict_ms={0:F2} upload_ms={1:F2} upload_pick_ms={2:F2} far_terrain_ms={3:F2}" -f `
                     $worst.chunk_eviction_ms,
                     $worst.chunk_upload_ms,
-                    $worst.chunk_upload_queue_pick_ms))
+                    $worst.chunk_upload_queue_pick_ms,
+                    $worst.chunk_far_terrain_update_ms))
+                $summaryLines.Add(("  worst_spike detail upload_prepare_ms={0:F2} upload_begin_ms={1:F2} upload_finalize_ms={2:F2} column_lookup_ms={3:F2} column_sample_ms={4:F2}" -f `
+                    $worst.chunk_upload_prepare_ms,
+                    $worst.chunk_upload_context_begin_ms,
+                    $worst.chunk_upload_finalize_ms,
+                    $worst.chunk_column_height_lookup_ms,
+                    $worst.chunk_column_height_sample_ms))
+                $summaryLines.Add(("  worst_spike detail commit_collect_ms={0:F2} commit_scan_ms={1:F2} commit_mesh_ms={2:F2} commit_page_ms={3:F2} commit_release_ms={4:F2}" -f `
+                    $worst.chunk_commit_collect_ms,
+                    $worst.chunk_commit_chunk_scan_ms,
+                    $worst.chunk_commit_mesh_state_ms,
+                    $worst.chunk_commit_page_state_ms,
+                    $worst.chunk_commit_release_ms))
+                $summaryLines.Add(("  worst_spike detail commit_mesh_wait_ms={0:F2} commit_mesh_locked_ms={1:F2}" -f `
+                    $worst.chunk_commit_mesh_lock_wait_ms,
+                    $worst.chunk_commit_mesh_locked_ms))
             }
             $summaryLines.Add(("  worst_spike relight region={0} changed={1} external={2} sky_scans={3} vertical_delta={4}" -f `
                 $worst.relight_region_chunks_this_frame,

@@ -805,6 +805,7 @@ struct BenchmarkSpikeRecord
     std::string blockingReason{"ready"};
     std::string suspectedSource{"unknown"};
     double chunkUpdateMs{0.0};
+    double chunkUpdateResidualMs{0.0};
     double chunkVerticalRadiusMs{0.0};
     double chunkPriorityUpdateMs{0.0};
     double chunkUploadBudgetMs{0.0};
@@ -816,6 +817,19 @@ struct BenchmarkSpikeRecord
     double chunkUploadMs{0.0};
     double chunkUploadQueuePickMs{0.0};
     double chunkPoolTrimMs{0.0};
+    double chunkFarTerrainUpdateMs{0.0};
+    double chunkColumnHeightLookupMs{0.0};
+    double chunkColumnHeightSampleMs{0.0};
+    double chunkUploadPrepareMs{0.0};
+    double chunkUploadContextBeginMs{0.0};
+    double chunkUploadFinalizeMs{0.0};
+    double chunkCommitCollectMs{0.0};
+    double chunkCommitChunkScanMs{0.0};
+    double chunkCommitMeshLockWaitMs{0.0};
+    double chunkCommitMeshLockedMs{0.0};
+    double chunkCommitMeshStateMs{0.0};
+    double chunkCommitPageStateMs{0.0};
+    double chunkCommitReleaseMs{0.0};
     double chunkStartupStateMs{0.0};
     double chunkBenchmarkBookkeepingMs{0.0};
     double pollEventsMs{0.0};
@@ -1147,6 +1161,7 @@ struct BenchmarkFrameSummary
 {
     const double renderMs = rendererWorkMs(rendererSnapshot);
     const double updateMs = chunkSnapshot.updateMsLastFrame;
+    const double updateResidualMs = chunkSnapshot.updateResidualMsLastFrame;
     const double verticalRadiusMs = chunkSnapshot.verticalRadiusMsLastFrame;
     const double priorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
     const double uploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
@@ -1159,6 +1174,19 @@ struct BenchmarkFrameSummary
     const double uploadMs = chunkSnapshot.uploadMsLastFrame;
     const double uploadQueuePickMs = chunkSnapshot.uploadQueuePickMsLastFrame;
     const double poolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
+    const double farTerrainUpdateMs = chunkSnapshot.farTerrainUpdateMsLastFrame;
+    const double columnHeightLookupMs = chunkSnapshot.columnHeightLookupMsLastFrame;
+    const double columnHeightSampleMs = chunkSnapshot.columnHeightSampleMsLastFrame;
+    const double uploadPrepareMs = chunkSnapshot.uploadPrepareMsLastFrame;
+    const double uploadContextBeginMs = chunkSnapshot.uploadContextBeginMsLastFrame;
+    const double uploadFinalizeMs = chunkSnapshot.uploadFinalizeMsLastFrame;
+    const double commitCollectMs = chunkSnapshot.commitCollectMsLastFrame;
+    const double commitChunkScanMs = chunkSnapshot.commitChunkScanMsLastFrame;
+    const double commitMeshLockWaitMs = chunkSnapshot.commitMeshLockWaitMsLastFrame;
+    const double commitMeshLockedMs = chunkSnapshot.commitMeshLockedMsLastFrame;
+    const double commitMeshStateMs = chunkSnapshot.commitMeshStateMsLastFrame;
+    const double commitPageStateMs = chunkSnapshot.commitPageStateMsLastFrame;
+    const double commitReleaseMs = chunkSnapshot.commitReleaseMsLastFrame;
     const double startupStateMs = chunkSnapshot.startupStateMsLastFrame;
     const double benchmarkBookkeepingMs = chunkSnapshot.benchmarkBookkeepingMsLastFrame;
 
@@ -1196,6 +1224,58 @@ struct BenchmarkFrameSummary
         {
             return "chunk_upload_budget";
         }
+        if (uploadPrepareMs >= 10.0 && uploadPrepareMs >= updateMs * 0.35)
+        {
+            if (commitMeshLockWaitMs >= 10.0 && commitMeshLockWaitMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_mesh_lock_wait";
+            }
+            if (commitMeshLockedMs >= 10.0 && commitMeshLockedMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_mesh_locked";
+            }
+            if (commitCollectMs >= 10.0 && commitCollectMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_collect";
+            }
+            if (commitChunkScanMs >= 10.0 && commitChunkScanMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_chunk_scan";
+            }
+            if (commitMeshStateMs >= 10.0 && commitMeshStateMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_mesh_state";
+            }
+            if (commitPageStateMs >= 10.0 && commitPageStateMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_page_state";
+            }
+            if (commitReleaseMs >= 10.0 && commitReleaseMs >= uploadPrepareMs * 0.30)
+            {
+                return "chunk_commit_release";
+            }
+            return "chunk_upload_prepare";
+        }
+        if (uploadContextBeginMs >= 10.0 && uploadContextBeginMs >= updateMs * 0.35)
+        {
+            return "chunk_upload_begin";
+        }
+        if (uploadFinalizeMs >= 10.0 && uploadFinalizeMs >= updateMs * 0.35)
+        {
+            return "chunk_upload_finalize";
+        }
+        if (farTerrainUpdateMs >= 10.0 && farTerrainUpdateMs >= updateMs * 0.35)
+        {
+            return "chunk_far_terrain_update";
+        }
+        if (columnHeightLookupMs >= 10.0 && columnHeightLookupMs >= updateMs * 0.35)
+        {
+            return "chunk_column_height_lookup";
+        }
+        if (columnHeightSampleMs >= 10.0 && columnHeightSampleMs >= updateMs * 0.35)
+        {
+            return "chunk_column_height_sample";
+        }
         if (ensureVolumeMs >= 10.0 && ensureVolumeMs >= updateMs * 0.35)
         {
             return "chunk_ensure_volume";
@@ -1231,6 +1311,10 @@ struct BenchmarkFrameSummary
         if (benchmarkBookkeepingMs >= 6.0 && benchmarkBookkeepingMs >= updateMs * 0.25)
         {
             return "chunk_benchmark_bookkeeping";
+        }
+        if (updateResidualMs >= 10.0 && updateResidualMs >= updateMs * 0.35)
+        {
+            return "chunk_update_unattributed";
         }
         if (chunkSnapshot.relightBatches > 0 || chunkSnapshot.relitChunks > 0)
         {
@@ -1321,6 +1405,7 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
                                                           buildRenderDataMs,
                                                           renderWorldCpuMs);
     record.chunkUpdateMs = chunkSnapshot.updateMsLastFrame;
+    record.chunkUpdateResidualMs = chunkSnapshot.updateResidualMsLastFrame;
     record.chunkVerticalRadiusMs = chunkSnapshot.verticalRadiusMsLastFrame;
     record.chunkPriorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
     record.chunkUploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
@@ -1332,6 +1417,19 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
     record.chunkUploadMs = chunkSnapshot.uploadMsLastFrame;
     record.chunkUploadQueuePickMs = chunkSnapshot.uploadQueuePickMsLastFrame;
     record.chunkPoolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
+    record.chunkFarTerrainUpdateMs = chunkSnapshot.farTerrainUpdateMsLastFrame;
+    record.chunkColumnHeightLookupMs = chunkSnapshot.columnHeightLookupMsLastFrame;
+    record.chunkColumnHeightSampleMs = chunkSnapshot.columnHeightSampleMsLastFrame;
+    record.chunkUploadPrepareMs = chunkSnapshot.uploadPrepareMsLastFrame;
+    record.chunkUploadContextBeginMs = chunkSnapshot.uploadContextBeginMsLastFrame;
+    record.chunkUploadFinalizeMs = chunkSnapshot.uploadFinalizeMsLastFrame;
+    record.chunkCommitCollectMs = chunkSnapshot.commitCollectMsLastFrame;
+    record.chunkCommitChunkScanMs = chunkSnapshot.commitChunkScanMsLastFrame;
+    record.chunkCommitMeshLockWaitMs = chunkSnapshot.commitMeshLockWaitMsLastFrame;
+    record.chunkCommitMeshLockedMs = chunkSnapshot.commitMeshLockedMsLastFrame;
+    record.chunkCommitMeshStateMs = chunkSnapshot.commitMeshStateMsLastFrame;
+    record.chunkCommitPageStateMs = chunkSnapshot.commitPageStateMsLastFrame;
+    record.chunkCommitReleaseMs = chunkSnapshot.commitReleaseMsLastFrame;
     record.chunkStartupStateMs = chunkSnapshot.startupStateMsLastFrame;
     record.chunkBenchmarkBookkeepingMs = chunkSnapshot.benchmarkBookkeepingMsLastFrame;
     record.pollEventsMs = pollEventsMs;
@@ -1593,6 +1691,7 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
         out << ",\"suspected_source\":";
         writeJsonEscaped(out, spike.suspectedSource);
         out << ",\"chunk_update_ms\":" << spike.chunkUpdateMs
+            << ",\"chunk_update_residual_ms\":" << spike.chunkUpdateResidualMs
             << ",\"chunk_vertical_radius_ms\":" << spike.chunkVerticalRadiusMs
             << ",\"chunk_priority_update_ms\":" << spike.chunkPriorityUpdateMs
             << ",\"chunk_upload_budget_ms\":" << spike.chunkUploadBudgetMs
@@ -1604,6 +1703,19 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
             << ",\"chunk_upload_ms\":" << spike.chunkUploadMs
             << ",\"chunk_upload_queue_pick_ms\":" << spike.chunkUploadQueuePickMs
             << ",\"chunk_pool_trim_ms\":" << spike.chunkPoolTrimMs
+            << ",\"chunk_far_terrain_update_ms\":" << spike.chunkFarTerrainUpdateMs
+            << ",\"chunk_column_height_lookup_ms\":" << spike.chunkColumnHeightLookupMs
+            << ",\"chunk_column_height_sample_ms\":" << spike.chunkColumnHeightSampleMs
+            << ",\"chunk_upload_prepare_ms\":" << spike.chunkUploadPrepareMs
+            << ",\"chunk_upload_context_begin_ms\":" << spike.chunkUploadContextBeginMs
+            << ",\"chunk_upload_finalize_ms\":" << spike.chunkUploadFinalizeMs
+            << ",\"chunk_commit_collect_ms\":" << spike.chunkCommitCollectMs
+            << ",\"chunk_commit_chunk_scan_ms\":" << spike.chunkCommitChunkScanMs
+            << ",\"chunk_commit_mesh_lock_wait_ms\":" << spike.chunkCommitMeshLockWaitMs
+            << ",\"chunk_commit_mesh_locked_ms\":" << spike.chunkCommitMeshLockedMs
+            << ",\"chunk_commit_mesh_state_ms\":" << spike.chunkCommitMeshStateMs
+            << ",\"chunk_commit_page_state_ms\":" << spike.chunkCommitPageStateMs
+            << ",\"chunk_commit_release_ms\":" << spike.chunkCommitReleaseMs
             << ",\"chunk_startup_state_ms\":" << spike.chunkStartupStateMs
             << ",\"chunk_benchmark_bookkeeping_ms\":" << spike.chunkBenchmarkBookkeepingMs
             << ",\"poll_events_ms\":" << spike.pollEventsMs
@@ -1735,6 +1847,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.uploadStage);
     out << ",\"update\":";
     writeStageStatsJson(out, report.updateStage);
+    out << ",\"update_residual\":";
+    writeStageStatsJson(out, report.updateResidualStage);
+    out << ",\"vertical_radius\":";
+    writeStageStatsJson(out, report.verticalRadiusStage);
+    out << ",\"priority_update\":";
+    writeStageStatsJson(out, report.priorityUpdateStage);
+    out << ",\"upload_budget_prep\":";
+    writeStageStatsJson(out, report.uploadBudgetPrepStage);
     out << ",\"visible_scan\":";
     writeStageStatsJson(out, report.visibleScanStage);
     out << ",\"ensure_volume\":";
@@ -1743,10 +1863,44 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.schedulingStage);
     out << ",\"eviction\":";
     writeStageStatsJson(out, report.evictionStage);
+    out << ",\"main_thread_relight\":";
+    writeStageStatsJson(out, report.mainThreadRelightStage);
     out << ",\"upload_drain\":";
     writeStageStatsJson(out, report.uploadDrainStage);
     out << ",\"upload_queue_pick\":";
     writeStageStatsJson(out, report.uploadQueuePickStage);
+    out << ",\"pool_trim\":";
+    writeStageStatsJson(out, report.poolTrimStage);
+    out << ",\"far_terrain_update\":";
+    writeStageStatsJson(out, report.farTerrainUpdateStage);
+    out << ",\"column_height_lookup\":";
+    writeStageStatsJson(out, report.columnHeightLookupStage);
+    out << ",\"column_height_sample\":";
+    writeStageStatsJson(out, report.columnHeightSampleStage);
+    out << ",\"upload_prepare\":";
+    writeStageStatsJson(out, report.uploadPrepareStage);
+    out << ",\"upload_context_begin\":";
+    writeStageStatsJson(out, report.uploadContextBeginStage);
+    out << ",\"upload_finalize\":";
+    writeStageStatsJson(out, report.uploadFinalizeStage);
+    out << ",\"commit_collect\":";
+    writeStageStatsJson(out, report.commitCollectStage);
+    out << ",\"commit_chunk_scan\":";
+    writeStageStatsJson(out, report.commitChunkScanStage);
+    out << ",\"commit_mesh_lock_wait\":";
+    writeStageStatsJson(out, report.commitMeshLockWaitStage);
+    out << ",\"commit_mesh_locked\":";
+    writeStageStatsJson(out, report.commitMeshLockedStage);
+    out << ",\"commit_mesh_state\":";
+    writeStageStatsJson(out, report.commitMeshStateStage);
+    out << ",\"commit_page_state\":";
+    writeStageStatsJson(out, report.commitPageStateStage);
+    out << ",\"commit_release\":";
+    writeStageStatsJson(out, report.commitReleaseStage);
+    out << ",\"startup_state\":";
+    writeStageStatsJson(out, report.startupStateStage);
+    out << ",\"benchmark_bookkeeping\":";
+    writeStageStatsJson(out, report.benchmarkBookkeepingStage);
     out << ",\"far_build\":";
     writeStageStatsJson(out, report.farBuildStage);
     out << ",\"lod_gpu_synthesis\":";
@@ -1814,11 +1968,25 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"vertical_radius\":" << finalProfiling.verticalRadius
         << ",\"vertical_radius_delta\":" << finalProfiling.verticalRadiusDelta
         << ",\"visible_scan_ms\":" << finalProfiling.missingScanMsLastFrame
+        << ",\"update_residual_ms\":" << finalProfiling.updateResidualMsLastFrame
         << ",\"ensure_volume_ms\":" << finalProfiling.ensureVolumeMsLastFrame
         << ",\"scheduling_ms\":" << finalProfiling.schedulingMsLastFrame
         << ",\"eviction_ms\":" << finalProfiling.evictionMsLastFrame
         << ",\"upload_drain_ms\":" << finalProfiling.uploadMsLastFrame
         << ",\"upload_queue_pick_ms\":" << finalProfiling.uploadQueuePickMsLastFrame
+        << ",\"far_terrain_update_ms\":" << finalProfiling.farTerrainUpdateMsLastFrame
+        << ",\"column_height_lookup_ms\":" << finalProfiling.columnHeightLookupMsLastFrame
+        << ",\"column_height_sample_ms\":" << finalProfiling.columnHeightSampleMsLastFrame
+        << ",\"upload_prepare_ms\":" << finalProfiling.uploadPrepareMsLastFrame
+        << ",\"upload_context_begin_ms\":" << finalProfiling.uploadContextBeginMsLastFrame
+        << ",\"upload_finalize_ms\":" << finalProfiling.uploadFinalizeMsLastFrame
+        << ",\"commit_collect_ms\":" << finalProfiling.commitCollectMsLastFrame
+        << ",\"commit_chunk_scan_ms\":" << finalProfiling.commitChunkScanMsLastFrame
+        << ",\"commit_mesh_lock_wait_ms\":" << finalProfiling.commitMeshLockWaitMsLastFrame
+        << ",\"commit_mesh_locked_ms\":" << finalProfiling.commitMeshLockedMsLastFrame
+        << ",\"commit_mesh_state_ms\":" << finalProfiling.commitMeshStateMsLastFrame
+        << ",\"commit_page_state_ms\":" << finalProfiling.commitPageStateMsLastFrame
+        << ",\"commit_release_ms\":" << finalProfiling.commitReleaseMsLastFrame
         << ",\"relight_region_chunks_last_frame\":" << finalProfiling.relightRegionChunks
         << ",\"relight_changed_chunks_last_frame\":" << finalProfiling.relightChangedChunks
         << ",\"relight_external_snapshot_chunks_last_frame\":" << finalProfiling.relightExternalSnapshotChunks
@@ -2057,6 +2225,22 @@ struct CaptureOverridesConfig
     default:
         return "Unknown";
     }
+}
+
+[[nodiscard]] constexpr std::array<BlockId, 10> placeableBlockOptions() noexcept
+{
+    return {
+        BlockId::Grass,
+        BlockId::Wood,
+        BlockId::Leaves,
+        BlockId::Sand,
+        BlockId::Water,
+        BlockId::Stone,
+        BlockId::SpruceLog,
+        BlockId::SpruceLeaves,
+        BlockId::Podzol,
+        BlockId::DebugLamp
+    };
 }
 
 [[nodiscard]] std::vector<CapturePlacementAction> loadCapturePlacements()
@@ -3027,7 +3211,7 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, double-tap SPACE to toggle flight, SHIFT to descend while flying, . to toggle mouse/UI control, N to set exact/total render distance, F2 to teleport, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, double-tap SPACE to toggle flight, SHIFT to descend while flying, . to toggle mouse/UI control, N to set exact/total render distance, F2 to teleport, E to choose block type, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -3369,7 +3553,7 @@ int runGame()
                 {
                     chunkManager.placeBlock(hit.blockPos,
                                            hit.faceNormal,
-                                           inputContext.placeLampMode ? BlockId::DebugLamp : BlockId::Grass);
+                                           inputContext.selectedPlacementBlock);
                 }
                 inputContext.rightMouseJustPressed = false;
             }
@@ -3745,7 +3929,7 @@ int runGame()
             debugStream << "Light Probe: sky=" << static_cast<int>(probeLight.sky)
                         << " block=" << static_cast<int>(probeLight.block) << '\n';
             debugStream << "Place Mode: "
-                        << (inputContext.placeLampMode ? "DebugLamp" : "Grass")
+                        << blockIdLabel(inputContext.selectedPlacementBlock)
                         << '\n';
 
             const int columnX = static_cast<int>(std::floor(samplePosition.x));
@@ -4008,6 +4192,7 @@ int runGame()
                 "Mouse: Look\n"
                 "Left Mouse: Break block\n"
                 "Right Mouse: Place block\n"
+                "E: Open block picker\n"
                 "L: Toggle Grass / DebugLamp placement\n"
                 ". : Release or recapture mouse\n"
                 "F1: Debug overlay, lighting lab, and LOD diagnostics\n"
@@ -4042,8 +4227,8 @@ int runGame()
             ImGui::TextUnformatted(inputContext.cameraMouseCaptured
                                        ? "Press . to release the mouse for UI. Press H for controls."
                                        : "Press . again to return to camera look. Press H for controls.");
-            ImGui::Text("Placement Block: %s (press L to toggle)",
-                        inputContext.placeLampMode ? "DebugLamp" : "Grass");
+            ImGui::Text("Placement Block: %s (press E to choose)",
+                        blockIdLabel(inputContext.selectedPlacementBlock));
             ImGui::Separator();
             ImGui::TextUnformatted("Quick Isolate");
 
@@ -4365,6 +4550,36 @@ int runGame()
             {
                 inputContext.showTeleportGUI = false;
                 inputContext.teleportBuffer.clear();
+            }
+            ImGui::End();
+        }
+
+        if (inputContext.showBlockPickerGUI)
+        {
+            ImGui::SetNextWindowPos(ImVec2(framebufferWidth * 0.5f, framebufferHeight * 0.5f),
+                                    ImGuiCond_Always,
+                                    ImVec2(0.5f, 0.5f));
+            ImGui::Begin("Block Picker",
+                         nullptr,
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+            ImGui::TextUnformatted("Choose the block placed by right-click.");
+            ImGui::Text("Current: %s", blockIdLabel(inputContext.selectedPlacementBlock));
+            ImGui::Separator();
+
+            for (BlockId block : placeableBlockOptions())
+            {
+                const bool selected = inputContext.selectedPlacementBlock == block;
+                if (ImGui::Selectable(blockIdLabel(block), selected))
+                {
+                    inputContext.selectedPlacementBlock = block;
+                    inputContext.placeLampMode = (block == BlockId::DebugLamp);
+                }
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Close") || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                inputContext.showBlockPickerGUI = false;
             }
             ImGui::End();
         }

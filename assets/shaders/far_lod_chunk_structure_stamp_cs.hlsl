@@ -229,8 +229,8 @@ int darkOakBranchCount(const GpuStructureInstance instance)
 {
     const int count = 1 + (int)(hashToUnitFloat32(instance.originX,
                                                   instance.originY + 719,
-                                                  instance.originZ) * 3.0f);
-    return clamp(count, 1, 3);
+                                                  instance.originZ) * 4.0f);
+    return clamp(count, 1, 4);
 }
 
 float darkOakBranchScore(const GpuStructureInstance instance, int dir)
@@ -484,6 +484,9 @@ void stampDarkOak(const GpuStructureInstance instance,
                   inout uint candidatePriority,
                   inout uint candidatePackedVoxel)
 {
+    const int trunkTopWorld = instance.originY + (int)instance.trunkHeight - 1;
+    const int canopyBaseWorld = instance.originY + (int)instance.trunkHeight - 2;
+
     [loop]
     for (int trunkX = 0; trunkX < 2; ++trunkX)
     {
@@ -527,6 +530,105 @@ void stampDarkOak(const GpuStructureInstance instance,
 
         int tipX = instance.originX;
         int tipZ = instance.originZ;
+        const int shoulderBaseWorldY = max(instance.originY + (int)instance.trunkHeight / 2 - 1,
+                                           branchWorldY - 2);
+        [loop]
+        for (int shoulderY = shoulderBaseWorldY; shoulderY <= trunkTopWorld; ++shoulderY)
+        {
+            [loop]
+            for (int side = 0; side < 2; ++side)
+            {
+                int shoulderX = instance.originX;
+                int shoulderZ = instance.originZ;
+                if (dir == 0)
+                {
+                    shoulderX = instance.originX + 2;
+                    shoulderZ = instance.originZ + side;
+                }
+                else if (dir == 1)
+                {
+                    shoulderX = instance.originX - 1;
+                    shoulderZ = instance.originZ + side;
+                }
+                else if (dir == 2)
+                {
+                    shoulderX = instance.originX + side;
+                    shoulderZ = instance.originZ + 2;
+                }
+                else
+                {
+                    shoulderX = instance.originX + side;
+                    shoulderZ = instance.originZ - 1;
+                }
+
+                considerStructureBlock(voxelMin,
+                                       voxelMax,
+                                       shoulderX,
+                                       shoulderY,
+                                       shoulderZ,
+                                       kBlockDarkOakLog,
+                                       true,
+                                       currentPackedVoxel,
+                                       hasCandidate,
+                                       candidatePriority,
+                                       candidatePackedVoxel);
+            }
+        }
+
+        [loop]
+        for (int leafY = canopyBaseWorld; leafY <= canopyBaseWorld + 1; ++leafY)
+        {
+            [loop]
+            for (int outward = 0; outward <= 2; ++outward)
+            {
+                [loop]
+                for (int lateral = -1; lateral <= 2; ++lateral)
+                {
+                    int leafX = instance.originX;
+                    int leafZ = instance.originZ;
+                    if (dir == 0)
+                    {
+                        leafX = instance.originX + 2 + outward;
+                        leafZ = instance.originZ + lateral;
+                    }
+                    else if (dir == 1)
+                    {
+                        leafX = instance.originX - 1 - outward;
+                        leafZ = instance.originZ + lateral;
+                    }
+                    else if (dir == 2)
+                    {
+                        leafX = instance.originX + lateral;
+                        leafZ = instance.originZ + 2 + outward;
+                    }
+                    else
+                    {
+                        leafX = instance.originX + lateral;
+                        leafZ = instance.originZ - 1 - outward;
+                    }
+
+                    if (leafX >= instance.originX && leafX <= instance.originX + 1 &&
+                        leafZ >= instance.originZ && leafZ <= instance.originZ + 1 &&
+                        leafY <= trunkTopWorld)
+                    {
+                        continue;
+                    }
+
+                    considerStructureBlock(voxelMin,
+                                           voxelMax,
+                                           leafX,
+                                           leafY,
+                                           leafZ,
+                                           kBlockDarkOakLeaves,
+                                           false,
+                                           currentPackedVoxel,
+                                           hasCandidate,
+                                           candidatePriority,
+                                           candidatePackedVoxel);
+                }
+            }
+        }
+
         [loop]
         for (int step = 1; step <= length; ++step)
         {
@@ -608,7 +710,6 @@ void stampDarkOak(const GpuStructureInstance instance,
         }
     }
 
-    const int canopyBaseWorld = instance.originY + (int)instance.trunkHeight - 2;
     [loop]
     for (int layer = 0; layer < 5; ++layer)
     {

@@ -3816,8 +3816,8 @@ inline int darkOakBranchLength(int originX, int groundWorldY, int originZ, int d
 
 inline int darkOakBranchCount(int originX, int groundWorldY, int originZ) noexcept
 {
-    const int count = 1 + static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 719, originZ) * 3.0f);
-    return std::clamp(count, 1, 3);
+    const int count = 1 + static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 719, originZ) * 4.0f);
+    return std::clamp(count, 1, 4);
 }
 
 inline float darkOakBranchScore(int originX, int groundWorldY, int originZ, int dir) noexcept
@@ -4187,6 +4187,9 @@ inline bool forEachDarkOakTreeBlock(int originX,
                                     BlockId leavesBlock,
                                     Callback&& callback)
 {
+    const int trunkTopWorld = groundWorldY + trunkHeight - 1;
+    const int canopyBaseWorld = groundWorldY + trunkHeight - kDarkOakCanopyBaseOffset;
+
     for (int trunkX = 0; trunkX < 2; ++trunkX)
     {
         for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
@@ -4219,6 +4222,85 @@ inline bool forEachDarkOakTreeBlock(int originX,
 
         int tipX = originX;
         int tipZ = originZ;
+        const int shoulderBaseWorldY = std::max(groundWorldY + trunkHeight / 2 - 1, branchWorldY - 2);
+        for (int shoulderY = shoulderBaseWorldY; shoulderY <= trunkTopWorld; ++shoulderY)
+        {
+            for (int side = 0; side < 2; ++side)
+            {
+                int shoulderX = originX;
+                int shoulderZ = originZ;
+                if (dir == 0)
+                {
+                    shoulderX = originX + 2;
+                    shoulderZ = originZ + side;
+                }
+                else if (dir == 1)
+                {
+                    shoulderX = originX - 1;
+                    shoulderZ = originZ + side;
+                }
+                else if (dir == 2)
+                {
+                    shoulderX = originX + side;
+                    shoulderZ = originZ + 2;
+                }
+                else
+                {
+                    shoulderX = originX + side;
+                    shoulderZ = originZ - 1;
+                }
+
+                if (callback(shoulderX, shoulderY, shoulderZ, trunkBlock))
+                {
+                    return true;
+                }
+            }
+        }
+
+        for (int leafY = canopyBaseWorld; leafY <= canopyBaseWorld + 1; ++leafY)
+        {
+            for (int outward = 0; outward <= 2; ++outward)
+            {
+                for (int lateral = -1; lateral <= 2; ++lateral)
+                {
+                    int leafX = originX;
+                    int leafZ = originZ;
+                    if (dir == 0)
+                    {
+                        leafX = originX + 2 + outward;
+                        leafZ = originZ + lateral;
+                    }
+                    else if (dir == 1)
+                    {
+                        leafX = originX - 1 - outward;
+                        leafZ = originZ + lateral;
+                    }
+                    else if (dir == 2)
+                    {
+                        leafX = originX + lateral;
+                        leafZ = originZ + 2 + outward;
+                    }
+                    else
+                    {
+                        leafX = originX + lateral;
+                        leafZ = originZ - 1 - outward;
+                    }
+
+                    if (leafX >= originX && leafX <= originX + 1 &&
+                        leafZ >= originZ && leafZ <= originZ + 1 &&
+                        leafY <= trunkTopWorld)
+                    {
+                        continue;
+                    }
+
+                    if (callback(leafX, leafY, leafZ, leavesBlock))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
         for (int step = 1; step <= length; ++step)
         {
             int branchX = originX + lane;
@@ -4284,7 +4366,6 @@ inline bool forEachDarkOakTreeBlock(int originX,
         }
     }
 
-    const int canopyBaseWorld = groundWorldY + trunkHeight - kDarkOakCanopyBaseOffset;
     for (int layer = 0; layer < kDarkOakCanopyLayers; ++layer)
     {
         const int radius = kDarkOakCanopyRadii[static_cast<std::size_t>(layer)];

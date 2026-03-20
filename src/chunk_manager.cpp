@@ -18030,11 +18030,14 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
 
     std::vector<std::vector<std::uint8_t>> previousLights;
     previousLights.reserve(regionChunks.size());
-    for (auto& chunk : regionChunks)
+    std::unordered_map<glm::ivec3, std::size_t, ChunkHasher> regionIndexByCoord;
+    regionIndexByCoord.reserve(regionChunks.size());
+    for (std::size_t chunkIndex = 0; chunkIndex < regionChunks.size(); ++chunkIndex)
     {
+        auto& chunk = regionChunks[chunkIndex];
         previousLights.push_back(chunk->lightLevels);
-        std::fill(chunk->lightLevels.begin(), chunk->lightLevels.end(), packLightLevels(0, 0));
         chunk->lightBoundaryDirtyMask = 0;
+        regionIndexByCoord.emplace(chunk->coord, chunkIndex);
     }
 
     auto findExternalSnapshot = [&](const glm::ivec3& chunkCoord) -> const RelightChunkReadSnapshot*
@@ -18051,6 +18054,8 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
 
     std::deque<LightNode> skyQueue;
     std::deque<LightNode> blockQueue;
+    std::deque<LightNode> skyRemovalQueue;
+    std::deque<LightNode> blockRemovalQueue;
     std::uint64_t skyAboveChunkScans = 0;
     std::uint64_t skySeedNodes = 0;
     std::uint64_t blockSeedNodes = 0;
@@ -18077,6 +18082,53 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
 
         const int localY = worldPos.y - it->second->minWorldY;
         return {it->second.get(), blockIndex(local.x, localY, local.z)};
+    };
+
+    auto channelFromPacked = [](std::uint8_t packed, bool skyChannel) noexcept -> std::uint8_t
+    {
+        return skyChannel ? skyLightFromPacked(packed) : blockLightFromPacked(packed);
+    };
+
+    auto setPackedChannel = [](std::uint8_t& packed, bool skyChannel, std::uint8_t level) noexcept
+    {
+        if (skyChannel)
+        {
+            setSkyLight(packed, level);
+        }
+        else
+        {
+            setBlockLight(packed, level);
+        }
+    };
+
+    std::vector<std::vector<std::uint8_t>> baseLightLevels(
+        regionChunks.size(),
+        std::vector<std::uint8_t>(kChunkBlockCount, packLightLevels(0, 0)));
+    std::unordered_set<glm::ivec2, ColumnHasher> dirtyColumns;
+    dirtyColumns.reserve(batch.dirtyCoordGenerations.size());
+    for (const auto& [coord, _] : batch.dirtyCoordGenerations)
+    {
+        dirtyColumns.insert(glm::ivec2(coord.x, coord.z));
+    }
+
+    std::unordered_set<glm::ivec3, ChunkHasher> recomputeCoords;
+    recomputeCoords.reserve(regionChunks.size());
+    for (const auto& chunk : regionChunks)
+    {
+        if (dirtyColumns.find(glm::ivec2(chunk->coord.x, chunk->coord.z)) != dirtyColumns.end())
+        {
+            recomputeCoords.insert(chunk->coord);
+        }
+    }
+
+    auto basePackedAtRegionVoxel = [&](Chunk* chunk, std::size_t idx) -> std::uint8_t
+    {
+        auto it = regionIndexByCoord.find(chunk->coord);
+        if (it == regionIndexByCoord.end())
+        {
+            return packLightLevels(0, 0);
+        }
+        return baseLightLevels[it->second][idx];
     };
 
     auto seedSkyLight = [&](const glm::ivec3& worldPos, std::uint8_t level)
@@ -18177,6 +18229,13 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
 
     for (const auto& chunk : verticalOrder)
     {
+        auto regionIndexIt = regionIndexByCoord.find(chunk->coord);
+        if (regionIndexIt == regionIndexByCoord.end())
+        {
+            continue;
+        }
+
+        auto& baseLights = baseLightLevels[regionIndexIt->second];
         const int baseWorldX = chunk->coord.x * kChunkSizeX;
         const int baseWorldZ = chunk->coord.z * kChunkSizeZ;
 
@@ -18197,7 +18256,6 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
 
                     if (isOpaqueForLighting(block))
                     {
-                        setSkyLight(chunk->lightLevels[idx], 0);
                         incomingSky = 0;
                     }
                     else
@@ -18205,25 +18263,155 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
                         const std::uint8_t attenuation = blockLightingProperties(block).skyAttenuation;
                         incomingSky = static_cast<std::uint8_t>(
                             std::max(0, static_cast<int>(incomingSky) - static_cast<int>(attenuation)));
-                        setSkyLight(chunk->lightLevels[idx], incomingSky);
-                        if (incomingSky > 0)
+                    }
+
+                    setSkyLight(baseLights[idx], incomingSky);
+                    const std::uint8_t emission = blockLightingProperties(block).blockEmission;
+                    setBlockLight(baseLights[idx], emission);
+                }
+            }
+        }
+    }
+
+    for (std::size_t chunkIndex = 0; chunkIndex < regionChunks.size(); ++chunkIndex)
+    {
+        auto& chunk = regionChunks[chunkIndex];
+        if (recomputeCoords.find(chunk->coord) != recomputeCoords.end())
+        {
+            chunk->lightLevels = baseLightLevels[chunkIndex];
+        }
+        else
+        {
+            chunk->lightLevels = previousLights[chunkIndex];
+        }
+    }
+
+    for (std::size_t chunkIndex = 0; chunkIndex < regionChunks.size(); ++chunkIndex)
+    {
+        const auto& chunk = regionChunks[chunkIndex];
+        if (recomputeCoords.find(chunk->coord) == recomputeCoords.end())
+        {
+            continue;
+        }
+
+        const int baseWorldX = chunk->coord.x * kChunkSizeX;
+        const int baseWorldZ = chunk->coord.z * kChunkSizeZ;
+        for (int localX = 0; localX < kChunkSizeX; ++localX)
+        {
+            for (int localY = 0; localY < kChunkSizeY; ++localY)
+            {
+                for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+                {
+                    const std::size_t idx = blockIndex(localX, localY, localZ);
+                    const glm::ivec3 worldPos(baseWorldX + localX,
+                                              chunk->minWorldY + localY,
+                                              baseWorldZ + localZ);
+                    const std::uint8_t oldPacked = previousLights[chunkIndex][idx];
+                    const std::uint8_t newPacked = chunk->lightLevels[idx];
+
+                    const std::uint8_t oldSky = skyLightFromPacked(oldPacked);
+                    const std::uint8_t oldBlock = blockLightFromPacked(oldPacked);
+                    const std::uint8_t newSky = skyLightFromPacked(newPacked);
+                    const std::uint8_t newBlock = blockLightFromPacked(newPacked);
+
+                    if (oldSky != newSky)
+                    {
+                        if (oldSky > newSky && oldSky > 1)
                         {
-                            skyQueue.push_back({worldPos, incomingSky});
+                            skyRemovalQueue.push_back({worldPos, oldSky});
+                        }
+                        if (newSky > 1)
+                        {
+                            skyQueue.push_back({worldPos, newSky});
                             ++skySeedNodes;
                         }
                     }
 
-                    const std::uint8_t emission = blockLightingProperties(block).blockEmission;
-                    if (emission > 0)
+                    if (oldBlock != newBlock)
                     {
-                        setBlockLight(chunk->lightLevels[idx], emission);
-                        blockQueue.push_back({worldPos, emission});
-                        ++blockSeedNodes;
+                        if (oldBlock > newBlock && oldBlock > 1)
+                        {
+                            blockRemovalQueue.push_back({worldPos, oldBlock});
+                        }
+                        if (newBlock > 1)
+                        {
+                            blockQueue.push_back({worldPos, newBlock});
+                            ++blockSeedNodes;
+                        }
                     }
                 }
             }
         }
     }
+
+    auto propagateLightRemoval = [&](std::deque<LightNode>& removalQueue,
+                                     bool skyChannel,
+                                     std::deque<LightNode>& addQueue,
+                                     std::uint64_t& processedNodeCounter)
+    {
+        while (!removalQueue.empty())
+        {
+            const LightNode node = removalQueue.front();
+            removalQueue.pop_front();
+            ++processedNodeCounter;
+
+            for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+            {
+                const glm::ivec3 neighborPos = node.worldPos + faceOffset(face);
+                auto [targetChunk, targetIdx] = accessRegionVoxel(neighborPos);
+                if (!targetChunk)
+                {
+                    continue;
+                }
+
+                const BlockId targetBlock = targetChunk->blocks[targetIdx];
+                if (isOpaqueForLighting(targetBlock))
+                {
+                    continue;
+                }
+
+                const std::uint8_t loss = propagationLossFor(targetBlock);
+                if (node.level <= loss)
+                {
+                    continue;
+                }
+
+                const std::uint8_t removedLevel = static_cast<std::uint8_t>(node.level - loss);
+                const std::uint8_t existingLevel =
+                    channelFromPacked(targetChunk->lightLevels[targetIdx], skyChannel);
+                if (existingLevel == 0)
+                {
+                    continue;
+                }
+
+                const std::uint8_t baseLevel =
+                    channelFromPacked(basePackedAtRegionVoxel(targetChunk, targetIdx), skyChannel);
+                if (existingLevel <= removedLevel)
+                {
+                    if (existingLevel != baseLevel)
+                    {
+                        setPackedChannel(targetChunk->lightLevels[targetIdx], skyChannel, baseLevel);
+                        if (existingLevel > baseLevel)
+                        {
+                            removalQueue.push_back({neighborPos, existingLevel});
+                        }
+                    }
+
+                    if (baseLevel > 1)
+                    {
+                        addQueue.push_back({neighborPos, baseLevel});
+                    }
+                }
+                else if (existingLevel > 1)
+                {
+                    addQueue.push_back({neighborPos, existingLevel});
+                }
+            }
+        }
+    };
+
+    propagateLightRemoval(skyRemovalQueue, true, skyQueue, skyNodesProcessed);
+    propagateLightRemoval(blockRemovalQueue, false, blockQueue, blockNodesProcessed);
 
     for (auto& chunk : regionChunks)
     {

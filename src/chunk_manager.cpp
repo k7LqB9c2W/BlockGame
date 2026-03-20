@@ -11474,6 +11474,8 @@ private:
     void recycleChunkGPU(Chunk& chunk);
     void destroyBufferPages();
     int computeVerticalRadius(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
+    int updateEvictionCenterChunkY(int targetChunkY) noexcept;
+    int computeEvictionBudget(std::size_t pendingEvictions) const noexcept;
     int columnRadiusFor(const glm::ivec2& column,
                         const glm::ivec2& cameraColumn,
                         int cameraChunkY,
@@ -11795,6 +11797,8 @@ private:
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
     int lastVerticalRadiusDelta_{0};
+    int evictionCenterChunkY_{0};
+    bool evictionCenterInitialized_{false};
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
     int uploadChunkLimitThisFrame_{1};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
@@ -13380,6 +13384,8 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> cacheLock(skyLightCacheMutex_);
         skyLightColumnGenerations_.clear();
     }
+    evictionCenterChunkY_ = 0;
+    evictionCenterInitialized_ = false;
     farTerrainManager_.clear();
     columnManager_.clear();
     structureRegistry_.clear();
@@ -15767,6 +15773,40 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
                       kVerticalStreamingConfig.maxRadiusChunks);
 }
 
+int ChunkManager::Impl::updateEvictionCenterChunkY(int targetChunkY) noexcept
+{
+    if (!evictionCenterInitialized_)
+    {
+        evictionCenterChunkY_ = targetChunkY;
+        evictionCenterInitialized_ = true;
+        return evictionCenterChunkY_;
+    }
+
+    const int deadband = std::max(0, kVerticalStreamingConfig.verticalEvictionDeadbandChunks);
+    if (targetChunkY > evictionCenterChunkY_ + deadband)
+    {
+        evictionCenterChunkY_ = targetChunkY - deadband;
+    }
+    else if (targetChunkY < evictionCenterChunkY_ - deadband)
+    {
+        evictionCenterChunkY_ = targetChunkY + deadband;
+    }
+
+    return evictionCenterChunkY_;
+}
+
+int ChunkManager::Impl::computeEvictionBudget(std::size_t pendingEvictions) const noexcept
+{
+    const int baseBudget = std::max(1, kVerticalStreamingConfig.baseEvictionChunksPerFrame);
+    const int maxBudget = std::max(baseBudget, kVerticalStreamingConfig.maxEvictionChunksPerFrame);
+    const int divisor = std::max(1, kVerticalStreamingConfig.evictionBudgetBoostDivisor);
+    const std::size_t safeSteps = pendingEvictions / static_cast<std::size_t>(divisor);
+    const int boostedBudget = baseBudget + static_cast<int>(std::min<std::size_t>(
+                                           safeSteps,
+                                           static_cast<std::size_t>(std::max(0, maxBudget - baseBudget))));
+    return std::clamp(boostedBudget, baseBudget, maxBudget);
+}
+
 bool ChunkManager::Impl::tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const
 {
     std::lock_guard<std::mutex> lock(predictedColumnMutex_);
@@ -16238,16 +16278,31 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                                              int horizontalThreshold,
                                              int verticalRadius)
 {
-    std::vector<glm::ivec3> toRemove;
+    struct EvictionCandidate
+    {
+        glm::ivec3 coord{0};
+        int horizontalExcess{0};
+        int verticalExcess{0};
+    };
+
+    std::vector<EvictionCandidate> immediateRemovals;
+    std::vector<EvictionCandidate> deferredVerticalRemovals;
     const glm::ivec2 cameraColumn{center.x, center.z};
+    const int evictionCenterY = updateEvictionCenterChunkY(center.y);
+    const bool deferVerticalEvictions = evictionCenterY != center.y;
+    const int evictionSlack =
+        std::max(0, kVerticalStreamingConfig.columnSlackChunks) +
+        std::max(0, kVerticalStreamingConfig.verticalEvictionExtraSlackChunks);
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
-        toRemove.reserve(chunks_.size());
+        immediateRemovals.reserve(chunks_.size());
+        deferredVerticalRemovals.reserve(chunks_.size());
         for (const auto& [coord, chunkPtr] : chunks_)
         {
+            (void)chunkPtr;
             if (coord.y < 0)
             {
-                toRemove.push_back(coord);
+                immediateRemovals.push_back(EvictionCandidate{coord, horizontalThreshold + 1, 0});
                 continue;
             }
 
@@ -16256,7 +16311,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
             if (horizontalDistance > horizontalThreshold)
             {
-                toRemove.push_back(coord);
+                immediateRemovals.push_back(EvictionCandidate{
+                    coord,
+                    horizontalDistance - horizontalThreshold,
+                    0});
                 continue;
             }
 
@@ -16267,20 +16325,67 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
             const auto [minChunkY, maxChunkY] = columnSpanForHeight(column,
                                                                     cameraColumn,
-                                                                    center.y,
+                                                                    evictionCenterY,
                                                                     verticalRadius,
                                                                     columnHeight);
-            const int slack = kVerticalStreamingConfig.columnSlackChunks;
-            if (coord.y < (minChunkY - slack) || coord.y > (maxChunkY + slack))
+            int verticalExcess = 0;
+            if (coord.y < (minChunkY - evictionSlack))
             {
-                toRemove.push_back(coord);
+                verticalExcess = (minChunkY - evictionSlack) - coord.y;
+            }
+            else if (coord.y > (maxChunkY + evictionSlack))
+            {
+                verticalExcess = coord.y - (maxChunkY + evictionSlack);
+            }
+
+            if (verticalExcess > 0)
+            {
+                if (deferVerticalEvictions)
+                {
+                    deferredVerticalRemovals.push_back(EvictionCandidate{coord, 0, verticalExcess});
+                }
+                else
+                {
+                    immediateRemovals.push_back(EvictionCandidate{coord, 0, verticalExcess});
+                }
             }
         }
     }
 
-    int evictedCount = 0;
-    for (const glm::ivec3& coord : toRemove)
+    std::sort(deferredVerticalRemovals.begin(),
+              deferredVerticalRemovals.end(),
+              [](const EvictionCandidate& lhs, const EvictionCandidate& rhs)
+              {
+                  if (lhs.verticalExcess != rhs.verticalExcess)
+                  {
+                      return lhs.verticalExcess > rhs.verticalExcess;
+                  }
+                  if (lhs.coord.y != rhs.coord.y)
+                  {
+                      return lhs.coord.y > rhs.coord.y;
+                  }
+                  if (lhs.coord.x != rhs.coord.x)
+                  {
+                      return lhs.coord.x < rhs.coord.x;
+                  }
+                  return lhs.coord.z < rhs.coord.z;
+              });
+
+    const int evictionBudget = computeEvictionBudget(deferredVerticalRemovals.size());
+    if (static_cast<int>(deferredVerticalRemovals.size()) > evictionBudget)
     {
+        deferredVerticalRemovals.resize(static_cast<std::size_t>(evictionBudget));
+    }
+
+    std::vector<EvictionCandidate> toRemove;
+    toRemove.reserve(immediateRemovals.size() + deferredVerticalRemovals.size());
+    toRemove.insert(toRemove.end(), immediateRemovals.begin(), immediateRemovals.end());
+    toRemove.insert(toRemove.end(), deferredVerticalRemovals.begin(), deferredVerticalRemovals.end());
+
+    int evictedCount = 0;
+    for (const EvictionCandidate& candidate : toRemove)
+    {
+        const glm::ivec3& coord = candidate.coord;
         std::shared_ptr<Chunk> chunk;
         {
             std::lock_guard<std::mutex> lock(chunksMutex);
@@ -16311,7 +16416,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                 tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
 
                 const auto [minChunkY, maxChunkY] =
-                    columnSpanForHeight(column, evictionCameraColumn, center.y, lastVerticalRadius_, columnHeight);
+                    columnSpanForHeight(column, evictionCameraColumn, evictionCenterY, lastVerticalRadius_, columnHeight);
                 const int horizontalDistance =
                     std::max(std::abs(chunk->coord.x - center.x), std::abs(chunk->coord.z - center.z));
 
@@ -16319,6 +16424,9 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                 stream << "evict chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
                        << ") hDist=" << horizontalDistance
                        << " hThreshold=" << horizontalThreshold
+                       << " hExcess=" << candidate.horizontalExcess
+                       << " vExcess=" << candidate.verticalExcess
+                       << " evictCenterY=" << evictionCenterY
                        << " spanY=[" << minChunkY << ", " << maxChunkY << "]"
                        << " idx=" << chunk->indexCount.load(std::memory_order_acquire);
                 appendRecentEditDebugEvent(stream.str());

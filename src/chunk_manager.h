@@ -69,6 +69,11 @@ struct VerticalStreamingConfig
     int columnSlackChunks{1};
     int sampleRadiusChunks{3};
     int horizontalEvictionSlack{1};
+    int verticalEvictionDeadbandChunks{1};
+    int verticalEvictionExtraSlackChunks{0};
+    int baseEvictionChunksPerFrame{64};
+    int maxEvictionChunksPerFrame{128};
+    int evictionBudgetBoostDivisor{96};
     int uploadBasePerColumn{4};
     int uploadRampDivisor{1};
     int uploadMaxPerColumn{24};

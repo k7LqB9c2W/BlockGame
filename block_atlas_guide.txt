@@ -29,6 +29,9 @@ Current Tile Assignments
 - `{0,11}` Spruce leaves
 - `{0,12}` Podzol side
 - `{0,13}` Podzol top
+- `{0,14}` Dark oak log top and bottom
+- `{0,15}` Dark oak log side
+- `{0,16}` Dark oak leaves
 
 Adding Blocks
 -------------

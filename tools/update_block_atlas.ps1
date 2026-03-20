@@ -1,5 +1,6 @@
 param(
-    [string]$AtlasPath = "block_atlas.png"
+    [string]$AtlasPath = "block_atlas.png",
+    [string[]]$Tiles = @()
 )
 
 Set-StrictMode -Version Latest
@@ -16,13 +17,10 @@ if (Test-Path $tempPath)
     Remove-Item $tempPath -Force
 }
 
-$tiles = @(
-    "spruce_top.jpg",
-    "spruce_side.jpg",
-    "spruce_leaves.png",
-    "podzol_side.png",
-    "podzol_top.png"
-)
+if ($Tiles.Count -eq 0)
+{
+    throw "Provide one or more tile image paths via -Tiles."
+}
 
 $existing = [System.Drawing.Bitmap]::FromFile($resolvedAtlasPath)
 try
@@ -30,7 +28,7 @@ try
     $tileSize = 16
     $bitmap = New-Object System.Drawing.Bitmap -ArgumentList @(
         $existing.Width,
-        ($existing.Height + ($tiles.Count * $tileSize)),
+        ($existing.Height + ($Tiles.Count * $tileSize)),
         [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
     )
 
@@ -45,9 +43,9 @@ try
             $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
             $graphics.DrawImage($existing, 0, 0, $existing.Width, $existing.Height)
 
-            for ($i = 0; $i -lt $tiles.Count; ++$i)
+            for ($i = 0; $i -lt $Tiles.Count; ++$i)
             {
-                $tilePath = (Resolve-Path $tiles[$i]).Path
+                $tilePath = (Resolve-Path $Tiles[$i]).Path
                 $tile = [System.Drawing.Image]::FromFile($tilePath)
                 try
                 {

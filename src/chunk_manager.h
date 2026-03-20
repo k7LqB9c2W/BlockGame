@@ -118,6 +118,8 @@ enum class BlockId : std::uint8_t
     SpruceLeaves = 8,
     Podzol = 9,
     DebugLamp = 10,
+    DarkOakLog = 11,
+    DarkOakLeaves = 12,
     Count
 };
 
@@ -365,6 +367,13 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats lodGpuCullStage{};
     BenchmarkStageStats lodIndirectBuildStage{};
     BenchmarkStageStats chunkReadyLatency{};
+    BenchmarkStageStats chunkReadyWaitGenerateStage{};
+    BenchmarkStageStats chunkReadyGenerateStage{};
+    BenchmarkStageStats chunkReadyWaitMeshEnqueueStage{};
+    BenchmarkStageStats chunkReadyWaitMeshStartStage{};
+    BenchmarkStageStats chunkReadyMeshStage{};
+    BenchmarkStageStats chunkReadyWaitUploadStage{};
+    BenchmarkStageStats chunkReadyUploadToReadyStage{};
     BenchmarkStageStats structureQueryStage{};
     BenchmarkStageStats verticalRadiusDelta{};
     BenchmarkStageStats relightRegionChunks{};

@@ -361,6 +361,17 @@ foreach ($scenario in $scenarioObjects) {
     $summaryLines.Add(("  chunk_ready_ms median={0:F2} p95={1:F2}" -f `
         $scenario.stages.chunk_ready_latency.median_ms,
         $scenario.stages.chunk_ready_latency.p95_ms))
+    if ($scenario.stages.chunk_ready_wait_generate) {
+        $summaryLines.Add(("  ready_breakdown_avg_ms wait_generate={0:F2} generate={1:F2} wait_mesh_enqueue={2:F2} wait_mesh_start={3:F2}" -f `
+            $scenario.stages.chunk_ready_wait_generate.avg_ms,
+            $scenario.stages.chunk_ready_generate.avg_ms,
+            $scenario.stages.chunk_ready_wait_mesh_enqueue.avg_ms,
+            $scenario.stages.chunk_ready_wait_mesh_start.avg_ms))
+        $summaryLines.Add(("  ready_breakdown_avg_ms mesh={0:F2} wait_upload={1:F2} upload_to_ready={2:F2}" -f `
+            $scenario.stages.chunk_ready_mesh.avg_ms,
+            $scenario.stages.chunk_ready_wait_upload.avg_ms,
+            $scenario.stages.chunk_ready_upload_to_ready.avg_ms))
+    }
     $summaryLines.Add(("  relight_avg_ms={0:F2} upload_backlog avg={1:F2} p95={2:F2}" -f `
         $scenario.stages.relight.avg_ms,
         $scenario.queues.upload_backlog.avg_depth,

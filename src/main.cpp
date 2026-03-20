@@ -1923,6 +1923,20 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, lodIndirectBuildStats);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
+    out << ",\"chunk_ready_wait_generate\":";
+    writeStageStatsJson(out, report.chunkReadyWaitGenerateStage);
+    out << ",\"chunk_ready_generate\":";
+    writeStageStatsJson(out, report.chunkReadyGenerateStage);
+    out << ",\"chunk_ready_wait_mesh_enqueue\":";
+    writeStageStatsJson(out, report.chunkReadyWaitMeshEnqueueStage);
+    out << ",\"chunk_ready_wait_mesh_start\":";
+    writeStageStatsJson(out, report.chunkReadyWaitMeshStartStage);
+    out << ",\"chunk_ready_mesh\":";
+    writeStageStatsJson(out, report.chunkReadyMeshStage);
+    out << ",\"chunk_ready_wait_upload\":";
+    writeStageStatsJson(out, report.chunkReadyWaitUploadStage);
+    out << ",\"chunk_ready_upload_to_ready\":";
+    writeStageStatsJson(out, report.chunkReadyUploadToReadyStage);
     out << ",\"structure_query\":";
     writeStageStatsJson(out, report.structureQueryStage);
     out << "}";
@@ -2160,6 +2174,14 @@ struct CaptureOverridesConfig
     {
         return BlockId::SpruceLeaves;
     }
+    if (text == "dark_oak_log" || text == "darkoaklog")
+    {
+        return BlockId::DarkOakLog;
+    }
+    if (text == "dark_oak_leaves" || text == "darkoakleaves")
+    {
+        return BlockId::DarkOakLeaves;
+    }
     if (text == "podzol")
     {
         return BlockId::Podzol;
@@ -2225,6 +2247,10 @@ struct CaptureOverridesConfig
         return "SpruceLog";
     case BlockId::SpruceLeaves:
         return "SpruceLeaves";
+    case BlockId::DarkOakLog:
+        return "DarkOakLog";
+    case BlockId::DarkOakLeaves:
+        return "DarkOakLeaves";
     case BlockId::Podzol:
         return "Podzol";
     case BlockId::DebugLamp:
@@ -2235,7 +2261,7 @@ struct CaptureOverridesConfig
     }
 }
 
-[[nodiscard]] constexpr std::array<BlockId, 10> placeableBlockOptions() noexcept
+[[nodiscard]] constexpr std::array<BlockId, 12> placeableBlockOptions() noexcept
 {
     return {
         BlockId::Grass,
@@ -2246,6 +2272,8 @@ struct CaptureOverridesConfig
         BlockId::Stone,
         BlockId::SpruceLog,
         BlockId::SpruceLeaves,
+        BlockId::DarkOakLog,
+        BlockId::DarkOakLeaves,
         BlockId::Podzol,
         BlockId::DebugLamp
     };

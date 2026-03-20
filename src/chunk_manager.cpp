@@ -541,6 +541,13 @@ struct ChunkBenchmarkMetrics
         lodGpuCullStage.reset();
         lodIndirectBuildStage.reset();
         chunkReadyLatency.reset();
+        chunkReadyWaitGenerateStage.reset();
+        chunkReadyGenerateStage.reset();
+        chunkReadyWaitMeshEnqueueStage.reset();
+        chunkReadyWaitMeshStartStage.reset();
+        chunkReadyMeshStage.reset();
+        chunkReadyWaitUploadStage.reset();
+        chunkReadyUploadToReadyStage.reset();
         structureQueryStage.reset();
         verticalRadiusDelta.reset();
         relightRegionChunks.reset();
@@ -609,6 +616,13 @@ struct ChunkBenchmarkMetrics
         report.lodGpuCullStage = lodGpuCullStage.snapshot();
         report.lodIndirectBuildStage = lodIndirectBuildStage.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
+        report.chunkReadyWaitGenerateStage = chunkReadyWaitGenerateStage.snapshot();
+        report.chunkReadyGenerateStage = chunkReadyGenerateStage.snapshot();
+        report.chunkReadyWaitMeshEnqueueStage = chunkReadyWaitMeshEnqueueStage.snapshot();
+        report.chunkReadyWaitMeshStartStage = chunkReadyWaitMeshStartStage.snapshot();
+        report.chunkReadyMeshStage = chunkReadyMeshStage.snapshot();
+        report.chunkReadyWaitUploadStage = chunkReadyWaitUploadStage.snapshot();
+        report.chunkReadyUploadToReadyStage = chunkReadyUploadToReadyStage.snapshot();
         report.structureQueryStage = structureQueryStage.snapshot();
         report.verticalRadiusDelta = verticalRadiusDelta.snapshot();
         report.relightRegionChunks = relightRegionChunks.snapshot();
@@ -675,6 +689,13 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram lodGpuCullStage{};
     AtomicLatencyHistogram lodIndirectBuildStage{};
     AtomicLatencyHistogram chunkReadyLatency{};
+    AtomicLatencyHistogram chunkReadyWaitGenerateStage{};
+    AtomicLatencyHistogram chunkReadyGenerateStage{};
+    AtomicLatencyHistogram chunkReadyWaitMeshEnqueueStage{};
+    AtomicLatencyHistogram chunkReadyWaitMeshStartStage{};
+    AtomicLatencyHistogram chunkReadyMeshStage{};
+    AtomicLatencyHistogram chunkReadyWaitUploadStage{};
+    AtomicLatencyHistogram chunkReadyUploadToReadyStage{};
     AtomicLatencyHistogram structureQueryStage{};
     AtomicCountHistogram verticalRadiusDelta{};
     AtomicCountHistogram relightRegionChunks{};
@@ -3417,6 +3438,8 @@ constexpr std::array<BlockLightingProperties, toIndex(BlockId::Count)> kBlockLig
     {false, 1, 0, true},               // SpruceLeaves
     {true, kMaxLightLevel, 0, true},   // Podzol
     {true, kMaxLightLevel, 14, true},  // DebugLamp
+    {true, kMaxLightLevel, 0, true},   // DarkOakLog
+    {false, 1, 0, true},               // DarkOakLeaves
 }};
 
 inline const BlockLightingProperties& blockLightingProperties(BlockId block) noexcept
@@ -3495,7 +3518,9 @@ inline int lightingMetricFromPackedVertex(std::uint32_t packed) noexcept
 
 inline bool isAlphaCutoutBlock(BlockId block) noexcept
 {
-    return block == BlockId::Leaves || block == BlockId::SpruceLeaves;
+    return block == BlockId::Leaves ||
+           block == BlockId::SpruceLeaves ||
+           block == BlockId::DarkOakLeaves;
 }
 
 inline bool isNonOpaqueBlock(BlockId block) noexcept
@@ -4733,6 +4758,13 @@ struct Chunk
         inFlight.store(0, std::memory_order_relaxed);
         requestTimestampMicros.store(0, std::memory_order_relaxed);
         initialReadyRecorded.store(false, std::memory_order_relaxed);
+        generateStartTimestampMicros.store(0, std::memory_order_relaxed);
+        generateDoneTimestampMicros.store(0, std::memory_order_relaxed);
+        meshQueuedTimestampMicros.store(0, std::memory_order_relaxed);
+        meshStartTimestampMicros.store(0, std::memory_order_relaxed);
+        meshDoneTimestampMicros.store(0, std::memory_order_relaxed);
+        uploadQueuedTimestampMicros.store(0, std::memory_order_relaxed);
+        uploadStartTimestampMicros.store(0, std::memory_order_relaxed);
         lightBoundaryDirtyMask = 0;
         pendingMeshRefresh.store(false, std::memory_order_relaxed);
         meshVersion.store(0, std::memory_order_relaxed);
@@ -4766,6 +4798,13 @@ struct Chunk
     std::atomic<int> inFlight{0};
     std::atomic<long long> requestTimestampMicros{0};
     std::atomic<bool> initialReadyRecorded{false};
+    std::atomic<long long> generateStartTimestampMicros{0};
+    std::atomic<long long> generateDoneTimestampMicros{0};
+    std::atomic<long long> meshQueuedTimestampMicros{0};
+    std::atomic<long long> meshStartTimestampMicros{0};
+    std::atomic<long long> meshDoneTimestampMicros{0};
+    std::atomic<long long> uploadQueuedTimestampMicros{0};
+    std::atomic<long long> uploadStartTimestampMicros{0};
     std::uint8_t lightBoundaryDirtyMask{0};
     std::atomic<bool> pendingMeshRefresh{false};
     std::atomic<std::uint32_t> meshVersion{0};
@@ -6616,11 +6655,11 @@ private:
 
     [[nodiscard]] static int structureMaterialPriority(BlockId block) noexcept
     {
-        if (block == BlockId::SpruceLog || block == BlockId::Wood)
+        if (block == BlockId::SpruceLog || block == BlockId::Wood || block == BlockId::DarkOakLog)
         {
             return 4;
         }
-        if (block == BlockId::SpruceLeaves || block == BlockId::Leaves)
+        if (block == BlockId::SpruceLeaves || block == BlockId::Leaves || block == BlockId::DarkOakLeaves)
         {
             return 3;
         }
@@ -12251,6 +12290,22 @@ void ColumnManager::updateChunk(const Chunk& chunk)
     }
 }
 
+inline void storeFirstBenchmarkTimestamp(std::atomic<long long>& current, std::uint64_t micros) noexcept
+{
+    long long expected = 0;
+    const long long value = static_cast<long long>(micros);
+    current.compare_exchange_strong(expected,
+                                    value,
+                                    std::memory_order_relaxed,
+                                    std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline std::uint64_t loadBenchmarkTimestamp(const std::atomic<long long>& current) noexcept
+{
+    const long long value = current.load(std::memory_order_relaxed);
+    return value > 0 ? static_cast<std::uint64_t>(value) : 0u;
+}
+
 void ColumnManager::updateChunkHeights(
     const glm::ivec3& chunkCoord,
     const std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& highestWorlds)
@@ -12584,6 +12639,18 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const BlockTextureAtlasConfi
     for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
     {
         assignFace(BlockId::DebugLamp, face, {0, 8});
+    }
+
+    assignFace(BlockId::DarkOakLog, BlockFace::Top, {0, 14});
+    assignFace(BlockId::DarkOakLog, BlockFace::Bottom, {0, 14});
+    for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::DarkOakLog, face, {0, 15});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::DarkOakLeaves, face, {0, 16});
     }
 
     blockAtlasConfigured_ = true;
@@ -14430,6 +14497,10 @@ void ChunkManager::Impl::processJob(const Job& job)
 
     if (job.type == JobType::Generate)
     {
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->generateStartTimestampMicros, steadyMicrosNow());
+        }
         const auto generateStart = SteadyClock::now();
         const bool published = generateChunkBlocks(*chunk, job.generationEpoch);
         const auto generateEnd = SteadyClock::now();
@@ -14446,6 +14517,11 @@ void ChunkManager::Impl::processJob(const Job& job)
         if (!published)
         {
             return;
+        }
+
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->generateDoneTimestampMicros, steadyMicrosNow());
         }
 
         queueRelightRequest(job.chunkCoord, chunk->hasBlocks.load(std::memory_order_acquire));
@@ -14477,6 +14553,10 @@ void ChunkManager::Impl::processJob(const Job& job)
     }
     else if (job.type == JobType::Mesh)
     {
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshStartTimestampMicros, steadyMicrosNow());
+        }
         const auto meshStart = SteadyClock::now();
         chunk->pendingMeshRefresh.store(false, std::memory_order_release);
         buildChunkMeshAsync(*chunk);
@@ -14490,6 +14570,10 @@ void ChunkManager::Impl::processJob(const Job& job)
         {
             benchmarkMetrics_.meshStage.recordMicros(static_cast<std::uint64_t>(meshMicros));
             benchmarkMetrics_.meshedChunks.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshDoneTimestampMicros, steadyMicrosNow());
         }
 
         const bool meshEmpty = chunk->meshData.empty();
@@ -14612,6 +14696,10 @@ void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk
 
     uploadQueue_.emplace_back(chunk);
     chunk->queuedForUpload.store(true, std::memory_order_release);
+    if (benchmarkMetrics_.isEnabled())
+    {
+        storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
+    }
 
     if (shouldTrackRecentEditChunk(chunk->coord))
     {
@@ -16578,6 +16666,10 @@ void ChunkManager::Impl::commitPendingChunkUploads()
 bool ChunkManager::Impl::uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    if (benchmarkEnabled)
+    {
+        storeFirstBenchmarkTimestamp(chunk.uploadStartTimestampMicros, steadyMicrosNow());
+    }
     const auto meshLockStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     const auto recordMeshLock = [&]()
     {
@@ -17485,6 +17577,10 @@ void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk)
     if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
     {
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
+        }
         enqueueJob(chunk, JobType::Mesh, chunk->coord);
         if (shouldTrackRecentEditChunk(chunk->coord))
         {
@@ -17527,6 +17623,10 @@ void ChunkManager::Impl::requestChunkRemeshFromRelight(const std::shared_ptr<Chu
     if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
     {
         chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
+        }
         enqueueJob(chunk, JobType::Mesh, chunk->coord);
     }
 }
@@ -19057,14 +19157,41 @@ void ChunkManager::Impl::noteChunkReadyLatency(Chunk& chunk)
     }
 
     const std::uint64_t readyMicros = steadyMicrosNow();
-    if (readyMicros <= static_cast<std::uint64_t>(requestedMicros))
+    const std::uint64_t requestMicros = static_cast<std::uint64_t>(requestedMicros);
+    if (readyMicros <= requestMicros)
     {
         benchmarkMetrics_.chunkReadyLatency.recordMicros(0);
         return;
     }
 
-    benchmarkMetrics_.chunkReadyLatency.recordMicros(
-        readyMicros - static_cast<std::uint64_t>(requestedMicros));
+    benchmarkMetrics_.chunkReadyLatency.recordMicros(readyMicros - requestMicros);
+
+    const std::uint64_t generateStartMicros = loadBenchmarkTimestamp(chunk.generateStartTimestampMicros);
+    const std::uint64_t generateDoneMicros = loadBenchmarkTimestamp(chunk.generateDoneTimestampMicros);
+    const std::uint64_t meshQueuedMicros = loadBenchmarkTimestamp(chunk.meshQueuedTimestampMicros);
+    const std::uint64_t meshStartMicros = loadBenchmarkTimestamp(chunk.meshStartTimestampMicros);
+    const std::uint64_t meshDoneMicros = loadBenchmarkTimestamp(chunk.meshDoneTimestampMicros);
+    const std::uint64_t uploadQueuedMicros = loadBenchmarkTimestamp(chunk.uploadQueuedTimestampMicros);
+    const std::uint64_t uploadStartMicros = loadBenchmarkTimestamp(chunk.uploadStartTimestampMicros);
+
+    auto recordStage = [&](AtomicLatencyHistogram& stage, std::uint64_t beginMicros, std::uint64_t endMicros)
+    {
+        if (beginMicros == 0 || endMicros == 0 || endMicros <= beginMicros)
+        {
+            return;
+        }
+
+        stage.recordMicros(endMicros - beginMicros);
+    };
+
+    recordStage(benchmarkMetrics_.chunkReadyWaitGenerateStage, requestMicros, generateStartMicros);
+    recordStage(benchmarkMetrics_.chunkReadyGenerateStage, generateStartMicros, generateDoneMicros);
+    recordStage(benchmarkMetrics_.chunkReadyWaitMeshEnqueueStage, generateDoneMicros, meshQueuedMicros);
+    recordStage(benchmarkMetrics_.chunkReadyWaitMeshStartStage, meshQueuedMicros, meshStartMicros);
+    recordStage(benchmarkMetrics_.chunkReadyMeshStage, meshStartMicros, meshDoneMicros);
+    const std::uint64_t uploadWaitStartMicros = uploadQueuedMicros != 0 ? uploadQueuedMicros : meshDoneMicros;
+    recordStage(benchmarkMetrics_.chunkReadyWaitUploadStage, uploadWaitStartMicros, uploadStartMicros);
+    recordStage(benchmarkMetrics_.chunkReadyUploadToReadyStage, uploadStartMicros, readyMicros);
 }
 
 

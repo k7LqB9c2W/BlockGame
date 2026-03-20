@@ -214,6 +214,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableGpuValidation = false;
     bool enableLodVisibilityDebug = false;
     bool enableExactUploadDebug = false;
+    bool enableTerrainLogDebug = false;
     for (int i = 1; i < argc; ++i)
     {
         if (argv[i] == nullptr)
@@ -255,9 +256,15 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--terrain-log-debug" || arg == "--debug-terrain-log")
+        {
+            enableTerrainLogDebug = true;
+            continue;
+        }
+
     }
 
-    if (!enableGpuDebug && !enableLodVisibilityDebug && !enableExactUploadDebug)
+    if (!enableGpuDebug && !enableLodVisibilityDebug && !enableExactUploadDebug && !enableTerrainLogDebug)
     {
         return;
     }
@@ -298,6 +305,14 @@ void applyLaunchDebugOptions(int argc, char** argv)
                           "exact upload debug enabled");
     }
 
+    if (enableTerrainLogDebug)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_TERRAIN_DEBUG_LOG", "1");
+        resetDebugLogFile("BLOCKGAME_TERRAIN_DEBUG_LOG_FILE",
+                          "debug_terrain.log",
+                          "terrain debug logging enabled");
+    }
+
     std::vector<std::string> enabledOptions;
     if (enableGpuDebug)
     {
@@ -320,6 +335,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (enableExactUploadDebug)
     {
         enabledOptions.emplace_back("exact upload debug (exactuploaddebug.log)");
+    }
+    if (enableTerrainLogDebug)
+    {
+        enabledOptions.emplace_back("terrain debug log (debug_terrain.log)");
     }
 
     if (!enabledOptions.empty())

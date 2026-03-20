@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -19,15 +21,21 @@ namespace terrain
 {
 namespace
 {
-struct TerrainLogInitializer
+[[nodiscard]] bool terrainDebugLoggingEnabled() noexcept
 {
-    TerrainLogInitializer()
+    static const bool enabled = []()
     {
-        std::ofstream clear("debug_terrain.log", std::ios::trunc);
-    }
-};
+        const char* value = std::getenv("BLOCKGAME_TERRAIN_DEBUG_LOG");
+        return value != nullptr && std::string_view(value) != "0" && std::string_view(value) != "false";
+    }();
+    return enabled;
+}
 
-const TerrainLogInitializer g_logInitializer{};
+[[nodiscard]] const char* terrainDebugLogPath() noexcept
+{
+    const char* value = std::getenv("BLOCKGAME_TERRAIN_DEBUG_LOG_FILE");
+    return (value != nullptr && *value != '\0') ? value : "debug_terrain.log";
+}
 
 inline std::size_t columnIndex(int x, int z, int strideX) noexcept
 {
@@ -88,8 +96,6 @@ float taigaPodzolNoise(int worldX, int worldZ) noexcept
     return broad * 0.55f + medium * 0.30f + detail * 0.15f;
 }
 
-constexpr bool kEnableTerrainDebugLogs = true;
-
 void logTerrainAnomaly(const char* tag,
                        int worldX,
                        int worldZ,
@@ -98,13 +104,13 @@ void logTerrainAnomaly(const char* tag,
                        const ColumnSample& sample,
                        int seaLevel)
 {
-    if (!kEnableTerrainDebugLogs)
+    if (!terrainDebugLoggingEnabled())
     {
         return;
     }
 
     static std::mutex s_logMutex;
-    static std::ofstream s_logFile("debug_terrain.log", std::ios::app);
+    static std::ofstream s_logFile(terrainDebugLogPath(), std::ios::app);
     static int s_logCount = 0;
     if (s_logCount >= 500 || !s_logFile.is_open())
     {
@@ -376,7 +382,7 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                 summary.slabContainsTerrain = true;
             }
 
-            if (kEnableTerrainDebugLogs)
+            if (terrainDebugLoggingEnabled())
             {
                 const float diff = std::abs(static_cast<float>(adjustedSurfaceY) - neighborAverage);
                 if (sample.slabHasSolid && (adjustedSurfaceY <= minWorldY + 4 || diff > 48.0f))

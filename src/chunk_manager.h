@@ -231,6 +231,14 @@ struct ChunkProfilingSnapshot
     double structureCacheHitRate{0.0};
     std::uint64_t structureRegionsBuilt{0};
     std::size_t uploadedBytes{0};
+    std::uint64_t relightRegionChunks{0};
+    std::uint64_t relightChangedChunks{0};
+    std::uint64_t relightExternalSnapshotChunks{0};
+    std::uint64_t relightSkyAboveChunkScans{0};
+    std::uint64_t relightSkySeedNodes{0};
+    std::uint64_t relightBlockSeedNodes{0};
+    std::uint64_t relightSkyNodesProcessed{0};
+    std::uint64_t relightBlockNodesProcessed{0};
     int generatedChunks{0};
     int relitChunks{0};
     int relightBatches{0};
@@ -240,6 +248,7 @@ struct ChunkProfilingSnapshot
     int deferredUploads{0};
     int evictedChunks{0};
     int verticalRadius{0};
+    int verticalRadiusDelta{0};
     int generationBudget{0};
     int generationJobsIssued{0};
     int ringExpansionBudget{0};
@@ -309,6 +318,15 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats lodIndirectBuildStage{};
     BenchmarkStageStats chunkReadyLatency{};
     BenchmarkStageStats structureQueryStage{};
+    BenchmarkStageStats verticalRadiusDelta{};
+    BenchmarkStageStats relightRegionChunks{};
+    BenchmarkStageStats relightChangedChunks{};
+    BenchmarkStageStats relightExternalSnapshotChunks{};
+    BenchmarkStageStats relightSkyAboveChunkScans{};
+    BenchmarkStageStats relightSkySeedNodes{};
+    BenchmarkStageStats relightBlockSeedNodes{};
+    BenchmarkStageStats relightSkyNodesProcessed{};
+    BenchmarkStageStats relightBlockNodesProcessed{};
     BenchmarkQueueDepthStats jobQueueDepth{};
     BenchmarkQueueDepthStats uploadQueueDepth{};
     BenchmarkQueueDepthStats farBuildQueueDepth{};

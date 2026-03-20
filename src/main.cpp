@@ -826,6 +826,8 @@ struct BenchmarkSpikeRecord
     double rendererToneMapMs{0.0};
     double rendererPresentMs{0.0};
     double rendererEndFrameMs{0.0};
+    int verticalRadius{0};
+    int verticalRadiusDelta{0};
     int generatedChunks{0};
     int relitChunks{0};
     int relightBatches{0};
@@ -835,6 +837,14 @@ struct BenchmarkSpikeRecord
     int uploadBacklog{0};
     int exactPendingChunks{0};
     int missingChunks{0};
+    std::uint64_t relightRegionChunks{0};
+    std::uint64_t relightChangedChunks{0};
+    std::uint64_t relightExternalSnapshotChunks{0};
+    std::uint64_t relightSkyAboveChunkScans{0};
+    std::uint64_t relightSkySeedNodes{0};
+    std::uint64_t relightBlockSeedNodes{0};
+    std::uint64_t relightSkyNodesProcessed{0};
+    std::uint64_t relightBlockNodesProcessed{0};
 };
 
 struct BenchmarkSpikeSummary
@@ -1320,6 +1330,8 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
     record.rendererToneMapMs = rendererSnapshot.toneMapMs;
     record.rendererPresentMs = rendererSnapshot.presentMs;
     record.rendererEndFrameMs = rendererSnapshot.endFrameMs;
+    record.verticalRadius = chunkSnapshot.verticalRadius;
+    record.verticalRadiusDelta = chunkSnapshot.verticalRadiusDelta;
     record.generatedChunks = chunkSnapshot.generatedChunks;
     record.relitChunks = chunkSnapshot.relitChunks;
     record.relightBatches = chunkSnapshot.relightBatches;
@@ -1329,6 +1341,14 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
     record.uploadBacklog = chunkSnapshot.uploadQueueDepth;
     record.exactPendingChunks = chunkSnapshot.exactChunksPending;
     record.missingChunks = chunkSnapshot.missingChunks;
+    record.relightRegionChunks = chunkSnapshot.relightRegionChunks;
+    record.relightChangedChunks = chunkSnapshot.relightChangedChunks;
+    record.relightExternalSnapshotChunks = chunkSnapshot.relightExternalSnapshotChunks;
+    record.relightSkyAboveChunkScans = chunkSnapshot.relightSkyAboveChunkScans;
+    record.relightSkySeedNodes = chunkSnapshot.relightSkySeedNodes;
+    record.relightBlockSeedNodes = chunkSnapshot.relightBlockSeedNodes;
+    record.relightSkyNodesProcessed = chunkSnapshot.relightSkyNodesProcessed;
+    record.relightBlockNodesProcessed = chunkSnapshot.relightBlockNodesProcessed;
 
     std::vector<BenchmarkSpikeRecord>& spikes = runtimeState.spikeSummary.worstSpikes;
     spikes.push_back(std::move(record));
@@ -1493,6 +1513,19 @@ void writeStageStatsJson(std::ostream& out, const BenchmarkStageStats& stats)
         << "}";
 }
 
+void writeCountStatsJson(std::ostream& out, const BenchmarkStageStats& stats)
+{
+    out << "{"
+        << "\"samples\":" << stats.count
+        << ",\"total\":" << stats.totalMs
+        << ",\"avg\":" << stats.averageMs
+        << ",\"median\":" << stats.medianMs
+        << ",\"p95\":" << stats.p95Ms
+        << ",\"p99\":" << stats.p99Ms
+        << ",\"max\":" << stats.maxMs
+        << "}";
+}
+
 void writeQueueStatsJson(std::ostream& out, const BenchmarkQueueDepthStats& stats)
 {
     out << "{"
@@ -1567,6 +1600,8 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
             << ",\"renderer_tonemap_ms\":" << spike.rendererToneMapMs
             << ",\"renderer_present_ms\":" << spike.rendererPresentMs
             << ",\"renderer_end_frame_ms\":" << spike.rendererEndFrameMs
+            << ",\"chunk_vertical_radius\":" << spike.verticalRadius
+            << ",\"chunk_vertical_radius_delta\":" << spike.verticalRadiusDelta
             << ",\"generated_this_frame\":" << spike.generatedChunks
             << ",\"relit_this_frame\":" << spike.relitChunks
             << ",\"relight_batches_this_frame\":" << spike.relightBatches
@@ -1576,6 +1611,14 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
             << ",\"upload_backlog\":" << spike.uploadBacklog
             << ",\"exact_pending_chunks\":" << spike.exactPendingChunks
             << ",\"missing_chunks\":" << spike.missingChunks
+            << ",\"relight_region_chunks_this_frame\":" << spike.relightRegionChunks
+            << ",\"relight_changed_chunks_this_frame\":" << spike.relightChangedChunks
+            << ",\"relight_external_snapshot_chunks_this_frame\":" << spike.relightExternalSnapshotChunks
+            << ",\"relight_sky_above_chunk_scans_this_frame\":" << spike.relightSkyAboveChunkScans
+            << ",\"relight_sky_seed_nodes_this_frame\":" << spike.relightSkySeedNodes
+            << ",\"relight_block_seed_nodes_this_frame\":" << spike.relightBlockSeedNodes
+            << ",\"relight_sky_nodes_processed_this_frame\":" << spike.relightSkyNodesProcessed
+            << ",\"relight_block_nodes_processed_this_frame\":" << spike.relightBlockNodesProcessed
             << "}";
     }
     out << "]}";
@@ -1613,7 +1656,7 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     const BenchmarkStageStats lodIndirectBuildStats = summarizeStageSamples(runtimeState.lodIndirectBuildMs);
 
     out << "{";
-    out << "\"schema_version\":1";
+    out << "\"schema_version\":2";
     out << ",\"scenario\":";
     writeJsonEscaped(out, benchmarkScenarioName(config.scenario));
     out << ",\"build_config\":";
@@ -1691,6 +1734,26 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"structure_query\":";
     writeStageStatsJson(out, report.structureQueryStage);
     out << "}";
+    out << ",\"relight_detail\":{"
+        << "\"vertical_radius_delta\":";
+    writeCountStatsJson(out, report.verticalRadiusDelta);
+    out << ",\"region_chunks\":";
+    writeCountStatsJson(out, report.relightRegionChunks);
+    out << ",\"changed_chunks\":";
+    writeCountStatsJson(out, report.relightChangedChunks);
+    out << ",\"external_snapshot_chunks\":";
+    writeCountStatsJson(out, report.relightExternalSnapshotChunks);
+    out << ",\"sky_above_chunk_scans\":";
+    writeCountStatsJson(out, report.relightSkyAboveChunkScans);
+    out << ",\"sky_seed_nodes\":";
+    writeCountStatsJson(out, report.relightSkySeedNodes);
+    out << ",\"block_seed_nodes\":";
+    writeCountStatsJson(out, report.relightBlockSeedNodes);
+    out << ",\"sky_nodes_processed\":";
+    writeCountStatsJson(out, report.relightSkyNodesProcessed);
+    out << ",\"block_nodes_processed\":";
+    writeCountStatsJson(out, report.relightBlockNodesProcessed);
+    out << "}";
     out << ",\"queues\":{"
         << "\"job_backlog\":";
     writeQueueStatsJson(out, report.jobQueueDepth);
@@ -1718,6 +1781,16 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << "\"pooled_chunks\":" << finalProfiling.pooledChunkCount
         << ",\"pooled_chunk_bytes\":" << finalProfiling.pooledChunkBytes
         << ",\"pooled_chunk_budget_bytes\":" << finalProfiling.pooledChunkBudgetBytes
+        << ",\"vertical_radius\":" << finalProfiling.verticalRadius
+        << ",\"vertical_radius_delta\":" << finalProfiling.verticalRadiusDelta
+        << ",\"relight_region_chunks_last_frame\":" << finalProfiling.relightRegionChunks
+        << ",\"relight_changed_chunks_last_frame\":" << finalProfiling.relightChangedChunks
+        << ",\"relight_external_snapshot_chunks_last_frame\":" << finalProfiling.relightExternalSnapshotChunks
+        << ",\"relight_sky_above_chunk_scans_last_frame\":" << finalProfiling.relightSkyAboveChunkScans
+        << ",\"relight_sky_seed_nodes_last_frame\":" << finalProfiling.relightSkySeedNodes
+        << ",\"relight_block_seed_nodes_last_frame\":" << finalProfiling.relightBlockSeedNodes
+        << ",\"relight_sky_nodes_processed_last_frame\":" << finalProfiling.relightSkyNodesProcessed
+        << ",\"relight_block_nodes_processed_last_frame\":" << finalProfiling.relightBlockNodesProcessed
         << ",\"lod_active_tiles\":" << finalProfiling.farActiveTiles
         << ",\"lod_dirty_tiles\":" << finalProfiling.farDirtyTiles
         << ",\"lod_ready_tiles\":" << finalProfiling.farShellTilesReady

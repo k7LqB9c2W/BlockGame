@@ -53,6 +53,16 @@
 namespace
 {
 std::atomic<int> gActiveVerticalRadius{kVerticalStreamingConfig.minRadiusChunks};
+constexpr glm::ivec3 kRelightNeighborPadding(1, 1, 1);
+constexpr glm::ivec3 kRelightReservationPadding(1, 1, 1);
+constexpr std::size_t kRelightMaxPendingDirtyCoordsPerRegion = 12;
+constexpr std::uint64_t kRelightBaseBudgetUnits = 1'500'000ull;
+constexpr std::uint64_t kRelightPerWorkerBudgetUnits = 250'000ull;
+constexpr std::uint64_t kRelightBacklogBudgetUnitsPerRegion = 32'768ull;
+constexpr std::uint64_t kRelightMaxBudgetUnits = 4'000'000ull;
+constexpr std::uint64_t kRelightMinBudgetUnits = 750'000ull;
+constexpr int kRelightMinBatchBudget = 2;
+constexpr int kRelightMaxBatchBudget = 8;
 
 using SteadyClock = std::chrono::steady_clock;
 
@@ -297,6 +307,103 @@ private:
     std::array<std::atomic<std::uint64_t>, kBucketCount> buckets_{};
 };
 
+class AtomicCountHistogram
+{
+public:
+    static constexpr std::size_t kBucketCount = 64;
+
+    void reset() noexcept
+    {
+        count_.store(0, std::memory_order_relaxed);
+        total_.store(0, std::memory_order_relaxed);
+        max_.store(0, std::memory_order_relaxed);
+        for (auto& bucket : buckets_)
+        {
+            bucket.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    void record(std::uint64_t value) noexcept
+    {
+        count_.fetch_add(1, std::memory_order_relaxed);
+        total_.fetch_add(value, std::memory_order_relaxed);
+        updateAtomicMax(max_, value);
+        buckets_[bucketIndexForValue(value)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] BenchmarkStageStats snapshot() const noexcept
+    {
+        BenchmarkStageStats stats{};
+        stats.count = count_.load(std::memory_order_relaxed);
+        const std::uint64_t total = total_.load(std::memory_order_relaxed);
+        const std::uint64_t maxValue = max_.load(std::memory_order_relaxed);
+        stats.totalMs = static_cast<double>(total);
+        if (stats.count > 0)
+        {
+            stats.averageMs = stats.totalMs / static_cast<double>(stats.count);
+            stats.medianMs = static_cast<double>(percentileValue(0.50, maxValue));
+            stats.p95Ms = static_cast<double>(percentileValue(0.95, maxValue));
+            stats.p99Ms = static_cast<double>(percentileValue(0.99, maxValue));
+            stats.maxMs = static_cast<double>(maxValue);
+        }
+        return stats;
+    }
+
+private:
+    [[nodiscard]] static std::size_t bucketIndexForValue(std::uint64_t value) noexcept
+    {
+        if (value == 0)
+        {
+            return 0;
+        }
+
+        const unsigned width = std::bit_width(value);
+        return static_cast<std::size_t>(std::min<unsigned>(width, static_cast<unsigned>(kBucketCount - 1)));
+    }
+
+    [[nodiscard]] static std::uint64_t bucketUpperBoundValue(std::size_t bucketIndex,
+                                                             std::uint64_t maxValue) noexcept
+    {
+        if (bucketIndex == 0)
+        {
+            return 0;
+        }
+        if (bucketIndex + 1 >= kBucketCount)
+        {
+            return maxValue;
+        }
+
+        return (std::uint64_t{1} << bucketIndex) - 1u;
+    }
+
+    [[nodiscard]] std::uint64_t percentileValue(double percentile, std::uint64_t maxValue) const noexcept
+    {
+        const std::uint64_t count = count_.load(std::memory_order_relaxed);
+        const std::uint64_t target = percentileRankCount(count, percentile);
+        if (target == 0)
+        {
+            return 0;
+        }
+
+        std::uint64_t running = 0;
+        for (std::size_t bucketIndex = 0; bucketIndex < buckets_.size(); ++bucketIndex)
+        {
+            running += buckets_[bucketIndex].load(std::memory_order_relaxed);
+            if (running >= target)
+            {
+                return bucketUpperBoundValue(bucketIndex, maxValue);
+            }
+        }
+
+        return maxValue;
+    }
+
+    std::atomic<std::uint64_t> count_{0};
+    std::atomic<std::uint64_t> total_{0};
+    std::atomic<std::uint64_t> max_{0};
+    std::array<std::atomic<std::uint64_t>, kBucketCount> buckets_{};
+};
+
 template <std::size_t MaxBucketInclusive>
 class AtomicDepthHistogram
 {
@@ -403,6 +510,15 @@ struct ChunkBenchmarkMetrics
         lodIndirectBuildStage.reset();
         chunkReadyLatency.reset();
         structureQueryStage.reset();
+        verticalRadiusDelta.reset();
+        relightRegionChunks.reset();
+        relightChangedChunks.reset();
+        relightExternalSnapshotChunks.reset();
+        relightSkyAboveChunkScans.reset();
+        relightSkySeedNodes.reset();
+        relightBlockSeedNodes.reset();
+        relightSkyNodesProcessed.reset();
+        relightBlockNodesProcessed.reset();
         jobQueueDepth.reset();
         uploadQueueDepth.reset();
         farBuildQueueDepth.reset();
@@ -430,6 +546,15 @@ struct ChunkBenchmarkMetrics
         report.lodIndirectBuildStage = lodIndirectBuildStage.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
         report.structureQueryStage = structureQueryStage.snapshot();
+        report.verticalRadiusDelta = verticalRadiusDelta.snapshot();
+        report.relightRegionChunks = relightRegionChunks.snapshot();
+        report.relightChangedChunks = relightChangedChunks.snapshot();
+        report.relightExternalSnapshotChunks = relightExternalSnapshotChunks.snapshot();
+        report.relightSkyAboveChunkScans = relightSkyAboveChunkScans.snapshot();
+        report.relightSkySeedNodes = relightSkySeedNodes.snapshot();
+        report.relightBlockSeedNodes = relightBlockSeedNodes.snapshot();
+        report.relightSkyNodesProcessed = relightSkyNodesProcessed.snapshot();
+        report.relightBlockNodesProcessed = relightBlockNodesProcessed.snapshot();
         report.jobQueueDepth = jobQueueDepth.snapshot();
         report.uploadQueueDepth = uploadQueueDepth.snapshot();
         report.farBuildQueueDepth = farBuildQueueDepth.snapshot();
@@ -455,6 +580,15 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram lodIndirectBuildStage{};
     AtomicLatencyHistogram chunkReadyLatency{};
     AtomicLatencyHistogram structureQueryStage{};
+    AtomicCountHistogram verticalRadiusDelta{};
+    AtomicCountHistogram relightRegionChunks{};
+    AtomicCountHistogram relightChangedChunks{};
+    AtomicCountHistogram relightExternalSnapshotChunks{};
+    AtomicCountHistogram relightSkyAboveChunkScans{};
+    AtomicCountHistogram relightSkySeedNodes{};
+    AtomicCountHistogram relightBlockSeedNodes{};
+    AtomicCountHistogram relightSkyNodesProcessed{};
+    AtomicCountHistogram relightBlockNodesProcessed{};
     AtomicDepthHistogram<4096> jobQueueDepth{};
     AtomicDepthHistogram<4096> uploadQueueDepth{};
     AtomicDepthHistogram<1024> farBuildQueueDepth{};
@@ -4506,6 +4640,10 @@ struct Chunk
         lightBoundaryDirtyMask = 0;
         pendingMeshRefresh.store(false, std::memory_order_relaxed);
         meshVersion.store(0, std::memory_order_relaxed);
+        lightingRevision.store(0, std::memory_order_relaxed);
+        appliedLightingRevision.store(0, std::memory_order_relaxed);
+        skyLightCacheGeneration.store(0, std::memory_order_relaxed);
+        skyLightFromAboveCache.fill(kMaxLightLevel);
         pendingMesh = {};
     }
 
@@ -4534,6 +4672,10 @@ struct Chunk
     std::uint8_t lightBoundaryDirtyMask{0};
     std::atomic<bool> pendingMeshRefresh{false};
     std::atomic<std::uint32_t> meshVersion{0};
+    std::atomic<std::uint64_t> lightingRevision{0};
+    std::atomic<std::uint64_t> appliedLightingRevision{0};
+    std::atomic<std::uint64_t> skyLightCacheGeneration{0};
+    std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     PendingRenderMesh pendingMesh{};
 };
 
@@ -4543,6 +4685,14 @@ struct ProfilingCounters
     std::atomic<long long> relightMicros{0};
     std::atomic<long long> meshingMicros{0};
     std::atomic<std::size_t> uploadedBytes{0};
+    std::atomic<std::uint64_t> relightRegionChunks{0};
+    std::atomic<std::uint64_t> relightChangedChunks{0};
+    std::atomic<std::uint64_t> relightExternalSnapshotChunks{0};
+    std::atomic<std::uint64_t> relightSkyAboveChunkScans{0};
+    std::atomic<std::uint64_t> relightSkySeedNodes{0};
+    std::atomic<std::uint64_t> relightBlockSeedNodes{0};
+    std::atomic<std::uint64_t> relightSkyNodesProcessed{0};
+    std::atomic<std::uint64_t> relightBlockNodesProcessed{0};
     std::atomic<int> generatedChunks{0};
     std::atomic<int> relitChunks{0};
     std::atomic<int> relightBatches{0};
@@ -11257,10 +11407,8 @@ private:
     void appendRecentEditDebugEvent(const std::string& event);
     bool shouldTrackRecentEditChunk(const glm::ivec3& coord) const;
 
-    struct PendingRelightRequest
-    {
-        bool forceRemesh{false};
-    };
+    using RelightCoordGenerationMap = std::unordered_map<glm::ivec3, std::uint64_t, ChunkHasher>;
+    using RelightCoordSet = std::unordered_set<glm::ivec3, ChunkHasher>;
 
     struct PendingRelightBatch
     {
@@ -11269,13 +11417,20 @@ private:
         glm::ivec3 maxCoord{0};
         glm::ivec3 reservedMinCoord{0};
         glm::ivec3 reservedMaxCoord{0};
-        std::unordered_set<glm::ivec3, ChunkHasher> forceRemeshCoords{};
+        RelightCoordGenerationMap dirtyCoordGenerations{};
+        RelightCoordSet forceRemeshCoords{};
+        std::uint64_t maxGeneration{0};
+        std::uint64_t estimatedCostUnits{0};
+        std::uint64_t sequence{0};
     };
 
     struct ActiveRelightRegion
     {
         glm::ivec3 minCoord{0};
         glm::ivec3 maxCoord{0};
+        RelightCoordGenerationMap dirtyCoordGenerations{};
+        std::uint64_t maxGeneration{0};
+        std::uint64_t sequence{0};
     };
 
     struct ChunkNeighborhoodSnapshot
@@ -11365,13 +11520,26 @@ private:
         std::size_t retainedBytes{0};
     };
 
+    static bool relightRegionsOverlap(const glm::ivec3& minA,
+                                      const glm::ivec3& maxA,
+                                      const glm::ivec3& minB,
+                                      const glm::ivec3& maxB) noexcept;
+    static glm::ivec3 relightRegionAnchor(const PendingRelightBatch& batch) noexcept;
+    void recomputePendingRelightBatchBounds(PendingRelightBatch& batch) const noexcept;
+    void mergePendingRelightBatch(PendingRelightBatch& dst, PendingRelightBatch&& src) const;
+    std::unordered_set<glm::ivec3, ChunkHasher> expandRelightCoords(const RelightCoordGenerationMap& dirtyCoords) const;
+    std::uint64_t estimatePendingRelightBatchCost(const PendingRelightBatch& batch) const;
+    void markSkyLightColumnDirty(const glm::ivec2& column);
+    std::uint64_t currentSkyLightColumnGeneration(const glm::ivec2& column);
+    void ensureSkyLightColumnCacheForChunks(const std::vector<std::shared_ptr<Chunk>>& chunks);
+    std::uint64_t computeRelightBudgetUnits();
+    int computeRelightBatchBudget();
+    void resetRelightBudgetForFrame();
     void queueRelightRequest(const glm::ivec3& centerCoord, bool forceRemesh);
     bool takePendingRelightBatch(PendingRelightBatch& batch);
     void releasePendingRelightBatch(const PendingRelightBatch& batch);
     void processPendingRelightRequests(int maxBatches);
-    void relightChunkRegion(const glm::ivec3& minCenterCoord,
-                            const glm::ivec3& maxCenterCoord,
-                            const std::unordered_set<glm::ivec3, ChunkHasher>* forceRemeshCoords);
+    void relightChunkRegion(const PendingRelightBatch& batch);
     ChunkNeighborhoodSnapshot captureChunkNeighborhoodSnapshot(
         const Chunk& chunk,
         const std::vector<BlockId>& centerBlocks,
@@ -11442,14 +11610,23 @@ private:
     std::mutex chunkPoolMutex_;
     ProfilingCounters profilingCounters_{};
     mutable ChunkBenchmarkMetrics benchmarkMetrics_{};
-    std::deque<glm::ivec3> pendingRelightQueue_{};
-    std::unordered_map<glm::ivec3, PendingRelightRequest, ChunkHasher> pendingRelightRequests_{};
-    std::mutex pendingRelightMutex_;
+    std::vector<PendingRelightBatch> pendingRelightRegions_{};
+    RelightCoordGenerationMap pendingRelightCoordGenerations_{};
+    RelightCoordGenerationMap activeRelightCoordGenerations_{};
+    std::mutex relightStateMutex_;
     std::atomic<int> activeRelightProcessors_{0};
     std::vector<ActiveRelightRegion> activeRelightRegions_{};
-    std::mutex activeRelightRegionsMutex_;
+    std::uint64_t nextRelightGeneration_{1};
+    std::uint64_t nextPendingRelightSequence_{1};
+    std::uint64_t relightBudgetUnitsThisFrame_{0};
+    std::uint64_t relightBudgetUnitsRemaining_{0};
+    int relightBatchBudgetThisFrame_{0};
+    int relightBatchBudgetRemaining_{0};
+    mutable std::mutex skyLightCacheMutex_;
+    std::unordered_map<glm::ivec2, std::uint64_t, ColumnHasher> skyLightColumnGenerations_{};
     std::unordered_map<glm::ivec2, int, ColumnHasher> jobsScheduledThisFrame_{};
     int lastVerticalRadius_{kVerticalStreamingConfig.minRadiusChunks};
+    int lastVerticalRadiusDelta_{0};
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
     int uploadChunkLimitThisFrame_{1};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
@@ -12358,10 +12535,16 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     resetColumnBudgets();
     const auto verticalRadiusStart = std::chrono::steady_clock::now();
+    const int previousVerticalRadius = lastVerticalRadius_;
     const int verticalRadius = computeVerticalRadius(centerChunk, targetViewDistance_, clampedWorldY);
     verticalRadiusMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verticalRadiusStart).count();
+    lastVerticalRadiusDelta_ = std::abs(verticalRadius - previousVerticalRadius);
     lastVerticalRadius_ = verticalRadius;
+    if (benchmarkMetrics_.isEnabled())
+    {
+        benchmarkMetrics_.verticalRadiusDelta.record(static_cast<std::uint64_t>(lastVerticalRadiusDelta_));
+    }
     gActiveVerticalRadius.store(verticalRadius, std::memory_order_relaxed);
     const bool lodActive = renderSettings_.totalChunks > renderSettings_.exactChunks;
     const int visibleDistanceBlocks = chunksToBlocks(lodActive ? renderSettings_.totalChunks
@@ -12375,6 +12558,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
     uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
     uploadChunkLimitThisFrame_ = uploadBudgets.chunkLimit;
+    resetRelightBudgetForFrame();
     uploadBudgetMsThisFrame_ = uploadBudgets.timeBudgetMs;
     pendingUploadsLastFrame_ = uploadBudgets.queueSize;
 
@@ -12490,15 +12674,21 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     evictionMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evictionStart).count();
 
-    const bool allowMainThreadRelight =
+    const bool allowMainThreadRelightWindow =
         startupEnabled_ &&
         startupState_.preloadStarted &&
         startupState_.phase == StreamingPhase::ExactPreload;
     relightMsLastFrame_ = 0.0;
-    if (allowMainThreadRelight)
+    if (allowMainThreadRelightWindow)
     {
         const auto relightStart = std::chrono::steady_clock::now();
-        processPendingRelightRequests(1);
+        const bool allowMainThreadRelightNow =
+            workerThreadCount_ == 0 ||
+            activeRelightProcessors_.load(std::memory_order_acquire) == 0;
+        if (allowMainThreadRelightNow)
+        {
+            processPendingRelightRequests(1);
+        }
         relightMsLastFrame_ =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
     }
@@ -12814,6 +13004,7 @@ void ChunkManager::Impl::clear()
         {
             columnManager_.removeChunk(*chunk);
             invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+            markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
             recycleChunkGPU(*chunk);
             recycleChunkObject(std::move(chunk));
 
@@ -12841,15 +13032,23 @@ void ChunkManager::Impl::clear()
         }
     }
     {
-        std::lock_guard<std::mutex> lock(pendingRelightMutex_);
-        pendingRelightQueue_.clear();
-        pendingRelightRequests_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(activeRelightRegionsMutex_);
+        std::lock_guard<std::mutex> lock(relightStateMutex_);
+        pendingRelightRegions_.clear();
+        pendingRelightCoordGenerations_.clear();
+        activeRelightCoordGenerations_.clear();
         activeRelightRegions_.clear();
+        relightBudgetUnitsThisFrame_ = 0;
+        relightBudgetUnitsRemaining_ = 0;
+        relightBatchBudgetThisFrame_ = 0;
+        relightBatchBudgetRemaining_ = 0;
+        nextRelightGeneration_ = 1;
+        nextPendingRelightSequence_ = 1;
     }
     activeRelightProcessors_.store(0, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> cacheLock(skyLightCacheMutex_);
+        skyLightColumnGenerations_.clear();
+    }
     farTerrainManager_.clear();
     columnManager_.clear();
     structureRegistry_.clear();
@@ -12931,6 +13130,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
     }
 
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+    markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
     // Player edits must always enqueue a geometry refresh immediately; relying on the
     // deferred relight pass alone can leave the old uploaded mesh visible as a ghost block.
     requestChunkRemesh(chunk);
@@ -12982,6 +13182,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
     }
 
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+    markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
     // Keep edit feedback immediate even if lighting catches up on a later relight batch.
     requestChunkRemesh(chunk);
     queueRelightRequest(chunkCoord, true);
@@ -13668,6 +13869,22 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     const int relightBatches = profilingCounters_.relightBatches.exchange(0, std::memory_order_relaxed);
     const int meshed = profilingCounters_.meshedChunks.exchange(0, std::memory_order_relaxed);
     const int uploaded = profilingCounters_.uploadedChunks.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightRegionChunks =
+        profilingCounters_.relightRegionChunks.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightChangedChunks =
+        profilingCounters_.relightChangedChunks.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightExternalSnapshotChunks =
+        profilingCounters_.relightExternalSnapshotChunks.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightSkyAboveChunkScans =
+        profilingCounters_.relightSkyAboveChunkScans.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightSkySeedNodes =
+        profilingCounters_.relightSkySeedNodes.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightBlockSeedNodes =
+        profilingCounters_.relightBlockSeedNodes.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightSkyNodesProcessed =
+        profilingCounters_.relightSkyNodesProcessed.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t relightBlockNodesProcessed =
+        profilingCounters_.relightBlockNodesProcessed.exchange(0, std::memory_order_relaxed);
 
     snapshot.generatedChunks = generated;
     snapshot.relitChunks = relit;
@@ -13675,10 +13892,19 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.meshedChunks = meshed;
     snapshot.uploadedChunks = uploaded;
     snapshot.uploadedBytes = profilingCounters_.uploadedBytes.exchange(0, std::memory_order_relaxed);
+    snapshot.relightRegionChunks = relightRegionChunks;
+    snapshot.relightChangedChunks = relightChangedChunks;
+    snapshot.relightExternalSnapshotChunks = relightExternalSnapshotChunks;
+    snapshot.relightSkyAboveChunkScans = relightSkyAboveChunkScans;
+    snapshot.relightSkySeedNodes = relightSkySeedNodes;
+    snapshot.relightBlockSeedNodes = relightBlockSeedNodes;
+    snapshot.relightSkyNodesProcessed = relightSkyNodesProcessed;
+    snapshot.relightBlockNodesProcessed = relightBlockNodesProcessed;
     snapshot.throttledUploads = profilingCounters_.throttledUploads.exchange(0, std::memory_order_relaxed);
     snapshot.deferredUploads = profilingCounters_.deferredUploads.exchange(0, std::memory_order_relaxed);
     snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
     snapshot.verticalRadius = lastVerticalRadius_;
+    snapshot.verticalRadiusDelta = lastVerticalRadiusDelta_;
     snapshot.generationBudget = lastGenerationBudget_;
     snapshot.generationJobsIssued = lastGenerationJobsIssued_;
     snapshot.ringExpansionBudget = lastRingBudget_;
@@ -16925,23 +17151,476 @@ void ChunkManager::Impl::requestChunkRemeshFromRelight(const std::shared_ptr<Chu
     }
 }
 
+bool ChunkManager::Impl::relightRegionsOverlap(const glm::ivec3& minA,
+                                               const glm::ivec3& maxA,
+                                               const glm::ivec3& minB,
+                                               const glm::ivec3& maxB) noexcept
+{
+    return minA.x <= maxB.x && maxA.x >= minB.x &&
+           minA.y <= maxB.y && maxA.y >= minB.y &&
+           minA.z <= maxB.z && maxA.z >= minB.z;
+}
+
+glm::ivec3 ChunkManager::Impl::relightRegionAnchor(const PendingRelightBatch& batch) noexcept
+{
+    return glm::ivec3((batch.minCoord.x + batch.maxCoord.x) / 2,
+                      (batch.minCoord.y + batch.maxCoord.y) / 2,
+                      (batch.minCoord.z + batch.maxCoord.z) / 2);
+}
+
+void ChunkManager::Impl::recomputePendingRelightBatchBounds(PendingRelightBatch& batch) const noexcept
+{
+    if (batch.dirtyCoordGenerations.empty())
+    {
+        batch = PendingRelightBatch{};
+        return;
+    }
+
+    bool first = true;
+    std::uint64_t maxGeneration = 0;
+    for (const auto& [coord, generation] : batch.dirtyCoordGenerations)
+    {
+        if (first)
+        {
+            batch.minCoord = coord;
+            batch.maxCoord = coord;
+            first = false;
+        }
+        else
+        {
+            batch.minCoord = glm::min(batch.minCoord, coord);
+            batch.maxCoord = glm::max(batch.maxCoord, coord);
+        }
+        maxGeneration = std::max(maxGeneration, generation);
+    }
+
+    batch.reservedMinCoord = batch.minCoord - kRelightReservationPadding;
+    batch.reservedMaxCoord = batch.maxCoord + kRelightReservationPadding;
+    batch.maxGeneration = maxGeneration;
+    batch.valid = true;
+}
+
+void ChunkManager::Impl::mergePendingRelightBatch(PendingRelightBatch& dst, PendingRelightBatch&& src) const
+{
+    for (auto& [coord, generation] : src.dirtyCoordGenerations)
+    {
+        auto [it, inserted] = dst.dirtyCoordGenerations.try_emplace(coord, generation);
+        if (!inserted)
+        {
+            it->second = std::max(it->second, generation);
+        }
+    }
+    dst.forceRemeshCoords.insert(src.forceRemeshCoords.begin(), src.forceRemeshCoords.end());
+    dst.sequence = (dst.sequence == 0) ? src.sequence : std::min(dst.sequence, src.sequence);
+    dst.estimatedCostUnits = 0;
+    recomputePendingRelightBatchBounds(dst);
+}
+
+std::unordered_set<glm::ivec3, ChunkHasher> ChunkManager::Impl::expandRelightCoords(
+    const RelightCoordGenerationMap& dirtyCoords) const
+{
+    std::unordered_set<glm::ivec3, ChunkHasher> expanded;
+    expanded.reserve(dirtyCoords.size() * 27);
+
+    for (const auto& [coord, _] : dirtyCoords)
+    {
+        for (int dx = -kRelightNeighborPadding.x; dx <= kRelightNeighborPadding.x; ++dx)
+        {
+            for (int dy = -kRelightNeighborPadding.y; dy <= kRelightNeighborPadding.y; ++dy)
+            {
+                for (int dz = -kRelightNeighborPadding.z; dz <= kRelightNeighborPadding.z; ++dz)
+                {
+                    expanded.insert(coord + glm::ivec3(dx, dy, dz));
+                }
+            }
+        }
+    }
+
+    return expanded;
+}
+
+std::uint64_t ChunkManager::Impl::estimatePendingRelightBatchCost(const PendingRelightBatch& batch) const
+{
+    if (!batch.valid || batch.dirtyCoordGenerations.empty())
+    {
+        return 0;
+    }
+
+    const std::unordered_set<glm::ivec3, ChunkHasher> expandedCoords = expandRelightCoords(batch.dirtyCoordGenerations);
+    std::unordered_set<glm::ivec3, ChunkHasher> loadedRegionCoords;
+    std::unordered_set<glm::ivec3, ChunkHasher> externalCoords;
+    std::unordered_map<glm::ivec2, int, ColumnHasher> maxLoadedChunkYByColumn;
+
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        loadedRegionCoords.reserve(expandedCoords.size());
+
+        for (const glm::ivec3& coord : expandedCoords)
+        {
+            auto it = chunks_.find(coord);
+            if (it == chunks_.end())
+            {
+                continue;
+            }
+
+            loadedRegionCoords.insert(coord);
+            const glm::ivec2 column(coord.x, coord.z);
+            auto [columnIt, inserted] = maxLoadedChunkYByColumn.try_emplace(column, coord.y);
+            if (!inserted)
+            {
+                columnIt->second = std::max(columnIt->second, coord.y);
+            }
+        }
+
+        for (const glm::ivec3& coord : loadedRegionCoords)
+        {
+            for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+            {
+                const glm::ivec3 neighborCoord = coord + faceOffset(face);
+                if (loadedRegionCoords.find(neighborCoord) != loadedRegionCoords.end())
+                {
+                    continue;
+                }
+
+                if (chunks_.find(neighborCoord) != chunks_.end())
+                {
+                    externalCoords.insert(neighborCoord);
+                }
+            }
+        }
+
+        for (const auto& [column, maxChunkY] : maxLoadedChunkYByColumn)
+        {
+            for (int chunkY = maxChunkY + 1;; ++chunkY)
+            {
+                const glm::ivec3 coord(column.x, chunkY, column.y);
+                if (chunks_.find(coord) == chunks_.end())
+                {
+                    break;
+                }
+
+                externalCoords.insert(coord);
+            }
+        }
+    }
+
+    const std::uint64_t regionChunkCount = static_cast<std::uint64_t>(loadedRegionCoords.size());
+    const std::uint64_t externalChunkCount = static_cast<std::uint64_t>(externalCoords.size());
+    const std::uint64_t dirtyCoordCount = static_cast<std::uint64_t>(batch.dirtyCoordGenerations.size());
+    const std::uint64_t forceRemeshCount = static_cast<std::uint64_t>(batch.forceRemeshCoords.size());
+
+    const std::uint64_t estimatedCost =
+        regionChunkCount * 2048ull +
+        externalChunkCount * 4096ull +
+        dirtyCoordCount * 1024ull +
+        forceRemeshCount * 512ull;
+    return std::max<std::uint64_t>(estimatedCost, 1ull);
+}
+
+void ChunkManager::Impl::markSkyLightColumnDirty(const glm::ivec2& column)
+{
+    std::lock_guard<std::mutex> lock(skyLightCacheMutex_);
+    auto [it, inserted] = skyLightColumnGenerations_.try_emplace(column, 1ull);
+    if (!inserted)
+    {
+        ++it->second;
+        if (it->second == 0)
+        {
+            it->second = 1;
+        }
+    }
+}
+
+std::uint64_t ChunkManager::Impl::currentSkyLightColumnGeneration(const glm::ivec2& column)
+{
+    std::lock_guard<std::mutex> lock(skyLightCacheMutex_);
+    auto [it, inserted] = skyLightColumnGenerations_.try_emplace(column, 1ull);
+    if (inserted && it->second == 0)
+    {
+        it->second = 1;
+    }
+    return it->second;
+}
+
+void ChunkManager::Impl::ensureSkyLightColumnCacheForChunks(const std::vector<std::shared_ptr<Chunk>>& chunks)
+{
+    if (chunks.empty())
+    {
+        return;
+    }
+
+    std::unordered_set<glm::ivec2, ColumnHasher> columns;
+    columns.reserve(chunks.size());
+    for (const auto& chunk : chunks)
+    {
+        if (chunk)
+        {
+            columns.insert(glm::ivec2(chunk->coord.x, chunk->coord.z));
+        }
+    }
+
+    if (columns.empty())
+    {
+        return;
+    }
+
+    std::unordered_map<glm::ivec2, std::uint64_t, ColumnHasher> columnGenerations;
+    columnGenerations.reserve(columns.size());
+    for (const glm::ivec2& column : columns)
+    {
+        columnGenerations.emplace(column, currentSkyLightColumnGeneration(column));
+    }
+
+    std::unordered_map<glm::ivec2, std::vector<std::shared_ptr<Chunk>>, ColumnHasher> columnStacks;
+    columnStacks.reserve(columns.size());
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        for (const auto& [coord, chunk] : chunks_)
+        {
+            const glm::ivec2 column(coord.x, coord.z);
+            if (columns.find(column) != columns.end())
+            {
+                columnStacks[column].push_back(chunk);
+            }
+        }
+    }
+
+    std::vector<std::shared_ptr<Chunk>> chunksToLock;
+    chunksToLock.reserve(chunks.size());
+    for (auto& [column, stack] : columnStacks)
+    {
+        if (stack.empty())
+        {
+            continue;
+        }
+
+        std::sort(stack.begin(),
+                  stack.end(),
+                  [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
+                  {
+                      return lhs->coord.y > rhs->coord.y;
+                  });
+        for (auto& chunk : stack)
+        {
+            chunksToLock.push_back(chunk);
+        }
+    }
+
+    std::sort(chunksToLock.begin(),
+              chunksToLock.end(),
+              [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
+              {
+                  if (lhs->coord.x != rhs->coord.x)
+                  {
+                      return lhs->coord.x < rhs->coord.x;
+                  }
+                  if (lhs->coord.y != rhs->coord.y)
+                  {
+                      return lhs->coord.y < rhs->coord.y;
+                  }
+                  return lhs->coord.z < rhs->coord.z;
+              });
+    chunksToLock.erase(std::unique(chunksToLock.begin(), chunksToLock.end()), chunksToLock.end());
+
+    std::vector<std::unique_lock<std::mutex>> locks;
+    locks.reserve(chunksToLock.size());
+    for (auto& chunk : chunksToLock)
+    {
+        locks.emplace_back(chunk->meshMutex);
+    }
+
+    for (auto& [column, stack] : columnStacks)
+    {
+        const std::uint64_t generation = columnGenerations[column];
+        bool needsRefresh = false;
+        for (const auto& chunk : stack)
+        {
+            if (chunk->skyLightCacheGeneration.load(std::memory_order_acquire) != generation)
+            {
+                needsRefresh = true;
+                break;
+            }
+        }
+        if (!needsRefresh)
+        {
+            continue;
+        }
+
+        std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
+        incomingSky.fill(kMaxLightLevel);
+
+        for (const auto& chunk : stack)
+        {
+            chunk->skyLightFromAboveCache = incomingSky;
+            chunk->skyLightCacheGeneration.store(generation, std::memory_order_release);
+
+            std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> outgoingSky = incomingSky;
+            for (int localX = 0; localX < kChunkSizeX; ++localX)
+            {
+                for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+                {
+                    const std::size_t columnIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
+                    std::uint8_t sky = incomingSky[columnIndex];
+                    for (int localY = kChunkSizeY - 1; localY >= 0 && sky > 0; --localY)
+                    {
+                        const BlockId block = chunk->blocks[blockIndex(localX, localY, localZ)];
+                        if (isOpaqueForLighting(block))
+                        {
+                            sky = 0;
+                            break;
+                        }
+
+                        const std::uint8_t attenuation = blockLightingProperties(block).skyAttenuation;
+                        sky = static_cast<std::uint8_t>(
+                            std::max(0, static_cast<int>(sky) - static_cast<int>(attenuation)));
+                    }
+                    outgoingSky[columnIndex] = sky;
+                }
+            }
+
+            incomingSky = outgoingSky;
+        }
+    }
+}
+
+std::uint64_t ChunkManager::Impl::computeRelightBudgetUnits()
+{
+    std::size_t pendingRegionCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(relightStateMutex_);
+        pendingRegionCount = pendingRelightRegions_.size();
+    }
+
+    std::uint64_t budget = kRelightBaseBudgetUnits;
+    budget += std::min<std::uint64_t>(workerThreadCount_, 4u) * kRelightPerWorkerBudgetUnits;
+    budget += std::min<std::uint64_t>(pendingRegionCount * kRelightBacklogBudgetUnitsPerRegion,
+                                      kRelightMaxBudgetUnits / 2);
+
+    const std::uint64_t uploadPenalty =
+        std::min<std::uint64_t>(pendingUploadsLastFrame_ * 2048ull, kRelightBaseBudgetUnits / 2);
+    budget = (budget > uploadPenalty) ? (budget - uploadPenalty / 2) : budget;
+    return std::clamp<std::uint64_t>(budget, kRelightMinBudgetUnits, kRelightMaxBudgetUnits);
+}
+
+int ChunkManager::Impl::computeRelightBatchBudget()
+{
+    std::size_t pendingRegionCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(relightStateMutex_);
+        pendingRegionCount = pendingRelightRegions_.size();
+    }
+
+    int batchBudget = kRelightMinBatchBudget + static_cast<int>(std::min<std::size_t>(workerThreadCount_, 4) / 2);
+    batchBudget += static_cast<int>(std::min<std::size_t>(pendingRegionCount / 12, 3));
+    if (pendingUploadsLastFrame_ > 256)
+    {
+        batchBudget = std::max(kRelightMinBatchBudget, batchBudget - 1);
+    }
+    return std::clamp(batchBudget, kRelightMinBatchBudget, kRelightMaxBatchBudget);
+}
+
+void ChunkManager::Impl::resetRelightBudgetForFrame()
+{
+    const std::uint64_t budgetUnits = computeRelightBudgetUnits();
+    const int batchBudget = computeRelightBatchBudget();
+
+    std::lock_guard<std::mutex> lock(relightStateMutex_);
+    relightBudgetUnitsThisFrame_ = budgetUnits;
+    relightBudgetUnitsRemaining_ = budgetUnits;
+    relightBatchBudgetThisFrame_ = batchBudget;
+    relightBatchBudgetRemaining_ = batchBudget;
+}
+
 void ChunkManager::Impl::queueRelightRequest(const glm::ivec3& centerCoord, bool forceRemesh)
 {
-    std::lock_guard<std::mutex> lock(pendingRelightMutex_);
-    auto [it, inserted] = pendingRelightRequests_.try_emplace(centerCoord);
-    it->second.forceRemesh = it->second.forceRemesh || forceRemesh;
-    if (inserted)
+    if (centerCoord.y < 0)
     {
-        pendingRelightQueue_.push_back(centerCoord);
+        return;
     }
+
+    std::shared_ptr<Chunk> chunk = getChunkShared(centerCoord);
+    PendingRelightBatch incoming{};
+    std::lock_guard<std::mutex> lock(relightStateMutex_);
+
+    if (auto pendingIt = pendingRelightCoordGenerations_.find(centerCoord);
+        pendingIt != pendingRelightCoordGenerations_.end())
+    {
+        const std::uint64_t pendingGeneration = pendingIt->second;
+        for (PendingRelightBatch& pendingBatch : pendingRelightRegions_)
+        {
+            auto dirtyIt = pendingBatch.dirtyCoordGenerations.find(centerCoord);
+            if (dirtyIt == pendingBatch.dirtyCoordGenerations.end())
+            {
+                continue;
+            }
+
+            dirtyIt->second = std::max(dirtyIt->second, pendingGeneration);
+            if (forceRemesh)
+            {
+                pendingBatch.forceRemeshCoords.insert(centerCoord);
+            }
+            pendingBatch.maxGeneration = std::max(pendingBatch.maxGeneration, dirtyIt->second);
+            pendingBatch.estimatedCostUnits = 0;
+            break;
+        }
+
+        if (chunk)
+        {
+            chunk->lightingRevision.store(pendingGeneration, std::memory_order_release);
+        }
+        return;
+    }
+
+    const std::uint64_t generation = nextRelightGeneration_++;
+    incoming.valid = true;
+    incoming.sequence = nextPendingRelightSequence_++;
+    incoming.dirtyCoordGenerations.emplace(centerCoord, generation);
+    if (forceRemesh)
+    {
+        incoming.forceRemeshCoords.insert(centerCoord);
+    }
+    recomputePendingRelightBatchBounds(incoming);
+
+    if (chunk)
+    {
+        chunk->lightingRevision.store(generation, std::memory_order_release);
+    }
+
+    for (auto it = pendingRelightRegions_.begin(); it != pendingRelightRegions_.end();)
+    {
+        if (incoming.dirtyCoordGenerations.size() + it->dirtyCoordGenerations.size() >
+            kRelightMaxPendingDirtyCoordsPerRegion)
+        {
+            ++it;
+            continue;
+        }
+
+        if (relightRegionsOverlap(incoming.reservedMinCoord,
+                                  incoming.reservedMaxCoord,
+                                  it->reservedMinCoord,
+                                  it->reservedMaxCoord))
+        {
+            mergePendingRelightBatch(incoming, std::move(*it));
+            it = pendingRelightRegions_.erase(it);
+            continue;
+        }
+        ++it;
+    }
+
+    for (const auto& [coord, coordGeneration] : incoming.dirtyCoordGenerations)
+    {
+        auto [it, inserted] = pendingRelightCoordGenerations_.try_emplace(coord, coordGeneration);
+        if (!inserted)
+        {
+            it->second = std::max(it->second, coordGeneration);
+        }
+    }
+    incoming.estimatedCostUnits = 0;
+    pendingRelightRegions_.push_back(std::move(incoming));
 }
 
 bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
 {
-    constexpr int kMaxCenterSpan = 2;
-    constexpr std::size_t kMaxMergedCenters = 8;
-    constexpr glm::ivec3 kRelightReservationPadding(2);
-
     glm::ivec3 priorityOrigin{0};
     glm::vec3 priorityForward{0.0f, 0.0f, -1.0f};
     {
@@ -16950,21 +17629,21 @@ bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
         priorityForward = schedulingPriorityForward_;
     }
 
-    auto regionsOverlap = [](const glm::ivec3& minA,
-                             const glm::ivec3& maxA,
-                             const glm::ivec3& minB,
-                             const glm::ivec3& maxB) noexcept
+    std::lock_guard<std::mutex> lock(relightStateMutex_);
+    if (pendingRelightRegions_.empty() || relightBatchBudgetRemaining_ <= 0)
     {
-        return minA.x <= maxB.x && maxA.x >= minB.x &&
-               minA.y <= maxB.y && maxA.y >= minB.y &&
-               minA.z <= maxB.z && maxA.z >= minB.z;
-    };
+        batch = PendingRelightBatch{};
+        return false;
+    }
 
-    auto overlapsActiveRegions = [&](const glm::ivec3& minCoord, const glm::ivec3& maxCoord) noexcept
+    auto overlapsActiveRegions = [&](const PendingRelightBatch& candidate) noexcept
     {
         for (const ActiveRelightRegion& region : activeRelightRegions_)
         {
-            if (regionsOverlap(minCoord, maxCoord, region.minCoord, region.maxCoord))
+            if (relightRegionsOverlap(candidate.reservedMinCoord,
+                                      candidate.reservedMaxCoord,
+                                      region.minCoord,
+                                      region.maxCoord))
             {
                 return true;
             }
@@ -16972,130 +17651,94 @@ bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
         return false;
     };
 
-    std::scoped_lock lock(pendingRelightMutex_, activeRelightRegionsMutex_);
+    const bool allowOverBudgetFallback =
+        relightBudgetUnitsRemaining_ == relightBudgetUnitsThisFrame_ &&
+        relightBatchBudgetRemaining_ == relightBatchBudgetThisFrame_;
 
-    while (!pendingRelightQueue_.empty())
+    auto bestFitIt = pendingRelightRegions_.end();
+    auto bestFallbackIt = pendingRelightRegions_.end();
+    for (auto it = pendingRelightRegions_.begin(); it != pendingRelightRegions_.end(); ++it)
     {
-        auto seedItInQueue = pendingRelightQueue_.end();
-        for (auto it = pendingRelightQueue_.begin(); it != pendingRelightQueue_.end(); ++it)
-        {
-            if (pendingRelightRequests_.find(*it) == pendingRelightRequests_.end())
-            {
-                continue;
-            }
-
-            const glm::ivec3 reservedMin = *it - kRelightReservationPadding;
-            const glm::ivec3 reservedMax = *it + kRelightReservationPadding;
-            if (overlapsActiveRegions(reservedMin, reservedMax))
-            {
-                continue;
-            }
-
-            if (seedItInQueue == pendingRelightQueue_.end() ||
-                isChunkCoordHigherPriority(*it, *seedItInQueue, priorityOrigin, priorityForward))
-            {
-                seedItInQueue = it;
-            }
-        }
-
-        if (seedItInQueue == pendingRelightQueue_.end())
-        {
-            break;
-        }
-
-        const glm::ivec3 seedCoord = *seedItInQueue;
-        pendingRelightQueue_.erase(seedItInQueue);
-
-        auto seedIt = pendingRelightRequests_.find(seedCoord);
-        if (seedIt == pendingRelightRequests_.end())
+        if (!it->valid || overlapsActiveRegions(*it))
         {
             continue;
         }
 
-        batch = PendingRelightBatch{};
-        batch.valid = true;
-        batch.minCoord = seedCoord;
-        batch.maxCoord = seedCoord;
-        batch.reservedMinCoord = seedCoord - kRelightReservationPadding;
-        batch.reservedMaxCoord = seedCoord + kRelightReservationPadding;
-        std::size_t mergedCenterCount = 1;
-        if (seedIt->second.forceRemesh)
+        if (it->estimatedCostUnits == 0)
         {
-            batch.forceRemeshCoords.insert(seedCoord);
+            it->estimatedCostUnits = estimatePendingRelightBatchCost(*it);
         }
-        pendingRelightRequests_.erase(seedIt);
 
-        bool expanded = true;
-        while (expanded)
+        const glm::ivec3 candidateAnchor = relightRegionAnchor(*it);
+        if (bestFallbackIt == pendingRelightRegions_.end() ||
+            isChunkCoordHigherPriority(candidateAnchor,
+                                       relightRegionAnchor(*bestFallbackIt),
+                                       priorityOrigin,
+                                       priorityForward))
         {
-            expanded = false;
-            for (auto it = pendingRelightQueue_.begin(); it != pendingRelightQueue_.end();)
+            bestFallbackIt = it;
+        }
+
+        if (it->estimatedCostUnits <= relightBudgetUnitsRemaining_)
+        {
+            if (bestFitIt == pendingRelightRegions_.end() ||
+                isChunkCoordHigherPriority(candidateAnchor,
+                                           relightRegionAnchor(*bestFitIt),
+                                           priorityOrigin,
+                                           priorityForward))
             {
-                auto requestIt = pendingRelightRequests_.find(*it);
-                if (requestIt == pendingRelightRequests_.end())
-                {
-                    it = pendingRelightQueue_.erase(it);
-                    continue;
-                }
-
-                const glm::ivec3 coord = requestIt->first;
-                const bool overlapsBatch =
-                    coord.x >= batch.minCoord.x - 2 && coord.x <= batch.maxCoord.x + 2 &&
-                    coord.y >= batch.minCoord.y - 2 && coord.y <= batch.maxCoord.y + 2 &&
-                    coord.z >= batch.minCoord.z - 2 && coord.z <= batch.maxCoord.z + 2;
-                if (!overlapsBatch)
-                {
-                    ++it;
-                    continue;
-                }
-
-                if (mergedCenterCount >= kMaxMergedCenters)
-                {
-                    ++it;
-                    continue;
-                }
-
-                const glm::ivec3 candidateMin(
-                    std::min(batch.minCoord.x, coord.x),
-                    std::min(batch.minCoord.y, coord.y),
-                    std::min(batch.minCoord.z, coord.z));
-                const glm::ivec3 candidateMax(
-                    std::max(batch.maxCoord.x, coord.x),
-                    std::max(batch.maxCoord.y, coord.y),
-                    std::max(batch.maxCoord.z, coord.z));
-                const glm::ivec3 candidateReservedMin = candidateMin - kRelightReservationPadding;
-                const glm::ivec3 candidateReservedMax = candidateMax + kRelightReservationPadding;
-                if (candidateMax.x - candidateMin.x > kMaxCenterSpan ||
-                    candidateMax.y - candidateMin.y > kMaxCenterSpan ||
-                    candidateMax.z - candidateMin.z > kMaxCenterSpan ||
-                    overlapsActiveRegions(candidateReservedMin, candidateReservedMax))
-                {
-                    ++it;
-                    continue;
-                }
-
-                batch.minCoord = candidateMin;
-                batch.maxCoord = candidateMax;
-                batch.reservedMinCoord = candidateReservedMin;
-                batch.reservedMaxCoord = candidateReservedMax;
-                ++mergedCenterCount;
-                if (requestIt->second.forceRemesh)
-                {
-                    batch.forceRemeshCoords.insert(coord);
-                }
-
-                pendingRelightRequests_.erase(requestIt);
-                it = pendingRelightQueue_.erase(it);
-                expanded = true;
+                bestFitIt = it;
             }
         }
-
-        activeRelightRegions_.push_back(ActiveRelightRegion{batch.reservedMinCoord, batch.reservedMaxCoord});
-        return true;
     }
 
-    batch = PendingRelightBatch{};
-    return false;
+    auto chosenIt = bestFitIt;
+    if (chosenIt == pendingRelightRegions_.end())
+    {
+        if (!allowOverBudgetFallback || bestFallbackIt == pendingRelightRegions_.end())
+        {
+            batch = PendingRelightBatch{};
+            return false;
+        }
+        chosenIt = bestFallbackIt;
+    }
+
+    batch = std::move(*chosenIt);
+    pendingRelightRegions_.erase(chosenIt);
+
+    for (const auto& [coord, coordGeneration] : batch.dirtyCoordGenerations)
+    {
+        auto pendingIt = pendingRelightCoordGenerations_.find(coord);
+        if (pendingIt != pendingRelightCoordGenerations_.end() && pendingIt->second <= coordGeneration)
+        {
+            pendingRelightCoordGenerations_.erase(pendingIt);
+        }
+
+        auto [activeIt, inserted] = activeRelightCoordGenerations_.try_emplace(coord, coordGeneration);
+        if (!inserted)
+        {
+            activeIt->second = std::max(activeIt->second, coordGeneration);
+        }
+    }
+
+    activeRelightRegions_.push_back(ActiveRelightRegion{
+        batch.reservedMinCoord,
+        batch.reservedMaxCoord,
+        batch.dirtyCoordGenerations,
+        batch.maxGeneration,
+        batch.sequence});
+
+    --relightBatchBudgetRemaining_;
+    if (batch.estimatedCostUnits >= relightBudgetUnitsRemaining_)
+    {
+        relightBudgetUnitsRemaining_ = 0;
+    }
+    else
+    {
+        relightBudgetUnitsRemaining_ -= batch.estimatedCostUnits;
+    }
+
+    return true;
 }
 
 void ChunkManager::Impl::releasePendingRelightBatch(const PendingRelightBatch& batch)
@@ -17105,17 +17748,25 @@ void ChunkManager::Impl::releasePendingRelightBatch(const PendingRelightBatch& b
         return;
     }
 
-    std::lock_guard<std::mutex> lock(activeRelightRegionsMutex_);
-    auto it = std::find_if(activeRelightRegions_.begin(),
-                           activeRelightRegions_.end(),
-                           [&](const ActiveRelightRegion& region)
-                           {
-                               return region.minCoord == batch.reservedMinCoord &&
-                                      region.maxCoord == batch.reservedMaxCoord;
-                           });
-    if (it != activeRelightRegions_.end())
+    std::lock_guard<std::mutex> lock(relightStateMutex_);
+    auto activeIt = std::find_if(activeRelightRegions_.begin(),
+                                 activeRelightRegions_.end(),
+                                 [&](const ActiveRelightRegion& region)
+                                 {
+                                     return region.sequence == batch.sequence;
+                                 });
+    if (activeIt != activeRelightRegions_.end())
     {
-        activeRelightRegions_.erase(it);
+        activeRelightRegions_.erase(activeIt);
+    }
+
+    for (const auto& [coord, coordGeneration] : batch.dirtyCoordGenerations)
+    {
+        auto coordIt = activeRelightCoordGenerations_.find(coord);
+        if (coordIt != activeRelightCoordGenerations_.end() && coordIt->second <= coordGeneration)
+        {
+            activeRelightCoordGenerations_.erase(coordIt);
+        }
     }
 }
 
@@ -17175,8 +17826,7 @@ void ChunkManager::Impl::processPendingRelightRequests(int maxBatches)
         } batchReservationGuard{*this, batch};
 
         profilingCounters_.relightBatches.fetch_add(1, std::memory_order_relaxed);
-        const auto* forceRemeshCoords = batch.forceRemeshCoords.empty() ? nullptr : &batch.forceRemeshCoords;
-        relightChunkRegion(batch.minCoord, batch.maxCoord, forceRemeshCoords);
+        relightChunkRegion(batch);
     }
 }
 
@@ -17215,37 +17865,21 @@ std::uint8_t ChunkManager::Impl::packedLightAtWorld(const glm::ivec3& worldPos) 
     return chunk->lightLevels[blockIndex(local.x, localY, local.z)];
 }
 
-void ChunkManager::Impl::relightChunkRegion(
-    const glm::ivec3& minCenterCoord,
-    const glm::ivec3& maxCenterCoord,
-    const std::unordered_set<glm::ivec3, ChunkHasher>* forceRemeshCoords)
+void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const SteadyClock::time_point relightStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
-    const glm::ivec3 minRegionCoord = minCenterCoord - glm::ivec3(1);
-    const glm::ivec3 maxRegionCoord = maxCenterCoord + glm::ivec3(1);
+    const std::unordered_set<glm::ivec3, ChunkHasher> expandedCoords = expandRelightCoords(batch.dirtyCoordGenerations);
     std::vector<std::shared_ptr<Chunk>> regionChunks;
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
-        const int estimatedCount =
-            std::max(1, maxRegionCoord.x - minRegionCoord.x + 1) *
-            std::max(1, maxRegionCoord.y - minRegionCoord.y + 1) *
-            std::max(1, maxRegionCoord.z - minRegionCoord.z + 1);
-        regionChunks.reserve(static_cast<std::size_t>(estimatedCount));
-
-        for (int chunkX = minRegionCoord.x; chunkX <= maxRegionCoord.x; ++chunkX)
+        regionChunks.reserve(expandedCoords.size());
+        for (const glm::ivec3& coord : expandedCoords)
         {
-            for (int chunkY = minRegionCoord.y; chunkY <= maxRegionCoord.y; ++chunkY)
+            auto it = chunks_.find(coord);
+            if (it != chunks_.end())
             {
-                for (int chunkZ = minRegionCoord.z; chunkZ <= maxRegionCoord.z; ++chunkZ)
-                {
-                    const glm::ivec3 coord(chunkX, chunkY, chunkZ);
-                    auto it = chunks_.find(coord);
-                    if (it != chunks_.end())
-                    {
-                        regionChunks.push_back(it->second);
-                    }
-                }
+                regionChunks.push_back(it->second);
             }
         }
     }
@@ -17256,6 +17890,14 @@ void ChunkManager::Impl::relightChunkRegion(
         if (benchmarkEnabled)
         {
             benchmarkMetrics_.relightStage.recordMicros(0);
+            benchmarkMetrics_.relightRegionChunks.record(0);
+            benchmarkMetrics_.relightChangedChunks.record(0);
+            benchmarkMetrics_.relightExternalSnapshotChunks.record(0);
+            benchmarkMetrics_.relightSkyAboveChunkScans.record(0);
+            benchmarkMetrics_.relightSkySeedNodes.record(0);
+            benchmarkMetrics_.relightBlockSeedNodes.record(0);
+            benchmarkMetrics_.relightSkyNodesProcessed.record(0);
+            benchmarkMetrics_.relightBlockNodesProcessed.record(0);
         }
         return;
     }
@@ -17300,6 +17942,8 @@ void ChunkManager::Impl::relightChunkRegion(
         }
     } relightFlightGuard{regionChunks};
 
+    ensureSkyLightColumnCacheForChunks(regionChunks);
+
     struct RelightChunkReadSnapshot
     {
         int minWorldY{0};
@@ -17331,21 +17975,30 @@ void ChunkManager::Impl::relightChunkRegion(
             }
         }
 
-        for (int chunkX = minRegionCoord.x; chunkX <= maxRegionCoord.x; ++chunkX)
+        std::unordered_map<glm::ivec2, int, ColumnHasher> maxRegionChunkYByColumn;
+        maxRegionChunkYByColumn.reserve(regionChunks.size());
+        for (const auto& chunk : regionChunks)
         {
-            for (int chunkZ = minRegionCoord.z; chunkZ <= maxRegionCoord.z; ++chunkZ)
+            const glm::ivec2 column(chunk->coord.x, chunk->coord.z);
+            auto [it, inserted] = maxRegionChunkYByColumn.try_emplace(column, chunk->coord.y);
+            if (!inserted)
             {
-                for (int chunkY = maxRegionCoord.y + 1;; ++chunkY)
-                {
-                    const glm::ivec3 coord(chunkX, chunkY, chunkZ);
-                    auto it = chunks_.find(coord);
-                    if (it == chunks_.end())
-                    {
-                        break;
-                    }
+                it->second = std::max(it->second, chunk->coord.y);
+            }
+        }
 
-                    externalSnapshotSources.try_emplace(coord, it->second);
+        for (const auto& [column, maxChunkY] : maxRegionChunkYByColumn)
+        {
+            for (int chunkY = maxChunkY + 1;; ++chunkY)
+            {
+                const glm::ivec3 coord(column.x, chunkY, column.y);
+                auto it = chunks_.find(coord);
+                if (it == chunks_.end())
+                {
+                    break;
                 }
+
+                externalSnapshotSources.try_emplace(coord, it->second);
             }
         }
     }
@@ -17398,6 +18051,11 @@ void ChunkManager::Impl::relightChunkRegion(
 
     std::deque<LightNode> skyQueue;
     std::deque<LightNode> blockQueue;
+    std::uint64_t skyAboveChunkScans = 0;
+    std::uint64_t skySeedNodes = 0;
+    std::uint64_t blockSeedNodes = 0;
+    std::uint64_t skyNodesProcessed = 0;
+    std::uint64_t blockNodesProcessed = 0;
 
     auto accessRegionVoxel = [&](const glm::ivec3& worldPos) -> std::pair<Chunk*, std::size_t>
     {
@@ -17435,6 +18093,7 @@ void ChunkManager::Impl::relightChunkRegion(
             if (level > 1)
             {
                 skyQueue.push_back({worldPos, level});
+                ++skySeedNodes;
             }
         }
     };
@@ -17453,6 +18112,7 @@ void ChunkManager::Impl::relightChunkRegion(
             if (level > 1)
             {
                 blockQueue.push_back({worldPos, level});
+                ++blockSeedNodes;
             }
         }
     };
@@ -17499,74 +18159,6 @@ void ChunkManager::Impl::relightChunkRegion(
         return snapshot->lightLevels[blockIndex(local.x, localY, local.z)];
     };
 
-    auto computeSkyLightFromAbove = [&](int worldX, int worldY, int worldZ) -> std::uint8_t
-    {
-        if (worldY < 0)
-        {
-            return 0;
-        }
-
-        int accumulatedAttenuation = 0;
-        int scanWorldY = worldY;
-
-        while (scanWorldY >= 0)
-        {
-            const glm::ivec3 scanPos(worldX, scanWorldY, worldZ);
-            const glm::ivec3 chunkCoord = worldToChunkCoords(scanPos.x, scanPos.y, scanPos.z);
-
-            const Chunk* regionChunk = nullptr;
-            const RelightChunkReadSnapshot* snapshot = nullptr;
-            auto regionIt = regionLookup.find(chunkCoord);
-            if (regionIt != regionLookup.end())
-            {
-                regionChunk = regionIt->second.get();
-            }
-            else
-            {
-                snapshot = findExternalSnapshot(chunkCoord);
-            }
-
-            if (regionChunk == nullptr && snapshot == nullptr)
-            {
-                break;
-            }
-
-            const glm::ivec3 local = localBlockCoords(scanPos, chunkCoord);
-            const int localX = local.x;
-            const int localZ = local.z;
-            if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
-            {
-                break;
-            }
-
-            const int chunkMinWorldY = (regionChunk != nullptr) ? regionChunk->minWorldY : snapshot->minWorldY;
-            const int chunkMaxWorldY = (regionChunk != nullptr) ? regionChunk->maxWorldY : snapshot->maxWorldY;
-            int localY = scanWorldY - chunkMinWorldY;
-            for (; localY < kChunkSizeY; ++localY)
-            {
-                const std::size_t idx = blockIndex(localX, localY, localZ);
-                const BlockId block =
-                    (regionChunk != nullptr) ? regionChunk->blocks[idx]
-                                             : snapshot->blocks[idx];
-                if (isOpaqueForLighting(block))
-                {
-                    return 0;
-                }
-
-                accumulatedAttenuation += static_cast<int>(blockLightingProperties(block).skyAttenuation);
-                if (accumulatedAttenuation >= static_cast<int>(kMaxLightLevel))
-                {
-                    return 0;
-                }
-            }
-
-            scanWorldY = chunkMaxWorldY + 1;
-        }
-
-        return static_cast<std::uint8_t>(
-            std::max(0, static_cast<int>(kMaxLightLevel) - accumulatedAttenuation));
-    };
-
     std::vector<std::shared_ptr<Chunk>> verticalOrder = regionChunks;
     std::sort(verticalOrder.begin(),
               verticalOrder.end(),
@@ -17594,7 +18186,8 @@ void ChunkManager::Impl::relightChunkRegion(
             {
                 const int worldX = baseWorldX + localX;
                 const int worldZ = baseWorldZ + localZ;
-                std::uint8_t incomingSky = computeSkyLightFromAbove(worldX, chunk->maxWorldY + 1, worldZ);
+                const std::size_t columnIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
+                std::uint8_t incomingSky = chunk->skyLightFromAboveCache[columnIndex];
 
                 for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
                 {
@@ -17616,6 +18209,7 @@ void ChunkManager::Impl::relightChunkRegion(
                         if (incomingSky > 0)
                         {
                             skyQueue.push_back({worldPos, incomingSky});
+                            ++skySeedNodes;
                         }
                     }
 
@@ -17624,6 +18218,7 @@ void ChunkManager::Impl::relightChunkRegion(
                     {
                         setBlockLight(chunk->lightLevels[idx], emission);
                         blockQueue.push_back({worldPos, emission});
+                        ++blockSeedNodes;
                     }
                 }
             }
@@ -17698,12 +18293,13 @@ void ChunkManager::Impl::relightChunkRegion(
         }
     }
 
-    auto propagateLight = [&](std::deque<LightNode>& queue, bool skyChannel)
+    auto propagateLight = [&](std::deque<LightNode>& queue, bool skyChannel, std::uint64_t& processedNodeCounter)
     {
         while (!queue.empty())
         {
             const LightNode node = queue.front();
             queue.pop_front();
+            ++processedNodeCounter;
 
             auto [sourceChunk, sourceIdx] = accessRegionVoxel(node.worldPos);
             if (!sourceChunk)
@@ -17766,8 +18362,8 @@ void ChunkManager::Impl::relightChunkRegion(
         }
     };
 
-    propagateLight(skyQueue, true);
-    propagateLight(blockQueue, false);
+    propagateLight(skyQueue, true, skyNodesProcessed);
+    propagateLight(blockQueue, false, blockNodesProcessed);
 
     std::vector<std::shared_ptr<Chunk>> changedChunks;
     changedChunks.reserve(regionChunks.size());
@@ -17782,16 +18378,35 @@ void ChunkManager::Impl::relightChunkRegion(
         }
     }
 
+    const std::uint64_t relightRegionChunkCount = static_cast<std::uint64_t>(regionChunks.size());
+    const std::uint64_t relightChangedChunkCount = static_cast<std::uint64_t>(changedChunks.size());
+    const std::uint64_t relightExternalSnapshotChunkCount =
+        static_cast<std::uint64_t>(externalReadSnapshots.size());
+
     locks.clear();
+
+    for (const auto& [coord, generation] : batch.dirtyCoordGenerations)
+    {
+        auto regionIt = regionLookup.find(coord);
+        if (regionIt == regionLookup.end() || !regionIt->second)
+        {
+            continue;
+        }
+
+        if (regionIt->second->lightingRevision.load(std::memory_order_acquire) <= generation)
+        {
+            regionIt->second->appliedLightingRevision.store(generation, std::memory_order_release);
+        }
+    }
 
     for (const auto& chunk : changedChunks)
     {
         requestChunkRemeshFromRelight(chunk);
     }
 
-    if (forceRemeshCoords != nullptr)
+    if (!batch.forceRemeshCoords.empty())
     {
-        for (const glm::ivec3& coord : *forceRemeshCoords)
+        for (const glm::ivec3& coord : batch.forceRemeshCoords)
         {
             if (changedChunkCoords.find(coord) != changedChunkCoords.end())
             {
@@ -17812,16 +18427,38 @@ void ChunkManager::Impl::relightChunkRegion(
     const auto relightMicros =
         std::chrono::duration_cast<std::chrono::microseconds>(relightEnd - relightStart).count();
     profilingCounters_.relightMicros.fetch_add(relightMicros, std::memory_order_relaxed);
+    profilingCounters_.relightRegionChunks.fetch_add(relightRegionChunkCount, std::memory_order_relaxed);
+    profilingCounters_.relightChangedChunks.fetch_add(relightChangedChunkCount, std::memory_order_relaxed);
+    profilingCounters_.relightExternalSnapshotChunks.fetch_add(relightExternalSnapshotChunkCount, std::memory_order_relaxed);
+    profilingCounters_.relightSkyAboveChunkScans.fetch_add(skyAboveChunkScans, std::memory_order_relaxed);
+    profilingCounters_.relightSkySeedNodes.fetch_add(skySeedNodes, std::memory_order_relaxed);
+    profilingCounters_.relightBlockSeedNodes.fetch_add(blockSeedNodes, std::memory_order_relaxed);
+    profilingCounters_.relightSkyNodesProcessed.fetch_add(skyNodesProcessed, std::memory_order_relaxed);
+    profilingCounters_.relightBlockNodesProcessed.fetch_add(blockNodesProcessed, std::memory_order_relaxed);
     profilingCounters_.relitChunks.fetch_add(1, std::memory_order_relaxed);
     if (benchmarkEnabled)
     {
         benchmarkMetrics_.relightStage.recordMicros(static_cast<std::uint64_t>(relightMicros));
+        benchmarkMetrics_.relightRegionChunks.record(relightRegionChunkCount);
+        benchmarkMetrics_.relightChangedChunks.record(relightChangedChunkCount);
+        benchmarkMetrics_.relightExternalSnapshotChunks.record(relightExternalSnapshotChunkCount);
+        benchmarkMetrics_.relightSkyAboveChunkScans.record(skyAboveChunkScans);
+        benchmarkMetrics_.relightSkySeedNodes.record(skySeedNodes);
+        benchmarkMetrics_.relightBlockSeedNodes.record(blockSeedNodes);
+        benchmarkMetrics_.relightSkyNodesProcessed.record(skyNodesProcessed);
+        benchmarkMetrics_.relightBlockNodesProcessed.record(blockNodesProcessed);
     }
 }
 
 void ChunkManager::Impl::relightAroundChunk(const glm::ivec3& centerCoord)
 {
-    relightChunkRegion(centerCoord, centerCoord, nullptr);
+    PendingRelightBatch batch{};
+    batch.valid = true;
+    batch.sequence = 0;
+    batch.dirtyCoordGenerations.emplace(centerCoord, 1);
+    recomputePendingRelightBatchBounds(batch);
+    batch.estimatedCostUnits = estimatePendingRelightBatchCost(batch);
+    relightChunkRegion(batch);
 }
 
 void ChunkManager::Impl::noteChunkReadyLatency(Chunk& chunk)
@@ -18155,6 +18792,7 @@ void ChunkManager::Impl::generateChunkBlocks(Chunk& chunk)
     }
 
     invalidatePredictedColumn({chunk.coord.x, chunk.coord.z});
+    markSkyLightColumnDirty({chunk.coord.x, chunk.coord.z});
 }
 
 
@@ -18241,6 +18879,7 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
                 chunk->hasBlocks.store(true, std::memory_order_release);
                 columnManager_.updateChunk(*chunk);
                 invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+                markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
             }
         }
 

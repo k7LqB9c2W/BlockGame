@@ -306,6 +306,16 @@ $acceptanceView = foreach ($scenario in $scenarioObjects) {
         exact_chunks = $scenario.render_settings.exact_chunks
         total_chunks = $scenario.render_settings.total_chunks
         lod_mode = $scenario.render_settings.lod_mode
+        relight_region_chunks_avg = if ($scenario.relight_detail) { $scenario.relight_detail.region_chunks.avg } else { $null }
+        relight_region_chunks_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.region_chunks.p95 } else { $null }
+        relight_changed_chunks_avg = if ($scenario.relight_detail) { $scenario.relight_detail.changed_chunks.avg } else { $null }
+        relight_changed_chunks_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.changed_chunks.p95 } else { $null }
+        relight_external_snapshot_chunks_avg = if ($scenario.relight_detail) { $scenario.relight_detail.external_snapshot_chunks.avg } else { $null }
+        relight_external_snapshot_chunks_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.external_snapshot_chunks.p95 } else { $null }
+        relight_sky_above_chunk_scans_avg = if ($scenario.relight_detail) { $scenario.relight_detail.sky_above_chunk_scans.avg } else { $null }
+        relight_sky_above_chunk_scans_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.sky_above_chunk_scans.p95 } else { $null }
+        vertical_radius_delta_avg = if ($scenario.relight_detail) { $scenario.relight_detail.vertical_radius_delta.avg } else { $null }
+        vertical_radius_delta_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.vertical_radius_delta.p95 } else { $null }
         lod_ready_tiles = if ($hasLodReadyTiles) { $finalProfiling.lod_ready_tiles } else { $null }
         lod_active_tiles = if ($hasLodActiveTiles) { $finalProfiling.lod_active_tiles } else { $null }
         lod_tiles_built_last_update = if ($hasLodBuiltTiles) { $finalProfiling.lod_tiles_built_last_update } else { $null }
@@ -355,6 +365,26 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.stages.relight.avg_ms,
         $scenario.queues.upload_backlog.avg_depth,
         $scenario.queues.upload_backlog.p95_depth))
+    if ($scenario.relight_detail) {
+        $summaryLines.Add(("  relight region_chunks avg={0:F2} p95={1:F2} changed_chunks avg={2:F2} p95={3:F2}" -f `
+            $scenario.relight_detail.region_chunks.avg,
+            $scenario.relight_detail.region_chunks.p95,
+            $scenario.relight_detail.changed_chunks.avg,
+            $scenario.relight_detail.changed_chunks.p95))
+        $summaryLines.Add(("  relight external_snapshots avg={0:F2} p95={1:F2} sky_above_scans avg={2:F2} p95={3:F2}" -f `
+            $scenario.relight_detail.external_snapshot_chunks.avg,
+            $scenario.relight_detail.external_snapshot_chunks.p95,
+            $scenario.relight_detail.sky_above_chunk_scans.avg,
+            $scenario.relight_detail.sky_above_chunk_scans.p95))
+        $summaryLines.Add(("  relight sky_seed avg={0:F2} p95={1:F2} sky_nodes avg={2:F2} p95={3:F2}" -f `
+            $scenario.relight_detail.sky_seed_nodes.avg,
+            $scenario.relight_detail.sky_seed_nodes.p95,
+            $scenario.relight_detail.sky_nodes_processed.avg,
+            $scenario.relight_detail.sky_nodes_processed.p95))
+        $summaryLines.Add(("  vertical_radius_delta avg={0:F2} p95={1:F2}" -f `
+            $scenario.relight_detail.vertical_radius_delta.avg,
+            $scenario.relight_detail.vertical_radius_delta.p95))
+    }
     $summaryLines.Add(("  climate_hit_rate={0:P2} surface_hit_rate={1:P2}" -f `
         $scenario.cache.climate.hit_rate,
         $scenario.cache.surface.hit_rate))
@@ -380,6 +410,12 @@ foreach ($scenario in $scenarioObjects) {
                 $worst.suspected_source,
                 $worst.chunk_update_ms,
                 $worst.renderer_present_ms))
+            $summaryLines.Add(("  worst_spike relight region={0} changed={1} external={2} sky_scans={3} vertical_delta={4}" -f `
+                $worst.relight_region_chunks_this_frame,
+                $worst.relight_changed_chunks_this_frame,
+                $worst.relight_external_snapshot_chunks_this_frame,
+                $worst.relight_sky_above_chunk_scans_this_frame,
+                $worst.chunk_vertical_radius_delta))
         }
     }
     $summaryLines.Add("")

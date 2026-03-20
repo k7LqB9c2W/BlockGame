@@ -32,12 +32,15 @@ RWStructuredBuffer<uint> gVoxelBuffer : register(u0);
 static const uint kLogicalSize = 16u;
 static const uint kStructureTypeDefaultTree = 0u;
 static const uint kStructureTypeTaigaSpruce = 1u;
+static const uint kStructureTypeDarkOak = 2u;
 
 static const uint kBlockAir = 0u;
 static const uint kBlockWood = 2u;
 static const uint kBlockLeaves = 3u;
 static const uint kBlockSpruceLog = 7u;
 static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockDarkOakLog = 11u;
+static const uint kBlockDarkOakLeaves = 12u;
 
 static const uint kFlagStructure = 0x02u;
 static const uint kFlagCutout = 0x04u;
@@ -79,11 +82,11 @@ bool voxelContainsWorldBlock(int3 voxelMin, int3 voxelMax, int worldX, int world
 
 uint structureBlockPriority(uint blockId)
 {
-    if (blockId == kBlockWood || blockId == kBlockSpruceLog)
+    if (blockId == kBlockWood || blockId == kBlockSpruceLog || blockId == kBlockDarkOakLog)
     {
         return 2u;
     }
-    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves)
+    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves || blockId == kBlockDarkOakLeaves)
     {
         return 1u;
     }
@@ -93,11 +96,21 @@ uint structureBlockPriority(uint blockId)
 uint packStructureVoxel(uint blockId)
 {
     uint flags = kFlagStructure;
-    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves)
+    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves || blockId == kBlockDarkOakLeaves)
     {
         flags |= kFlagCutout;
     }
     return packVoxel(blockId != kBlockAir, blockId, flags);
+}
+
+float hashToUnitFloat32(int x, int y, int z)
+{
+    uint h = (uint)x * 374761393u;
+    h ^= (uint)y * 668265263u;
+    h ^= (uint)z * 2147483647u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    h ^= (h >> 16u);
+    return (float)(h & 0x00FFFFFFu) / 16777215.0f;
 }
 
 void considerStructureBlock(int3 voxelMin,
@@ -202,6 +215,95 @@ bool taigaSpruceLeafOccupiesCell(int originX,
     }
 
     return (dx + dz) <= manhattanAllowance;
+}
+
+int darkOakBranchLength(const GpuStructureInstance instance, int dir)
+{
+    const int length = 1 + (int)(hashToUnitFloat32(instance.originX + dir * 37,
+                                                    instance.originY + 557,
+                                                    instance.originZ + dir * 53) * 3.0f);
+    return clamp(length, 1, 3);
+}
+
+int darkOakBranchCount(const GpuStructureInstance instance)
+{
+    const int count = 1 + (int)(hashToUnitFloat32(instance.originX,
+                                                  instance.originY + 719,
+                                                  instance.originZ) * 3.0f);
+    return clamp(count, 1, 3);
+}
+
+float darkOakBranchScore(const GpuStructureInstance instance, int dir)
+{
+    return hashToUnitFloat32(instance.originX + dir * 97,
+                             instance.originY + 683,
+                             instance.originZ + dir * 109);
+}
+
+bool darkOakBranchActive(const GpuStructureInstance instance, int dir)
+{
+    const float score = darkOakBranchScore(instance, dir);
+    int rank = 0;
+    [unroll]
+    for (int otherDir = 0; otherDir < 4; ++otherDir)
+    {
+        if (otherDir == dir)
+        {
+            continue;
+        }
+
+        const float otherScore = darkOakBranchScore(instance, otherDir);
+        if (otherScore > score || (otherScore == score && otherDir < dir))
+        {
+            ++rank;
+        }
+    }
+
+    return rank < darkOakBranchCount(instance);
+}
+
+int darkOakBranchWorldY(const GpuStructureInstance instance, int dir)
+{
+    const int verticalOffset =
+        (int)(hashToUnitFloat32(instance.originX + dir * 67,
+                                instance.originY + 601,
+                                instance.originZ + dir * 79) * 3.0f);
+    return max(instance.originY + (int)instance.trunkHeight / 2,
+               instance.originY + (int)instance.trunkHeight - 2 - clamp(verticalOffset, 0, 2));
+}
+
+int darkOakBranchLane(const GpuStructureInstance instance, int dir)
+{
+    return hashToUnitFloat32(instance.originX + dir * 19,
+                             instance.originY + 643,
+                             instance.originZ + dir * 29) < 0.5f ? 0 : 1;
+}
+
+bool darkOakCanopyOccupiesCell(const GpuStructureInstance instance,
+                               int worldX,
+                               int worldZ,
+                               int layer)
+{
+    static const int kRadii[5] = {2, 2, 2, 1, 0};
+    if (layer < 0 || layer >= 5)
+    {
+        return false;
+    }
+
+    const int radius = kRadii[layer];
+    const int dx = distanceToInclusiveRange(worldX, instance.originX, instance.originX + 1);
+    const int dz = distanceToInclusiveRange(worldZ, instance.originZ, instance.originZ + 1);
+    const int chebyshev = max(dx, dz);
+    if (radius == 0)
+    {
+        return chebyshev == 0;
+    }
+    if (chebyshev > radius)
+    {
+        return false;
+    }
+
+    return true;
 }
 
 void stampDefaultTree(const GpuStructureInstance instance,
@@ -374,6 +476,207 @@ void stampTaigaSpruce(const GpuStructureInstance instance,
     }
 }
 
+void stampDarkOak(const GpuStructureInstance instance,
+                  int3 voxelMin,
+                  int3 voxelMax,
+                  uint currentPackedVoxel,
+                  inout bool hasCandidate,
+                  inout uint candidatePriority,
+                  inout uint candidatePackedVoxel)
+{
+    [loop]
+    for (int trunkX = 0; trunkX < 2; ++trunkX)
+    {
+        [loop]
+        for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+        {
+            [loop]
+            for (uint dy = 0u; dy < instance.trunkHeight; ++dy)
+            {
+                considerStructureBlock(voxelMin,
+                                       voxelMax,
+                                       instance.originX + trunkX,
+                                       instance.originY + (int)dy,
+                                       instance.originZ + trunkZ,
+                                       kBlockDarkOakLog,
+                                       true,
+                                       currentPackedVoxel,
+                                       hasCandidate,
+                                       candidatePriority,
+                                       candidatePackedVoxel);
+            }
+        }
+    }
+
+    static const int kDirX[4] = {1, -1, 0, 0};
+    static const int kDirZ[4] = {0, 0, 1, -1};
+    static const int kSideX[4] = {0, 0, 1, 1};
+    static const int kSideZ[4] = {1, 1, 0, 0};
+
+    [loop]
+    for (int dir = 0; dir < 4; ++dir)
+    {
+        if (!darkOakBranchActive(instance, dir))
+        {
+            continue;
+        }
+
+        const int length = darkOakBranchLength(instance, dir);
+        const int branchWorldY = darkOakBranchWorldY(instance, dir);
+        const int lane = darkOakBranchLane(instance, dir);
+
+        int tipX = instance.originX;
+        int tipZ = instance.originZ;
+        [loop]
+        for (int step = 1; step <= length; ++step)
+        {
+            int branchX = instance.originX + lane;
+            int branchZ = instance.originZ + lane;
+            if (dir == 0)
+            {
+                branchX = instance.originX + 1 + step;
+                branchZ = instance.originZ + lane;
+            }
+            else if (dir == 1)
+            {
+                branchX = instance.originX - step;
+                branchZ = instance.originZ + lane;
+            }
+            else if (dir == 2)
+            {
+                branchX = instance.originX + lane;
+                branchZ = instance.originZ + 1 + step;
+            }
+            else
+            {
+                branchX = instance.originX + lane;
+                branchZ = instance.originZ - step;
+            }
+
+            tipX = branchX;
+            tipZ = branchZ;
+            considerStructureBlock(voxelMin,
+                                   voxelMax,
+                                   branchX,
+                                   branchWorldY,
+                                   branchZ,
+                                   kBlockDarkOakLog,
+                                   true,
+                                   currentPackedVoxel,
+                                   hasCandidate,
+                                   candidatePriority,
+                                   candidatePackedVoxel);
+        }
+
+        [loop]
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            [loop]
+            for (int back = 0; back <= 1; ++back)
+            {
+                [loop]
+                for (int lateral = -1; lateral <= 1; ++lateral)
+                {
+                    if (abs(lateral) + back + abs(dy) > 2)
+                    {
+                        continue;
+                    }
+
+                    const int leafX = tipX - kDirX[dir] * back + kSideX[dir] * lateral;
+                    const int leafZ = tipZ - kDirZ[dir] * back + kSideZ[dir] * lateral;
+                    const int leafY = branchWorldY + dy;
+                    if (leafX >= instance.originX && leafX <= instance.originX + 1 &&
+                        leafZ >= instance.originZ && leafZ <= instance.originZ + 1 &&
+                        leafY <= instance.originY + (int)instance.trunkHeight - 1)
+                    {
+                        continue;
+                    }
+
+                    considerStructureBlock(voxelMin,
+                                           voxelMax,
+                                           leafX,
+                                           leafY,
+                                           leafZ,
+                                           kBlockDarkOakLeaves,
+                                           false,
+                                           currentPackedVoxel,
+                                           hasCandidate,
+                                           candidatePriority,
+                                           candidatePackedVoxel);
+                }
+            }
+        }
+    }
+
+    const int canopyBaseWorld = instance.originY + (int)instance.trunkHeight - 2;
+    [loop]
+    for (int layer = 0; layer < 5; ++layer)
+    {
+        const int radius = (layer < 3) ? 2 : 1;
+        const int worldY = canopyBaseWorld + layer;
+        [loop]
+        for (int worldX = instance.originX - radius; worldX <= instance.originX + 1 + radius; ++worldX)
+        {
+            [loop]
+            for (int worldZ = instance.originZ - radius; worldZ <= instance.originZ + 1 + radius; ++worldZ)
+            {
+                if (!darkOakCanopyOccupiesCell(instance, worldX, worldZ, layer))
+                {
+                    continue;
+                }
+                if (worldX >= instance.originX && worldX <= instance.originX + 1 &&
+                    worldZ >= instance.originZ && worldZ <= instance.originZ + 1 &&
+                    worldY <= instance.originY + (int)instance.trunkHeight - 1)
+                {
+                    continue;
+                }
+
+                considerStructureBlock(voxelMin,
+                                       voxelMax,
+                                       worldX,
+                                       worldY,
+                                       worldZ,
+                                       kBlockDarkOakLeaves,
+                                       false,
+                                       currentPackedVoxel,
+                                       hasCandidate,
+                                       candidatePriority,
+                                       candidatePackedVoxel);
+            }
+        }
+    }
+
+    const int hangingLeavesWorldY = canopyBaseWorld - 1;
+    [loop]
+    for (int worldX = instance.originX - 2; worldX <= instance.originX + 3; ++worldX)
+    {
+        [loop]
+        for (int worldZ = instance.originZ - 2; worldZ <= instance.originZ + 3; ++worldZ)
+        {
+            const int dx = distanceToInclusiveRange(worldX, instance.originX, instance.originX + 1);
+            const int dz = distanceToInclusiveRange(worldZ, instance.originZ, instance.originZ + 1);
+            const int chebyshev = max(dx, dz);
+            const int manhattan = dx + dz;
+            if (chebyshev == 0 || chebyshev > 2 || manhattan > 2)
+            {
+                continue;
+            }
+
+            considerStructureBlock(voxelMin,
+                                   voxelMax,
+                                   worldX,
+                                   hangingLeavesWorldY,
+                                   worldZ,
+                                   kBlockDarkOakLeaves,
+                                   false,
+                                   currentPackedVoxel,
+                                   hasCandidate,
+                                   candidatePriority,
+                                   candidatePackedVoxel);
+        }
+    }
+}
+
 [numthreads(64, 1, 1)]
 void FarLodChunkStructureStampMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -421,6 +724,16 @@ void FarLodChunkStructureStampMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                              hasCandidate,
                              candidatePriority,
                              candidatePackedVoxel);
+        }
+        else if (instance.type == kStructureTypeDarkOak)
+        {
+            stampDarkOak(instance,
+                         voxelMin,
+                         voxelMax,
+                         currentPackedVoxel,
+                         hasCandidate,
+                         candidatePriority,
+                         candidatePackedVoxel);
         }
         else
         {

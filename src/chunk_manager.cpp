@@ -3590,6 +3590,15 @@ constexpr int kDefaultTreeMinHeight = 6;
 constexpr int kDefaultTreeMaxHeight = 8;
 constexpr int kDefaultTreeMaxRadius = 2;
 constexpr int kDefaultTreeConflictSearchRadius = (kDefaultTreeMaxRadius * 2) + 1;
+constexpr int kDarkOakCellSize = 6;
+constexpr int kDarkOakMinTrunkHeight = 6;
+constexpr int kDarkOakMaxTrunkHeight = 10;
+constexpr int kDarkOakBranchMaxLength = 3;
+constexpr int kDarkOakCanopyLayers = 5;
+constexpr int kDarkOakCanopyBaseOffset = 2;
+constexpr int kDarkOakCanopyTopOffset = kDarkOakCanopyLayers - kDarkOakCanopyBaseOffset - 1;
+constexpr int kDarkOakMaxHorizontalReach = kDarkOakBranchMaxLength + 1;
+constexpr std::array<int, kDarkOakCanopyLayers> kDarkOakCanopyRadii{{2, 2, 2, 1, 1}};
 
 struct DefaultTreeCandidate
 {
@@ -3607,6 +3616,35 @@ struct DefaultTreeBlockPalette
     BlockId trunkBlock{BlockId::Wood};
     BlockId leavesBlock{BlockId::Leaves};
 };
+
+struct DarkOakTreeCandidate
+{
+    int originX{0};
+    int originZ{0};
+    int groundWorldY{0};
+    int trunkHeight{0};
+    float priority{0.0f};
+};
+
+inline float hashToUnitFloat32(int x, int y, int z) noexcept
+{
+    constexpr std::uint32_t kMulX = 374761393u;
+    constexpr std::uint32_t kMulY = 668265263u;
+    constexpr std::uint32_t kMulZ = 2147483647u;
+    constexpr std::uint32_t kMixMul = 1274126177u;
+    constexpr std::uint32_t kMask24 = 0x00FFFFFFu;
+
+    const auto widen = [](int value) noexcept -> std::uint32_t {
+        return static_cast<std::uint32_t>(value);
+    };
+
+    std::uint32_t h = widen(x) * kMulX;
+    h ^= widen(y) * kMulY;
+    h ^= widen(z) * kMulZ;
+    h = (h ^ (h >> 13)) * kMixMul;
+    h ^= (h >> 16);
+    return static_cast<float>(h & kMask24) / static_cast<float>(kMask24);
+}
 
 inline glm::ivec2 taigaSpruceOriginForCell(int cellX, int cellZ) noexcept
 {
@@ -3731,6 +3769,121 @@ inline bool taigaSpruceLeafOccupiesCell(int originX,
     }
 
     return (dx + dz) <= manhattanAllowance;
+}
+
+inline glm::ivec2 darkOakOriginForCell(int cellX, int cellZ) noexcept
+{
+    const int offsetX = 1 + static_cast<int>(hashToUnitFloat32(cellX, 1301, cellZ) * 3.0f);
+    const int offsetZ = 1 + static_cast<int>(hashToUnitFloat32(cellX, 1427, cellZ) * 3.0f);
+    return glm::ivec2(cellX * kDarkOakCellSize + offsetX,
+                      cellZ * kDarkOakCellSize + offsetZ);
+}
+
+inline bool isDarkOakOrigin(int worldX, int worldZ) noexcept
+{
+    const int cellX = floorDiv(worldX, kDarkOakCellSize);
+    const int cellZ = floorDiv(worldZ, kDarkOakCellSize);
+    return darkOakOriginForCell(cellX, cellZ) == glm::ivec2(worldX, worldZ);
+}
+
+inline float darkOakPriority(int originX, int groundWorldY, int originZ) noexcept
+{
+    return hashToUnitFloat32(originX, groundWorldY + 887, originZ);
+}
+
+inline int darkOakTrunkHeight(int originX, int groundWorldY, int originZ) noexcept
+{
+    const int height = kDarkOakMinTrunkHeight +
+                       static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 461, originZ) *
+                                        static_cast<float>(kDarkOakMaxTrunkHeight - kDarkOakMinTrunkHeight + 1));
+    return std::clamp(height, kDarkOakMinTrunkHeight, kDarkOakMaxTrunkHeight);
+}
+
+inline float darkOakSpawnChance(const BiomeDefinition& biome, float normalizedDensity) noexcept
+{
+    const float baseChance = 0.62f + normalizedDensity * 0.28f;
+    const float densityScale = 0.88f + std::max(biome.treeDensityMultiplier, 0.0f) * 0.09f;
+    return std::clamp(baseChance * densityScale, 0.68f, 0.98f);
+}
+
+inline int darkOakBranchLength(int originX, int groundWorldY, int originZ, int dir) noexcept
+{
+    const int length = 1 + static_cast<int>(hashToUnitFloat32(originX + dir * 37,
+                                                              groundWorldY + 557,
+                                                              originZ + dir * 53) * 3.0f);
+    return std::clamp(length, 1, kDarkOakBranchMaxLength);
+}
+
+inline int darkOakBranchCount(int originX, int groundWorldY, int originZ) noexcept
+{
+    const int count = 1 + static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 719, originZ) * 3.0f);
+    return std::clamp(count, 1, 3);
+}
+
+inline float darkOakBranchScore(int originX, int groundWorldY, int originZ, int dir) noexcept
+{
+    return hashToUnitFloat32(originX + dir * 97, groundWorldY + 683, originZ + dir * 109);
+}
+
+inline bool darkOakBranchActive(int originX, int groundWorldY, int originZ, int dir) noexcept
+{
+    const float score = darkOakBranchScore(originX, groundWorldY, originZ, dir);
+    int rank = 0;
+    for (int otherDir = 0; otherDir < 4; ++otherDir)
+    {
+        if (otherDir == dir)
+        {
+            continue;
+        }
+
+        const float otherScore = darkOakBranchScore(originX, groundWorldY, originZ, otherDir);
+        if (otherScore > score || (otherScore == score && otherDir < dir))
+        {
+            ++rank;
+        }
+    }
+
+    return rank < darkOakBranchCount(originX, groundWorldY, originZ);
+}
+
+inline int darkOakBranchWorldY(int originX, int groundWorldY, int originZ, int trunkHeight, int dir) noexcept
+{
+    const int verticalOffset =
+        static_cast<int>(hashToUnitFloat32(originX + dir * 67, groundWorldY + 601, originZ + dir * 79) * 3.0f);
+    return std::max(groundWorldY + trunkHeight / 2,
+                    groundWorldY + trunkHeight - 2 - std::clamp(verticalOffset, 0, 2));
+}
+
+inline int darkOakBranchLane(int originX, int groundWorldY, int originZ, int dir) noexcept
+{
+    return hashToUnitFloat32(originX + dir * 19, groundWorldY + 643, originZ + dir * 29) < 0.5f ? 0 : 1;
+}
+
+inline bool darkOakCanopyOccupiesCell(int originX,
+                                      int originZ,
+                                      int worldX,
+                                      int worldZ,
+                                      int layer) noexcept
+{
+    if (layer < 0 || layer >= kDarkOakCanopyLayers)
+    {
+        return false;
+    }
+
+    const int radius = kDarkOakCanopyRadii[static_cast<std::size_t>(layer)];
+    const int dx = distanceToInclusiveRange(worldX, originX, originX + 1);
+    const int dz = distanceToInclusiveRange(worldZ, originZ, originZ + 1);
+    const int chebyshev = std::max(dx, dz);
+    if (radius == 0)
+    {
+        return chebyshev == 0;
+    }
+    if (chebyshev > radius)
+    {
+        return false;
+    }
+
+    return true;
 }
 
 inline int defaultTreeTrunkHeight(int worldX, int groundWorldY, int worldZ) noexcept
@@ -3918,7 +4071,7 @@ inline bool tryBuildDefaultTreeCandidate(int originX,
     }
 
     const BiomeDefinition& biome = *columnSample.dominantBiome;
-    if (terrain::isTaigaBiome(biome))
+    if (terrain::isTaigaBiome(biome) || biome.id == "dark_forest")
     {
         return false;
     }
@@ -4009,8 +4162,348 @@ inline bool defaultTreeHasSpacingConflict(const DefaultTreeCandidate& candidate,
     return false;
 }
 
+inline bool shouldDarkOakWinTie(const DarkOakTreeCandidate& candidate,
+                                const DarkOakTreeCandidate& other) noexcept
+{
+    if (candidate.priority != other.priority)
+    {
+        return candidate.priority > other.priority;
+    }
+
+    if (candidate.originX != other.originX)
+    {
+        return candidate.originX < other.originX;
+    }
+
+    return candidate.originZ < other.originZ;
+}
+
+template <typename Callback>
+inline bool forEachDarkOakTreeBlock(int originX,
+                                    int originZ,
+                                    int groundWorldY,
+                                    int trunkHeight,
+                                    BlockId trunkBlock,
+                                    BlockId leavesBlock,
+                                    Callback&& callback)
+{
+    for (int trunkX = 0; trunkX < 2; ++trunkX)
+    {
+        for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+        {
+            for (int dy = 0; dy < trunkHeight; ++dy)
+            {
+                if (callback(originX + trunkX, groundWorldY + dy, originZ + trunkZ, trunkBlock))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    static constexpr std::array<int, 4> kDirX{{1, -1, 0, 0}};
+    static constexpr std::array<int, 4> kDirZ{{0, 0, 1, -1}};
+    static constexpr std::array<int, 4> kSideX{{0, 0, 1, 1}};
+    static constexpr std::array<int, 4> kSideZ{{1, 1, 0, 0}};
+
+    for (int dir = 0; dir < 4; ++dir)
+    {
+        if (!darkOakBranchActive(originX, groundWorldY, originZ, dir))
+        {
+            continue;
+        }
+
+        const int length = darkOakBranchLength(originX, groundWorldY, originZ, dir);
+        const int branchWorldY = darkOakBranchWorldY(originX, groundWorldY, originZ, trunkHeight, dir);
+        const int lane = darkOakBranchLane(originX, groundWorldY, originZ, dir);
+
+        int tipX = originX;
+        int tipZ = originZ;
+        for (int step = 1; step <= length; ++step)
+        {
+            int branchX = originX + lane;
+            int branchZ = originZ + lane;
+            if (dir == 0)
+            {
+                branchX = originX + 1 + step;
+                branchZ = originZ + lane;
+            }
+            else if (dir == 1)
+            {
+                branchX = originX - step;
+                branchZ = originZ + lane;
+            }
+            else if (dir == 2)
+            {
+                branchX = originX + lane;
+                branchZ = originZ + 1 + step;
+            }
+            else
+            {
+                branchX = originX + lane;
+                branchZ = originZ - step;
+            }
+
+            tipX = branchX;
+            tipZ = branchZ;
+            if (callback(branchX, branchWorldY, branchZ, trunkBlock))
+            {
+                return true;
+            }
+        }
+
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int back = 0; back <= 1; ++back)
+            {
+                for (int lateral = -1; lateral <= 1; ++lateral)
+                {
+                    if (std::abs(lateral) + back + std::abs(dy) > 2)
+                    {
+                        continue;
+                    }
+
+                    const int leafX = tipX - kDirX[static_cast<std::size_t>(dir)] * back +
+                                      kSideX[static_cast<std::size_t>(dir)] * lateral;
+                    const int leafZ = tipZ - kDirZ[static_cast<std::size_t>(dir)] * back +
+                                      kSideZ[static_cast<std::size_t>(dir)] * lateral;
+                    const int leafY = branchWorldY + dy;
+                    if (leafX >= originX && leafX <= originX + 1 &&
+                        leafZ >= originZ && leafZ <= originZ + 1 &&
+                        leafY <= groundWorldY + trunkHeight - 1)
+                    {
+                        continue;
+                    }
+
+                    if (callback(leafX, leafY, leafZ, leavesBlock))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    const int canopyBaseWorld = groundWorldY + trunkHeight - kDarkOakCanopyBaseOffset;
+    for (int layer = 0; layer < kDarkOakCanopyLayers; ++layer)
+    {
+        const int radius = kDarkOakCanopyRadii[static_cast<std::size_t>(layer)];
+        const int worldY = canopyBaseWorld + layer;
+        for (int worldX = originX - radius; worldX <= originX + 1 + radius; ++worldX)
+        {
+            for (int worldZ = originZ - radius; worldZ <= originZ + 1 + radius; ++worldZ)
+            {
+                if (!darkOakCanopyOccupiesCell(originX, originZ, worldX, worldZ, layer))
+                {
+                    continue;
+                }
+
+                if (worldX >= originX && worldX <= originX + 1 &&
+                    worldZ >= originZ && worldZ <= originZ + 1 &&
+                    worldY <= groundWorldY + trunkHeight - 1)
+                {
+                    continue;
+                }
+
+                if (callback(worldX, worldY, worldZ, leavesBlock))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    const int hangingLeavesWorldY = canopyBaseWorld - 1;
+    for (int worldX = originX - 2; worldX <= originX + 3; ++worldX)
+    {
+        for (int worldZ = originZ - 2; worldZ <= originZ + 3; ++worldZ)
+        {
+            const int dx = distanceToInclusiveRange(worldX, originX, originX + 1);
+            const int dz = distanceToInclusiveRange(worldZ, originZ, originZ + 1);
+            const int chebyshev = std::max(dx, dz);
+            const int manhattan = dx + dz;
+            if (chebyshev == 0 || chebyshev > 2)
+            {
+                continue;
+            }
+            if (manhattan > 2)
+            {
+                continue;
+            }
+
+            if (callback(worldX, hangingLeavesWorldY, worldZ, leavesBlock))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+inline bool darkOakTreesTouchOrOverlap(const DarkOakTreeCandidate& a,
+                                       const DarkOakTreeCandidate& b) noexcept
+{
+    const int minAX = a.originX - kDarkOakBranchMaxLength;
+    const int maxAX = a.originX + 1 + kDarkOakBranchMaxLength;
+    const int minAZ = a.originZ - kDarkOakBranchMaxLength;
+    const int maxAZ = a.originZ + 1 + kDarkOakBranchMaxLength;
+    const int minAY = a.groundWorldY;
+    const int maxAY = a.groundWorldY + a.trunkHeight + kDarkOakCanopyTopOffset;
+
+    const int minBX = b.originX - kDarkOakBranchMaxLength;
+    const int maxBX = b.originX + 1 + kDarkOakBranchMaxLength;
+    const int minBZ = b.originZ - kDarkOakBranchMaxLength;
+    const int maxBZ = b.originZ + 1 + kDarkOakBranchMaxLength;
+    const int minBY = b.groundWorldY;
+    const int maxBY = b.groundWorldY + b.trunkHeight + kDarkOakCanopyTopOffset;
+
+    return rangesTouchWithinMargin(minAX, maxAX, minBX, maxBX, 0) &&
+           rangesTouchWithinMargin(minAY, maxAY, minBY, maxBY, 0) &&
+           rangesTouchWithinMargin(minAZ, maxAZ, minBZ, maxBZ, 0);
+}
+
+template <typename SampleColumnFn, typename SurfaceBlockFn, typename DensityFn>
+inline bool tryBuildDarkOakCandidate(int originX,
+                                     int originZ,
+                                     const ColumnSample& columnSample,
+                                     SampleColumnFn&& sampleColumn,
+                                     SurfaceBlockFn&& surfaceBlockAt,
+                                     DensityFn&& densityAt,
+                                     DarkOakTreeCandidate& outCandidate)
+{
+    if (!columnSample.dominantBiome || !columnSample.dominantBiome->generatesTrees)
+    {
+        return false;
+    }
+
+    const BiomeDefinition& biome = *columnSample.dominantBiome;
+    if (biome.id != "dark_forest" ||
+        columnSample.dominantWeight < kTreeBiomeWeightThreshold ||
+        !isDarkOakOrigin(originX, originZ))
+    {
+        return false;
+    }
+
+    int groundWorldY = std::numeric_limits<int>::min();
+    for (int trunkX = 0; trunkX < 2; ++trunkX)
+    {
+        for (int trunkZ = 0; trunkZ < 2; ++trunkZ)
+        {
+            const ColumnSample trunkSample = sampleColumn(originX + trunkX, originZ + trunkZ);
+            if (!trunkSample.dominantBiome || trunkSample.dominantBiome->id != biome.id)
+            {
+                return false;
+            }
+            if (trunkSample.dominantWeight < kTreeBiomeWeightThreshold)
+            {
+                return false;
+            }
+
+            const BlockId surfaceBlock = surfaceBlockAt(originX + trunkX, originZ + trunkZ, trunkSample);
+            if (surfaceBlock != BlockId::Grass && surfaceBlock != BlockId::Podzol)
+            {
+                return false;
+            }
+
+            if (groundWorldY == std::numeric_limits<int>::min())
+            {
+                groundWorldY = trunkSample.surfaceY;
+            }
+            else if (trunkSample.surfaceY != groundWorldY)
+            {
+                return false;
+            }
+        }
+    }
+
+    if (groundWorldY <= 2)
+    {
+        return false;
+    }
+
+    for (int dx = -2; dx <= 3; ++dx)
+    {
+        for (int dz = -2; dz <= 3; ++dz)
+        {
+            const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
+            if (!neighborSample.dominantBiome)
+            {
+                return false;
+            }
+            if (std::abs(neighborSample.surfaceY - groundWorldY) > 2)
+            {
+                return false;
+            }
+        }
+    }
+
+    const float density = densityAt(originX + 1, originZ + 1);
+    const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
+    const int cellX = floorDiv(originX, kDarkOakCellSize);
+    const int cellZ = floorDiv(originZ, kDarkOakCellSize);
+    const float occupancyRoll = hashToUnitFloat32(cellX, groundWorldY + 509, cellZ);
+    if (occupancyRoll > darkOakSpawnChance(biome, normalizedDensity))
+    {
+        return false;
+    }
+
+    outCandidate.originX = originX;
+    outCandidate.originZ = originZ;
+    outCandidate.groundWorldY = groundWorldY;
+    outCandidate.trunkHeight = darkOakTrunkHeight(originX, groundWorldY, originZ);
+    outCandidate.priority = darkOakPriority(originX, groundWorldY, originZ);
+    return true;
+}
+
+template <typename SampleColumnFn, typename SurfaceBlockFn, typename DensityFn>
+inline bool darkOakHasSpacingConflict(const DarkOakTreeCandidate& candidate,
+                                      SampleColumnFn&& sampleColumn,
+                                      SurfaceBlockFn&& surfaceBlockAt,
+                                      DensityFn&& densityAt)
+{
+    const int cellX = floorDiv(candidate.originX, kDarkOakCellSize);
+    const int cellZ = floorDiv(candidate.originZ, kDarkOakCellSize);
+    for (int neighborCellZ = cellZ - 1; neighborCellZ <= cellZ + 1; ++neighborCellZ)
+    {
+        for (int neighborCellX = cellX - 1; neighborCellX <= cellX + 1; ++neighborCellX)
+        {
+            const glm::ivec2 neighborOrigin = darkOakOriginForCell(neighborCellX, neighborCellZ);
+            if (neighborOrigin.x == candidate.originX && neighborOrigin.y == candidate.originZ)
+            {
+                continue;
+            }
+
+            const ColumnSample neighborSample = sampleColumn(neighborOrigin.x, neighborOrigin.y);
+            DarkOakTreeCandidate neighborCandidate{};
+            if (!tryBuildDarkOakCandidate(neighborOrigin.x,
+                                          neighborOrigin.y,
+                                          neighborSample,
+                                          sampleColumn,
+                                          surfaceBlockAt,
+                                          densityAt,
+                                          neighborCandidate))
+            {
+                continue;
+            }
+
+            if (!darkOakTreesTouchOrOverlap(candidate, neighborCandidate))
+            {
+                continue;
+            }
+
+            if (!shouldDarkOakWinTie(candidate, neighborCandidate))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 constexpr int kStructureRegionSize = 128;
-constexpr int kMaxStructureHorizontalRadius = kTaigaSpruceMaxLeafRadius + 1;
+constexpr int kMaxStructureHorizontalRadius = std::max(kTaigaSpruceMaxLeafRadius + 1, kDarkOakMaxHorizontalReach);
 
 struct StructureAabb
 {
@@ -4029,6 +4522,7 @@ enum class StructureType : std::uint8_t
 {
     DefaultTree = 0,
     TaigaSpruce = 1,
+    DarkOak = 2,
 };
 
 struct StructureInstance
@@ -4115,6 +4609,17 @@ inline bool forEachStructureVoxel(const StructureInstance& instance, Callback&& 
             }
         }
         return false;
+    }
+
+    if (instance.type == StructureType::DarkOak)
+    {
+        return forEachDarkOakTreeBlock(instance.origin.x,
+                                       instance.origin.z,
+                                       instance.origin.y,
+                                       instance.trunkHeight,
+                                       instance.trunkBlock,
+                                       instance.leavesBlock,
+                                       std::forward<Callback>(callback));
     }
 
     return forEachDefaultTreeBlock(instance.origin.x,
@@ -4429,6 +4934,43 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
                 instance.bounds.max = glm::ivec3(worldX + 1 + kTaigaSpruceMaxLeafRadius,
                                                  taigaGroundWorldY + instance.trunkHeight + 1,
                                                  worldZ + 1 + kTaigaSpruceMaxLeafRadius);
+                region.instances.push_back(instance);
+                continue;
+            }
+
+            if (biome.id == "dark_forest")
+            {
+                DarkOakTreeCandidate candidate{};
+                if (!tryBuildDarkOakCandidate(worldX,
+                                              worldZ,
+                                              columnSample,
+                                              sampleColumn,
+                                              resolvedSurfaceBlockAt,
+                                              densityAt,
+                                              candidate))
+                {
+                    continue;
+                }
+
+                if (darkOakHasSpacingConflict(candidate, sampleColumn, resolvedSurfaceBlockAt, densityAt))
+                {
+                    continue;
+                }
+
+                StructureInstance instance{};
+                instance.type = StructureType::DarkOak;
+                instance.origin = glm::ivec3(candidate.originX, candidate.groundWorldY, candidate.originZ);
+                instance.trunkHeight = candidate.trunkHeight;
+                instance.priority = candidate.priority;
+                instance.maxLodLevel = 4;
+                instance.trunkBlock = BlockId::DarkOakLog;
+                instance.leavesBlock = BlockId::DarkOakLeaves;
+                instance.bounds.min = glm::ivec3(candidate.originX - kDarkOakBranchMaxLength,
+                                                 candidate.groundWorldY,
+                                                 candidate.originZ - kDarkOakBranchMaxLength);
+                instance.bounds.max = glm::ivec3(candidate.originX + 1 + kDarkOakBranchMaxLength,
+                                                 candidate.groundWorldY + candidate.trunkHeight + kDarkOakCanopyTopOffset,
+                                                 candidate.originZ + 1 + kDarkOakBranchMaxLength);
                 region.instances.push_back(instance);
                 continue;
             }
@@ -13997,6 +14539,16 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
                           0.55f,
                           2.0f);
     };
+    auto resolvedSurfaceBlockAt = [&](int worldX, int worldZ, const ColumnSample& sample) -> BlockId
+    {
+        if (!sample.dominantBiome)
+        {
+            return BlockId::Air;
+        }
+        const terrain::TerrainColumnBlocks blocks =
+            terrain::resolveTerrainColumnBlocks(*sample.dominantBiome, sample, worldX, worldZ, globalSeaLevel_);
+        return blocks.surfaceBlock;
+    };
 
     auto predictTreeCanopyTop = [&](int originX, int originZ, const ColumnSample& columnSample, int targetX, int targetZ) -> int
     {
@@ -14107,6 +14659,45 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
                 }
             }
 
+            return highestCover;
+        }
+
+        if (biome.id == "dark_forest")
+        {
+            DarkOakTreeCandidate darkOakCandidate{};
+            if (!tryBuildDarkOakCandidate(originX,
+                                          originZ,
+                                          columnSample,
+                                          sampleColumnAt,
+                                          resolvedSurfaceBlockAt,
+                                          computeDefaultTreeDensity,
+                                          darkOakCandidate))
+            {
+                return ColumnManager::kNoHeight;
+            }
+
+            if (darkOakHasSpacingConflict(darkOakCandidate,
+                                          sampleColumnAt,
+                                          resolvedSurfaceBlockAt,
+                                          computeDefaultTreeDensity))
+            {
+                return ColumnManager::kNoHeight;
+            }
+
+            int highestCover = ColumnManager::kNoHeight;
+            forEachDarkOakTreeBlock(darkOakCandidate.originX,
+                                    darkOakCandidate.originZ,
+                                    darkOakCandidate.groundWorldY,
+                                    darkOakCandidate.trunkHeight,
+                                    BlockId::DarkOakLog,
+                                    BlockId::DarkOakLeaves,
+                                    [&](int blockX, int blockY, int blockZ, BlockId) {
+                                        if (blockX == targetX && blockZ == targetZ)
+                                        {
+                                            highestCover = std::max(highestCover, blockY);
+                                        }
+                                        return false;
+                                    });
             return highestCover;
         }
 
@@ -19814,6 +20405,21 @@ void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBl
                               false);
             }
         }
+        return;
+    }
+
+    if (instance.type == StructureType::DarkOak)
+    {
+        forEachDarkOakTreeBlock(instance.origin.x,
+                                instance.origin.z,
+                                instance.origin.y,
+                                instance.trunkHeight,
+                                instance.trunkBlock,
+                                instance.leavesBlock,
+                                [&](int blockX, int blockY, int blockZ, BlockId block) {
+                                    setLocalBlock(blockX, blockY, blockZ, block, block == instance.trunkBlock);
+                                    return false;
+                                });
         return;
     }
 

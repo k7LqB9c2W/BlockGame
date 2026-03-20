@@ -1,0 +1,49 @@
+id = "dark_forest"
+name = "Dark Forest"
+surface_block = "grass"
+filler_block = "grass"
+generates_trees = true
+tree_density_multiplier = 7.5
+radius = 280.0
+radius_variation = 70.0
+spawn_chance = 0.8
+min_height = 28
+max_height = 60
+roughness = 0.55
+hills = 0.34
+min_height_limit = 24
+max_height_limit = 64
+base_slope_bias = 0.48
+max_gradient = 8.5
+footprint_multiplier = 1.0
+flags = ["land"]
+coast_profile = "gentle_beach"
+smooth_beaches = true
+keep_original_terrain = 0.60
+properties = ["temperate", "land", "wet", "overgrown"]
+
+max_sub_biome_count = 1.0
+sub_biome_total_chance = 0.10
+
+[[sub_biomes]]
+id = "grasslands"
+chance = 0.10
+min_radius = 36.0
+max_radius = 96.0
+
+[soil_creep]
+strength = 0.45
+max_step = 2
+max_depth = 3
+
+[stripes]
+enabled = false
+block = "grass"
+period = 5
+thickness = 1
+noise_threshold = 0.5
+
+[water_fill]
+enabled = false
+block = "water"
+max_depth = 0

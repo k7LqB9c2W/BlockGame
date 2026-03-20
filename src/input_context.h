@@ -70,6 +70,7 @@ struct PlayerInputState
     bool jumpHeld{false};
     bool ascendHeld{false};
     bool descendHeld{false};
+    bool sprintHeld{false};
     bool toggleFlightPressed{false};
 };
 

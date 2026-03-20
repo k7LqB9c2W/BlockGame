@@ -2921,6 +2921,7 @@ void updatePhysics(Camera& camera,
                    const PlayerInputState& inputState,
                    float dt)
 {
+    constexpr float kSprintMultiplier = 1.3f;
     if (inputState.toggleFlightPressed)
     {
         camera.flyMode = !camera.flyMode;
@@ -2928,12 +2929,13 @@ void updatePhysics(Camera& camera,
         camera.onGround = false;
     }
 
+    const float currentMoveSpeed = camera.moveSpeed * (inputState.sprintHeld ? kSprintMultiplier : 1.0f);
     const glm::vec2 horizontalInput(inputState.moveDirection.x, inputState.moveDirection.z);
     if (glm::dot(horizontalInput, horizontalInput) > kEpsilon * kEpsilon)
     {
         glm::vec3 normalized = glm::normalize(glm::vec3(horizontalInput.x, 0.0f, horizontalInput.y));
-        camera.velocity.x = normalized.x * camera.moveSpeed;
-        camera.velocity.z = normalized.z * camera.moveSpeed;
+        camera.velocity.x = normalized.x * currentMoveSpeed;
+        camera.velocity.z = normalized.z * currentMoveSpeed;
     }
     else
     {
@@ -2961,7 +2963,7 @@ void updatePhysics(Camera& camera,
         {
             verticalDirection -= 1.0f;
         }
-        camera.velocity.y = verticalDirection * camera.moveSpeed;
+        camera.velocity.y = verticalDirection * currentMoveSpeed;
     }
     else
     {
@@ -3261,7 +3263,7 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
-    std::cout << "Controls: WASD to move, mouse to look, SPACE to jump, double-tap SPACE to toggle flight, SHIFT to descend while flying, . to toggle mouse/UI control, N to set exact/total render distance, F2 to teleport, E to choose block type, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
+    std::cout << "Controls: WASD to move, mouse to look, hold CTRL to sprint, SPACE to jump, double-tap SPACE to toggle flight, SHIFT to descend while flying, . to toggle mouse/UI control, N to set exact/total render distance, F2 to teleport, E to choose block type, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {

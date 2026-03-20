@@ -211,6 +211,8 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
 
     const bool shiftCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
                                        (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+    const bool ctrlCurrentlyPressed = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) ||
+                                      (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
 
     if (captureMouse)
     {
@@ -263,6 +265,8 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
             state.moveDirection += right;
         }
 
+        state.sprintHeld = ctrlCurrentlyPressed;
+
         if (camera.flyMode)
         {
             state.ascendHeld = spaceCurrentlyPressed;
@@ -278,6 +282,7 @@ PlayerInputState computePlayerInputState(GLFWwindow* window,
         state.jumpHeld = false;
         state.ascendHeld = false;
         state.descendHeld = false;
+        state.sprintHeld = false;
         state.toggleFlightPressed = false;
         inputContext.lastSpacePressTimeSeconds = -1.0;
     }

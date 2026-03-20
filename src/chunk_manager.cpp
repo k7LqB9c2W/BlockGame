@@ -4876,9 +4876,20 @@ struct Job
     glm::ivec3 chunkCoord;
     std::shared_ptr<Chunk> chunk;
     std::uint32_t generationEpoch{0};
+    bool initialReadyPriority{false};
 
-    Job(JobType t, const glm::ivec3& coord, std::shared_ptr<Chunk> c, std::uint32_t epoch = 0)
-        : type(t), chunkCoord(coord), chunk(std::move(c)), generationEpoch(epoch) {}
+    Job(JobType t,
+        const glm::ivec3& coord,
+        std::shared_ptr<Chunk> c,
+        std::uint32_t epoch = 0,
+        bool initialPriority = false)
+        : type(t),
+          chunkCoord(coord),
+          chunk(std::move(c)),
+          generationEpoch(epoch),
+          initialReadyPriority(initialPriority)
+    {
+    }
 };
 
 constexpr std::size_t kJobTypeCount = 2;
@@ -4993,6 +5004,18 @@ struct ChunkPriorityKey
                                     buildChunkPriorityKey(rhs, origin, forwardXZ)) < 0;
 }
 
+[[nodiscard]] bool chunkAwaitingInitialReady(const Chunk& chunk) noexcept
+{
+    return chunk.requestTimestampMicros.load(std::memory_order_acquire) > 0 &&
+           !chunk.initialReadyRecorded.load(std::memory_order_acquire);
+}
+
+[[nodiscard]] bool chunkAwaitingInitialVisibleReady(const Chunk& chunk) noexcept
+{
+    return chunkAwaitingInitialReady(chunk) &&
+           chunk.hasBlocks.load(std::memory_order_acquire);
+}
+
 class JobQueue
 {
 public:
@@ -5012,6 +5035,7 @@ private:
     {
         Job job;
         ChunkPriorityKey priority{};
+        int lifecycleBias{0};
         int stageBias{0};
         std::uint64_t sequence{0};
     };
@@ -11364,7 +11388,8 @@ private:
     void enqueueJob(const std::shared_ptr<Chunk>& chunk,
                     JobType type,
                     const glm::ivec3& coord,
-                    std::uint32_t generationEpoch = 0);
+                    std::uint32_t generationEpoch = 0,
+                    bool initialReadyPriority = false);
     void processJob(const Job& job);
     std::shared_ptr<Chunk> popNextChunkForUpload();
     void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk);
@@ -11470,6 +11495,7 @@ private:
     void resetColumnBudgets();
     int baseUploadsPerColumnLimit(int verticalRadius) const noexcept;
     std::size_t estimateUploadQueueSize();
+    std::size_t estimateInitialReadyUploadQueueSize();
     struct UploadBudgets
     {
         std::size_t byteBudget{kUploadBudgetBytesPerFrame};
@@ -11560,6 +11586,7 @@ private:
         glm::ivec3 reservedMaxCoord{0};
         RelightCoordGenerationMap dirtyCoordGenerations{};
         RelightCoordSet forceRemeshCoords{};
+        bool containsInitialReadyCoord{false};
         std::uint64_t maxGeneration{0};
         std::uint64_t estimatedCostUnits{0};
         std::uint64_t sequence{0};
@@ -12062,14 +12089,19 @@ bool JobQueue::JobComparer::operator()(const PrioritizedJob& lhs, const Prioriti
 JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
 {
     const ChunkPriorityKey priority = buildChunkPriorityKey(job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
+    const int lifecycleBias = job.initialReadyPriority ? 0 : 1;
     const int bias = (job.type == JobType::Mesh) ? 0 : 1;
     const std::uint64_t sequence = nextSequence_++;
-    return PrioritizedJob{job, priority, bias, sequence};
+    return PrioritizedJob{job, priority, lifecycleBias, bias, sequence};
 }
 
 int JobQueue::comparePrioritizedJobs(const PrioritizedJob& lhs,
                                      const PrioritizedJob& rhs) noexcept
 {
+    if (lhs.lifecycleBias != rhs.lifecycleBias)
+    {
+        return lhs.lifecycleBias < rhs.lifecycleBias ? -1 : 1;
+    }
     const int priorityComparison = compareChunkPriorityKeys(lhs.priority, rhs.priority);
     if (priorityComparison != 0)
     {
@@ -12109,9 +12141,36 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
 
     const std::size_t generateBacklog = queues_[jobTypeIndex(JobType::Generate)].size();
     const std::size_t meshBacklog = queues_[jobTypeIndex(JobType::Mesh)].size();
+    const bool generateInitialReadyTop =
+        generateBacklog > 0 && queues_[jobTypeIndex(JobType::Generate)].top().lifecycleBias == 0;
+    const bool meshInitialReadyTop =
+        meshBacklog > 0 && queues_[jobTypeIndex(JobType::Mesh)].top().lifecycleBias == 0;
 
     double meshShare = 0.5;
-    if (meshBacklog == 0 && generateBacklog > 0)
+    if (generateInitialReadyTop && meshInitialReadyTop)
+    {
+        if (generateBacklog > meshBacklog * 2)
+        {
+            meshShare = 0.35;
+        }
+        else if (generateBacklog > meshBacklog)
+        {
+            meshShare = 0.40;
+        }
+        else if (meshBacklog > generateBacklog * 2)
+        {
+            meshShare = 0.60;
+        }
+        else if (meshBacklog > generateBacklog)
+        {
+            meshShare = 0.50;
+        }
+        else
+        {
+            meshShare = 0.45;
+        }
+    }
+    else if (meshBacklog == 0 && generateBacklog > 0)
     {
         meshShare = 0.4;
     }
@@ -12171,6 +12230,10 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
 
     const PrioritizedJob& generateTop = queues_[generateIndex].top();
     const PrioritizedJob& meshTop = queues_[meshIndex].top();
+    if (generateTop.lifecycleBias != meshTop.lifecycleBias)
+    {
+        return (generateTop.lifecycleBias < meshTop.lifecycleBias) ? generateIndex : meshIndex;
+    }
     return comparePrioritizedJobs(meshTop, generateTop) <= 0 ? meshIndex : generateIndex;
 }
 
@@ -14455,7 +14518,8 @@ void ChunkManager::Impl::workerThreadFunction()
 void ChunkManager::Impl::enqueueJob(const std::shared_ptr<Chunk>& chunk,
                                     JobType type,
                                     const glm::ivec3& coord,
-                                    std::uint32_t generationEpoch)
+                                    std::uint32_t generationEpoch,
+                                    bool initialReadyPriority)
 {
     if (!chunk)
     {
@@ -14468,7 +14532,7 @@ void ChunkManager::Impl::enqueueJob(const std::shared_ptr<Chunk>& chunk,
     }
 
     chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
-    if (!jobQueue_.push(Job(type, coord, chunk, generationEpoch)))
+    if (!jobQueue_.push(Job(type, coord, chunk, generationEpoch, initialReadyPriority)))
     {
         chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -14599,7 +14663,11 @@ void ChunkManager::Impl::processJob(const Job& job)
         if (chunk->pendingMeshRefresh.exchange(false, std::memory_order_acq_rel))
         {
             chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
-            enqueueJob(chunk, JobType::Mesh, job.chunkCoord);
+            enqueueJob(chunk,
+                       JobType::Mesh,
+                       job.chunkCoord,
+                       0,
+                       chunkAwaitingInitialVisibleReady(*chunk));
             if (shouldTrackRecentEditChunk(chunk->coord))
             {
                 std::ostringstream stream;
@@ -14660,8 +14728,12 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
             continue;
         }
 
+        const bool chunkInitialReady = chunkAwaitingInitialVisibleReady(*chunk);
+        const bool bestInitialReady = bestChunk && chunkAwaitingInitialVisibleReady(*bestChunk);
         if (!bestChunk ||
-            isChunkCoordHigherPriority(chunk->coord, bestChunk->coord, priorityOrigin, priorityForward))
+            (chunkInitialReady != bestInitialReady
+                 ? chunkInitialReady
+                 : isChunkCoordHigherPriority(chunk->coord, bestChunk->coord, priorityOrigin, priorityForward)))
         {
             bestIt = it;
             bestChunk = chunk;
@@ -14694,7 +14766,14 @@ void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk
         return;
     }
 
-    uploadQueue_.emplace_back(chunk);
+    if (chunkAwaitingInitialVisibleReady(*chunk))
+    {
+        uploadQueue_.emplace_front(chunk);
+    }
+    else
+    {
+        uploadQueue_.emplace_back(chunk);
+    }
     chunk->queuedForUpload.store(true, std::memory_order_release);
     if (benchmarkMetrics_.isEnabled())
     {
@@ -14723,7 +14802,7 @@ void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chu
         return;
     }
 
-    if (toFront)
+    if (toFront || chunkAwaitingInitialVisibleReady(*chunk))
     {
         uploadQueue_.emplace_front(chunk);
     }
@@ -15380,12 +15459,28 @@ std::size_t ChunkManager::Impl::estimateUploadQueueSize()
     return uploadQueue_.size();
 }
 
+std::size_t ChunkManager::Impl::estimateInitialReadyUploadQueueSize()
+{
+    std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+    std::size_t readyCount = 0;
+    for (const std::weak_ptr<Chunk>& weakChunk : uploadQueue_)
+    {
+        const std::shared_ptr<Chunk> chunk = weakChunk.lock();
+        if (chunk && chunkAwaitingInitialVisibleReady(*chunk))
+        {
+            ++readyCount;
+        }
+    }
+    return readyCount;
+}
+
 ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int verticalRadius)
 {
     UploadBudgets budgets{};
     budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
     budgets.chunkLimit = 3;
     budgets.queueSize = estimateUploadQueueSize();
+    const std::size_t initialReadyUploads = estimateInitialReadyUploadQueueSize();
     const int uploadDebtSteps = computeBacklogSteps(static_cast<int>(std::min<std::size_t>(
                                                         budgets.queueSize,
                                                         static_cast<std::size_t>(std::numeric_limits<int>::max()))),
@@ -15452,6 +15547,15 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
             budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
             budgets.timeBudgetMs = std::min(2.5, budgets.timeBudgetMs + 0.25 * static_cast<double>(clampedSteps));
         }
+    }
+
+    if (initialReadyUploads > 0)
+    {
+        const int urgencySteps = std::min<int>(static_cast<int>(initialReadyUploads), 2);
+        budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(urgencySteps);
+        budgets.chunkLimit = std::min(budgets.chunkLimit + urgencySteps, 6);
+        budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
+        budgets.timeBudgetMs = std::min(3.0, budgets.timeBudgetMs + 0.35 * static_cast<double>(urgencySteps));
     }
 
     return budgets;
@@ -16261,7 +16365,7 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 
         const std::uint32_t generationEpoch =
             chunk->generationEpoch.fetch_add(1, std::memory_order_acq_rel) + 1u;
-        enqueueJob(chunk, JobType::Generate, coord, generationEpoch);
+        enqueueJob(chunk, JobType::Generate, coord, generationEpoch, true);
         return true;
     }
     catch (const std::exception& ex)
@@ -17581,7 +17685,11 @@ void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk)
         {
             storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
         }
-        enqueueJob(chunk, JobType::Mesh, chunk->coord);
+        enqueueJob(chunk,
+                   JobType::Mesh,
+                   chunk->coord,
+                   0,
+                   chunkAwaitingInitialVisibleReady(*chunk));
         if (shouldTrackRecentEditChunk(chunk->coord))
         {
             std::ostringstream stream;
@@ -17627,7 +17735,11 @@ void ChunkManager::Impl::requestChunkRemeshFromRelight(const std::shared_ptr<Chu
         {
             storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
         }
-        enqueueJob(chunk, JobType::Mesh, chunk->coord);
+        enqueueJob(chunk,
+                   JobType::Mesh,
+                   chunk->coord,
+                   0,
+                   chunkAwaitingInitialVisibleReady(*chunk));
     }
 }
 
@@ -17691,6 +17803,7 @@ void ChunkManager::Impl::mergePendingRelightBatch(PendingRelightBatch& dst, Pend
         }
     }
     dst.forceRemeshCoords.insert(src.forceRemeshCoords.begin(), src.forceRemeshCoords.end());
+    dst.containsInitialReadyCoord = dst.containsInitialReadyCoord || src.containsInitialReadyCoord;
     dst.sequence = (dst.sequence == 0) ? src.sequence : std::min(dst.sequence, src.sequence);
     dst.estimatedCostUnits = 0;
     recomputePendingRelightBatchBounds(dst);
@@ -18028,6 +18141,8 @@ void ChunkManager::Impl::queueRelightRequest(const glm::ivec3& centerCoord, bool
     }
 
     std::shared_ptr<Chunk> chunk = getChunkShared(centerCoord);
+    const bool initialReadyCoord =
+        chunk && chunkAwaitingInitialVisibleReady(*chunk);
     PendingRelightBatch incoming{};
     std::lock_guard<std::mutex> lock(relightStateMutex_);
 
@@ -18048,6 +18163,8 @@ void ChunkManager::Impl::queueRelightRequest(const glm::ivec3& centerCoord, bool
             {
                 pendingBatch.forceRemeshCoords.insert(centerCoord);
             }
+            pendingBatch.containsInitialReadyCoord =
+                pendingBatch.containsInitialReadyCoord || initialReadyCoord;
             pendingBatch.maxGeneration = std::max(pendingBatch.maxGeneration, dirtyIt->second);
             pendingBatch.estimatedCostUnits = 0;
             break;
@@ -18068,6 +18185,7 @@ void ChunkManager::Impl::queueRelightRequest(const glm::ivec3& centerCoord, bool
     {
         incoming.forceRemeshCoords.insert(centerCoord);
     }
+    incoming.containsInitialReadyCoord = initialReadyCoord;
     recomputePendingRelightBatchBounds(incoming);
 
     if (chunk)
@@ -18144,6 +18262,19 @@ bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
         relightBudgetUnitsRemaining_ == relightBudgetUnitsThisFrame_ &&
         relightBatchBudgetRemaining_ == relightBatchBudgetThisFrame_;
 
+    auto isHigherPriorityBatch = [&](const PendingRelightBatch& lhs, const PendingRelightBatch& rhs) noexcept
+    {
+        if (lhs.containsInitialReadyCoord != rhs.containsInitialReadyCoord)
+        {
+            return lhs.containsInitialReadyCoord;
+        }
+
+        return isChunkCoordHigherPriority(relightRegionAnchor(lhs),
+                                          relightRegionAnchor(rhs),
+                                          priorityOrigin,
+                                          priorityForward);
+    };
+
     auto bestFitIt = pendingRelightRegions_.end();
     auto bestFallbackIt = pendingRelightRegions_.end();
     for (auto it = pendingRelightRegions_.begin(); it != pendingRelightRegions_.end(); ++it)
@@ -18158,12 +18289,8 @@ bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
             it->estimatedCostUnits = estimatePendingRelightBatchCost(*it);
         }
 
-        const glm::ivec3 candidateAnchor = relightRegionAnchor(*it);
         if (bestFallbackIt == pendingRelightRegions_.end() ||
-            isChunkCoordHigherPriority(candidateAnchor,
-                                       relightRegionAnchor(*bestFallbackIt),
-                                       priorityOrigin,
-                                       priorityForward))
+            isHigherPriorityBatch(*it, *bestFallbackIt))
         {
             bestFallbackIt = it;
         }
@@ -18171,10 +18298,7 @@ bool ChunkManager::Impl::takePendingRelightBatch(PendingRelightBatch& batch)
         if (it->estimatedCostUnits <= relightBudgetUnitsRemaining_)
         {
             if (bestFitIt == pendingRelightRegions_.end() ||
-                isChunkCoordHigherPriority(candidateAnchor,
-                                           relightRegionAnchor(*bestFitIt),
-                                           priorityOrigin,
-                                           priorityForward))
+                isHigherPriorityBatch(*it, *bestFitIt))
             {
                 bestFitIt = it;
             }

@@ -92,6 +92,14 @@ float4 main(PSInput input) : SV_TARGET
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
+    const uint grassTintIndex = decodeGrassTintIndex(input.materialFlags);
+    float3 albedo = textureSample.rgb;
+    if (grassTintIndex != 0u)
+    {
+        const float3 tint = biomeGrassTint(grassTintIndex);
+        const float tintMask = isGrassSideTint(input.materialFlags) ? grassSideTintMask(wrappedTileUv) : 1.0f;
+        albedo = lerp(albedo, albedo * tint, tintMask);
+    }
     // Far LOD tiles are expected to behave like a sealed opaque terrain shell. Applying the
     // same alpha cutout threshold used by exact voxel geometry turns atlas mip bleed into
     // screen-door holes across the distant terrain, especially on grass and snow edges.
@@ -135,7 +143,7 @@ float4 main(PSInput input) : SV_TARGET
     const float3 directLight = uSunColor.rgb * (diff * directSunGate * faceShade * lerp(1.0f, ao, 0.20f) * 0.16f);
     const float3 baseBounce = ambientTint * 0.018f;
 
-    float3 color = textureSample.rgb * (indirect + baseBounce + directLight);
+    float3 color = albedo * (indirect + baseBounce + directLight);
     if (isWater)
     {
         const float fresnel = pow(1.0f - saturate(dot(normal, viewDir)), 4.0f);

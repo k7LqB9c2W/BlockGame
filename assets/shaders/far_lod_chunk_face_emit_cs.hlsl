@@ -77,6 +77,8 @@ static const uint kColumnFlagWater = 0x02u;
 static const uint kColumnFlagCanopy = 0x04u;
 static const uint kMaterialFlagWater = 0x01u;
 static const uint kMaterialFlagFarLod = 0x02u;
+static const uint kMaterialFlagGrassTintShift = 2u;
+static const uint kMaterialFlagGrassSideTint = 0x20u;
 static const uint kLayerTerrain = 0u;
 static const uint kLayerWater = 1u;
 static const uint kLayerCanopy = 2u;
@@ -93,6 +95,14 @@ static const uint kFaceEast = 4u;
 static const uint kFaceWest = 5u;
 static const uint kDrawRecordOverflowFlag = 0x80000000u;
 static const uint kDrawRecordFaceCountMask = 0x7fffffffu;
+static const uint kBlockGrass = 1u;
+static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockDarkOakLeaves = 12u;
+static const uint kBlockAcaciaLeaves = 16u;
+static const uint kGrassTintDefault = 1u;
+static const uint kGrassTintDarkForest = 2u;
+static const uint kGrassTintTaiga = 3u;
+static const uint kGrassTintWarm = 4u;
 
 groupshared GpuTerrainColumnDescriptor gSharedColumns[kLogicalSize * kLogicalSize];
 groupshared int gSharedTileClosureFloorY;
@@ -183,19 +193,56 @@ float2 projectTileCoord(uint faceId, float3 position)
     return float2(position.x, position.y);
 }
 
-uint packLightingData(uint layerId)
+uint grassTintIndexForColumn(GpuTerrainColumnDescriptor column)
+{
+    if (column.canopyBlock == kBlockDarkOakLeaves)
+    {
+        return kGrassTintDarkForest;
+    }
+    if (column.canopyBlock == kBlockSpruceLeaves)
+    {
+        return kGrassTintTaiga;
+    }
+    if (column.canopyBlock == kBlockAcaciaLeaves)
+    {
+        return kGrassTintWarm;
+    }
+    return kGrassTintDefault;
+}
+
+uint packGrassTintFlags(GpuTerrainColumnDescriptor column, uint blockId, bool sideTintOnly)
+{
+    if (blockId != kBlockGrass)
+    {
+        return 0u;
+    }
+
+    return (grassTintIndexForColumn(column) << kMaterialFlagGrassTintShift) |
+           (sideTintOnly ? kMaterialFlagGrassSideTint : 0u);
+}
+
+uint layerMaterialFlags(GpuTerrainColumnDescriptor column, uint layerId, bool sideFace, uint material)
 {
     uint flags = kMaterialFlagFarLod;
     if (layerId == kLayerWater)
     {
         flags |= kMaterialFlagWater;
     }
+    if (layerId == kLayerTerrain)
+    {
+        flags |= packGrassTintFlags(column, material, sideFace);
+    }
+    return flags;
+}
+
+uint packLightingData(uint flags)
+{
     return 0xF0u | (flags << 10u) | ((gBlockScale & 0xFFu) << 16u);
 }
 
 void emitQuad(uint emittedFaceIndex,
               uint material,
-              uint layerId,
+              uint materialFlags,
               uint faceId,
               float3 p0,
               float3 p1,
@@ -207,7 +254,7 @@ void emitQuad(uint emittedFaceIndex,
     const uint vertexOffset = gVertexBase + localVertexOffset;
     const uint indexOffset = gIndexBase + emittedFaceIndex * 6u;
     const GpuBlockFaceUv uv = gBlockFaceUvs[material * 6u + faceId];
-    const uint lightingData = packLightingData(layerId);
+    const uint lightingData = packLightingData(materialFlags);
 
     WorldVertex v0;
     v0.position = p0;
@@ -265,9 +312,10 @@ void emitTopPlane(uint planeIndex, uint layerId)
         const float z0 = (float)gWorldMinZ + (float)(z * gBlockScale);
         const float x1 = x0 + (float)(width * gBlockScale);
         const float z1 = z0 + (float)(height * gBlockScale);
+        const uint material = layerTopBlock(column, layerId);
         emitQuad(faceBase + descriptorIndex,
-                 layerTopBlock(column, layerId),
-                 layerId,
+                 material,
+                 layerMaterialFlags(column, layerId, false, material),
                  kFaceTop,
                  float3(x0, y, z0),
                  float3(x0, y, z1),
@@ -320,7 +368,16 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
             p2 = float3(x, (float)segmentTopExclusive, z1);
             p3 = float3(x, (float)segmentTopExclusive, z0);
             normal = float3(1.0f, 0.0f, 0.0f);
-            emitQuad(faceBase + descriptorIndex, layerSideBlock(current, layerId), layerId, kFaceEast, p0, p3, p2, p1, normal);
+            const uint material = layerSideBlock(current, layerId);
+            emitQuad(faceBase + descriptorIndex,
+                     material,
+                     layerMaterialFlags(current, layerId, true, material),
+                     kFaceEast,
+                     p0,
+                     p3,
+                     p2,
+                     p1,
+                     normal);
         }
         else if (dirId == 1u)
         {
@@ -332,7 +389,16 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
             p2 = float3(x, (float)segmentTopExclusive, z1);
             p3 = float3(x, (float)segmentBottom, z1);
             normal = float3(-1.0f, 0.0f, 0.0f);
-            emitQuad(faceBase + descriptorIndex, layerSideBlock(current, layerId), layerId, kFaceWest, p0, p3, p2, p1, normal);
+            const uint material = layerSideBlock(current, layerId);
+            emitQuad(faceBase + descriptorIndex,
+                     material,
+                     layerMaterialFlags(current, layerId, true, material),
+                     kFaceWest,
+                     p0,
+                     p3,
+                     p2,
+                     p1,
+                     normal);
         }
         else if (dirId == 2u)
         {
@@ -344,7 +410,16 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
             p2 = float3(x1, (float)segmentTopExclusive, z);
             p3 = float3(x1, (float)segmentBottom, z);
             normal = float3(0.0f, 0.0f, 1.0f);
-            emitQuad(faceBase + descriptorIndex, layerSideBlock(current, layerId), layerId, kFaceSouth, p0, p3, p2, p1, normal);
+            const uint material = layerSideBlock(current, layerId);
+            emitQuad(faceBase + descriptorIndex,
+                     material,
+                     layerMaterialFlags(current, layerId, true, material),
+                     kFaceSouth,
+                     p0,
+                     p3,
+                     p2,
+                     p1,
+                     normal);
         }
         else
         {
@@ -356,7 +431,16 @@ void emitSidePlane(uint planeIndex, uint layerId, uint dirId, uint slice)
             p2 = float3(x1, (float)segmentTopExclusive, z);
             p3 = float3(x0, (float)segmentTopExclusive, z);
             normal = float3(0.0f, 0.0f, -1.0f);
-            emitQuad(faceBase + descriptorIndex, layerSideBlock(current, layerId), layerId, kFaceNorth, p0, p3, p2, p1, normal);
+            const uint material = layerSideBlock(current, layerId);
+            emitQuad(faceBase + descriptorIndex,
+                     material,
+                     layerMaterialFlags(current, layerId, true, material),
+                     kFaceNorth,
+                     p0,
+                     p3,
+                     p2,
+                     p1,
+                     normal);
         }
     }
 }

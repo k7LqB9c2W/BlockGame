@@ -12,6 +12,9 @@ struct DecodedVertexLighting
 
 static const uint kMaterialFlagWater = 0x01u;
 static const uint kMaterialFlagFarLod = 0x02u;
+static const uint kMaterialFlagGrassTintShift = 2u;
+static const uint kMaterialFlagGrassTintMask = 0x1Cu;
+static const uint kMaterialFlagGrassSideTint = 0x20u;
 
 struct FogBlendResult
 {
@@ -67,6 +70,38 @@ float faceShadeMultiplier(float3 normal)
         return 0.80f;
     }
     return 0.60f;
+}
+
+uint decodeGrassTintIndex(uint materialFlags)
+{
+    return (materialFlags & kMaterialFlagGrassTintMask) >> kMaterialFlagGrassTintShift;
+}
+
+bool isGrassSideTint(uint materialFlags)
+{
+    return (materialFlags & kMaterialFlagGrassSideTint) != 0u;
+}
+
+float3 biomeGrassTint(uint tintIndex)
+{
+    if (tintIndex == 2u)
+    {
+        return float3(80.0f, 122.0f, 50.0f) / 255.0f;
+    }
+    if (tintIndex == 3u)
+    {
+        return float3(134.0f, 183.0f, 131.0f) / 255.0f;
+    }
+    if (tintIndex == 4u)
+    {
+        return float3(191.0f, 183.0f, 85.0f) / 255.0f;
+    }
+    return float3(121.0f, 192.0f, 90.0f) / 255.0f;
+}
+
+float grassSideTintMask(float2 wrappedTileUv)
+{
+    return smoothstep(0.70f, 0.84f, wrappedTileUv.y);
 }
 
 float3 computeTerrainFogColor(float3 viewDir, float3 topSkyColorSrgb, float3 horizonSkyColorSrgb)

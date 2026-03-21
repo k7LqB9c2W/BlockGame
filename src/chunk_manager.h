@@ -128,6 +128,8 @@ enum class BlockId : std::uint8_t
     DarkOakLeaves = 12,
     BirchLog = 13,
     BirchLeaves = 14,
+    AcaciaLog = 15,
+    AcaciaLeaves = 16,
     Count
 };
 

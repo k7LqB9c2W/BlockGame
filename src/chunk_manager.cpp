@@ -3458,6 +3458,8 @@ constexpr std::array<BlockLightingProperties, toIndex(BlockId::Count)> kBlockLig
     {false, 1, 0, true},               // DarkOakLeaves
     {true, kMaxLightLevel, 0, true},   // BirchLog
     {false, 1, 0, true},               // BirchLeaves
+    {true, kMaxLightLevel, 0, true},   // AcaciaLog
+    {false, 1, 0, true},               // AcaciaLeaves
 }};
 
 inline const BlockLightingProperties& blockLightingProperties(BlockId block) noexcept
@@ -3515,6 +3517,12 @@ inline std::uint32_t packVertexLighting(std::uint8_t packedLight,
            (static_cast<std::uint32_t>(flags) << 10);
 }
 
+inline std::uint32_t applyVertexFlags(std::uint32_t packedLighting, std::uint8_t flags) noexcept
+{
+    return (packedLighting & ~(static_cast<std::uint32_t>(0x3Fu) << 10)) |
+           (static_cast<std::uint32_t>(flags & 0x3Fu) << 10);
+}
+
 inline std::uint8_t aoLevelFromPackedVertexLighting(std::uint32_t packed) noexcept
 {
     return static_cast<std::uint8_t>((packed >> 8) & 0x03u);
@@ -3523,6 +3531,47 @@ inline std::uint8_t aoLevelFromPackedVertexLighting(std::uint32_t packed) noexce
 inline std::uint8_t vertexFlagsFromPackedLighting(std::uint32_t packed) noexcept
 {
     return static_cast<std::uint8_t>((packed >> 10) & 0x3Fu);
+}
+
+constexpr std::uint8_t kMaterialFlagGrassTintShiftCpu = 2u;
+constexpr std::uint8_t kMaterialFlagGrassTintMaskCpu = 0x1Cu;
+constexpr std::uint8_t kMaterialFlagGrassSideTintCpu = 0x20u;
+
+enum class GrassTintIndex : std::uint8_t
+{
+    None = 0,
+    Default = 1,
+    DarkForest = 2,
+    Taiga = 3,
+    Warm = 4,
+};
+
+inline std::uint8_t packGrassTintFlags(GrassTintIndex tintIndex, bool sideTintOnly) noexcept
+{
+    const std::uint8_t tintBits =
+        (static_cast<std::uint8_t>(tintIndex) << kMaterialFlagGrassTintShiftCpu) & kMaterialFlagGrassTintMaskCpu;
+    return static_cast<std::uint8_t>(tintBits | (sideTintOnly ? kMaterialFlagGrassSideTintCpu : 0u));
+}
+
+inline GrassTintIndex grassTintIndexForBiome(const terrain::BiomeDefinition* biome) noexcept
+{
+    if (!biome)
+    {
+        return GrassTintIndex::Default;
+    }
+    if (biome->id == "dark_forest")
+    {
+        return GrassTintIndex::DarkForest;
+    }
+    if (terrain::isTaigaBiome(*biome))
+    {
+        return GrassTintIndex::Taiga;
+    }
+    if (biome->id == "savanna" || biome->id == "desert")
+    {
+        return GrassTintIndex::Warm;
+    }
+    return GrassTintIndex::Default;
 }
 
 inline int lightingMetricFromPackedVertex(std::uint32_t packed) noexcept
@@ -3539,7 +3588,8 @@ inline bool isAlphaCutoutBlock(BlockId block) noexcept
     return block == BlockId::Leaves ||
            block == BlockId::SpruceLeaves ||
            block == BlockId::DarkOakLeaves ||
-           block == BlockId::BirchLeaves;
+           block == BlockId::BirchLeaves ||
+           block == BlockId::AcaciaLeaves;
 }
 
 inline bool isNonOpaqueBlock(BlockId block) noexcept
@@ -3599,6 +3649,16 @@ constexpr int kDarkOakCanopyBaseOffset = 2;
 constexpr int kDarkOakCanopyTopOffset = kDarkOakCanopyLayers - kDarkOakCanopyBaseOffset - 1;
 constexpr int kDarkOakMaxHorizontalReach = kDarkOakBranchMaxLength + 1;
 constexpr std::array<int, kDarkOakCanopyLayers> kDarkOakCanopyRadii{{2, 2, 2, 1, 1}};
+constexpr int kAcaciaCellSize = 11;
+constexpr int kAcaciaMinTrunkHeight = 6;
+constexpr int kAcaciaMaxTrunkHeight = 9;
+constexpr int kAcaciaMaxLeanLength = 3;
+constexpr int kAcaciaMainCanopyLayers = 4;
+constexpr int kAcaciaSecondaryCanopyLayers = 3;
+constexpr int kAcaciaMainCanopyTopOffset = 2;
+constexpr int kAcaciaMaxHorizontalReach = 7;
+constexpr std::array<int, kAcaciaMainCanopyLayers> kAcaciaMainCanopyRadii{{3, 3, 2, 1}};
+constexpr std::array<int, kAcaciaSecondaryCanopyLayers> kAcaciaSecondaryCanopyRadii{{2, 2, 1}};
 
 struct DefaultTreeCandidate
 {
@@ -3618,6 +3678,15 @@ struct DefaultTreeBlockPalette
 };
 
 struct DarkOakTreeCandidate
+{
+    int originX{0};
+    int originZ{0};
+    int groundWorldY{0};
+    int trunkHeight{0};
+    float priority{0.0f};
+};
+
+struct AcaciaTreeCandidate
 {
     int originX{0};
     int originZ{0};
@@ -3886,6 +3955,113 @@ inline bool darkOakCanopyOccupiesCell(int originX,
     return true;
 }
 
+inline glm::ivec2 acaciaOriginForCell(int cellX, int cellZ) noexcept
+{
+    const int offsetX = 2 + static_cast<int>(hashToUnitFloat32(cellX, 1703, cellZ) * 7.0f);
+    const int offsetZ = 2 + static_cast<int>(hashToUnitFloat32(cellX, 1811, cellZ) * 7.0f);
+    return glm::ivec2(cellX * kAcaciaCellSize + offsetX,
+                      cellZ * kAcaciaCellSize + offsetZ);
+}
+
+inline bool isAcaciaOrigin(int worldX, int worldZ) noexcept
+{
+    const int cellX = floorDiv(worldX, kAcaciaCellSize);
+    const int cellZ = floorDiv(worldZ, kAcaciaCellSize);
+    return acaciaOriginForCell(cellX, cellZ) == glm::ivec2(worldX, worldZ);
+}
+
+inline float acaciaPriority(int originX, int groundWorldY, int originZ) noexcept
+{
+    return hashToUnitFloat32(originX, groundWorldY + 919, originZ);
+}
+
+inline int acaciaTrunkHeight(int originX, int groundWorldY, int originZ) noexcept
+{
+    const int height = kAcaciaMinTrunkHeight +
+                       static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 947, originZ) *
+                                        static_cast<float>(kAcaciaMaxTrunkHeight - kAcaciaMinTrunkHeight + 1));
+    return std::clamp(height, kAcaciaMinTrunkHeight, kAcaciaMaxTrunkHeight);
+}
+
+inline float acaciaSpawnChance(const BiomeDefinition& biome, float normalizedDensity) noexcept
+{
+    const float baseChance = 0.28f + normalizedDensity * 0.18f;
+    const float densityScale = 0.65f + std::max(biome.treeDensityMultiplier, 0.0f) * 0.12f;
+    return std::clamp(baseChance * densityScale, 0.20f, 0.78f);
+}
+
+inline int acaciaLeanDir(int originX, int groundWorldY, int originZ) noexcept
+{
+    return static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 971, originZ) * 4.0f) & 3;
+}
+
+inline int acaciaLeanLength(int originX, int groundWorldY, int originZ) noexcept
+{
+    const int length = 1 + static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 997, originZ) * 3.0f);
+    return std::clamp(length, 1, kAcaciaMaxLeanLength);
+}
+
+inline int acaciaBendStart(int originX, int groundWorldY, int originZ, int trunkHeight) noexcept
+{
+    const int minStart = std::max(2, trunkHeight / 3);
+    const int maxStart = std::max(minStart, trunkHeight - 3);
+    const int span = maxStart - minStart + 1;
+    const int offset = static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 1031, originZ) *
+                                        static_cast<float>(span));
+    return std::clamp(minStart + offset, minStart, maxStart);
+}
+
+inline bool acaciaHasSecondaryBranch(int originX, int groundWorldY, int originZ) noexcept
+{
+    return hashToUnitFloat32(originX, groundWorldY + 1063, originZ) < 0.55f;
+}
+
+inline int acaciaSecondaryDir(int originX, int groundWorldY, int originZ, int primaryDir) noexcept
+{
+    const int delta = 1 + (static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 1097, originZ) * 3.0f) % 3);
+    return (primaryDir + delta) & 3;
+}
+
+inline int acaciaSecondaryLength(int originX, int groundWorldY, int originZ) noexcept
+{
+    const int length = 1 + static_cast<int>(hashToUnitFloat32(originX, groundWorldY + 1129, originZ) * 2.0f);
+    return std::clamp(length, 1, 2);
+}
+
+inline bool acaciaCanopyOccupiesCell(int centerX,
+                                     int centerZ,
+                                     int worldX,
+                                     int worldZ,
+                                     int radius,
+                                     int layer,
+                                     bool secondary) noexcept
+{
+    if (radius <= 0)
+    {
+        return worldX == centerX && worldZ == centerZ;
+    }
+
+    const int dx = std::abs(worldX - centerX);
+    const int dz = std::abs(worldZ - centerZ);
+    const int chebyshev = std::max(dx, dz);
+    if (chebyshev > radius)
+    {
+        return false;
+    }
+
+    if (layer == 0)
+    {
+        return (dx + dz) <= (secondary ? radius + 1 : radius + 2);
+    }
+
+    if (chebyshev == radius && dx + dz > radius + 1)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 inline int defaultTreeTrunkHeight(int worldX, int groundWorldY, int worldZ) noexcept
 {
     int height = kDefaultTreeMinHeight +
@@ -4071,7 +4247,7 @@ inline bool tryBuildDefaultTreeCandidate(int originX,
     }
 
     const BiomeDefinition& biome = *columnSample.dominantBiome;
-    if (terrain::isTaigaBiome(biome) || biome.id == "dark_forest")
+    if (terrain::isTaigaBiome(biome) || biome.id == "dark_forest" || biome.id == "savanna")
     {
         return false;
     }
@@ -4176,6 +4352,165 @@ inline bool shouldDarkOakWinTie(const DarkOakTreeCandidate& candidate,
     }
 
     return candidate.originZ < other.originZ;
+}
+
+inline bool shouldAcaciaWinTie(const AcaciaTreeCandidate& candidate,
+                               const AcaciaTreeCandidate& other) noexcept
+{
+    if (candidate.priority != other.priority)
+    {
+        return candidate.priority > other.priority;
+    }
+
+    if (candidate.originX != other.originX)
+    {
+        return candidate.originX < other.originX;
+    }
+
+    return candidate.originZ < other.originZ;
+}
+
+template <typename Callback>
+inline bool forEachAcaciaTreeBlock(int originX,
+                                   int originZ,
+                                   int groundWorldY,
+                                   int trunkHeight,
+                                   BlockId trunkBlock,
+                                   BlockId leavesBlock,
+                                   Callback&& callback)
+{
+    static constexpr std::array<int, 4> kDirX{{1, -1, 0, 0}};
+    static constexpr std::array<int, 4> kDirZ{{0, 0, 1, -1}};
+
+    const int leanDir = acaciaLeanDir(originX, groundWorldY, originZ);
+    const int leanLength = acaciaLeanLength(originX, groundWorldY, originZ);
+    const int bendStart = acaciaBendStart(originX, groundWorldY, originZ, trunkHeight);
+
+    int tipX = originX;
+    int tipZ = originZ;
+    int tipY = groundWorldY;
+
+    for (int dy = 0; dy < trunkHeight; ++dy)
+    {
+        if (dy >= bendStart)
+        {
+            const int leanStep = std::min(dy - bendStart + 1, leanLength);
+            tipX = originX + kDirX[static_cast<std::size_t>(leanDir)] * leanStep;
+            tipZ = originZ + kDirZ[static_cast<std::size_t>(leanDir)] * leanStep;
+        }
+        else
+        {
+            tipX = originX;
+            tipZ = originZ;
+        }
+
+        tipY = groundWorldY + dy;
+        if (callback(tipX, tipY, tipZ, trunkBlock))
+        {
+            return true;
+        }
+    }
+
+    const int mainCenterX = tipX;
+    const int mainCenterZ = tipZ;
+    const int mainBaseWorldY = tipY - kAcaciaMainCanopyTopOffset;
+    for (int layer = 0; layer < kAcaciaMainCanopyLayers; ++layer)
+    {
+        const int radius = kAcaciaMainCanopyRadii[static_cast<std::size_t>(layer)];
+        const int worldY = mainBaseWorldY + layer;
+        for (int worldX = mainCenterX - radius; worldX <= mainCenterX + radius; ++worldX)
+        {
+            for (int worldZ = mainCenterZ - radius; worldZ <= mainCenterZ + radius; ++worldZ)
+            {
+                if (!acaciaCanopyOccupiesCell(mainCenterX, mainCenterZ, worldX, worldZ, radius, layer, false))
+                {
+                    continue;
+                }
+
+                if (worldX == tipX && worldZ == tipZ && worldY <= tipY)
+                {
+                    continue;
+                }
+
+                if (callback(worldX, worldY, worldZ, leavesBlock))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    const int hangingLeavesWorldY = mainBaseWorldY - 1;
+    for (int worldX = mainCenterX - 2; worldX <= mainCenterX + 2; ++worldX)
+    {
+        for (int worldZ = mainCenterZ - 2; worldZ <= mainCenterZ + 2; ++worldZ)
+        {
+            const int dx = std::abs(worldX - mainCenterX);
+            const int dz = std::abs(worldZ - mainCenterZ);
+            if (std::max(dx, dz) != 2 || dx + dz > 3)
+            {
+                continue;
+            }
+
+            if (callback(worldX, hangingLeavesWorldY, worldZ, leavesBlock))
+            {
+                return true;
+            }
+        }
+    }
+
+    if (!acaciaHasSecondaryBranch(originX, groundWorldY, originZ))
+    {
+        return false;
+    }
+
+    const int secondaryDir = acaciaSecondaryDir(originX, groundWorldY, originZ, leanDir);
+    const int secondaryLength = acaciaSecondaryLength(originX, groundWorldY, originZ);
+    const int branchStartY = std::max(groundWorldY + bendStart, tipY - 2);
+    int branchX = originX;
+    int branchZ = originZ;
+    for (int step = 1; step <= secondaryLength; ++step)
+    {
+        branchX = tipX + kDirX[static_cast<std::size_t>(secondaryDir)] * step;
+        branchZ = tipZ + kDirZ[static_cast<std::size_t>(secondaryDir)] * step;
+        const int branchY = branchStartY + std::min(step - 1, 1);
+        if (callback(branchX, branchY, branchZ, trunkBlock))
+        {
+            return true;
+        }
+    }
+
+    const int secondaryCenterX = branchX;
+    const int secondaryCenterZ = branchZ;
+    const int secondaryBaseWorldY = branchStartY - 1;
+    for (int layer = 0; layer < kAcaciaSecondaryCanopyLayers; ++layer)
+    {
+        const int radius = kAcaciaSecondaryCanopyRadii[static_cast<std::size_t>(layer)];
+        const int worldY = secondaryBaseWorldY + layer;
+        for (int worldX = secondaryCenterX - radius; worldX <= secondaryCenterX + radius; ++worldX)
+        {
+            for (int worldZ = secondaryCenterZ - radius; worldZ <= secondaryCenterZ + radius; ++worldZ)
+            {
+                if (!acaciaCanopyOccupiesCell(secondaryCenterX, secondaryCenterZ, worldX, worldZ, radius, layer, true))
+                {
+                    continue;
+                }
+
+                if ((worldX == branchX && worldZ == branchZ && worldY <= branchStartY + 1) ||
+                    (worldX == tipX && worldZ == tipZ && worldY <= tipY))
+                {
+                    continue;
+                }
+
+                if (callback(worldX, worldY, worldZ, leavesBlock))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 template <typename Callback>
@@ -4444,6 +4779,28 @@ inline bool darkOakTreesTouchOrOverlap(const DarkOakTreeCandidate& a,
            rangesTouchWithinMargin(minAZ, maxAZ, minBZ, maxBZ, 0);
 }
 
+inline bool acaciaTreesTouchOrOverlap(const AcaciaTreeCandidate& a,
+                                      const AcaciaTreeCandidate& b) noexcept
+{
+    const int minAX = a.originX - kAcaciaMaxHorizontalReach;
+    const int maxAX = a.originX + kAcaciaMaxHorizontalReach;
+    const int minAZ = a.originZ - kAcaciaMaxHorizontalReach;
+    const int maxAZ = a.originZ + kAcaciaMaxHorizontalReach;
+    const int minAY = a.groundWorldY;
+    const int maxAY = a.groundWorldY + a.trunkHeight + 1;
+
+    const int minBX = b.originX - kAcaciaMaxHorizontalReach;
+    const int maxBX = b.originX + kAcaciaMaxHorizontalReach;
+    const int minBZ = b.originZ - kAcaciaMaxHorizontalReach;
+    const int maxBZ = b.originZ + kAcaciaMaxHorizontalReach;
+    const int minBY = b.groundWorldY;
+    const int maxBY = b.groundWorldY + b.trunkHeight + 1;
+
+    return rangesTouchWithinMargin(minAX, maxAX, minBX, maxBX, 0) &&
+           rangesTouchWithinMargin(minAY, maxAY, minBY, maxBY, 0) &&
+           rangesTouchWithinMargin(minAZ, maxAZ, minBZ, maxBZ, 0);
+}
+
 template <typename SampleColumnFn, typename SurfaceBlockFn, typename DensityFn>
 inline bool tryBuildDarkOakCandidate(int originX,
                                      int originZ,
@@ -4538,6 +4895,74 @@ inline bool tryBuildDarkOakCandidate(int originX,
 }
 
 template <typename SampleColumnFn, typename SurfaceBlockFn, typename DensityFn>
+inline bool tryBuildAcaciaCandidate(int originX,
+                                    int originZ,
+                                    const ColumnSample& columnSample,
+                                    SampleColumnFn&& sampleColumn,
+                                    SurfaceBlockFn&& surfaceBlockAt,
+                                    DensityFn&& densityAt,
+                                    AcaciaTreeCandidate& outCandidate)
+{
+    if (!columnSample.dominantBiome || !columnSample.dominantBiome->generatesTrees)
+    {
+        return false;
+    }
+
+    const BiomeDefinition& biome = *columnSample.dominantBiome;
+    if (biome.id != "savanna" ||
+        columnSample.dominantWeight < kTreeBiomeWeightThreshold ||
+        !isAcaciaOrigin(originX, originZ))
+    {
+        return false;
+    }
+
+    const BlockId surfaceBlock = surfaceBlockAt(originX, originZ, columnSample);
+    if (surfaceBlock != BlockId::Grass)
+    {
+        return false;
+    }
+
+    const int groundWorldY = columnSample.surfaceY;
+    if (groundWorldY <= 2)
+    {
+        return false;
+    }
+
+    for (int dx = -2; dx <= 2; ++dx)
+    {
+        for (int dz = -2; dz <= 2; ++dz)
+        {
+            const ColumnSample neighborSample = sampleColumn(originX + dx, originZ + dz);
+            if (!neighborSample.dominantBiome || neighborSample.dominantBiome->id != biome.id)
+            {
+                return false;
+            }
+            if (std::abs(neighborSample.surfaceY - groundWorldY) > 2)
+            {
+                return false;
+            }
+        }
+    }
+
+    const float density = densityAt(originX, originZ);
+    const float normalizedDensity = std::clamp((density + 1.0f) * 0.5f, 0.0f, 1.0f);
+    const int cellX = floorDiv(originX, kAcaciaCellSize);
+    const int cellZ = floorDiv(originZ, kAcaciaCellSize);
+    const float occupancyRoll = hashToUnitFloat32(cellX, groundWorldY + 1153, cellZ);
+    if (occupancyRoll > acaciaSpawnChance(biome, normalizedDensity))
+    {
+        return false;
+    }
+
+    outCandidate.originX = originX;
+    outCandidate.originZ = originZ;
+    outCandidate.groundWorldY = groundWorldY;
+    outCandidate.trunkHeight = acaciaTrunkHeight(originX, groundWorldY, originZ);
+    outCandidate.priority = acaciaPriority(originX, groundWorldY, originZ);
+    return true;
+}
+
+template <typename SampleColumnFn, typename SurfaceBlockFn, typename DensityFn>
 inline bool darkOakHasSpacingConflict(const DarkOakTreeCandidate& candidate,
                                       SampleColumnFn&& sampleColumn,
                                       SurfaceBlockFn&& surfaceBlockAt,
@@ -4583,8 +5008,55 @@ inline bool darkOakHasSpacingConflict(const DarkOakTreeCandidate& candidate,
     return false;
 }
 
+template <typename SampleColumnFn, typename SurfaceBlockFn, typename DensityFn>
+inline bool acaciaHasSpacingConflict(const AcaciaTreeCandidate& candidate,
+                                     SampleColumnFn&& sampleColumn,
+                                     SurfaceBlockFn&& surfaceBlockAt,
+                                     DensityFn&& densityAt)
+{
+    for (int dx = -kAcaciaCellSize; dx <= kAcaciaCellSize; ++dx)
+    {
+        for (int dz = -kAcaciaCellSize; dz <= kAcaciaCellSize; ++dz)
+        {
+            if (dx == 0 && dz == 0)
+            {
+                continue;
+            }
+
+            const int neighborX = candidate.originX + dx;
+            const int neighborZ = candidate.originZ + dz;
+            const ColumnSample neighborSample = sampleColumn(neighborX, neighborZ);
+
+            AcaciaTreeCandidate neighborCandidate{};
+            if (!tryBuildAcaciaCandidate(neighborX,
+                                         neighborZ,
+                                         neighborSample,
+                                         sampleColumn,
+                                         surfaceBlockAt,
+                                         densityAt,
+                                         neighborCandidate))
+            {
+                continue;
+            }
+
+            if (!acaciaTreesTouchOrOverlap(candidate, neighborCandidate))
+            {
+                continue;
+            }
+
+            if (!shouldAcaciaWinTie(candidate, neighborCandidate))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 constexpr int kStructureRegionSize = 128;
-constexpr int kMaxStructureHorizontalRadius = std::max(kTaigaSpruceMaxLeafRadius + 1, kDarkOakMaxHorizontalReach);
+constexpr int kMaxStructureHorizontalRadius =
+    std::max(std::max(kTaigaSpruceMaxLeafRadius + 1, kDarkOakMaxHorizontalReach), kAcaciaMaxHorizontalReach);
 
 struct StructureAabb
 {
@@ -4604,6 +5076,7 @@ enum class StructureType : std::uint8_t
     DefaultTree = 0,
     TaigaSpruce = 1,
     DarkOak = 2,
+    Acacia = 3,
 };
 
 struct StructureInstance
@@ -4690,6 +5163,17 @@ inline bool forEachStructureVoxel(const StructureInstance& instance, Callback&& 
             }
         }
         return false;
+    }
+
+    if (instance.type == StructureType::Acacia)
+    {
+        return forEachAcaciaTreeBlock(instance.origin.x,
+                                      instance.origin.z,
+                                      instance.origin.y,
+                                      instance.trunkHeight,
+                                      instance.trunkBlock,
+                                      instance.leavesBlock,
+                                      std::forward<Callback>(callback));
     }
 
     if (instance.type == StructureType::DarkOak)
@@ -5052,6 +5536,43 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
                 instance.bounds.max = glm::ivec3(candidate.originX + 1 + kDarkOakBranchMaxLength,
                                                  candidate.groundWorldY + candidate.trunkHeight + kDarkOakCanopyTopOffset,
                                                  candidate.originZ + 1 + kDarkOakBranchMaxLength);
+                region.instances.push_back(instance);
+                continue;
+            }
+
+            if (biome.id == "savanna")
+            {
+                AcaciaTreeCandidate candidate{};
+                if (!tryBuildAcaciaCandidate(worldX,
+                                             worldZ,
+                                             columnSample,
+                                             sampleColumn,
+                                             resolvedSurfaceBlockAt,
+                                             densityAt,
+                                             candidate))
+                {
+                    continue;
+                }
+
+                if (acaciaHasSpacingConflict(candidate, sampleColumn, resolvedSurfaceBlockAt, densityAt))
+                {
+                    continue;
+                }
+
+                StructureInstance instance{};
+                instance.type = StructureType::Acacia;
+                instance.origin = glm::ivec3(candidate.originX, candidate.groundWorldY, candidate.originZ);
+                instance.trunkHeight = candidate.trunkHeight;
+                instance.priority = candidate.priority;
+                instance.maxLodLevel = 4;
+                instance.trunkBlock = BlockId::AcaciaLog;
+                instance.leavesBlock = BlockId::AcaciaLeaves;
+                instance.bounds.min = glm::ivec3(candidate.originX - kAcaciaMaxHorizontalReach,
+                                                 candidate.groundWorldY,
+                                                 candidate.originZ - kAcaciaMaxHorizontalReach);
+                instance.bounds.max = glm::ivec3(candidate.originX + kAcaciaMaxHorizontalReach,
+                                                 candidate.groundWorldY + candidate.trunkHeight + 1,
+                                                 candidate.originZ + kAcaciaMaxHorizontalReach);
                 region.instances.push_back(instance);
                 continue;
             }
@@ -7369,12 +7890,14 @@ private:
     [[nodiscard]] static int structureMaterialPriority(BlockId block) noexcept
     {
         if (block == BlockId::SpruceLog || block == BlockId::Wood ||
-            block == BlockId::DarkOakLog || block == BlockId::BirchLog)
+            block == BlockId::DarkOakLog || block == BlockId::BirchLog ||
+            block == BlockId::AcaciaLog)
         {
             return 4;
         }
         if (block == BlockId::SpruceLeaves || block == BlockId::Leaves ||
-            block == BlockId::DarkOakLeaves || block == BlockId::BirchLeaves)
+            block == BlockId::DarkOakLeaves || block == BlockId::BirchLeaves ||
+            block == BlockId::AcaciaLeaves)
         {
             return 3;
         }
@@ -13436,6 +13959,18 @@ void ChunkManager::Impl::setBlockTextureAtlasConfig(const BlockTextureAtlasConfi
         assignFace(BlockId::BirchLeaves, face, {0, 19});
     }
 
+    assignFace(BlockId::AcaciaLog, BlockFace::Top, {0, 20});
+    assignFace(BlockId::AcaciaLog, BlockFace::Bottom, {0, 20});
+    for (BlockFace face : {BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::AcaciaLog, face, {0, 21});
+    }
+
+    for (BlockFace face : {BlockFace::Top, BlockFace::Bottom, BlockFace::North, BlockFace::South, BlockFace::East, BlockFace::West})
+    {
+        assignFace(BlockId::AcaciaLeaves, face, {0, 22});
+    }
+
     blockAtlasConfigured_ = true;
     {
         std::vector<FarTerrainManager::GpuBlockFaceUv> uvTable;
@@ -14779,6 +15314,45 @@ glm::vec3 ChunkManager::Impl::findSafeSpawnPosition(float worldX, float worldZ) 
                                         }
                                         return false;
                                     });
+            return highestCover;
+        }
+
+        if (biome.id == "savanna")
+        {
+            AcaciaTreeCandidate acaciaCandidate{};
+            if (!tryBuildAcaciaCandidate(originX,
+                                         originZ,
+                                         columnSample,
+                                         sampleColumnAt,
+                                         resolvedSurfaceBlockAt,
+                                         computeDefaultTreeDensity,
+                                         acaciaCandidate))
+            {
+                return ColumnManager::kNoHeight;
+            }
+
+            if (acaciaHasSpacingConflict(acaciaCandidate,
+                                         sampleColumnAt,
+                                         resolvedSurfaceBlockAt,
+                                         computeDefaultTreeDensity))
+            {
+                return ColumnManager::kNoHeight;
+            }
+
+            int highestCover = ColumnManager::kNoHeight;
+            forEachAcaciaTreeBlock(acaciaCandidate.originX,
+                                   acaciaCandidate.originZ,
+                                   acaciaCandidate.groundWorldY,
+                                   acaciaCandidate.trunkHeight,
+                                   BlockId::AcaciaLog,
+                                   BlockId::AcaciaLeaves,
+                                   [&](int blockX, int blockY, int blockZ, BlockId) {
+                                       if (blockX == targetX && blockZ == targetZ)
+                                       {
+                                           highestCover = std::max(highestCover, blockY);
+                                       }
+                                       return false;
+                                   });
             return highestCover;
         }
 
@@ -17967,6 +18541,30 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     const int baseWorldY = chunk.minWorldY;
     const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
     const glm::vec3 chunkOrigin(static_cast<float>(baseWorldX), static_cast<float>(baseWorldY), static_cast<float>(baseWorldZ));
+    std::array<std::uint8_t, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> grassTintByColumn{};
+    for (int localX = 0; localX < kChunkSizeX; ++localX)
+    {
+        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+        {
+            const ColumnSample columnSample = sampleColumn(baseWorldX + localX,
+                                                           baseWorldZ + localZ,
+                                                           baseWorldY,
+                                                           baseWorldY + kChunkSizeY - 1);
+            grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)] =
+                static_cast<std::uint8_t>(grassTintIndexForBiome(columnSample.dominantBiome));
+        }
+    }
+
+    auto grassTintForLocal = [&](int localX, int localZ) noexcept -> GrassTintIndex
+    {
+        if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
+        {
+            return GrassTintIndex::Default;
+        }
+
+        return static_cast<GrassTintIndex>(
+            grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)]);
+    };
 
     auto isInsideChunk = [](const glm::ivec3& local) noexcept
     {
@@ -17996,6 +18594,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::ivec3 vAxis{0, 1, 0};
         BlockFace face{BlockFace::Top};
         std::array<std::uint32_t, 4> lightingData{};
+        std::uint8_t flags{0};
         bool mergeable{true};
 
         bool operator==(const FaceMaterial& other) const noexcept
@@ -18006,6 +18605,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                    vAxis == other.vAxis &&
                    face == other.face &&
                    lightingData == other.lightingData &&
+                   flags == other.flags &&
                    mergeable == other.mergeable;
         }
     };
@@ -18188,6 +18788,19 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
             break;
         }
 
+        if (block == BlockId::Grass)
+        {
+            const GrassTintIndex tintIndex = grassTintForLocal(owningLocal.x, owningLocal.z);
+            if (face == BlockFace::Top)
+            {
+                material.flags = packGrassTintFlags(tintIndex, false);
+            }
+            else if (face != BlockFace::Bottom)
+            {
+                material.flags = packGrassTintFlags(tintIndex, true);
+            }
+        }
+
         return material;
     };
 
@@ -18250,7 +18863,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	            vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
 	            vertex.atlasBase = material.uvBase;
 	            vertex.atlasSize = material.uvSize;
-	            vertex.lightingData = cornerLighting[i];
+	            vertex.lightingData = applyVertexFlags(cornerLighting[i], material.flags);
 	            meshData.vertices.push_back(vertex);
 	        }
 
@@ -20501,6 +21114,21 @@ void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBl
                                     setLocalBlock(blockX, blockY, blockZ, block, block == instance.trunkBlock);
                                     return false;
                                 });
+        return;
+    }
+
+    if (instance.type == StructureType::Acacia)
+    {
+        forEachAcaciaTreeBlock(instance.origin.x,
+                               instance.origin.z,
+                               instance.origin.y,
+                               instance.trunkHeight,
+                               instance.trunkBlock,
+                               instance.leavesBlock,
+                               [&](int blockX, int blockY, int blockZ, BlockId block) {
+                                   setLocalBlock(blockX, blockY, blockZ, block, block == instance.trunkBlock);
+                                   return false;
+                               });
         return;
     }
 

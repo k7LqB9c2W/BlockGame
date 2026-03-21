@@ -126,6 +126,15 @@ float4 main(PSInput input) : SV_TARGET
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
     clip(textureSample.a - 0.5f);
+    const uint grassTintIndex = decodeGrassTintIndex(input.materialFlags);
+
+    float3 albedo = textureSample.rgb;
+    if (grassTintIndex != 0u)
+    {
+        const float3 tint = biomeGrassTint(grassTintIndex);
+        const float tintMask = isGrassSideTint(input.materialFlags) ? grassSideTintMask(wrappedTileUv) : 1.0f;
+        albedo = lerp(albedo, albedo * tint, tintMask);
+    }
 
     const float skyLight = saturate(input.lightChannels.x);
     const float blockLight = saturate(input.lightChannels.y);
@@ -170,7 +179,7 @@ float4 main(PSInput input) : SV_TARGET
         uSunColor.rgb * (spec * shadow * directSunGate * faceShade * directAo * 0.012f);
     const float3 baseBounce = ambientTint * 0.026f;
 
-    float3 color = textureSample.rgb * (indirect + baseBounce + directLight) + specularLight;
+    float3 color = albedo * (indirect + baseBounce + directLight) + specularLight;
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
     const float horizontalDistanceBlocks = distance(input.worldPos.xz, uCameraPos.xz);

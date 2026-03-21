@@ -45,6 +45,8 @@ static const uint kColumnFlagWater = 0x02u;
 static const uint kColumnFlagCanopy = 0x04u;
 static const uint kMaterialFlagWater = 0x01u;
 static const uint kMaterialFlagFarLod = 0x02u;
+static const uint kMaterialFlagGrassTintShift = 2u;
+static const uint kMaterialFlagGrassSideTint = 0x20u;
 static const uint kLayerTerrain = 0u;
 static const uint kLayerWater = 1u;
 static const uint kLayerCanopy = 2u;
@@ -54,6 +56,14 @@ static const uint kPlaneCount = kTopPlaneCount + 3u * kSideSlicesPerLayer;
 static const uint kFaceMetadataClosureFloorOffset = 0u;
 static const uint kMaxTopDescriptorsPerPlane = kLogicalSize * kLogicalSize;
 static const uint kMaxSideDescriptorsPerPlane = kLogicalSize;
+static const uint kBlockGrass = 1u;
+static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockDarkOakLeaves = 12u;
+static const uint kBlockAcaciaLeaves = 16u;
+static const uint kGrassTintDefault = 1u;
+static const uint kGrassTintDarkForest = 2u;
+static const uint kGrassTintTaiga = 3u;
+static const uint kGrassTintWarm = 4u;
 
 groupshared GpuTerrainColumnDescriptor gSharedColumns[kLogicalSize * kLogicalSize];
 groupshared int gSharedTileClosureFloorY;
@@ -130,9 +140,44 @@ int layerBottomY(GpuTerrainColumnDescriptor column, uint layerId)
     return column.canopyBottomY;
 }
 
-uint layerMaterialFlags(uint layerId)
+uint grassTintIndexForColumn(GpuTerrainColumnDescriptor column)
 {
-    return kMaterialFlagFarLod | ((layerId == kLayerWater) ? kMaterialFlagWater : 0u);
+    if (column.canopyBlock == kBlockDarkOakLeaves)
+    {
+        return kGrassTintDarkForest;
+    }
+    if (column.canopyBlock == kBlockSpruceLeaves)
+    {
+        return kGrassTintTaiga;
+    }
+    if (column.canopyBlock == kBlockAcaciaLeaves)
+    {
+        return kGrassTintWarm;
+    }
+    return kGrassTintDefault;
+}
+
+uint packGrassTintFlags(GpuTerrainColumnDescriptor column, uint blockId, bool sideTintOnly)
+{
+    if (blockId != kBlockGrass)
+    {
+        return 0u;
+    }
+
+    return (grassTintIndexForColumn(column) << kMaterialFlagGrassTintShift) |
+           (sideTintOnly ? kMaterialFlagGrassSideTint : 0u);
+}
+
+uint layerMaterialFlags(GpuTerrainColumnDescriptor column, uint layerId, bool sideFace)
+{
+    uint flags = kMaterialFlagFarLod | ((layerId == kLayerWater) ? kMaterialFlagWater : 0u);
+    if (layerId == kLayerTerrain)
+    {
+        flags |= packGrassTintFlags(column,
+                                    sideFace ? column.terrainSideBlock : column.terrainTopBlock,
+                                    sideFace);
+    }
+    return flags;
 }
 
 bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
@@ -164,7 +209,7 @@ uint hashTopKey(GpuTerrainColumnDescriptor column, uint layerId)
 
     uint h = 2166136261u;
     h = (h ^ layerTopBlock(column, layerId)) * 16777619u;
-    h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
+    h = (h ^ layerMaterialFlags(column, layerId, false)) * 16777619u;
     h = (h ^ asuint(layerTopY(column, layerId))) * 16777619u;
     return h | 1u;
 }
@@ -236,7 +281,7 @@ uint hashSideDescriptorKey(GpuTerrainColumnDescriptor current,
 {
     uint h = 2166136261u;
     h = (h ^ layerSideBlock(current, layerId)) * 16777619u;
-    h = (h ^ layerMaterialFlags(layerId)) * 16777619u;
+    h = (h ^ layerMaterialFlags(current, layerId, true)) * 16777619u;
     h = (h ^ asuint(segmentBottom)) * 16777619u;
     h = (h ^ asuint(segmentTopExclusive)) * 16777619u;
     return h | 1u;

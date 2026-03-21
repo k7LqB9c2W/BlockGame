@@ -99,6 +99,8 @@ BlockId parseBlockId(const std::string& text, const std::filesystem::path& fileP
     if (lower == "dark_oak_leaves" || lower == "darkoakleaves") return BlockId::DarkOakLeaves;
     if (lower == "birch_log" || lower == "birchlog" || lower == "birch_wood") return BlockId::BirchLog;
     if (lower == "birch_leaves" || lower == "birchleaves") return BlockId::BirchLeaves;
+    if (lower == "acacia_log" || lower == "acacialog" || lower == "acacia_wood") return BlockId::AcaciaLog;
+    if (lower == "acacia_leaves" || lower == "acacialeaves") return BlockId::AcaciaLeaves;
     if (lower == "podzol") return BlockId::Podzol;
     if (lower == "debug_lamp" || lower == "lamp") return BlockId::DebugLamp;
 

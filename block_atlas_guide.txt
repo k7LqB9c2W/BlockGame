@@ -35,6 +35,9 @@ Current Tile Assignments
 - `{0,17}` Birch log top and bottom
 - `{0,18}` Birch log side
 - `{0,19}` Birch leaves
+- `{0,20}` Acacia log top and bottom
+- `{0,21}` Acacia log side
+- `{0,22}` Acacia leaves
 
 Adding Blocks
 -------------

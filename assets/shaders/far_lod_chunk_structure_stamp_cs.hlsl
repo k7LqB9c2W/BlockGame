@@ -33,6 +33,7 @@ static const uint kLogicalSize = 16u;
 static const uint kStructureTypeDefaultTree = 0u;
 static const uint kStructureTypeTaigaSpruce = 1u;
 static const uint kStructureTypeDarkOak = 2u;
+static const uint kStructureTypeAcacia = 3u;
 
 static const uint kBlockAir = 0u;
 static const uint kBlockWood = 2u;
@@ -41,6 +42,8 @@ static const uint kBlockSpruceLog = 7u;
 static const uint kBlockSpruceLeaves = 8u;
 static const uint kBlockDarkOakLog = 11u;
 static const uint kBlockDarkOakLeaves = 12u;
+static const uint kBlockAcaciaLog = 15u;
+static const uint kBlockAcaciaLeaves = 16u;
 
 static const uint kFlagStructure = 0x02u;
 static const uint kFlagCutout = 0x04u;
@@ -82,11 +85,11 @@ bool voxelContainsWorldBlock(int3 voxelMin, int3 voxelMax, int worldX, int world
 
 uint structureBlockPriority(uint blockId)
 {
-    if (blockId == kBlockWood || blockId == kBlockSpruceLog || blockId == kBlockDarkOakLog)
+    if (blockId == kBlockWood || blockId == kBlockSpruceLog || blockId == kBlockDarkOakLog || blockId == kBlockAcaciaLog)
     {
         return 2u;
     }
-    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves || blockId == kBlockDarkOakLeaves)
+    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves || blockId == kBlockDarkOakLeaves || blockId == kBlockAcaciaLeaves)
     {
         return 1u;
     }
@@ -96,7 +99,7 @@ uint structureBlockPriority(uint blockId)
 uint packStructureVoxel(uint blockId)
 {
     uint flags = kFlagStructure;
-    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves || blockId == kBlockDarkOakLeaves)
+    if (blockId == kBlockLeaves || blockId == kBlockSpruceLeaves || blockId == kBlockDarkOakLeaves || blockId == kBlockAcaciaLeaves)
     {
         flags |= kFlagCutout;
     }
@@ -304,6 +307,260 @@ bool darkOakCanopyOccupiesCell(const GpuStructureInstance instance,
     }
 
     return true;
+}
+
+int acaciaLeanDir(const GpuStructureInstance instance)
+{
+    return ((int)(hashToUnitFloat32(instance.originX, instance.originY + 971, instance.originZ) * 4.0f)) & 3;
+}
+
+int acaciaLeanLength(const GpuStructureInstance instance)
+{
+    const int length = 1 + (int)(hashToUnitFloat32(instance.originX, instance.originY + 997, instance.originZ) * 3.0f);
+    return clamp(length, 1, 3);
+}
+
+int acaciaBendStart(const GpuStructureInstance instance)
+{
+    const int minStart = max(2, (int)instance.trunkHeight / 3);
+    const int maxStart = max(minStart, (int)instance.trunkHeight - 3);
+    const int span = maxStart - minStart + 1;
+    const int offset = (int)(hashToUnitFloat32(instance.originX, instance.originY + 1031, instance.originZ) * (float)span);
+    return clamp(minStart + offset, minStart, maxStart);
+}
+
+bool acaciaHasSecondaryBranch(const GpuStructureInstance instance)
+{
+    return hashToUnitFloat32(instance.originX, instance.originY + 1063, instance.originZ) < 0.55f;
+}
+
+int acaciaSecondaryDir(const GpuStructureInstance instance, int primaryDir)
+{
+    const int delta = 1 + (((int)(hashToUnitFloat32(instance.originX, instance.originY + 1097, instance.originZ) * 3.0f)) % 3);
+    return (primaryDir + delta) & 3;
+}
+
+int acaciaSecondaryLength(const GpuStructureInstance instance)
+{
+    const int length = 1 + (int)(hashToUnitFloat32(instance.originX, instance.originY + 1129, instance.originZ) * 2.0f);
+    return clamp(length, 1, 2);
+}
+
+bool acaciaCanopyOccupiesCell(int centerX,
+                              int centerZ,
+                              int worldX,
+                              int worldZ,
+                              int radius,
+                              int layer,
+                              bool secondary)
+{
+    if (radius <= 0)
+    {
+        return worldX == centerX && worldZ == centerZ;
+    }
+
+    const int dx = abs(worldX - centerX);
+    const int dz = abs(worldZ - centerZ);
+    const int chebyshev = max(dx, dz);
+    if (chebyshev > radius)
+    {
+        return false;
+    }
+
+    if (layer == 0)
+    {
+        return (dx + dz) <= (secondary ? radius + 1 : radius + 2);
+    }
+
+    if (chebyshev == radius && dx + dz > radius + 1)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void stampAcacia(const GpuStructureInstance instance,
+                 int3 voxelMin,
+                 int3 voxelMax,
+                 uint currentPackedVoxel,
+                 inout bool hasCandidate,
+                 inout uint candidatePriority,
+                 inout uint candidatePackedVoxel)
+{
+    static const int kDirX[4] = {1, -1, 0, 0};
+    static const int kDirZ[4] = {0, 0, 1, -1};
+    static const int kMainRadii[4] = {3, 3, 2, 1};
+    static const int kSecondaryRadii[3] = {2, 2, 1};
+
+    const int leanDir = acaciaLeanDir(instance);
+    const int leanLength = acaciaLeanLength(instance);
+    const int bendStart = acaciaBendStart(instance);
+
+    int tipX = instance.originX;
+    int tipZ = instance.originZ;
+    int tipY = instance.originY;
+
+    [loop]
+    for (uint dy = 0u; dy < instance.trunkHeight; ++dy)
+    {
+        if ((int)dy >= bendStart)
+        {
+            const int leanStep = min((int)dy - bendStart + 1, leanLength);
+            tipX = instance.originX + kDirX[leanDir] * leanStep;
+            tipZ = instance.originZ + kDirZ[leanDir] * leanStep;
+        }
+        else
+        {
+            tipX = instance.originX;
+            tipZ = instance.originZ;
+        }
+
+        tipY = instance.originY + (int)dy;
+        considerStructureBlock(voxelMin,
+                               voxelMax,
+                               tipX,
+                               tipY,
+                               tipZ,
+                               kBlockAcaciaLog,
+                               true,
+                               currentPackedVoxel,
+                               hasCandidate,
+                               candidatePriority,
+                               candidatePackedVoxel);
+    }
+
+    const int mainBaseWorldY = tipY - 2;
+    [loop]
+    for (int layer = 0; layer < 4; ++layer)
+    {
+        const int radius = kMainRadii[layer];
+        const int worldY = mainBaseWorldY + layer;
+        [loop]
+        for (int worldX = tipX - radius; worldX <= tipX + radius; ++worldX)
+        {
+            [loop]
+            for (int worldZ = tipZ - radius; worldZ <= tipZ + radius; ++worldZ)
+            {
+                if (!acaciaCanopyOccupiesCell(tipX, tipZ, worldX, worldZ, radius, layer, false))
+                {
+                    continue;
+                }
+
+                if (worldX == tipX && worldZ == tipZ && worldY <= tipY)
+                {
+                    continue;
+                }
+
+                considerStructureBlock(voxelMin,
+                                       voxelMax,
+                                       worldX,
+                                       worldY,
+                                       worldZ,
+                                       kBlockAcaciaLeaves,
+                                       false,
+                                       currentPackedVoxel,
+                                       hasCandidate,
+                                       candidatePriority,
+                                       candidatePackedVoxel);
+            }
+        }
+    }
+
+    const int hangingLeavesWorldY = mainBaseWorldY - 1;
+    [loop]
+    for (int worldX = tipX - 2; worldX <= tipX + 2; ++worldX)
+    {
+        [loop]
+        for (int worldZ = tipZ - 2; worldZ <= tipZ + 2; ++worldZ)
+        {
+            const int dx = abs(worldX - tipX);
+            const int dz = abs(worldZ - tipZ);
+            if (max(dx, dz) != 2 || dx + dz > 3)
+            {
+                continue;
+            }
+
+            considerStructureBlock(voxelMin,
+                                   voxelMax,
+                                   worldX,
+                                   hangingLeavesWorldY,
+                                   worldZ,
+                                   kBlockAcaciaLeaves,
+                                   false,
+                                   currentPackedVoxel,
+                                   hasCandidate,
+                                   candidatePriority,
+                                   candidatePackedVoxel);
+        }
+    }
+
+    if (!acaciaHasSecondaryBranch(instance))
+    {
+        return;
+    }
+
+    const int secondaryDir = acaciaSecondaryDir(instance, leanDir);
+    const int secondaryLength = acaciaSecondaryLength(instance);
+    const int branchStartY = max(instance.originY + bendStart, tipY - 2);
+    int branchX = tipX;
+    int branchZ = tipZ;
+    [loop]
+    for (int step = 1; step <= secondaryLength; ++step)
+    {
+        branchX = tipX + kDirX[secondaryDir] * step;
+        branchZ = tipZ + kDirZ[secondaryDir] * step;
+        const int branchY = branchStartY + min(step - 1, 1);
+        considerStructureBlock(voxelMin,
+                               voxelMax,
+                               branchX,
+                               branchY,
+                               branchZ,
+                               kBlockAcaciaLog,
+                               true,
+                               currentPackedVoxel,
+                               hasCandidate,
+                               candidatePriority,
+                               candidatePackedVoxel);
+    }
+
+    const int secondaryBaseWorldY = branchStartY - 1;
+    [loop]
+    for (int layer = 0; layer < 3; ++layer)
+    {
+        const int radius = kSecondaryRadii[layer];
+        const int worldY = secondaryBaseWorldY + layer;
+        [loop]
+        for (int worldX = branchX - radius; worldX <= branchX + radius; ++worldX)
+        {
+            [loop]
+            for (int worldZ = branchZ - radius; worldZ <= branchZ + radius; ++worldZ)
+            {
+                if (!acaciaCanopyOccupiesCell(branchX, branchZ, worldX, worldZ, radius, layer, true))
+                {
+                    continue;
+                }
+
+                if ((worldX == branchX && worldZ == branchZ && worldY <= branchStartY + 1) ||
+                    (worldX == tipX && worldZ == tipZ && worldY <= tipY))
+                {
+                    continue;
+                }
+
+                considerStructureBlock(voxelMin,
+                                       voxelMax,
+                                       worldX,
+                                       worldY,
+                                       worldZ,
+                                       kBlockAcaciaLeaves,
+                                       false,
+                                       currentPackedVoxel,
+                                       hasCandidate,
+                                       candidatePriority,
+                                       candidatePackedVoxel);
+            }
+        }
+    }
 }
 
 void stampDefaultTree(const GpuStructureInstance instance,
@@ -835,6 +1092,16 @@ void FarLodChunkStructureStampMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                          hasCandidate,
                          candidatePriority,
                          candidatePackedVoxel);
+        }
+        else if (instance.type == kStructureTypeAcacia)
+        {
+            stampAcacia(instance,
+                        voxelMin,
+                        voxelMax,
+                        currentPackedVoxel,
+                        hasCandidate,
+                        candidatePriority,
+                        candidatePackedVoxel);
         }
         else
         {

@@ -369,6 +369,10 @@ FarLodWorldgenTables buildFarLodWorldgenTables(const BiomeDatabase& biomeDatabas
         {
             packed.canopyBlock = static_cast<std::uint32_t>(BlockId::DarkOakLeaves);
         }
+        if (biome.id == "savanna")
+        {
+            packed.canopyBlock = static_cast<std::uint32_t>(BlockId::AcaciaLeaves);
+        }
         if (biome.id == "forest")
         {
             packed.secondaryCanopyBlock = static_cast<std::uint32_t>(BlockId::BirchLeaves);

@@ -3292,11 +3292,12 @@ int runGame()
         return {};
     };
 
-    const auto spawnPigNearPlayer = [&]()
+    const auto spawnPassiveMobNearPlayer = [&](const char* modelId, const char* displayName)
     {
-        if (mobSystem.findModel("pig") == nullptr)
+        if (mobSystem.findModel(modelId) == nullptr)
         {
-            std::cerr << "Cannot spawn pig: assets/mobs/pig.geo.json was not loaded." << std::endl;
+            std::cerr << "Cannot spawn " << displayName << ": assets/mobs/" << modelId
+                      << ".geo.json was not loaded." << std::endl;
             return false;
         }
 
@@ -3316,12 +3317,23 @@ int runGame()
                                                                         camera.position.z + forward.z * 3.0f),
                                              camera.position.z + forward.z * 3.0f);
         const float yawRadians = std::atan2(-forward.x, -forward.z);
-        const bool spawned = mobSystem.spawn("pig", spawnPos, yawRadians);
+        const bool spawned = mobSystem.spawn(modelId, spawnPos, yawRadians);
         if (spawned)
         {
-            std::cout << "Spawned pig at: (" << spawnPos.x << ", " << spawnPos.y << ", " << spawnPos.z << ")" << std::endl;
+            std::cout << "Spawned " << displayName << " at: ("
+                      << spawnPos.x << ", " << spawnPos.y << ", " << spawnPos.z << ")" << std::endl;
         }
         return spawned;
+    };
+
+    const auto spawnPigNearPlayer = [&]()
+    {
+        return spawnPassiveMobNearPlayer("pig", "pig");
+    };
+
+    const auto spawnCowNearPlayer = [&]()
+    {
+        return spawnPassiveMobNearPlayer("cow", "cow");
     };
     
     // Find a guaranteed safe spawn position above ground
@@ -4410,6 +4422,7 @@ int runGame()
                 environment.debug.fogFallbackEnabled = true;
                 environment.debug.shadowsEnabled = true;
                 environment.debug.directSunEnabled = true;
+                environment.debug.aoIntensity = 1.0f;
                 environment.debug.terrainDebugView = TerrainDebugView::None;
             };
             const auto applyWorldOnlyPreset = [&]()
@@ -4422,12 +4435,14 @@ int runGame()
                 environment.debug.fogFallbackEnabled = true;
                 environment.debug.shadowsEnabled = true;
                 environment.debug.directSunEnabled = true;
+                environment.debug.aoIntensity = 1.0f;
                 environment.debug.terrainDebugView = TerrainDebugView::None;
             };
             const auto applyNoSunPreset = [&]()
             {
                 environment.debug.shadowsEnabled = false;
                 environment.debug.directSunEnabled = false;
+                environment.debug.aoIntensity = 1.0f;
                 environment.debug.terrainDebugView = TerrainDebugView::None;
             };
             const auto applyDefaultsPreset = [&]()
@@ -4514,6 +4529,7 @@ int runGame()
             ImGui::Checkbox("Fog Fallback", &environment.debug.fogFallbackEnabled);
             ImGui::Checkbox("Shadows", &environment.debug.shadowsEnabled);
             ImGui::Checkbox("Direct Sun", &environment.debug.directSunEnabled);
+            ImGui::SliderFloat("AO Intensity", &environment.debug.aoIntensity, 0.25f, 2.50f, "%.2f");
             int terrainDebugView = static_cast<int>(environment.debug.terrainDebugView);
             if (ImGui::Combo("Terrain Debug",
                              &terrainDebugView,
@@ -4585,6 +4601,7 @@ int runGame()
                         mobSystem.definitionCount(),
                         mobSystem.instanceCount());
             const bool pigAvailable = (mobSystem.findModel("pig") != nullptr);
+            const bool cowAvailable = (mobSystem.findModel("cow") != nullptr);
             if (!pigAvailable)
             {
                 ImGui::BeginDisabled();
@@ -4597,6 +4614,19 @@ int runGame()
             {
                 ImGui::EndDisabled();
                 ImGui::TextUnformatted("Pig definition missing from assets/mobs.");
+            }
+            if (!cowAvailable)
+            {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Spawn Cow"))
+            {
+                spawnCowNearPlayer();
+            }
+            if (!cowAvailable)
+            {
+                ImGui::EndDisabled();
+                ImGui::TextUnformatted("Cow definition missing from assets/mobs.");
             }
             ImGui::Separator();
             ImGui::TextUnformatted("View Diagnostics");

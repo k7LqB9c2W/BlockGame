@@ -4,6 +4,7 @@ Put Bedrock-style geometry JSON files in this folder.
 
 Current BlockGame mob import rules:
 - Files are discovered from `assets/mobs/*.json`.
+- Example definitions currently in this folder include `pig.geo.json` and `cow.geo.json`.
 - Legacy Bedrock geometry roots like `geometry.pig.v1.8` are supported.
 - Modern `minecraft:geometry` files are also accepted if they use a standard `description` plus `bones` layout.
 - Box UV cubes are supported.

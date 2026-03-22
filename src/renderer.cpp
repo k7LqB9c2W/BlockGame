@@ -3398,7 +3398,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     nearConstants->terrainDebug = glm::vec4(environment.debug.directSunEnabled ? 1.0f : 0.0f,
                                             static_cast<float>(static_cast<int>(environment.debug.terrainDebugView)),
                                             skyPassEnabled ? 1.0f : 0.0f,
-                                            0.0f);
+                                            environment.debug.aoIntensity);
     const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
 
     const auto drawBaseSkyToTarget = [&](D3D12_CPU_DESCRIPTOR_HANDLE rtv,

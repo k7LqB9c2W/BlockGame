@@ -1316,6 +1316,22 @@ inline int lightingMetricFromPackedVertex(std::uint32_t packed) noexcept
     return sky * 24 + block * 18 + (3 - ao) * 20;
 }
 
+inline bool hasUniformCornerLighting(const std::array<std::uint32_t, 4>& lightingData) noexcept
+{
+    return lightingData[0] == lightingData[1] &&
+           lightingData[0] == lightingData[2] &&
+           lightingData[0] == lightingData[3];
+}
+
+inline std::size_t cornerIndexForSigns(int uSign, int vSign) noexcept
+{
+    if (uSign > 0)
+    {
+        return vSign > 0 ? 2u : 1u;
+    }
+    return vSign > 0 ? 3u : 0u;
+}
+
 inline bool isAlphaCutoutBlock(BlockId block) noexcept
 {
     return block == BlockId::Leaves ||
@@ -8794,11 +8810,12 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	    auto makeMaterial = [&](BlockId block, const glm::vec3& normal, const glm::ivec3& owningLocal) -> FaceMaterial
 	    {
 	        FaceMaterial material{};
-	        material.mergeable = !isAlphaCutoutBlock(block);
 	        const BlockFace face = faceFromNormal(normal);
 
 	        material.face = face;
             material.lightingData = buildCornerLighting(face, owningLocal);
+	        material.mergeable =
+	            !isAlphaCutoutBlock(block) && hasUniformCornerLighting(material.lightingData);
 
 	        if (blockAtlasConfigured_)
 	        {
@@ -8892,19 +8909,27 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	        if (dir == FaceDir::Negative)
 	        {
 	            std::swap(positions[1], positions[3]);
-                std::swap(cornerLighting[1], cornerLighting[3]);
 	        }
 
-            const int diagonal02 =
-                lightingMetricFromPackedVertex(cornerLighting[0]) +
-                lightingMetricFromPackedVertex(cornerLighting[2]);
-            const int diagonal13 =
-                lightingMetricFromPackedVertex(cornerLighting[1]) +
-                lightingMetricFromPackedVertex(cornerLighting[3]);
-            const bool flipDiagonal = diagonal13 > diagonal02;
+            std::array<std::uint32_t, 4> vertexLighting{};
+            const glm::vec3 quadCenter = 0.25f * (positions[0] + positions[1] + positions[2] + positions[3]);
+            const glm::vec3 uAxisVec = glm::vec3(material.uAxis);
+            const glm::vec3 vAxisVec = glm::vec3(material.vAxis);
+            for (std::size_t i = 0; i < positions.size(); ++i)
+            {
+                const glm::vec3 offset = positions[i] - quadCenter;
+                const int uSign = glm::dot(offset, uAxisVec) >= 0.0f ? 1 : -1;
+                const int vSign = glm::dot(offset, vAxisVec) >= 0.0f ? 1 : -1;
+                vertexLighting[i] = cornerLighting[cornerIndexForSigns(uSign, vSign)];
+            }
 
-	        const glm::vec3 uAxisVec = glm::vec3(material.uAxis);
-	        const glm::vec3 vAxisVec = glm::vec3(material.vAxis);
+            const int diagonal02 =
+                lightingMetricFromPackedVertex(vertexLighting[0]) +
+                lightingMetricFromPackedVertex(vertexLighting[2]);
+            const int diagonal13 =
+                lightingMetricFromPackedVertex(vertexLighting[1]) +
+                lightingMetricFromPackedVertex(vertexLighting[3]);
+            const bool flipDiagonal = diagonal13 > diagonal02;
 
 	        const std::size_t vertexStart = meshData.vertices.size();
         for (int i = 0; i < 4; ++i)
@@ -8912,12 +8937,12 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
             const glm::vec3& pos = positions[i];
 
             Vertex vertex{};
-            vertex.position = pos;
+	            vertex.position = pos;
 	            vertex.normal = normal;
 	            vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
 	            vertex.atlasBase = material.uvBase;
 	            vertex.atlasSize = material.uvSize;
-	            vertex.lightingData = applyVertexFlags(cornerLighting[i], material.flags);
+	            vertex.lightingData = applyVertexFlags(vertexLighting[i], material.flags);
 	            meshData.vertices.push_back(vertex);
 	        }
 

@@ -138,7 +138,8 @@ float4 main(PSInput input) : SV_TARGET
 
     const float skyLight = saturate(input.lightChannels.x);
     const float blockLight = saturate(input.lightChannels.y);
-    const float ao = saturate(input.ao);
+    const float aoStrength = max(uTerrainDebug.w, 0.01f);
+    const float ao = pow(saturate(input.ao), aoStrength);
     const float mipLevel = computeMipLevel(atlasUvDdx, atlasUvDdy);
     const int debugView = (int)uTerrainDebug.y;
 
@@ -171,11 +172,11 @@ float4 main(PSInput input) : SV_TARGET
     const float3 skyTint = ambientTint * 2.15f + float3(0.08f, 0.09f, 0.11f);
     const float3 skyIndirect = skyTint * skyLight;
     const float3 blockIndirect = float3(1.12f, 0.95f, 0.70f) * blockLight;
-    const float indirectAo = lerp(1.0f, ao, 0.60f);
+    const float indirectAo = lerp(1.0f, ao, 0.78f);
     const float3 indirect = (skyIndirect + blockIndirect) * indirectFaceShade * indirectAo;
 
     const float directSunGate = uTerrainDebug.x * saturate(skyLight * 1.08f);
-    const float directAo = lerp(1.0f, ao, 0.10f);
+    const float directAo = lerp(1.0f, ao, 0.18f);
     const float3 directLight =
         uSunColor.rgb * (diff * shadow * directSunGate * directFaceShade * directAo * 0.38f);
     const float3 specularLight =

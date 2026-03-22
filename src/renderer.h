@@ -89,6 +89,7 @@ struct RenderDebugSettings
     bool fogFallbackEnabled{true};
     bool shadowsEnabled{true};
     bool directSunEnabled{true};
+    float aoIntensity{1.0f};
     TerrainDebugView terrainDebugView{TerrainDebugView::None};
 };
 

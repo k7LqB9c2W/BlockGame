@@ -29,8 +29,9 @@ static const float kVanillaLightLut[16] = {
     0.520f, 0.690f, 0.845f, 1.000f
 };
 
-// Keep terrain corners readable without outlining every block step like old fast-lighting.
-static const float kAoFactors[4] = {1.00f, 0.90f, 0.82f, 0.74f};
+// Lean a bit more into corner darkening so terrain AO reads clearly without
+// returning to the old overly harsh fast-lighting look.
+static const float kAoFactors[4] = {1.00f, 0.86f, 0.73f, 0.60f};
 
 float decodeNonLinearLightLevel(uint level)
 {

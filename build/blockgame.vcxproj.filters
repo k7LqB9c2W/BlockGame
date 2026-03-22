@@ -10,6 +10,12 @@
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_column_manager.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_job_queue.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\input_context.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -34,6 +40,20 @@
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\worldgen_profile.cpp">
       <Filter>src\terrain</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_gpu_contexts.inl">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_structure_registry.inl">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_far_terrain.inl">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_support.h">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\Users\Jacob\Documents\code\BlockGame\CMakeLists.txt" />

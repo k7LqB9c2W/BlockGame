@@ -1,6 +1,8 @@
 C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\main.obj
 C:\Users\Jacob\Documents\code\BlockGame\src\camera.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\camera.obj
 C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\chunk_manager.obj
+C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_column_manager.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\chunk_manager_column_manager.obj
+C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_job_queue.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\chunk_manager_job_queue.obj
 C:\Users\Jacob\Documents\code\BlockGame\src\input_context.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\input_context.obj
 C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\renderer.obj
 C:\Users\Jacob\Documents\code\BlockGame\src\terrain\biome_database.cpp;C:\Users\Jacob\Documents\code\BlockGame\build\blockgame.dir\Release\biome_database.obj

@@ -1,0 +1,534 @@
+// chunk_manager_job_queue.cpp
+// Implements the internal chunk job scheduler used by ChunkManager worker threads.
+
+#include "chunk_manager_support.h"
+
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+#include <utility>
+
+#include <glm/geometric.hpp>
+
+namespace
+{
+[[nodiscard]] ChunkPriorityKey buildChunkPriorityKey(const glm::ivec3& coord,
+                                                     const glm::ivec3& origin,
+                                                     const glm::vec2& forwardXZ) noexcept
+{
+    const int dx = coord.x - origin.x;
+    const int dy = coord.y - origin.y;
+    const int dz = coord.z - origin.z;
+    const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
+    const int verticalDistance = std::abs(dy);
+
+    int supportBucket = 3;
+    if (horizontalDistance == 0 && verticalDistance <= 8)
+    {
+        supportBucket = 0;
+    }
+    else if (horizontalDistance <= 1 && coord.y >= origin.y - 2 && coord.y <= origin.y + 2)
+    {
+        supportBucket = 1;
+    }
+    else if (horizontalDistance <= 2 && verticalDistance <= 2)
+    {
+        supportBucket = 2;
+    }
+
+    float facingDot = 1.0f;
+    const glm::vec2 delta(static_cast<float>(dx), static_cast<float>(dz));
+    if (glm::dot(delta, delta) > kEpsilon)
+    {
+        facingDot = glm::dot(glm::normalize(delta), forwardXZ);
+    }
+
+    int forwardBucket = 2;
+    if (facingDot >= 0.5f)
+    {
+        forwardBucket = 0;
+    }
+    else if (facingDot >= -0.2f)
+    {
+        forwardBucket = 1;
+    }
+
+    return ChunkPriorityKey{
+        supportBucket,
+        horizontalDistance,
+        forwardBucket,
+        verticalDistance,
+        std::abs(dx) + verticalDistance + std::abs(dz)};
+}
+
+[[nodiscard]] int compareChunkPriorityKeys(const ChunkPriorityKey& lhs,
+                                           const ChunkPriorityKey& rhs) noexcept
+{
+    if (lhs.supportBucket != rhs.supportBucket)
+    {
+        return lhs.supportBucket < rhs.supportBucket ? -1 : 1;
+    }
+    if (lhs.horizontalDistance != rhs.horizontalDistance)
+    {
+        return lhs.horizontalDistance < rhs.horizontalDistance ? -1 : 1;
+    }
+    if (lhs.forwardBucket != rhs.forwardBucket)
+    {
+        return lhs.forwardBucket < rhs.forwardBucket ? -1 : 1;
+    }
+    if (lhs.verticalDistance != rhs.verticalDistance)
+    {
+        return lhs.verticalDistance < rhs.verticalDistance ? -1 : 1;
+    }
+    if (lhs.axisDistance != rhs.axisDistance)
+    {
+        return lhs.axisDistance < rhs.axisDistance ? -1 : 1;
+    }
+    return 0;
+}
+} // namespace
+
+glm::vec2 normalizePriorityForwardXZ(const glm::vec3& forward) noexcept
+{
+    glm::vec2 forwardXZ(forward.x, forward.z);
+    if (glm::dot(forwardXZ, forwardXZ) <= kEpsilon)
+    {
+        return {0.0f, -1.0f};
+    }
+
+    return glm::normalize(forwardXZ);
+}
+
+bool isChunkCoordHigherPriority(const glm::ivec3& lhs,
+                                const glm::ivec3& rhs,
+                                const glm::ivec3& origin,
+                                const glm::vec3& forward) noexcept
+{
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    return compareChunkPriorityKeys(buildChunkPriorityKey(lhs, origin, forwardXZ),
+                                    buildChunkPriorityKey(rhs, origin, forwardXZ)) < 0;
+}
+
+bool JobQueue::push(const Job& job)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return false;
+    }
+
+    queues_[jobTypeIndex(job.type)].push(wrap(job));
+    queuedJobCount_.fetch_add(1, std::memory_order_relaxed);
+    condition_.notify_one();
+    return true;
+}
+
+bool JobQueue::tryPop(Job& job)
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!hasQueuedJobsLocked())
+    {
+        return false;
+    }
+
+    const std::size_t queueIndex = pickNextQueueIndexLocked();
+    job = queues_[queueIndex].top().job;
+    queues_[queueIndex].pop();
+    queuedJobCount_.fetch_sub(1, std::memory_order_relaxed);
+    ++activeCounts_[queueIndex];
+    return true;
+}
+
+Job JobQueue::waitAndPop()
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this]
+    {
+        return hasQueuedJobsLocked() || shouldStop_.load(std::memory_order_acquire);
+    });
+
+    while (true)
+    {
+        if (shouldStop_.load(std::memory_order_acquire) && !hasQueuedJobsLocked())
+        {
+            throw std::runtime_error("Job queue stopped");
+        }
+
+        if (!hasQueuedJobsLocked())
+        {
+            condition_.wait(lock, [this]
+            {
+                return hasQueuedJobsLocked() || shouldStop_.load(std::memory_order_acquire);
+            });
+            continue;
+        }
+
+        const std::size_t queueIndex = pickNextQueueIndexLocked();
+        if (queues_[queueIndex].empty())
+        {
+            condition_.wait(lock, [this]
+            {
+                return hasQueuedJobsLocked() || shouldStop_.load(std::memory_order_acquire);
+            });
+            continue;
+        }
+
+        Job job = queues_[queueIndex].top().job;
+        queues_[queueIndex].pop();
+        queuedJobCount_.fetch_sub(1, std::memory_order_relaxed);
+        ++activeCounts_[queueIndex];
+        return job;
+    }
+}
+
+std::vector<Job> JobQueue::stop()
+{
+    std::vector<Job> cancelledJobs;
+    std::lock_guard<std::mutex> lock(mutex_);
+    shouldStop_.store(true, std::memory_order_release);
+    std::size_t pendingCount = 0;
+    for (const auto& queue : queues_)
+    {
+        pendingCount += queue.size();
+    }
+    cancelledJobs.reserve(pendingCount);
+    for (auto& queue : queues_)
+    {
+        while (!queue.empty())
+        {
+            cancelledJobs.push_back(queue.top().job);
+            queue.pop();
+        }
+    }
+    queuedJobCount_.store(0, std::memory_order_relaxed);
+    condition_.notify_all();
+    return cancelledJobs;
+}
+
+bool JobQueue::empty() const
+{
+    return queuedJobCount_.load(std::memory_order_relaxed) == 0;
+}
+
+std::size_t JobQueue::size() const
+{
+    return queuedJobCount_.load(std::memory_order_relaxed);
+}
+
+std::size_t JobQueue::size(JobType type) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queues_[jobTypeIndex(type)].size();
+}
+
+std::size_t JobQueue::outstanding(JobType type) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t index = jobTypeIndex(type);
+    return queues_[index].size() + activeCounts_[index];
+}
+
+void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    const float facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    if (origin == priorityOrigin_ && facingDot >= 0.995f)
+    {
+        return;
+    }
+
+    const glm::ivec3 delta = origin - priorityOrigin_;
+    const int horizontalShift = std::max(std::abs(delta.x), std::abs(delta.z));
+    const int verticalShift = std::abs(delta.y);
+
+    priorityOrigin_ = origin;
+    priorityForwardXZ_ = forwardXZ;
+
+    constexpr int kPriorityRebuildChunkShiftThreshold = 2;
+    constexpr int kPriorityRebuildForceShiftThreshold = 6;
+    constexpr float kPriorityRebuildFacingDotThreshold = 0.85f;
+    constexpr std::size_t kPriorityRebuildQueueThreshold = 128;
+
+    const bool forceRebuild = horizontalShift >= kPriorityRebuildForceShiftThreshold ||
+                              verticalShift >= kPriorityRebuildForceShiftThreshold;
+    const bool significantMove = horizontalShift >= kPriorityRebuildChunkShiftThreshold ||
+                                 verticalShift >= kPriorityRebuildChunkShiftThreshold;
+    const bool significantTurn = facingDot <= kPriorityRebuildFacingDotThreshold;
+    if (!forceRebuild && !significantMove && !significantTurn)
+    {
+        return;
+    }
+
+    std::size_t queuedJobs = 0;
+    for (const auto& queue : queues_)
+    {
+        queuedJobs += queue.size();
+    }
+
+    if (!forceRebuild && queuedJobs > kPriorityRebuildQueueThreshold)
+    {
+        return;
+    }
+
+    rebuildLocked();
+}
+
+bool JobQueue::tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
+{
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+    {
+        return false;
+    }
+
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    const float facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    if (origin == priorityOrigin_ && facingDot >= 0.995f)
+    {
+        return true;
+    }
+
+    const glm::ivec3 delta = origin - priorityOrigin_;
+    const int horizontalShift = std::max(std::abs(delta.x), std::abs(delta.z));
+    const int verticalShift = std::abs(delta.y);
+
+    priorityOrigin_ = origin;
+    priorityForwardXZ_ = forwardXZ;
+
+    constexpr int kPriorityRebuildChunkShiftThreshold = 2;
+    constexpr int kPriorityRebuildForceShiftThreshold = 6;
+    constexpr float kPriorityRebuildFacingDotThreshold = 0.85f;
+    constexpr std::size_t kPriorityRebuildQueueThreshold = 128;
+
+    const bool forceRebuild = horizontalShift >= kPriorityRebuildForceShiftThreshold ||
+                              verticalShift >= kPriorityRebuildForceShiftThreshold;
+    const bool significantMove = horizontalShift >= kPriorityRebuildChunkShiftThreshold ||
+                                 verticalShift >= kPriorityRebuildChunkShiftThreshold;
+    const bool significantTurn = facingDot <= kPriorityRebuildFacingDotThreshold;
+    if (!forceRebuild && !significantMove && !significantTurn)
+    {
+        return true;
+    }
+
+    std::size_t queuedJobs = 0;
+    for (const auto& queue : queues_)
+    {
+        queuedJobs += queue.size();
+    }
+
+    if (!forceRebuild && queuedJobs > kPriorityRebuildQueueThreshold)
+    {
+        return true;
+    }
+
+    rebuildLocked();
+    return true;
+}
+
+bool JobQueue::JobComparer::operator()(const PrioritizedJob& lhs, const PrioritizedJob& rhs) const
+{
+    return JobQueue::comparePrioritizedJobs(lhs, rhs) > 0;
+}
+
+JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
+{
+    const ChunkPriorityKey priority = buildChunkPriorityKey(job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
+    const int lifecycleBias = job.initialReadyPriority ? 0 : 1;
+    const int bias = (job.type == JobType::Mesh) ? 0 : 1;
+    const std::uint64_t sequence = nextSequence_++;
+    return PrioritizedJob{job, priority, lifecycleBias, bias, sequence};
+}
+
+int JobQueue::comparePrioritizedJobs(const PrioritizedJob& lhs,
+                                     const PrioritizedJob& rhs) noexcept
+{
+    if (lhs.lifecycleBias != rhs.lifecycleBias)
+    {
+        return lhs.lifecycleBias < rhs.lifecycleBias ? -1 : 1;
+    }
+    const int priorityComparison = compareChunkPriorityKeys(lhs.priority, rhs.priority);
+    if (priorityComparison != 0)
+    {
+        return priorityComparison;
+    }
+    if (lhs.stageBias != rhs.stageBias)
+    {
+        return lhs.stageBias < rhs.stageBias ? -1 : 1;
+    }
+    if (lhs.sequence != rhs.sequence)
+    {
+        return lhs.sequence < rhs.sequence ? -1 : 1;
+    }
+    return 0;
+}
+
+bool JobQueue::hasQueuedJobsLocked() const noexcept
+{
+    for (const auto& queue : queues_)
+    {
+        if (!queue.empty())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() const noexcept
+{
+    std::array<std::size_t, kJobTypeCount> targets{1, 1};
+    const std::size_t totalWorkers = std::max<std::size_t>(workerConcurrency_, 1);
+    if (totalWorkers <= 1)
+    {
+        return targets;
+    }
+
+    const std::size_t generateBacklog = queues_[jobTypeIndex(JobType::Generate)].size();
+    const std::size_t meshBacklog = queues_[jobTypeIndex(JobType::Mesh)].size();
+    const bool generateInitialReadyTop =
+        generateBacklog > 0 && queues_[jobTypeIndex(JobType::Generate)].top().lifecycleBias == 0;
+    const bool meshInitialReadyTop =
+        meshBacklog > 0 && queues_[jobTypeIndex(JobType::Mesh)].top().lifecycleBias == 0;
+
+    double meshShare = 0.5;
+    if (generateInitialReadyTop && meshInitialReadyTop)
+    {
+        if (generateBacklog > meshBacklog * 2)
+        {
+            meshShare = 0.35;
+        }
+        else if (generateBacklog > meshBacklog)
+        {
+            meshShare = 0.40;
+        }
+        else if (meshBacklog > generateBacklog * 2)
+        {
+            meshShare = 0.60;
+        }
+        else if (meshBacklog > generateBacklog)
+        {
+            meshShare = 0.50;
+        }
+        else
+        {
+            meshShare = 0.45;
+        }
+    }
+    else if (meshBacklog == 0 && generateBacklog > 0)
+    {
+        meshShare = 0.4;
+    }
+    else if (generateBacklog == 0 && meshBacklog > 0)
+    {
+        meshShare = 0.8;
+    }
+    else if (meshBacklog > generateBacklog * 2)
+    {
+        meshShare = 0.65;
+    }
+    else if (generateBacklog > meshBacklog * 2)
+    {
+        meshShare = 0.35;
+    }
+
+    std::size_t meshTarget = static_cast<std::size_t>(std::round(meshShare * static_cast<double>(totalWorkers)));
+    meshTarget = std::clamp<std::size_t>(meshTarget, 1, totalWorkers - 1);
+    std::size_t generateTarget = totalWorkers - meshTarget;
+    if (generateBacklog == 0)
+    {
+        generateTarget = 0;
+        meshTarget = totalWorkers;
+    }
+    else if (meshBacklog == 0)
+    {
+        meshTarget = 0;
+        generateTarget = totalWorkers;
+    }
+
+    targets[jobTypeIndex(JobType::Generate)] = generateTarget;
+    targets[jobTypeIndex(JobType::Mesh)] = meshTarget;
+    return targets;
+}
+
+std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
+{
+    const std::size_t generateIndex = jobTypeIndex(JobType::Generate);
+    const std::size_t meshIndex = jobTypeIndex(JobType::Mesh);
+    const bool generateReady = !queues_[generateIndex].empty();
+    const bool meshReady = !queues_[meshIndex].empty();
+
+    if (!meshReady)
+    {
+        return generateIndex;
+    }
+    if (!generateReady)
+    {
+        return meshIndex;
+    }
+
+    const std::array<std::size_t, kJobTypeCount> targets = computeStageTargetsLocked();
+    const bool generateUnderTarget = activeCounts_[generateIndex] < targets[generateIndex];
+    const bool meshUnderTarget = activeCounts_[meshIndex] < targets[meshIndex];
+
+    if (meshUnderTarget != generateUnderTarget)
+    {
+        return meshUnderTarget ? meshIndex : generateIndex;
+    }
+
+    const PrioritizedJob& generateTop = queues_[generateIndex].top();
+    const PrioritizedJob& meshTop = queues_[meshIndex].top();
+    if (generateTop.lifecycleBias != meshTop.lifecycleBias)
+    {
+        return (generateTop.lifecycleBias < meshTop.lifecycleBias) ? generateIndex : meshIndex;
+    }
+    return comparePrioritizedJobs(meshTop, generateTop) <= 0 ? meshIndex : generateIndex;
+}
+
+void JobQueue::rebuildLocked()
+{
+    if (!hasQueuedJobsLocked())
+    {
+        return;
+    }
+
+    for (auto& queue : queues_)
+    {
+        if (queue.empty())
+        {
+            continue;
+        }
+
+        std::vector<PrioritizedJob> jobs;
+        jobs.reserve(queue.size());
+        while (!queue.empty())
+        {
+            jobs.push_back(queue.top());
+            queue.pop();
+        }
+
+        for (auto& prioritized : jobs)
+        {
+            prioritized.priority = buildChunkPriorityKey(prioritized.job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
+            queue.push(std::move(prioritized));
+        }
+    }
+}
+
+void JobQueue::setWorkerConcurrency(std::size_t workerCount) noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    workerConcurrency_ = std::max<std::size_t>(workerCount, 1);
+    condition_.notify_all();
+}
+
+void JobQueue::jobCompleted(JobType type) noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t index = jobTypeIndex(type);
+    if (activeCounts_[index] > 0)
+    {
+        --activeCounts_[index];
+    }
+    condition_.notify_one();
+}

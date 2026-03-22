@@ -50,6 +50,12 @@ set(BLOCKGAME_SOURCES
     ${SRC_ROOT}/main.cpp
     ${SRC_ROOT}/camera.cpp
     ${SRC_ROOT}/chunk_manager.cpp
+    ${SRC_ROOT}/chunk_manager_column_manager.cpp
+    ${SRC_ROOT}/chunk_manager_job_queue.cpp
+    ${SRC_ROOT}/chunk_manager_gpu_contexts.inl
+    ${SRC_ROOT}/chunk_manager_structure_registry.inl
+    ${SRC_ROOT}/chunk_manager_far_terrain.inl
+    ${SRC_ROOT}/chunk_manager_support.h
     ${SRC_ROOT}/input_context.cpp
     ${SRC_ROOT}/renderer.cpp
     ${SRC_ROOT}/terrain/biome_database.cpp

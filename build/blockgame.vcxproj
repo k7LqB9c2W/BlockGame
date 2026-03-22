@@ -534,6 +534,12 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\main.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\camera.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager.cpp" />
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_column_manager.cpp" />
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_job_queue.cpp" />
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_gpu_contexts.inl" />
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_structure_registry.inl" />
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_far_terrain.inl" />
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_support.h" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\input_context.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\biome_database.cpp" />

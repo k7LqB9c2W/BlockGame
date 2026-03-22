@@ -969,18 +969,6 @@ void chunkManagerDebugLog(const std::string& message)
     return (renderSettings.totalChunks <= renderSettings.exactChunks) ? kHiddenExactPreloadBufferChunks : 0;
 }
 
-[[nodiscard]] float horizontalDistanceSqToAabb2D(float pointX,
-                                                 float pointZ,
-                                                 float minX,
-                                                 float minZ,
-                                                 float maxX,
-                                                 float maxZ) noexcept
-{
-    const float dx = (pointX < minX) ? (minX - pointX) : ((pointX > maxX) ? (pointX - maxX) : 0.0f);
-    const float dz = (pointZ < minZ) ? (minZ - pointZ) : ((pointZ > maxZ) ? (pointZ - maxZ) : 0.0f);
-    return dx * dx + dz * dz;
-}
-
 [[nodiscard]] bool exactUploadDebugLoggingEnabled() noexcept
 {
     static const bool enabled = []()
@@ -14453,8 +14441,9 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     farTerrainManager_.setVisibility(frustum, lastCameraPosition_);
     const int exactDrawRadiusChunks =
         std::max(targetViewDistance_ + hiddenExactPreloadBufferChunks(renderSettings_), targetViewDistance_);
-    const float exactDrawRadiusBlocks = static_cast<float>(chunksToBlocks(std::max(exactDrawRadiusChunks, 0)));
-    const float exactDrawRadiusSq = exactDrawRadiusBlocks * exactDrawRadiusBlocks;
+    const glm::ivec3 cameraChunk = worldToChunkCoords(static_cast<int>(std::floor(lastCameraPosition_.x)),
+                                                      0,
+                                                      static_cast<int>(std::floor(lastCameraPosition_.z)));
 
     std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
     {
@@ -14508,14 +14497,11 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             continue;
         }
 
-        // Keep exact terrain alive a little past the user-facing horizon so fog hides the
-        // cutoff instead of the cutoff defining the visible edge.
-        if (horizontalDistanceSqToAabb2D(lastCameraPosition_.x,
-                                         lastCameraPosition_.z,
-                                         minCorner.x,
-                                         minCorner.z,
-                                         maxCorner.x,
-                                         maxCorner.z) > exactDrawRadiusSq)
+        // Keep the newer fog behavior by drawing exact terrain into the hidden outer preload
+        // buffer, but make that coverage square instead of radial.
+        const int horizontalChunkDistance =
+            std::max(std::abs(coord.x - cameraChunk.x), std::abs(coord.z - cameraChunk.z));
+        if (horizontalChunkDistance > exactDrawRadiusChunks)
         {
             continue;
         }

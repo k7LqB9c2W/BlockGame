@@ -1,5 +1,5 @@
 // mob_system.cpp
-// Implements the lightweight passive-mob runtime, including chunk-radius despawn, simple locomotion, and per-part walk animation.
+// Implements the lightweight passive-mob runtime, including chunk-radius despawn, simple locomotion, and procedural per-part animation.
 
 #include "mob_system.h"
 #include "terrain/terrain_generator.h"
@@ -19,6 +19,13 @@ struct PassiveMobProfile
 {
     float walkSpeed{1.35f};
     float maxTurnRateRadians{glm::radians(220.0f)};
+    float headTurnRateRadians{glm::radians(140.0f)};
+    float maxHeadYawRadians{glm::radians(24.0f)};
+    float maxHeadPitchUpRadians{glm::radians(10.0f)};
+    float maxHeadPitchDownRadians{glm::radians(14.0f)};
+    float idleHeadLookChance{0.7f};
+    float idleHeadLookMinSeconds{0.9f};
+    float idleHeadLookMaxSeconds{2.0f};
     float idleMinSeconds{2.0f};
     float idleMaxSeconds{5.0f};
     float wanderMinDistance{2.0f};
@@ -58,6 +65,10 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     {
         profile.walkSpeed = 1.6f;
         profile.maxTurnRateRadians = glm::radians(280.0f);
+        profile.headTurnRateRadians = glm::radians(220.0f);
+        profile.maxHeadYawRadians = glm::radians(30.0f);
+        profile.maxHeadPitchUpRadians = glm::radians(18.0f);
+        profile.maxHeadPitchDownRadians = glm::radians(22.0f);
         profile.wanderMaxDistance = 5.0f;
         profile.colliderWidth = 0.4f;
         profile.colliderHeight = 0.9f;
@@ -67,6 +78,10 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     {
         profile.walkSpeed = 1.15f;
         profile.maxTurnRateRadians = glm::radians(180.0f);
+        profile.headTurnRateRadians = glm::radians(110.0f);
+        profile.maxHeadYawRadians = glm::radians(20.0f);
+        profile.maxHeadPitchUpRadians = glm::radians(9.0f);
+        profile.maxHeadPitchDownRadians = glm::radians(12.0f);
         profile.wanderMaxDistance = 7.0f;
         profile.colliderWidth = 0.8f;
         profile.colliderHeight = 1.4f;
@@ -75,6 +90,10 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     {
         profile.walkSpeed = 1.25f;
         profile.maxTurnRateRadians = glm::radians(210.0f);
+        profile.headTurnRateRadians = glm::radians(130.0f);
+        profile.maxHeadYawRadians = glm::radians(22.0f);
+        profile.maxHeadPitchUpRadians = glm::radians(8.0f);
+        profile.maxHeadPitchDownRadians = glm::radians(12.0f);
         profile.colliderWidth = 0.72f;
         profile.colliderHeight = 1.1f;
     }
@@ -179,14 +198,19 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     return wrapAngleRadians(target - current);
 }
 
+[[nodiscard]] float turnAngleToward(float current, float target, float maxTurnStepRadians) noexcept
+{
+    const float delta = shortestAngleDeltaRadians(current, target);
+    const float clampedDelta = std::clamp(delta, -maxTurnStepRadians, maxTurnStepRadians);
+    return wrapAngleRadians(current + clampedDelta);
+}
+
 void turnTowardYaw(MobSystem::MobInstance& instance,
                    float targetYawRadians,
                    float maxTurnStepRadians) noexcept
 {
     instance.desiredYawRadians = targetYawRadians;
-    const float delta = shortestAngleDeltaRadians(instance.yawRadians, targetYawRadians);
-    const float clampedDelta = std::clamp(delta, -maxTurnStepRadians, maxTurnStepRadians);
-    instance.yawRadians = wrapAngleRadians(instance.yawRadians + clampedDelta);
+    instance.yawRadians = turnAngleToward(instance.yawRadians, targetYawRadians, maxTurnStepRadians);
 }
 
 [[nodiscard]] float legSwingAngleRadians(const MobSystem::MobInstance& instance,
@@ -209,20 +233,93 @@ void turnTowardYaw(MobSystem::MobInstance& instance,
     }
 }
 
+void chooseIdleHeadLookTarget(MobSystem::MobInstance& instance,
+                              std::mt19937& rng,
+                              const PassiveMobProfile& profile)
+{
+    const bool lookAround = randomRange(rng, 0.0f, 1.0f) <= profile.idleHeadLookChance;
+    if (lookAround)
+    {
+        instance.desiredHeadYawRadians =
+            randomRange(rng, -profile.maxHeadYawRadians, profile.maxHeadYawRadians);
+        instance.desiredHeadPitchRadians =
+            randomRange(rng, -profile.maxHeadPitchDownRadians, profile.maxHeadPitchUpRadians);
+    }
+    else
+    {
+        instance.desiredHeadYawRadians = 0.0f;
+        instance.desiredHeadPitchRadians = 0.0f;
+    }
+
+    instance.headLookTimerSeconds =
+        randomRange(rng, profile.idleHeadLookMinSeconds, profile.idleHeadLookMaxSeconds);
+}
+
+void updateHeadLook(MobSystem::MobInstance& instance,
+                    std::mt19937& rng,
+                    const PassiveMobProfile& profile,
+                    float deltaSeconds)
+{
+    if (instance.state == MobSystem::PassiveState::Idle)
+    {
+        instance.headLookTimerSeconds -= deltaSeconds;
+        if (instance.headLookTimerSeconds <= 0.0f)
+        {
+            chooseIdleHeadLookTarget(instance, rng, profile);
+        }
+    }
+    else
+    {
+        instance.desiredHeadYawRadians = 0.0f;
+        instance.desiredHeadPitchRadians = 0.0f;
+        instance.headLookTimerSeconds = 0.0f;
+    }
+
+    const float maxTurnStep = profile.headTurnRateRadians * deltaSeconds;
+    instance.headYawRadians = turnAngleToward(instance.headYawRadians,
+                                              instance.desiredHeadYawRadians,
+                                              maxTurnStep);
+    instance.headPitchRadians = turnAngleToward(instance.headPitchRadians,
+                                                instance.desiredHeadPitchRadians,
+                                                maxTurnStep);
+}
+
 [[nodiscard]] glm::mat4 modelPartTransform(const MobSystem::MobInstance& instance,
                                            const MobModelPart& part) noexcept
 {
-    const float legSwing = legSwingAngleRadians(instance, part.animationRole);
-    if (std::abs(legSwing) <= 1e-5f)
-    {
-        return glm::mat4(1.0f);
-    }
-
     glm::mat4 transform(1.0f);
-    transform = glm::translate(transform, part.pivot);
-    transform = glm::rotate(transform, legSwing, glm::vec3(1.0f, 0.0f, 0.0f));
-    transform = glm::translate(transform, -part.pivot);
-    return transform;
+    switch (part.animationRole)
+    {
+    case MobPartAnimationRole::Head:
+        if (std::abs(instance.headYawRadians) <= 1e-5f &&
+            std::abs(instance.headPitchRadians) <= 1e-5f)
+        {
+            return transform;
+        }
+        transform = glm::translate(transform, part.pivot);
+        transform = glm::rotate(transform, instance.headYawRadians, glm::vec3(0.0f, 1.0f, 0.0f));
+        transform = glm::rotate(transform, instance.headPitchRadians, glm::vec3(1.0f, 0.0f, 0.0f));
+        transform = glm::translate(transform, -part.pivot);
+        return transform;
+    case MobPartAnimationRole::FrontLeftLeg:
+    case MobPartAnimationRole::FrontRightLeg:
+    case MobPartAnimationRole::BackLeftLeg:
+    case MobPartAnimationRole::BackRightLeg:
+    {
+        const float legSwing = legSwingAngleRadians(instance, part.animationRole);
+        if (std::abs(legSwing) <= 1e-5f)
+        {
+            return transform;
+        }
+        transform = glm::translate(transform, part.pivot);
+        transform = glm::rotate(transform, legSwing, glm::vec3(1.0f, 0.0f, 0.0f));
+        transform = glm::translate(transform, -part.pivot);
+        return transform;
+    }
+    case MobPartAnimationRole::Static:
+    default:
+        return transform;
+    }
 }
 
 [[nodiscard]] AxisMoveResult sweepMobAABB(AABB& box,
@@ -450,6 +547,7 @@ void beginIdle(MobSystem::MobInstance& instance,
     instance.stateTimerSeconds = randomRange(rng, profile.idleMinSeconds, profile.idleMaxSeconds);
     instance.targetWorldPosition = instance.worldPosition;
     instance.desiredYawRadians = instance.yawRadians;
+    instance.headLookTimerSeconds = 0.0f;
 }
 
 [[nodiscard]] bool isWalkableTarget(const ChunkManager& chunkManager,
@@ -696,6 +794,11 @@ bool MobSystem::spawn(std::string_view id, const glm::vec3& worldPosition, float
     instance.jumpCooldownSeconds = 0.0f;
     instance.walkCyclePhaseRadians = 0.0f;
     instance.walkCycleStrength = 0.0f;
+    instance.headYawRadians = 0.0f;
+    instance.headPitchRadians = 0.0f;
+    instance.desiredHeadYawRadians = 0.0f;
+    instance.desiredHeadPitchRadians = 0.0f;
+    instance.headLookTimerSeconds = 0.0f;
     instance.onGround = true;
     beginIdle(instance, rng, profile);
     instances_.push_back(instance);
@@ -769,6 +872,8 @@ void MobSystem::update(const glm::vec3& playerWorldPosition,
         {
             advanceWalk(instance, chunkManager, rng, profile, deltaSeconds);
         }
+
+        updateHeadLook(instance, rng, profile, deltaSeconds);
     }
 }
 

@@ -14,6 +14,7 @@
 enum class MobPartAnimationRole
 {
     Static,
+    Head,
     FrontLeftLeg,
     FrontRightLeg,
     BackLeftLeg,

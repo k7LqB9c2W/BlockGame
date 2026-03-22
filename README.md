@@ -209,6 +209,7 @@ BlockGame now has a first-pass passive-mob runtime for debug-spawned animals suc
 - Mob geometry is loaded from `assets/mobs/*.json`, with textures resolved from a matching `.png` when present.
 - Passive mobs currently share one very small AI loop: `Idle` for a random few seconds, then pick a short wander target, then `Walk` to it, then return to `Idle`.
 - Bedrock leg bones can be animated at runtime, and pigs now swing their legs while walking so the motion is not fully rigid.
+- Idle passive mobs can also do a small procedural head look-around, with bounded up/down and side-to-side motion that returns to neutral while walking.
 - The wander step is intentionally cheap. It does not pathfind, does not run herd logic, and only checks a few chunk/terrain queries plus a small mob AABB sweep to keep movement on nearby walkable ground.
 - Passive mobs now use collision-lite locomotion: shared gravity, simple block collision, and an automatic fixed hop over jumpable 1-block ledges instead of a full player-style movement stack.
 - Despawn is chunk-radius based, not block-distance based. If a mob's chunk moves outside the player's current `Exact Chunks` radius, it is removed from `MobSystem`.

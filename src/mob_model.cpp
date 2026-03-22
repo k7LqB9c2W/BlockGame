@@ -537,6 +537,10 @@ struct ParsedModelGeometry
 
 [[nodiscard]] MobPartAnimationRole animationRoleForBoneName(std::string_view boneName) noexcept
 {
+    if (boneName == "head")
+    {
+        return MobPartAnimationRole::Head;
+    }
     if (boneName == "leg0")
     {
         return MobPartAnimationRole::BackLeftLeg;
@@ -886,7 +890,7 @@ void bakeCube(std::vector<MobVertex>& vertices,
 
     if (!model.parts.empty())
     {
-        const glm::vec3 animationPadding(0.08f, 0.0f, 0.12f);
+        const glm::vec3 animationPadding(0.18f, 0.12f, 0.18f);
         model.localBoundsMin -= animationPadding;
         model.localBoundsMax += animationPadding;
     }

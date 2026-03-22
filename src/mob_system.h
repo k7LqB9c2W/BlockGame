@@ -37,6 +37,11 @@ public:
         float jumpCooldownSeconds{0.0f};
         float walkCyclePhaseRadians{0.0f};
         float walkCycleStrength{0.0f};
+        float headYawRadians{0.0f};
+        float headPitchRadians{0.0f};
+        float desiredHeadYawRadians{0.0f};
+        float desiredHeadPitchRadians{0.0f};
+        float headLookTimerSeconds{0.0f};
         bool onGround{true};
     };
 

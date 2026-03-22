@@ -1872,14 +1872,35 @@ void Renderer::destroySceneColor()
 
 void Renderer::createPipelines()
 {
-    D3D12_ROOT_PARAMETER shadowRootParam{};
-    shadowRootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    shadowRootParam.Descriptor.ShaderRegister = 0;
-    shadowRootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    D3D12_DESCRIPTOR_RANGE shadowAtlasRange{};
+    shadowAtlasRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    shadowAtlasRange.NumDescriptors = 1;
+    shadowAtlasRange.BaseShaderRegister = 0;
+
+    std::array<D3D12_ROOT_PARAMETER, 2> shadowRootParams{};
+    shadowRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    shadowRootParams[0].Descriptor.ShaderRegister = 0;
+    shadowRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    shadowRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    shadowRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    shadowRootParams[1].DescriptorTable.pDescriptorRanges = &shadowAtlasRange;
+    shadowRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC shadowSampler{};
+    shadowSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    shadowSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    shadowSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    shadowSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    shadowSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    shadowSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    shadowSampler.ShaderRegister = 0;
+    shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC shadowRootDesc{};
-    shadowRootDesc.NumParameters = 1;
-    shadowRootDesc.pParameters = &shadowRootParam;
+    shadowRootDesc.NumParameters = static_cast<UINT>(shadowRootParams.size());
+    shadowRootDesc.pParameters = shadowRootParams.data();
+    shadowRootDesc.NumStaticSamplers = 1;
+    shadowRootDesc.pStaticSamplers = &shadowSampler;
     shadowRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     Microsoft::WRL::ComPtr<ID3DBlob> serializedRoot;
@@ -2044,6 +2065,8 @@ void Renderer::createPipelines()
         loadShaderBytecode(shaderPath("block_outline_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> shadowVs =
         loadShaderBytecode(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> shadowPs =
+        loadShaderBytecode(shaderPath("shadow_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
         loadShaderBytecode(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
@@ -2078,8 +2101,11 @@ void Renderer::createPipelines()
         {"COLOR", 0, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(WorldVertex, lightingData)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
-    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 1> shadowInputLayout = {{
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> shadowInputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, tileCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasBase)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasSize)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> mobInputLayout = {{
@@ -2093,6 +2119,7 @@ void Renderer::createPipelines()
     shadowPso.InputLayout = {shadowInputLayout.data(), static_cast<UINT>(shadowInputLayout.size())};
     shadowPso.pRootSignature = shadowRootSignature_.Get();
     shadowPso.VS = {shadowVs->GetBufferPointer(), shadowVs->GetBufferSize()};
+    shadowPso.PS = {shadowPs->GetBufferPointer(), shadowPs->GetBufferSize()};
     shadowPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     shadowPso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     shadowPso.RasterizerState.FrontCounterClockwise = TRUE;
@@ -3449,7 +3476,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
     if (environment.debug.shadowsEnabled)
     {
-        renderShadowMap(renderData, view, cameraPos, environment, *nearConstants);
+        renderShadowMap(renderData, atlasTexture, view, cameraPos, environment, *nearConstants);
     }
 
     if ((skyPassEnabled || aerialPerspectiveEnabled) && atmosphere_)
@@ -3736,6 +3763,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 }
 
 void Renderer::renderShadowMap(const WorldRenderData& renderData,
+                               const LoadedTexture& atlasTexture,
                                const glm::mat4& view,
                                const glm::vec3& cameraPos,
                                const EnvironmentState& environment,
@@ -3780,6 +3808,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
     commandList_->SetGraphicsRootSignature(shadowRootSignature_.Get());
     commandList_->SetPipelineState(shadowPipelineState_.Get());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->SetGraphicsRootDescriptorTable(1, atlasTexture.srvGpu);
 
     const glm::mat4 invView = glm::inverse(view);
     glm::vec3 cameraForward = -glm::normalize(glm::vec3(invView[2]));

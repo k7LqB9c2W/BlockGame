@@ -13,11 +13,12 @@ struct ShaderCompileSpec
     const char* target;
 };
 
-inline constexpr std::array<ShaderCompileSpec, 31> kBlockGameShaderCompileSpecs{{
+inline constexpr std::array<ShaderCompileSpec, 32> kBlockGameShaderCompileSpecs{{
     {"world_vs.hlsl", "main", "vs_5_0"},
     {"mob_vs.hlsl", "main", "vs_5_0"},
     {"block_outline_vs.hlsl", "main", "vs_5_0"},
     {"shadow_vs.hlsl", "main", "vs_5_0"},
+    {"shadow_ps.hlsl", "main", "ps_5_0"},
     {"world_near_ps.hlsl", "main", "ps_5_0"},
     {"world_far_ps.hlsl", "main", "ps_5_0"},
     {"mob_ps.hlsl", "main", "ps_5_0"},

@@ -132,15 +132,20 @@ float4 main(PSInput input) : SV_TARGET
     }
 
     const float faceShade = faceShadeMultiplier(normal);
+    const float indirectFaceShade = lerp(1.0f, faceShade, 0.55f);
+    const float directFaceShade = lerp(1.0f, faceShade, 0.25f);
     const float diff = max(dot(normal, lightDir), 0.0f);
     const float hemi = saturate(normal.y * 0.5f + 0.5f);
     const float3 ambientTint = lerp(uGroundAmbient.rgb, uSkyAmbient.rgb, hemi);
     const float3 skyTint = ambientTint * 2.00f + float3(0.08f, 0.09f, 0.11f);
     const float3 skyIndirect = skyTint * skyLight;
     const float3 blockIndirect = float3(1.08f, 0.92f, 0.68f) * blockLight;
-    const float3 indirect = (skyIndirect + blockIndirect) * faceShade * ao;
+    const float indirectAo = lerp(1.0f, ao, 0.60f);
+    const float3 indirect = (skyIndirect + blockIndirect) * indirectFaceShade * indirectAo;
     const float directSunGate = uTerrainDebug.x * saturate(skyLight * 1.05f);
-    const float3 directLight = uSunColor.rgb * (diff * directSunGate * faceShade * lerp(1.0f, ao, 0.20f) * 0.16f);
+    const float directAo = lerp(1.0f, ao, 0.10f);
+    const float3 directLight =
+        uSunColor.rgb * (diff * directSunGate * directFaceShade * directAo * 0.16f);
     const float3 baseBounce = ambientTint * 0.018f;
 
     float3 color = albedo * (indirect + baseBounce + directLight);

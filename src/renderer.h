@@ -313,6 +313,7 @@ private:
                                D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
                                D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv);
     void renderShadowMap(const WorldRenderData& renderData,
+                         const LoadedTexture& atlasTexture,
                          const glm::mat4& view,
                          const glm::vec3& cameraPos,
                          const EnvironmentState& environment,

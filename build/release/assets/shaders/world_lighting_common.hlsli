@@ -29,7 +29,8 @@ static const float kVanillaLightLut[16] = {
     0.520f, 0.690f, 0.845f, 1.000f
 };
 
-static const float kAoFactors[4] = {1.00f, 0.80f, 0.62f, 0.45f};
+// Keep terrain corners readable without outlining every block step like old fast-lighting.
+static const float kAoFactors[4] = {1.00f, 0.90f, 0.82f, 0.74f};
 
 float decodeNonLinearLightLevel(uint level)
 {
@@ -63,13 +64,13 @@ float faceShadeMultiplier(float3 normal)
     const float3 absNormal = abs(normal);
     if (absNormal.y >= absNormal.x && absNormal.y >= absNormal.z)
     {
-        return normal.y >= 0.0f ? 1.00f : 0.50f;
+        return normal.y >= 0.0f ? 1.00f : 0.82f;
     }
     if (absNormal.z >= absNormal.x)
     {
-        return 0.80f;
+        return 0.94f;
     }
-    return 0.60f;
+    return 0.90f;
 }
 
 uint decodeGrassTintIndex(uint materialFlags)

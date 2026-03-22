@@ -1062,6 +1062,7 @@ void Renderer::shutdown()
     shadowPipelineState_.Reset();
     nearPipelineState_.Reset();
     farPipelineState_.Reset();
+    mobPipelineState_.Reset();
     blockOutlinePipelineState_.Reset();
     lodIndirectPipelineState_.Reset();
     lodCullPipelineState_.Reset();
@@ -2036,6 +2037,8 @@ void Renderer::createPipelines()
 
     Microsoft::WRL::ComPtr<ID3DBlob> worldVs =
         loadShaderBytecode(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> mobVs =
+        loadShaderBytecode(shaderPath("mob_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> blockOutlineVs =
         loadShaderBytecode(shaderPath("block_outline_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> shadowVs =
@@ -2044,6 +2047,8 @@ void Renderer::createPipelines()
         loadShaderBytecode(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
           loadShaderBytecode(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> mobPs =
+          loadShaderBytecode(shaderPath("mob_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> blockOutlinePs =
           loadShaderBytecode(shaderPath("block_outline_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> depthPyramidCs =
@@ -2074,6 +2079,13 @@ void Renderer::createPipelines()
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 1> shadowInputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    }};
+
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> mobInputLayout = {{
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(MobVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(MobVertex, normal)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(MobVertex, uv)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(MobVertex, color)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPso{};
@@ -2123,6 +2135,13 @@ void Renderer::createPipelines()
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
                   "failed to create far pipeline");
+
+    worldPso.InputLayout = {mobInputLayout.data(), static_cast<UINT>(mobInputLayout.size())};
+    worldPso.VS = {mobVs->GetBufferPointer(), mobVs->GetBufferSize()};
+    worldPso.PS = {mobPs->GetBufferPointer(), mobPs->GetBufferSize()};
+    worldPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&mobPipelineState_)),
+                  "failed to create mob pipeline");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC blockOutlinePso{};
     blockOutlinePso.pRootSignature = shadowRootSignature_.Get();
@@ -3606,6 +3625,57 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                               indirectBufferOffset,
                                               nullptr,
                                               0);
+        }
+
+        if (!renderData.mobBatches.empty())
+        {
+            commandList_->SetPipelineState(mobPipelineState_.Get());
+            for (const MobRenderBatch& batch : renderData.mobBatches)
+            {
+                if (batch.vertices.empty() || batch.indices.empty())
+                {
+                    continue;
+                }
+
+                void* mobVertexCpu = nullptr;
+                const std::size_t mobVertexBytes = batch.vertices.size() * sizeof(MobVertex);
+                const std::uint64_t mobVertexGpuAddress =
+                    allocateFrameConstantBytes(mobVertexBytes, &mobVertexCpu);
+                std::memcpy(mobVertexCpu, batch.vertices.data(), mobVertexBytes);
+
+                void* mobIndexCpu = nullptr;
+                const std::size_t mobIndexBytes = batch.indices.size() * sizeof(std::uint32_t);
+                const std::uint64_t mobIndexGpuAddress =
+                    allocateFrameConstantBytes(mobIndexBytes, &mobIndexCpu);
+                std::memcpy(mobIndexCpu, batch.indices.data(), mobIndexBytes);
+
+                void* mobConstantsCpu = nullptr;
+                const std::uint64_t mobCb = allocateFrameConstantBytes(sizeof(WorldConstants), &mobConstantsCpu);
+                auto* mobConstants = static_cast<WorldConstants*>(mobConstantsCpu);
+                *mobConstants = *nearConstants;
+                mobConstants->params0 = glm::vec4(batch.hasTexture ? 1.0f : 0.0f,
+                                                  aerialPerspectiveEnabled ? 1.0f : 0.0f,
+                                                  1.0f / static_cast<float>(std::max(width_, 1)),
+                                                  1.0f / static_cast<float>(std::max(height_, 1)));
+
+                const D3D12_VERTEX_BUFFER_VIEW vertexView{
+                    mobVertexGpuAddress,
+                    static_cast<UINT>(mobVertexBytes),
+                    static_cast<UINT>(sizeof(MobVertex))};
+                const D3D12_INDEX_BUFFER_VIEW indexView{
+                    mobIndexGpuAddress,
+                    static_cast<UINT>(mobIndexBytes),
+                    DXGI_FORMAT_R32_UINT};
+
+                commandList_->SetGraphicsRootConstantBufferView(0, mobCb);
+                commandList_->SetGraphicsRootDescriptorTable(1, batch.hasTexture ? batch.textureSrv : atlasTexture.srvGpu);
+                commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+                commandList_->SetGraphicsRootDescriptorTable(3, shadowMapSrvGpu_);
+                commandList_->SetGraphicsRootDescriptorTable(4, skyBackgroundSrvGpu_);
+                commandList_->IASetVertexBuffers(0, 1, &vertexView);
+                commandList_->IASetIndexBuffer(&indexView);
+                commandList_->DrawIndexedInstanced(static_cast<UINT>(batch.indices.size()), 1, 0, 0, 0);
+            }
         }
     }
 

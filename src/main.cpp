@@ -3,6 +3,7 @@
 #include "camera.h"
 #include "chunk_manager.h"
 #include "input_context.h"
+#include "mob_system.h"
 #include "renderer.h"
 #include "terrain/terrain_generator.h"
 
@@ -3231,6 +3232,97 @@ int runGame()
                   << benchmarkScenarioName(benchmarkConfig.scenario)
                   << "'. Output: " << benchmarkConfig.outputPath << std::endl;
     }
+
+    MobSystem mobSystem;
+    std::unordered_map<std::string, LoadedTexture> mobTextureCache;
+    std::unordered_set<std::string> missingMobTextures;
+    noteDiagnosticPhase("startup/mobs");
+    if (mobSystem.loadDefinitions(std::filesystem::path("assets") / "mobs"))
+    {
+        for (const MobModel* model : mobSystem.allModels())
+        {
+            if (model == nullptr || model->texturePath.empty())
+            {
+                continue;
+            }
+
+            const std::string textureKey = model->texturePath.generic_string();
+            if (mobTextureCache.find(textureKey) != mobTextureCache.end() ||
+                missingMobTextures.find(textureKey) != missingMobTextures.end())
+            {
+                continue;
+            }
+
+            std::error_code textureEc;
+            if (!std::filesystem::exists(model->texturePath, textureEc) || textureEc)
+            {
+                missingMobTextures.insert(textureKey);
+                continue;
+            }
+
+            try
+            {
+                mobTextureCache.emplace(textureKey, renderer.loadTexture(textureKey.c_str()));
+            }
+            catch (const std::exception& ex)
+            {
+                std::cerr << "Failed to load mob texture '" << textureKey << "': " << ex.what() << std::endl;
+                missingMobTextures.insert(textureKey);
+            }
+        }
+
+        std::cout << "Loaded " << mobSystem.definitionCount() << " mob model definition(s)." << std::endl;
+    }
+    else
+    {
+        std::cout << "No mob model definitions were loaded from assets/mobs." << std::endl;
+    }
+
+    const auto resolveMobTextureBinding = [&](const MobModel& model) -> MobTextureBinding
+    {
+        if (!model.texturePath.empty())
+        {
+            const std::string textureKey = model.texturePath.generic_string();
+            const auto textureIt = mobTextureCache.find(textureKey);
+            if (textureIt != mobTextureCache.end())
+            {
+                return MobTextureBinding{textureIt->second.srvGpu, true};
+            }
+        }
+        return {};
+    };
+
+    const auto spawnPigNearPlayer = [&]()
+    {
+        if (mobSystem.findModel("pig") == nullptr)
+        {
+            std::cerr << "Cannot spawn pig: assets/mobs/pig.geo.json was not loaded." << std::endl;
+            return false;
+        }
+
+        glm::vec3 forward = camera.front();
+        forward.y = 0.0f;
+        if (glm::dot(forward, forward) <= 1e-4f)
+        {
+            forward = glm::vec3(0.0f, 0.0f, -1.0f);
+        }
+        else
+        {
+            forward = glm::normalize(forward);
+        }
+
+        const glm::vec3 spawnPos = glm::vec3(camera.position.x + forward.x * 3.0f,
+                                             chunkManager.surfaceHeight(camera.position.x + forward.x * 3.0f,
+                                                                        camera.position.z + forward.z * 3.0f),
+                                             camera.position.z + forward.z * 3.0f);
+        const float yawRadians = std::atan2(-forward.x, -forward.z);
+        const bool spawned = mobSystem.spawn("pig", spawnPos, yawRadians);
+        if (spawned)
+        {
+            std::cout << "Spawned pig at: (" << spawnPos.x << ", " << spawnPos.y << ", " << spawnPos.z << ")" << std::endl;
+        }
+        return spawned;
+    };
     
     // Find a guaranteed safe spawn position above ground
     std::cout << "Finding safe spawn position..." << std::endl;
@@ -3928,7 +4020,8 @@ int runGame()
         {
             noteDiagnosticPhase("frame/build_render_data");
             const auto buildRenderDataStart = std::chrono::steady_clock::now();
-            const WorldRenderData renderData = chunkManager.buildRenderData(frustum);
+            WorldRenderData renderData = chunkManager.buildRenderData(frustum);
+            mobSystem.appendRenderBatches(renderData, frustum, resolveMobTextureBinding);
             buildRenderDataMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - buildRenderDataStart).count();
             const auto renderWorldStart = std::chrono::steady_clock::now();
@@ -4268,7 +4361,7 @@ int runGame()
                 "E: Open block picker\n"
                 "L: Toggle Grass / DebugLamp placement\n"
                 ". : Release or recapture mouse\n"
-                "F1: Debug overlay, lighting lab, and LOD diagnostics\n"
+                "F1: Debug overlay, lighting lab, mob spawning, and LOD diagnostics\n"
                 "F2: Teleport dialog\n"
                 "N: Render distance dialog\n"
                 "H: Toggle this help\n"
@@ -4483,6 +4576,25 @@ int runGame()
                 ImGui::TextWrapped("Only the inner Exact Radius streams real chunks. The outer %d chunks are LOD-only visual terrain until you move closer.",
                                    std::max(renderSettings.totalChunks - renderSettings.exactChunks, 0));
                 ImGui::TextWrapped("GPU-backed distant terrain is active beyond the Exact Radius. Exact chunks still own gameplay, collision, and edits.");
+            }
+            ImGui::Separator();
+            ImGui::TextUnformatted("Mobs");
+            ImGui::Text("Definitions: %zu | Spawned: %zu",
+                        mobSystem.definitionCount(),
+                        mobSystem.instanceCount());
+            const bool pigAvailable = (mobSystem.findModel("pig") != nullptr);
+            if (!pigAvailable)
+            {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Spawn Pig"))
+            {
+                spawnPigNearPlayer();
+            }
+            if (!pigAvailable)
+            {
+                ImGui::EndDisabled();
+                ImGui::TextUnformatted("Pig definition missing from assets/mobs.");
             }
             ImGui::Separator();
             ImGui::TextUnformatted("View Diagnostics");

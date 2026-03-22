@@ -19,6 +19,12 @@
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\input_context.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_model.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_system.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -52,6 +58,12 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_support.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_model.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_system.h">
       <Filter>src</Filter>
     </ClInclude>
   </ItemGroup>

@@ -541,6 +541,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_far_terrain.inl" />
     <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\chunk_manager_support.h" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\input_context.cpp" />
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_model.cpp" />
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_model.h" />
+    <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_system.cpp" />
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\mob_system.h" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\renderer.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\biome_database.cpp" />
     <ClCompile Include="C:\Users\Jacob\Documents\code\BlockGame\src\terrain\climate_map.cpp" />

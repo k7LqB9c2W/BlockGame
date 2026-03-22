@@ -57,6 +57,10 @@ set(BLOCKGAME_SOURCES
     ${SRC_ROOT}/chunk_manager_far_terrain.inl
     ${SRC_ROOT}/chunk_manager_support.h
     ${SRC_ROOT}/input_context.cpp
+    ${SRC_ROOT}/mob_model.cpp
+    ${SRC_ROOT}/mob_model.h
+    ${SRC_ROOT}/mob_system.cpp
+    ${SRC_ROOT}/mob_system.h
     ${SRC_ROOT}/renderer.cpp
     ${SRC_ROOT}/terrain/biome_database.cpp
     ${SRC_ROOT}/terrain/climate_map.cpp

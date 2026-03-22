@@ -161,6 +161,14 @@ struct WorldVertex
     std::uint32_t lightingData{0};
 };
 
+struct MobVertex
+{
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec2 uv;
+    glm::vec4 color{1.0f};
+};
+
 struct BlockTextureAtlasConfig
 {
     glm::ivec2 textureSizePixels{0};
@@ -198,12 +206,21 @@ struct ChunkRenderBatch
     std::uint32_t debugPageIndex{0};
 };
 
+struct MobRenderBatch
+{
+    std::vector<MobVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    D3D12_GPU_DESCRIPTOR_HANDLE textureSrv{};
+    bool hasTexture{false};
+};
+
 struct WorldRenderData
 {
     glm::ivec3 highlightedBlock{0};
     bool hasHighlight{false};
     std::vector<ChunkRenderBatch> nearBatches;
     std::vector<ChunkRenderBatch> farBatches;
+    std::vector<MobRenderBatch> mobBatches;
 };
 
 struct RenderDistanceSettings

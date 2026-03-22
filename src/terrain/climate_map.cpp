@@ -676,21 +676,54 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos,
 
     if (weighted.empty())
     {
+        const CandidateInfo* nearestCandidate = nullptr;
+        for (const CandidateInfo& candidate : candidates)
+        {
+            if (!candidate.seed || !candidate.seed->biome)
+            {
+                continue;
+            }
+
+            if (nearestCandidate == nullptr ||
+                candidate.normalized < nearestCandidate->normalized ||
+                (candidate.normalized == nearestCandidate->normalized &&
+                 candidate.distance < nearestCandidate->distance))
+            {
+                nearestCandidate = &candidate;
+            }
+        }
+
         ClimateSample fallback{};
         fallback.blendCount = 1;
-        const BiomeDefinition& biome = biomeDatabase_.definitionByIndex(0);
+        const BiomeDefinition* fallbackBiome =
+            (nearestCandidate && nearestCandidate->seed && nearestCandidate->seed->biome)
+                ? nearestCandidate->seed->biome
+                : (biomeSelection_.empty() ? &biomeDatabase_.definitionByIndex(0) : biomeSelection_.front());
+        const BiomeDefinition& biome = *fallbackBiome;
+        const float normalizedDistance = nearestCandidate ? nearestCandidate->normalized : 0.0f;
+        const float falloff = nearestCandidate ? nearestCandidate->radius : biome.maxRadius();
+        const glm::vec2 sitePosition =
+            nearestCandidate
+                ? glm::vec2(static_cast<float>(nearestCandidate->seed->position.x),
+                            static_cast<float>(nearestCandidate->seed->position.y))
+                : glm::vec2(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y));
+        const float baseHeight =
+            nearestCandidate ? nearestCandidate->seed->baseHeight : static_cast<float>(biome.minHeight);
         BiomeBlend blend{};
         blend.biome = &biome;
         blend.weight = 1.0f;
-        blend.height = static_cast<float>(biome.minHeight);
-        blend.height = biome.applyHeightLimits(blend.height, 0.0f);
+        blend.height = biome.applyHeightLimits(baseHeight, normalizedDistance);
         blend.roughness = biome.roughness;
         blend.hills = biome.hills;
         blend.mountains = biome.mountains;
-        blend.normalizedDistance = 0.0f;
-        blend.seed = hashCombine(baseSeed_, static_cast<unsigned>(biome.minHeight));
-        blend.falloff = biome.maxRadius();
-        blend.sitePosition = glm::vec2(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y));
+        blend.normalizedDistance = normalizedDistance;
+        blend.seed = nearestCandidate
+                         ? hashCombine(baseSeed_,
+                                       hashCombine(static_cast<unsigned>(nearestCandidate->seed->position.x),
+                                                   static_cast<unsigned>(nearestCandidate->seed->position.y)))
+                         : hashCombine(baseSeed_, static_cast<unsigned>(biome.minHeight));
+        blend.falloff = falloff;
+        blend.sitePosition = sitePosition;
         fallback.blends[0] = blend;
         fallback.representativeBiome = &biome;
         fallback.representativeWeight = 1.0f;
@@ -699,8 +732,8 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos,
         fallback.aggregatedHills = blend.hills;
         fallback.aggregatedMountains = blend.mountains;
         fallback.keepOriginalMix = std::clamp(biome.keepOriginalTerrain, 0.0f, 1.0f);
-        fallback.dominantSitePos = glm::vec2(static_cast<float>(worldPos.x), static_cast<float>(worldPos.y));
-        fallback.dominantSiteHalfExtents = glm::vec2(biome.radius);
+        fallback.dominantSitePos = sitePosition;
+        fallback.dominantSiteHalfExtents = glm::vec2(falloff);
         fallback.dominantIsOcean = biome.isOcean();
         fallback.distanceToCoast = std::numeric_limits<float>::infinity();
         fallback.signedDistanceToCoast =

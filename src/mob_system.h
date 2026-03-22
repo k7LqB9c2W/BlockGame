@@ -29,6 +29,7 @@ public:
         const MobModel* model{nullptr};
         glm::vec3 worldPosition{0.0f};
         float yawRadians{0.0f};
+        float desiredYawRadians{0.0f};
         PassiveState state{PassiveState::Idle};
         float stateTimerSeconds{0.0f};
         glm::vec3 targetWorldPosition{0.0f};

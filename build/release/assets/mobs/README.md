@@ -10,5 +10,7 @@ Current BlockGame mob import rules:
 - The loader looks for a texture next to the JSON using the same base name.
   - Example: `pig.geo.json` will try `pig.png`.
 - If the texture is missing, the mob renders with a default pink fallback material.
+- Per-bone geometry is preserved as baked parts so simple runtime animation can be applied without skeletal skinning.
+- Pig-style four-leg walk animation currently expects Bedrock leg bone names `leg0`, `leg1`, `leg2`, and `leg3`.
 
-For the current test pass, only static bind-pose geometry is rendered. Animation and AI are not wired yet.
+For the current test pass, BlockGame supports simple passive AI plus a lightweight walk-cycle animation, not full Bedrock animation controllers.

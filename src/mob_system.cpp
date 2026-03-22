@@ -18,6 +18,7 @@ namespace
 struct PassiveMobProfile
 {
     float walkSpeed{1.35f};
+    float maxTurnRateRadians{glm::radians(220.0f)};
     float idleMinSeconds{2.0f};
     float idleMaxSeconds{5.0f};
     float wanderMinDistance{2.0f};
@@ -56,6 +57,7 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     if (modelId == "chicken")
     {
         profile.walkSpeed = 1.6f;
+        profile.maxTurnRateRadians = glm::radians(280.0f);
         profile.wanderMaxDistance = 5.0f;
         profile.colliderWidth = 0.4f;
         profile.colliderHeight = 0.9f;
@@ -64,6 +66,7 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     else if (modelId == "cow" || modelId == "sheep")
     {
         profile.walkSpeed = 1.15f;
+        profile.maxTurnRateRadians = glm::radians(180.0f);
         profile.wanderMaxDistance = 7.0f;
         profile.colliderWidth = 0.8f;
         profile.colliderHeight = 1.4f;
@@ -71,6 +74,7 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
     else if (modelId == "pig")
     {
         profile.walkSpeed = 1.25f;
+        profile.maxTurnRateRadians = glm::radians(210.0f);
         profile.colliderWidth = 0.72f;
         profile.colliderHeight = 1.1f;
     }
@@ -157,6 +161,32 @@ constexpr float kLegSwingAmplitudeRadians = glm::radians(26.0f);
 [[nodiscard]] float yawFromDirection(const glm::vec2& direction) noexcept
 {
     return std::atan2(-direction.x, -direction.y);
+}
+
+[[nodiscard]] float wrapAngleRadians(float angle) noexcept
+{
+    constexpr float kTwoPi = glm::two_pi<float>();
+    angle = std::fmod(angle + glm::pi<float>(), kTwoPi);
+    if (angle < 0.0f)
+    {
+        angle += kTwoPi;
+    }
+    return angle - glm::pi<float>();
+}
+
+[[nodiscard]] float shortestAngleDeltaRadians(float current, float target) noexcept
+{
+    return wrapAngleRadians(target - current);
+}
+
+void turnTowardYaw(MobSystem::MobInstance& instance,
+                   float targetYawRadians,
+                   float maxTurnStepRadians) noexcept
+{
+    instance.desiredYawRadians = targetYawRadians;
+    const float delta = shortestAngleDeltaRadians(instance.yawRadians, targetYawRadians);
+    const float clampedDelta = std::clamp(delta, -maxTurnStepRadians, maxTurnStepRadians);
+    instance.yawRadians = wrapAngleRadians(instance.yawRadians + clampedDelta);
 }
 
 [[nodiscard]] float legSwingAngleRadians(const MobSystem::MobInstance& instance,
@@ -419,6 +449,7 @@ void beginIdle(MobSystem::MobInstance& instance,
     instance.state = MobSystem::PassiveState::Idle;
     instance.stateTimerSeconds = randomRange(rng, profile.idleMinSeconds, profile.idleMaxSeconds);
     instance.targetWorldPosition = instance.worldPosition;
+    instance.desiredYawRadians = instance.yawRadians;
 }
 
 [[nodiscard]] bool isWalkableTarget(const ChunkManager& chunkManager,
@@ -575,7 +606,7 @@ void simulateMobMotion(MobSystem::MobInstance& instance,
         instance.state = MobSystem::PassiveState::Walk;
         instance.stateTimerSeconds = std::max(distance / std::max(profile.walkSpeed, 0.1f), 0.5f) + 0.75f;
         instance.targetWorldPosition = candidatePosition;
-        instance.yawRadians = yawFromDirection(direction);
+        instance.desiredYawRadians = yawFromDirection(direction);
         return true;
     }
 
@@ -608,11 +639,14 @@ void advanceWalk(MobSystem::MobInstance& instance,
     }
 
     const glm::vec2 direction = toTarget / distance;
-    instance.yawRadians = yawFromDirection(direction);
+    const float desiredYaw = yawFromDirection(direction);
+    turnTowardYaw(instance, desiredYaw, profile.maxTurnRateRadians * deltaSeconds);
+    const float alignment =
+        std::max(std::cos(std::abs(shortestAngleDeltaRadians(instance.yawRadians, desiredYaw))), 0.0f);
     simulateMobMotion(instance,
                       chunkManager,
                       profile,
-                      direction * profile.walkSpeed,
+                      direction * (profile.walkSpeed * alignment),
                       deltaSeconds);
 
     if (instance.stateTimerSeconds <= 0.0f)
@@ -657,6 +691,7 @@ bool MobSystem::spawn(std::string_view id, const glm::vec3& worldPosition, float
     instance.model = model;
     instance.worldPosition = worldPosition;
     instance.yawRadians = yawRadians;
+    instance.desiredYawRadians = yawRadians;
     instance.verticalVelocity = 0.0f;
     instance.jumpCooldownSeconds = 0.0f;
     instance.walkCyclePhaseRadians = 0.0f;

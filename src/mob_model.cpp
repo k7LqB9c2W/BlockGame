@@ -527,10 +527,11 @@ struct ParsedModelGeometry
 
 [[nodiscard]] glm::mat4 bedrockRotationMatrix(const glm::vec3& rotationDegrees)
 {
+    const glm::vec3 correctedRotation = -rotationDegrees;
     glm::mat4 matrix(1.0f);
-    matrix = glm::rotate(matrix, glm::radians(rotationDegrees.z), glm::vec3(0.0f, 0.0f, 1.0f));
-    matrix = glm::rotate(matrix, glm::radians(rotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
-    matrix = glm::rotate(matrix, glm::radians(rotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
+    matrix = glm::rotate(matrix, glm::radians(correctedRotation.z), glm::vec3(0.0f, 0.0f, 1.0f));
+    matrix = glm::rotate(matrix, glm::radians(correctedRotation.y), glm::vec3(0.0f, 1.0f, 0.0f));
+    matrix = glm::rotate(matrix, glm::radians(correctedRotation.x), glm::vec3(1.0f, 0.0f, 0.0f));
     return matrix;
 }
 
@@ -822,32 +823,14 @@ void bakeCube(std::vector<MobVertex>& vertices,
     model.texturePath = defaultTexturePathForModel(path);
     model.textureSize = parsed.textureSize;
 
-    std::vector<std::optional<glm::mat4>> boneTransforms(parsed.bones.size());
-    std::function<const glm::mat4&(int)> resolveBoneTransform = [&](int boneIndex) -> const glm::mat4&
+    for (const BedrockBone& bone : parsed.bones)
     {
-        std::optional<glm::mat4>& cached = boneTransforms[boneIndex];
-        if (cached.has_value())
-        {
-            return *cached;
-        }
-
-        const BedrockBone& bone = parsed.bones[static_cast<std::size_t>(boneIndex)];
-        glm::mat4 transform = glm::translate(glm::mat4(1.0f), bone.pivot) *
-                              bedrockRotationMatrix(bone.bindRotation) *
-                              glm::translate(glm::mat4(1.0f), -bone.pivot);
-        if (bone.parentIndex >= 0)
-        {
-            transform = resolveBoneTransform(bone.parentIndex) * transform;
-        }
-
-        cached = transform;
-        return *cached;
-    };
-
-    for (std::size_t boneIndex = 0; boneIndex < parsed.bones.size(); ++boneIndex)
-    {
-        const BedrockBone& bone = parsed.bones[boneIndex];
-        const glm::mat4& transform = resolveBoneTransform(static_cast<int>(boneIndex));
+        // Bedrock geometry authors cubes and pivots in model space. For the static bind-pose bake,
+        // applying parent transforms again explodes child bones away from the body; preserve only
+        // this bone's own bind rotation around its authored model-space pivot.
+        const glm::mat4 transform = glm::translate(glm::mat4(1.0f), bone.pivot) *
+                                    bedrockRotationMatrix(bone.bindRotation) *
+                                    glm::translate(glm::mat4(1.0f), -bone.pivot);
         for (const BedrockCube& cube : bone.cubes)
         {
             bakeCube(model.vertices, model.indices, model.textureSize, transform, cube);

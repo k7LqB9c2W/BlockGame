@@ -1936,7 +1936,8 @@ void Renderer::createPipelines()
     worldRootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> worldSamplers{};
-    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    // Keep voxel and mob albedo texels crisp instead of smoothing them with linear filtering.
+    worldSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
     worldSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     worldSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     worldSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;

@@ -1,5 +1,5 @@
 // mob_model.h
-// Declares Bedrock-style mob geometry loading and bind-pose mesh baking for BlockGame's first mob-content path.
+// Declares Bedrock-style mob geometry loading, including per-bone baked parts for simple runtime mob animation.
 
 #pragma once
 
@@ -10,6 +10,24 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+enum class MobPartAnimationRole
+{
+    Static,
+    FrontLeftLeg,
+    FrontRightLeg,
+    BackLeftLeg,
+    BackRightLeg
+};
+
+struct MobModelPart
+{
+    std::string name;
+    glm::vec3 pivot{0.0f};
+    std::size_t vertexOffset{0};
+    std::size_t vertexCount{0};
+    MobPartAnimationRole animationRole{MobPartAnimationRole::Static};
+};
 
 struct MobModel
 {
@@ -22,6 +40,7 @@ struct MobModel
     glm::vec4 fallbackColor{1.0f, 0.72f, 0.78f, 1.0f};
     std::vector<MobVertex> vertices;
     std::vector<std::uint32_t> indices;
+    std::vector<MobModelPart> parts;
 
     [[nodiscard]] bool empty() const noexcept
     {

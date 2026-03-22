@@ -1,5 +1,5 @@
 // mob_model.cpp
-// Loads a Bedrock-style subset of mob geometry JSON and bakes it into a static bind-pose mesh for BlockGame.
+// Loads a Bedrock-style subset of mob geometry JSON and bakes bind-pose mesh parts that can be animated at runtime.
 
 #include "mob_model.h"
 
@@ -535,6 +535,27 @@ struct ParsedModelGeometry
     return matrix;
 }
 
+[[nodiscard]] MobPartAnimationRole animationRoleForBoneName(std::string_view boneName) noexcept
+{
+    if (boneName == "leg0")
+    {
+        return MobPartAnimationRole::BackLeftLeg;
+    }
+    if (boneName == "leg1")
+    {
+        return MobPartAnimationRole::BackRightLeg;
+    }
+    if (boneName == "leg2")
+    {
+        return MobPartAnimationRole::FrontLeftLeg;
+    }
+    if (boneName == "leg3")
+    {
+        return MobPartAnimationRole::FrontRightLeg;
+    }
+    return MobPartAnimationRole::Static;
+}
+
 [[nodiscard]] ParsedModelGeometry parseBoneGeometryArray(const JsonArray& bones,
                                                          const JsonObject& textureOwner,
                                                          bool modernDescriptionNames)
@@ -825,6 +846,7 @@ void bakeCube(std::vector<MobVertex>& vertices,
 
     for (const BedrockBone& bone : parsed.bones)
     {
+        const std::size_t vertexOffset = model.vertices.size();
         // Bedrock geometry authors cubes and pivots in model space. For the static bind-pose bake,
         // applying parent transforms again explodes child bones away from the body; preserve only
         // this bone's own bind rotation around its authored model-space pivot.
@@ -834,6 +856,18 @@ void bakeCube(std::vector<MobVertex>& vertices,
         for (const BedrockCube& cube : bone.cubes)
         {
             bakeCube(model.vertices, model.indices, model.textureSize, transform, cube);
+        }
+
+        const std::size_t vertexCount = model.vertices.size() - vertexOffset;
+        if (vertexCount > 0)
+        {
+            MobModelPart part;
+            part.name = bone.name;
+            part.pivot = bone.pivot / 16.0f;
+            part.vertexOffset = vertexOffset;
+            part.vertexCount = vertexCount;
+            part.animationRole = animationRoleForBoneName(bone.name);
+            model.parts.push_back(std::move(part));
         }
     }
 
@@ -848,6 +882,13 @@ void bakeCube(std::vector<MobVertex>& vertices,
     {
         model.localBoundsMin = glm::min(model.localBoundsMin, vertex.position);
         model.localBoundsMax = glm::max(model.localBoundsMax, vertex.position);
+    }
+
+    if (!model.parts.empty())
+    {
+        const glm::vec3 animationPadding(0.08f, 0.0f, 0.12f);
+        model.localBoundsMin -= animationPadding;
+        model.localBoundsMax += animationPadding;
     }
 
     return model;

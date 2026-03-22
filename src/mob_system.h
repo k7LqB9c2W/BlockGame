@@ -1,5 +1,5 @@
 // mob_system.h
-// Declares the lightweight passive-mob runtime that owns spawned mob instances, simple wander AI, and render-batch emission.
+// Declares the lightweight passive-mob runtime that owns spawned mob instances, simple wander AI, and animated render-batch emission.
 
 #pragma once
 
@@ -32,6 +32,11 @@ public:
         PassiveState state{PassiveState::Idle};
         float stateTimerSeconds{0.0f};
         glm::vec3 targetWorldPosition{0.0f};
+        float verticalVelocity{0.0f};
+        float jumpCooldownSeconds{0.0f};
+        float walkCyclePhaseRadians{0.0f};
+        float walkCycleStrength{0.0f};
+        bool onGround{true};
     };
 
     bool loadDefinitions(const std::filesystem::path& directory);

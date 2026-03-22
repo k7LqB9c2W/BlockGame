@@ -202,6 +202,17 @@ The project currently includes:
 - startup preload sequencing
 - profiling and streaming diagnostics
 
+## Passive Mob AI
+
+BlockGame now has a first-pass passive-mob runtime for debug-spawned animals such as pigs.
+
+- Mob geometry is loaded from `assets/mobs/*.json`, with textures resolved from a matching `.png` when present.
+- Passive mobs currently share one very small AI loop: `Idle` for a random few seconds, then pick a short wander target, then `Walk` to it, then return to `Idle`.
+- The wander step is intentionally cheap. It does not pathfind, does not run herd logic, and only checks a few chunk/terrain queries to keep movement on nearby walkable ground.
+- Despawn is chunk-radius based, not block-distance based. If a mob's chunk moves outside the player's current `Exact Chunks` radius, it is removed from `MobSystem`.
+- There is no far-distance persistence layer yet. If you spawn pigs and then travel far enough away, those pigs are gone until you spawn new ones again.
+- The current F1 debug UI exposes a `Spawn Pig` button so the passive-mob path can be tested without natural spawning or combat/gameplay systems.
+
 ## Troubleshooting
 
 ### CMake cannot find `imgui` or `glfw3`

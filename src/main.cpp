@@ -3669,12 +3669,14 @@ int runGame()
                     {
                         PlayerInputState inputState = computePlayerInputState(window, *inputContextPtr, camera, chunkManager);
                         updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                        mobSystem.update(camera.position, chunkManager, static_cast<float>(kFixedTimeStep));
                     }
                     else
                     {
                         InputContext dummy;
                         PlayerInputState inputState = computePlayerInputState(window, dummy, camera, chunkManager);
                         updatePhysics(camera, chunkManager, inputState, static_cast<float>(kFixedTimeStep));
+                        mobSystem.update(camera.position, chunkManager, static_cast<float>(kFixedTimeStep));
                     }
                     accumulator -= kFixedTimeStep;
                 }

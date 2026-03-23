@@ -814,6 +814,11 @@ inline constexpr std::size_t kChunkPoolMinBudgetBytes = 16ull * 1024ull * 1024ul
 inline constexpr std::size_t kChunkPoolBaseBudgetBytes = 96ull * 1024ull * 1024ull;
 inline constexpr double kChunkPoolMaxUploadPressure = 1.5;
 inline constexpr double kChunkPoolUploadPressureDivisor = 32.0;
+inline constexpr int kDenseCpuHorizontalRadiusMin = 4;
+inline constexpr int kDenseCpuHorizontalRadiusMax = 8;
+inline constexpr int kDenseCpuVerticalRadiusMin = 4;
+inline constexpr int kDenseCpuVerticalRadiusMax = 8;
+inline constexpr std::uint64_t kDenseCpuDemotionGraceFrames = 120u;
 
 // Debug logging and D3D helper utilities stay near the top because multiple chunk subsystems depend on them.
 [[nodiscard]] bool chunkManagerDebugLoggingEnabled() noexcept;
@@ -2896,6 +2901,9 @@ namespace chunk_manager_detail
 {
 struct Chunk
 {
+    static constexpr std::size_t kColumnCount =
+        static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
+
     struct PendingRenderMesh
     {
         std::uint32_t pageIndex{kInvalidChunkBufferPage};
@@ -2971,9 +2979,40 @@ struct Chunk
         appliedLightingRevision.store(0, std::memory_order_relaxed);
         skyLightCacheGeneration.store(0, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
+        cpuDataResident = true;
+        lastDenseFrameTouched = 0;
         pendingMesh = {};
     }
 
+    void ensureCpuDataAllocated()
+    {
+        if (blocks.size() != static_cast<std::size_t>(kChunkBlockCount))
+        {
+            blocks.assign(kChunkBlockCount, BlockId::Air);
+        }
+        else
+        {
+            std::fill(blocks.begin(), blocks.end(), BlockId::Air);
+        }
+
+        if (lightLevels.size() != static_cast<std::size_t>(kChunkBlockCount))
+        {
+            lightLevels.assign(kChunkBlockCount, packLightLevels(kMaxLightLevel, 0));
+        }
+        else
+        {
+            std::fill(lightLevels.begin(), lightLevels.end(), packLightLevels(kMaxLightLevel, 0));
+        }
+
+        cpuDataResident = true;
+    }
+
+    void releaseCpuData()
+    {
+        std::vector<BlockId>().swap(blocks);
+        std::vector<std::uint8_t>().swap(lightLevels);
+        cpuDataResident = false;
+    }
 
     glm::ivec3 coord;
     int minWorldY{0};
@@ -3011,6 +3050,8 @@ struct Chunk
     std::atomic<std::uint64_t> appliedLightingRevision{0};
     std::atomic<std::uint64_t> skyLightCacheGeneration{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
+    bool cpuDataResident{true};
+    std::uint64_t lastDenseFrameTouched{0};
     PendingRenderMesh pendingMesh{};
 };
 
@@ -3055,6 +3096,12 @@ struct PendingStructureEdit
     bool replaceSolid{false};
 };
 
+struct BlockEditOverlayEntry
+{
+    std::uint16_t localIndex{0};
+    BlockId block{BlockId::Air};
+};
+
 [[nodiscard]] bool chunkAwaitingInitialReady(const Chunk& chunk) noexcept
 {
     return chunk.requestTimestampMicros.load(std::memory_order_acquire) > 0 &&
@@ -3068,6 +3115,8 @@ struct PendingStructureEdit
 }
 
 #include "chunk_manager_far_terrain.inl"
+
+struct ChunkBuildScratch;
 
 } // namespace
 
@@ -3362,6 +3411,16 @@ private:
     void uploadReadyMeshes();
     bool uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId);
     void buildChunkMeshAsync(Chunk& chunk);
+    void updateDenseChunkResidency(const glm::ivec3& centerChunk);
+    [[nodiscard]] int denseCpuHorizontalRadius() const noexcept;
+    [[nodiscard]] int denseCpuVerticalRadius() const noexcept;
+    [[nodiscard]] bool shouldKeepChunkCpuDense(const Chunk& chunk,
+                                               const glm::ivec3& centerChunk,
+                                               int horizontalRadius,
+                                               int verticalRadius) const;
+    [[nodiscard]] bool ensureChunkCpuDataResident(Chunk& chunk);
+    [[nodiscard]] bool chunkHasPendingStructureEdits(const glm::ivec3& coord) const;
+    void releaseChunkCpuData(Chunk& chunk);
     static glm::ivec3 worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept;
     static std::size_t estimateChunkRetainedBytes(const Chunk& chunk) noexcept;
     std::size_t chunkPoolBudgetBytes() const noexcept;
@@ -3381,6 +3440,13 @@ private:
     std::uint8_t packedLightAtWorld(const glm::ivec3& worldPos) const noexcept;
     void noteChunkReadyLatency(Chunk& chunk);
     [[nodiscard]] bool generateChunkBlocks(Chunk& chunk, std::uint32_t generationEpoch);
+    void buildChunkCpuBlocks(const Chunk& chunk,
+                             ChunkBuildScratch& scratch,
+                             bool includePendingStructureEdits,
+                             std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>&
+                                 columnResults,
+                             std::vector<PendingStructureEdit>* consumedPendingEdits = nullptr);
+    void rebuildChunkBaseLighting(Chunk& chunk) const;
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
@@ -3391,7 +3457,12 @@ private:
     int cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const;
     void invalidatePredictedColumn(const glm::ivec2& column) const;
     std::vector<PendingStructureEdit> takePendingStructureEdits(const glm::ivec3& coord);
+    std::vector<PendingStructureEdit> copyPendingStructureEdits(const glm::ivec3& coord) const;
     bool applyPendingStructureEditsLocked(Chunk& chunk);
+    static std::uint16_t blockOverlayLocalIndex(int localX, int localY, int localZ) noexcept;
+    void applyBlockEditOverlay(ChunkBuildScratch& scratch, const glm::ivec3& chunkCoord) const;
+    void recordBlockEditOverlay(const glm::ivec3& worldPos, BlockId block);
+    bool tryGetBlockEditOverlay(const glm::ivec3& worldPos, BlockId& outBlock) const;
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     std::vector<StructureInstance> queryStructureInstances(const glm::ivec3& minWorld,
                                                            const glm::ivec3& maxWorld,
@@ -3540,7 +3611,7 @@ private:
     ChunkNeighborhoodSnapshot captureChunkNeighborhoodSnapshot(
         const Chunk& chunk,
         const std::vector<BlockId>& centerBlocks,
-        const std::vector<std::uint8_t>& centerLightLevels) const;
+        const std::vector<std::uint8_t>& centerLightLevels);
 
     glm::ivec2 atlasTextureSizePixels_{1, 1};
     int atlasTileSizePixels_{kAtlasTileSizePixels};
@@ -3591,6 +3662,8 @@ private:
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
+    std::unordered_map<glm::ivec3, std::vector<BlockEditOverlayEntry>, ChunkHasher> blockEditOverlays_;
+    mutable std::mutex blockEditOverlayMutex_;
 
     std::vector<std::thread> workerThreads_;
     std::size_t workerThreadCount_{0};
@@ -3684,6 +3757,7 @@ private:
     glm::vec3 lastCameraForward_{0.0f, 0.0f, -1.0f};
     glm::ivec3 lastCenterChunk_{0};
     std::chrono::steady_clock::time_point lastUpdateTime_{};
+    std::uint64_t updateFrameIndex_{0};
     double smoothedFrameMs_{16.0};
     double lastUploadMsUsed_{0.0};
     int farWorkerCount_{1};
@@ -4089,6 +4163,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         frameSeconds = std::chrono::duration<double>(now - lastUpdateTime_).count();
     }
     lastUpdateTime_ = now;
+    ++updateFrameIndex_;
     frameSeconds = std::clamp(frameSeconds, 1.0 / 240.0, 0.25);
     smoothedFrameMs_ = smoothedFrameMs_ * 0.90 + frameSeconds * 1000.0 * 0.10;
 
@@ -4313,6 +4388,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
     }
     uploadReadyMeshes();
+    updateDenseChunkResidency(centerChunk);
     const auto poolTrimStart = std::chrono::steady_clock::now();
     trimChunkPoolToBudget();
     poolTrimMsLastFrame_ =
@@ -4750,6 +4826,10 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
         pendingStructureEdits_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+        blockEditOverlays_.clear();
+    }
 
     uploadBudgetBytesThisFrame_ = kUploadBudgetBytesPerFrame;
     uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
@@ -4761,6 +4841,7 @@ void ChunkManager::Impl::clear()
     lastJobQueuePriorityOrigin_ = glm::ivec3{0};
     lastJobQueuePriorityForwardXZ_ = glm::vec2{0.0f, -1.0f};
     lastJobQueuePriorityRefreshTime_ = SteadyClock::time_point{};
+    updateFrameIndex_ = 0;
 
     if (climateMap_)
     {
@@ -4803,6 +4884,11 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
     const std::size_t blockIdx = blockIndex(local.x, localY, local.z);
 
 
+    if (!chunk->cpuDataResident && !ensureChunkCpuDataResident(*chunk))
+    {
+        return false;
+    }
+
     {
         std::lock_guard<std::mutex> lock(chunk->meshMutex);
         if (!isSolid(chunk->blocks[blockIdx]))
@@ -4811,6 +4897,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         }
 
         chunk->blocks[blockIdx] = BlockId::Air;
+        chunk->lastDenseFrameTouched = updateFrameIndex_;
         if (chunk->hasBlocks.load(std::memory_order_relaxed))
         {
             chunk->hasBlocks.store(chunkHasSolidBlocks(*chunk), std::memory_order_relaxed);
@@ -4819,6 +4906,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
         columnManager_.updateColumn(makeChunkBlockView(*chunk), local.x, local.z);
     }
 
+    recordBlockEditOverlay(worldPos, BlockId::Air);
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
     markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
     // Player edits must always enqueue a geometry refresh immediately; relying on the
@@ -4857,6 +4945,10 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
     const int localY = placePos.y - chunk->minWorldY;
     const std::size_t blockIdx = blockIndex(local.x, localY, local.z);
 
+    if (!chunk->cpuDataResident && !ensureChunkCpuDataResident(*chunk))
+    {
+        return false;
+    }
 
     {
         std::lock_guard<std::mutex> lock(chunk->meshMutex);
@@ -4866,11 +4958,13 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
         }
 
         chunk->blocks[blockIdx] = block;
+        chunk->lastDenseFrameTouched = updateFrameIndex_;
         chunk->hasBlocks.store(true, std::memory_order_relaxed);
 
         columnManager_.updateColumn(makeChunkBlockView(*chunk), local.x, local.z);
     }
 
+    recordBlockEditOverlay(placePos, block);
     invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
     markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
     // Keep edit feedback immediate even if lighting catches up on a later relight batch.
@@ -5170,6 +5264,12 @@ bool ChunkManager::Impl::lodEnabled() const noexcept
 
 BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
 {
+    BlockId overlayBlock = BlockId::Air;
+    if (tryGetBlockEditOverlay(worldPos, overlayBlock))
+    {
+        return overlayBlock;
+    }
+
     const glm::ivec3 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
     auto chunk = getChunkShared(chunkCoord);
     if (!chunk)
@@ -5182,6 +5282,10 @@ BlockId ChunkManager::Impl::blockAt(const glm::ivec3& worldPos) const noexcept
         return BlockId::Air;
     }
     const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    if (!chunk->cpuDataResident || chunk->blocks.size() != static_cast<std::size_t>(kChunkBlockCount))
+    {
+        return BlockId::Air;
+    }
     const int localY = worldPos.y - chunk->minWorldY;
     return chunk->blocks[blockIndex(local.x, localY, local.z)];
 
@@ -8447,7 +8551,7 @@ bool ChunkManager::Impl::uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId)
 ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNeighborhoodSnapshot(
     const Chunk& chunk,
     const std::vector<BlockId>& centerBlocks,
-    const std::vector<std::uint8_t>& centerLightLevels) const
+    const std::vector<std::uint8_t>& centerLightLevels)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     ChunkNeighborhoodSnapshot snapshot(chunk.minWorldY);
@@ -8464,7 +8568,7 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
         }
     }
 
-    std::unordered_map<glm::ivec3, std::shared_ptr<const Chunk>, ChunkHasher> neighborhoodChunks;
+    std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> neighborhoodChunks;
     neighborhoodChunks.reserve(27);
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
@@ -8485,7 +8589,7 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
         }
     }
 
-    std::vector<std::shared_ptr<const Chunk>> lockedNeighbors;
+    std::vector<std::shared_ptr<Chunk>> lockedNeighbors;
     lockedNeighbors.reserve(neighborhoodChunks.size());
     for (const auto& [coord, sampleChunk] : neighborhoodChunks)
     {
@@ -8499,7 +8603,7 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
 
     std::sort(lockedNeighbors.begin(),
               lockedNeighbors.end(),
-              [](const std::shared_ptr<const Chunk>& lhs, const std::shared_ptr<const Chunk>& rhs)
+              [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
               {
                   if (lhs->coord.x != rhs->coord.x)
                   {
@@ -8517,6 +8621,10 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
     const auto lockStageStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     for (const auto& sampleChunk : lockedNeighbors)
     {
+        if (sampleChunk && !sampleChunk->cpuDataResident)
+        {
+            (void)ensureChunkCpuDataResident(*sampleChunk);
+        }
         locks.emplace_back(sampleChunk->meshMutex);
     }
 
@@ -8587,6 +8695,10 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
 
 void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 {
+    if (!ensureChunkCpuDataResident(chunk))
+    {
+        return;
+    }
     std::vector<BlockId> chunkBlocks;
     std::vector<std::uint8_t> chunkLightLevels;
     {
@@ -10071,6 +10183,11 @@ std::uint8_t ChunkManager::Impl::packedLightAtWorld(const glm::ivec3& worldPos) 
         return packLightLevels(kMaxLightLevel, 0);
     }
 
+    if (!chunk->cpuDataResident || chunk->lightLevels.size() != static_cast<std::size_t>(kChunkBlockCount))
+    {
+        return packLightLevels(kMaxLightLevel, 0);
+    }
+
     const int localY = worldPos.y - chunk->minWorldY;
     return chunk->lightLevels[blockIndex(local.x, localY, local.z)];
 }
@@ -10110,6 +10227,14 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
             benchmarkMetrics_.relightBlockNodesProcessed.record(0);
         }
         return;
+    }
+
+    for (const auto& chunk : regionChunks)
+    {
+        if (chunk && !chunk->cpuDataResident)
+        {
+            (void)ensureChunkCpuDataResident(*chunk);
+        }
     }
 
     std::sort(regionChunks.begin(),
@@ -10220,6 +10345,11 @@ void ChunkManager::Impl::relightChunkRegion(const PendingRelightBatch& batch)
         if (!chunk)
         {
             continue;
+        }
+
+        if (!chunk->cpuDataResident)
+        {
+            (void)ensureChunkCpuDataResident(*chunk);
         }
 
         std::lock_guard<std::mutex> lock(chunk->meshMutex);
@@ -11227,77 +11357,10 @@ void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBl
 bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generationEpoch)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
-    const int baseWorldX = chunk.coord.x * kChunkSizeX;
-    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
-
-    if (surfaceMap_)
-    {
-        const int fragmentSize = terrain::SurfaceFragment::kSize;
-        const int minFragmentX = floorDiv(baseWorldX - 1, fragmentSize);
-        const int maxFragmentX = floorDiv(baseWorldX + kChunkSizeX, fragmentSize);
-        const int minFragmentZ = floorDiv(baseWorldZ - 1, fragmentSize);
-        const int maxFragmentZ = floorDiv(baseWorldZ + kChunkSizeZ, fragmentSize);
-
-        for (int fx = minFragmentX; fx <= maxFragmentX; ++fx)
-        {
-            for (int fz = minFragmentZ; fz <= maxFragmentZ; ++fz)
-            {
-                const auto& prefetchedFragment = surfaceMap_->getFragment({fx, fz});
-                (void)prefetchedFragment;
-            }
-        }
-    }
-
     ChunkBuildScratch scratch(chunk);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-
-    auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
-    {
-        if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
-        {
-            return;
-        }
-        if (localY < 0 || localY >= kChunkSizeY)
-        {
-            return;
-        }
-        scratch.setGeneratedLocalBlock(localX, localY, localZ, block);
-    };
-
-    if (terrainGenerator_)
-    {
-        terrainGenerator_->generateChunkColumns(chunk.coord,
-                                                chunk.minWorldY,
-                                                chunk.maxWorldY,
-                                                kChunkSizeX,
-                                                kChunkSizeY,
-                                                kChunkSizeZ,
-                                                setBlockDirect,
-                                                columnResults);
-    }
-
-    for (std::size_t i = 0; i < columnResults.size(); ++i)
-    {
-        scratch.highestSolidWorlds[i] = columnResults[i].highestSolidWorld;
-    }
-
-    // Structure-only slabs above the ground still need canopy/trunk blocks.
-    const glm::ivec3 queryMin(baseWorldX, chunk.minWorldY, baseWorldZ);
-    const glm::ivec3 queryMax(baseWorldX + kChunkSizeX - 1, chunk.maxWorldY, baseWorldZ + kChunkSizeZ - 1);
-    const std::vector<StructureInstance> structures = queryStructureInstances(queryMin, queryMax, 0);
-    for (const StructureInstance& instance : structures)
-    {
-        stampStructureInstanceIntoTarget(instance,
-                                        [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid) {
-                                            scratch.setWorldBlock(worldX, worldY, worldZ, block, replaceSolid);
-                                        });
-    }
-
-    std::vector<PendingStructureEdit> pendingEdits = takePendingStructureEdits(chunk.coord);
-    for (const PendingStructureEdit& edit : pendingEdits)
-    {
-        scratch.setWorldBlock(edit.worldPos.x, edit.worldPos.y, edit.worldPos.z, edit.block, edit.replaceSolid);
-    }
+    std::vector<PendingStructureEdit> pendingEdits;
+    buildChunkCpuBlocks(chunk, scratch, true, columnResults, &pendingEdits);
 
     // `hasBlocks` controls whether the chunk enters relight/mesh/upload. Water-only
     // slabs and canopy-only slabs must count here even though they do not raise the
@@ -11334,8 +11397,10 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
         }
 
         // Publish the fully built block slab in one short handoff so upload/commit only contends on swaps.
+        chunk.ensureCpuDataAllocated();
         chunk.blocks = std::move(scratch.blocks);
         chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
+        chunk.lastDenseFrameTouched = updateFrameIndex_;
     }
     if (benchmarkEnabled)
     {
@@ -11361,6 +11426,402 @@ std::vector<PendingStructureEdit> ChunkManager::Impl::takePendingStructureEdits(
         pendingStructureEdits_.erase(it);
     }
     return edits;
+}
+
+std::vector<PendingStructureEdit> ChunkManager::Impl::copyPendingStructureEdits(const glm::ivec3& coord) const
+{
+    std::vector<PendingStructureEdit> edits;
+    std::lock_guard<std::mutex> lock(pendingStructureMutex_);
+    auto it = pendingStructureEdits_.find(coord);
+    if (it != pendingStructureEdits_.end())
+    {
+        edits = it->second;
+    }
+    return edits;
+}
+
+std::uint16_t ChunkManager::Impl::blockOverlayLocalIndex(int localX, int localY, int localZ) noexcept
+{
+    return static_cast<std::uint16_t>(blockIndex(localX, localY, localZ));
+}
+
+void ChunkManager::Impl::recordBlockEditOverlay(const glm::ivec3& worldPos, BlockId block)
+{
+    const glm::ivec3 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    if (local.x < 0 || local.x >= kChunkSizeX ||
+        local.y < 0 || local.y >= kChunkSizeY ||
+        local.z < 0 || local.z >= kChunkSizeZ)
+    {
+        return;
+    }
+
+    const std::uint16_t localIndex = blockOverlayLocalIndex(local.x, local.y, local.z);
+    std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+    auto& overlays = blockEditOverlays_[chunkCoord];
+    auto it = std::find_if(overlays.begin(),
+                           overlays.end(),
+                           [localIndex](const BlockEditOverlayEntry& entry) {
+                               return entry.localIndex == localIndex;
+                           });
+    if (it != overlays.end())
+    {
+        it->block = block;
+    }
+    else
+    {
+        overlays.push_back(BlockEditOverlayEntry{localIndex, block});
+    }
+}
+
+bool ChunkManager::Impl::tryGetBlockEditOverlay(const glm::ivec3& worldPos, BlockId& outBlock) const
+{
+    const glm::ivec3 chunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+    const glm::ivec3 local = localBlockCoords(worldPos, chunkCoord);
+    if (local.x < 0 || local.x >= kChunkSizeX ||
+        local.y < 0 || local.y >= kChunkSizeY ||
+        local.z < 0 || local.z >= kChunkSizeZ)
+    {
+        return false;
+    }
+
+    const std::uint16_t localIndex = blockOverlayLocalIndex(local.x, local.y, local.z);
+    std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+    auto chunkIt = blockEditOverlays_.find(chunkCoord);
+    if (chunkIt == blockEditOverlays_.end())
+    {
+        return false;
+    }
+
+    const auto& overlays = chunkIt->second;
+    auto it = std::find_if(overlays.begin(),
+                           overlays.end(),
+                           [localIndex](const BlockEditOverlayEntry& entry) {
+                               return entry.localIndex == localIndex;
+                           });
+    if (it == overlays.end())
+    {
+        return false;
+    }
+
+    outBlock = it->block;
+    return true;
+}
+
+void ChunkManager::Impl::applyBlockEditOverlay(ChunkBuildScratch& scratch, const glm::ivec3& chunkCoord) const
+{
+    std::vector<BlockEditOverlayEntry> overlays;
+    {
+        std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+        auto it = blockEditOverlays_.find(chunkCoord);
+        if (it == blockEditOverlays_.end())
+        {
+            return;
+        }
+        overlays = it->second;
+    }
+
+    for (const BlockEditOverlayEntry& entry : overlays)
+    {
+        const int localX = entry.localIndex % kChunkSizeX;
+        const int localZ = (entry.localIndex / kChunkSizeX) % kChunkSizeZ;
+        const int localY = entry.localIndex / (kChunkSizeX * kChunkSizeZ);
+        scratch.setWorldBlock(chunkCoord.x * kChunkSizeX + localX,
+                              chunkCoord.y * kChunkSizeY + localY,
+                              chunkCoord.z * kChunkSizeZ + localZ,
+                              entry.block,
+                              true);
+    }
+}
+
+bool ChunkManager::Impl::chunkHasPendingStructureEdits(const glm::ivec3& coord) const
+{
+    std::lock_guard<std::mutex> lock(pendingStructureMutex_);
+    auto it = pendingStructureEdits_.find(coord);
+    return it != pendingStructureEdits_.end() && !it->second.empty();
+}
+
+void ChunkManager::Impl::buildChunkCpuBlocks(
+    const Chunk& chunk,
+    ChunkBuildScratch& scratch,
+    bool includePendingStructureEdits,
+    std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& columnResults,
+    std::vector<PendingStructureEdit>* consumedPendingEdits)
+{
+    const int baseWorldX = chunk.coord.x * kChunkSizeX;
+    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
+
+    if (surfaceMap_)
+    {
+        const int fragmentSize = terrain::SurfaceFragment::kSize;
+        const int minFragmentX = floorDiv(baseWorldX - 1, fragmentSize);
+        const int maxFragmentX = floorDiv(baseWorldX + kChunkSizeX, fragmentSize);
+        const int minFragmentZ = floorDiv(baseWorldZ - 1, fragmentSize);
+        const int maxFragmentZ = floorDiv(baseWorldZ + kChunkSizeZ, fragmentSize);
+
+        for (int fx = minFragmentX; fx <= maxFragmentX; ++fx)
+        {
+            for (int fz = minFragmentZ; fz <= maxFragmentZ; ++fz)
+            {
+                const auto& prefetchedFragment = surfaceMap_->getFragment({fx, fz});
+                (void)prefetchedFragment;
+            }
+        }
+    }
+
+    auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
+    {
+        if (localX < 0 || localX >= kChunkSizeX || localZ < 0 || localZ >= kChunkSizeZ)
+        {
+            return;
+        }
+        if (localY < 0 || localY >= kChunkSizeY)
+        {
+            return;
+        }
+        scratch.setGeneratedLocalBlock(localX, localY, localZ, block);
+    };
+
+    if (terrainGenerator_)
+    {
+        terrainGenerator_->generateChunkColumns(chunk.coord,
+                                                chunk.minWorldY,
+                                                chunk.maxWorldY,
+                                                kChunkSizeX,
+                                                kChunkSizeY,
+                                                kChunkSizeZ,
+                                                setBlockDirect,
+                                                columnResults);
+    }
+
+    for (std::size_t i = 0; i < columnResults.size(); ++i)
+    {
+        scratch.highestSolidWorlds[i] = columnResults[i].highestSolidWorld;
+    }
+
+    const glm::ivec3 queryMin(baseWorldX, chunk.minWorldY, baseWorldZ);
+    const glm::ivec3 queryMax(baseWorldX + kChunkSizeX - 1, chunk.maxWorldY, baseWorldZ + kChunkSizeZ - 1);
+    const std::vector<StructureInstance> structures = queryStructureInstances(queryMin, queryMax, 0);
+    for (const StructureInstance& instance : structures)
+    {
+        stampStructureInstanceIntoTarget(instance,
+                                        [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid) {
+                                            scratch.setWorldBlock(worldX, worldY, worldZ, block, replaceSolid);
+                                        });
+    }
+
+    std::vector<PendingStructureEdit> pendingEdits = includePendingStructureEdits
+        ? takePendingStructureEdits(chunk.coord)
+        : copyPendingStructureEdits(chunk.coord);
+    for (const PendingStructureEdit& edit : pendingEdits)
+    {
+        scratch.setWorldBlock(edit.worldPos.x, edit.worldPos.y, edit.worldPos.z, edit.block, edit.replaceSolid);
+    }
+
+    applyBlockEditOverlay(scratch, chunk.coord);
+
+    if (consumedPendingEdits != nullptr)
+    {
+        *consumedPendingEdits = std::move(pendingEdits);
+    }
+}
+
+void ChunkManager::Impl::rebuildChunkBaseLighting(Chunk& chunk) const
+{
+    chunk.lightLevels.assign(kChunkBlockCount, packLightLevels(0, 0));
+    for (int localX = 0; localX < kChunkSizeX; ++localX)
+    {
+        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+        {
+            const std::size_t localColumnIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
+            std::uint8_t incomingSky = chunk.skyLightFromAboveCache[localColumnIndex];
+
+            for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
+            {
+                const std::size_t idx = blockIndex(localX, localY, localZ);
+                const BlockId block = chunk.blocks[idx];
+                if (isOpaqueForLighting(block))
+                {
+                    incomingSky = 0;
+                }
+                else
+                {
+                    const std::uint8_t attenuation = blockLightingProperties(block).skyAttenuation;
+                    incomingSky = static_cast<std::uint8_t>(
+                        std::max(0, static_cast<int>(incomingSky) - static_cast<int>(attenuation)));
+                }
+
+                chunk.lightLevels[idx] = packLightLevels(incomingSky, blockLightingProperties(block).blockEmission);
+            }
+        }
+    }
+}
+
+int ChunkManager::Impl::denseCpuHorizontalRadius() const noexcept
+{
+    return std::clamp(2 + targetViewDistance_ / 4,
+                      kDenseCpuHorizontalRadiusMin,
+                      kDenseCpuHorizontalRadiusMax);
+}
+
+int ChunkManager::Impl::denseCpuVerticalRadius() const noexcept
+{
+    return std::clamp(3 + targetViewDistance_ / 8,
+                      kDenseCpuVerticalRadiusMin,
+                      kDenseCpuVerticalRadiusMax);
+}
+
+bool ChunkManager::Impl::shouldKeepChunkCpuDense(const Chunk& chunk,
+                                                 const glm::ivec3& centerChunk,
+                                                 int horizontalRadius,
+                                                 int verticalRadius) const
+{
+    const ChunkState state = chunk.state.load(std::memory_order_acquire);
+    if (state != ChunkState::Uploaded)
+    {
+        return true;
+    }
+
+    if (chunk.inFlight.load(std::memory_order_acquire) > 0 ||
+        chunk.queuedForUpload.load(std::memory_order_acquire) ||
+        chunk.pendingMesh.valid() ||
+        chunk.pendingMeshRefresh.load(std::memory_order_acquire) ||
+        chunk.meshReady.load(std::memory_order_acquire) ||
+        chunkHasPendingStructureEdits(chunk.coord))
+    {
+        return true;
+    }
+
+    const int horizontalDistance =
+        std::max(std::abs(chunk.coord.x - centerChunk.x), std::abs(chunk.coord.z - centerChunk.z));
+    const int verticalDistance = std::abs(chunk.coord.y - centerChunk.y);
+    return horizontalDistance <= horizontalRadius && verticalDistance <= verticalRadius;
+}
+
+bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
+{
+    {
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        if (chunk.cpuDataResident &&
+            chunk.blocks.size() == static_cast<std::size_t>(kChunkBlockCount) &&
+            chunk.lightLevels.size() == static_cast<std::size_t>(kChunkBlockCount))
+        {
+            chunk.lastDenseFrameTouched = updateFrameIndex_;
+            return true;
+        }
+    }
+
+    ChunkBuildScratch scratch(chunk);
+    std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
+    buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr);
+
+    std::lock_guard<std::mutex> lock(chunk.meshMutex);
+    chunk.ensureCpuDataAllocated();
+    chunk.blocks = std::move(scratch.blocks);
+    chunk.hasBlocks.store(std::any_of(chunk.blocks.begin(),
+                                      chunk.blocks.end(),
+                                      [](BlockId block) { return block != BlockId::Air; }),
+                          std::memory_order_release);
+    rebuildChunkBaseLighting(chunk);
+    chunk.lastDenseFrameTouched = updateFrameIndex_;
+    return true;
+}
+
+void ChunkManager::Impl::releaseChunkCpuData(Chunk& chunk)
+{
+    std::lock_guard<std::mutex> lock(chunk.meshMutex);
+    if (!chunk.cpuDataResident)
+    {
+        return;
+    }
+
+    const ChunkState state = chunk.state.load(std::memory_order_acquire);
+    if (state != ChunkState::Uploaded ||
+        chunk.inFlight.load(std::memory_order_acquire) > 0 ||
+        chunk.queuedForUpload.load(std::memory_order_acquire) ||
+        chunk.pendingMesh.valid() ||
+        chunk.pendingMeshRefresh.load(std::memory_order_acquire) ||
+        chunk.meshReady.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    chunk.releaseCpuData();
+}
+
+void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk)
+{
+    const int horizontalRadius = denseCpuHorizontalRadius();
+    const int verticalRadius = denseCpuVerticalRadius();
+
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        chunks.reserve(chunks_.size());
+        for (const auto& [coord, chunk] : chunks_)
+        {
+            (void)coord;
+            chunks.push_back(chunk);
+        }
+    }
+
+    std::vector<std::shared_ptr<Chunk>> toHydrate;
+    std::vector<std::shared_ptr<Chunk>> toDemote;
+    toHydrate.reserve(chunks.size());
+    toDemote.reserve(chunks.size());
+
+    for (const std::shared_ptr<Chunk>& chunk : chunks)
+    {
+        if (!chunk)
+        {
+            continue;
+        }
+
+        const bool keepDense = shouldKeepChunkCpuDense(*chunk, centerChunk, horizontalRadius, verticalRadius);
+        if (keepDense)
+        {
+            if (chunk->cpuDataResident)
+            {
+                std::lock_guard<std::mutex> lock(chunk->meshMutex);
+                chunk->lastDenseFrameTouched = updateFrameIndex_;
+            }
+            else
+            {
+                toHydrate.push_back(chunk);
+            }
+            continue;
+        }
+
+        if (chunk->cpuDataResident)
+        {
+            std::uint64_t lastTouched = 0;
+            {
+                std::lock_guard<std::mutex> lock(chunk->meshMutex);
+                lastTouched = chunk->lastDenseFrameTouched;
+            }
+            if (updateFrameIndex_ > lastTouched + kDenseCpuDemotionGraceFrames)
+            {
+                toDemote.push_back(chunk);
+            }
+        }
+    }
+
+    for (const std::shared_ptr<Chunk>& chunk : toHydrate)
+    {
+        if (chunk && ensureChunkCpuDataResident(*chunk))
+        {
+            std::lock_guard<std::mutex> lock(chunk->meshMutex);
+            columnManager_.updateChunk(makeChunkBlockView(*chunk));
+        }
+    }
+
+    for (const std::shared_ptr<Chunk>& chunk : toDemote)
+    {
+        if (chunk)
+        {
+            releaseChunkCpuData(*chunk);
+        }
+    }
 }
 
 bool ChunkManager::Impl::applyPendingStructureEditsLocked(Chunk& chunk)
@@ -11418,6 +11879,11 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
     {
         auto chunk = getChunkShared(coord);
         if (!chunk)
+        {
+            continue;
+        }
+
+        if (!chunk->cpuDataResident && !ensureChunkCpuDataResident(*chunk))
         {
             continue;
         }

@@ -3295,6 +3295,7 @@ private:
     void startWorkerThreads();
     void stopWorkerThreads();
     void workerThreadFunction();
+    void columnHeightPrefetchThreadFunction();
     void enqueueJob(const std::shared_ptr<Chunk>& chunk,
                     JobType type,
                     const glm::ivec3& coord,
@@ -3505,6 +3506,7 @@ private:
     bool tryGetCachedColumnHeight(const glm::ivec2& column, int worldX, int worldZ, int& outHeight) const;
     bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
     int cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const;
+    void requestColumnHeightPrefetch(const glm::ivec2& column) const;
     void invalidatePredictedColumn(const glm::ivec2& column) const;
     std::vector<PendingStructureEdit> takePendingStructureEdits(const glm::ivec3& coord);
     std::vector<PendingStructureEdit> copyPendingStructureEdits(const glm::ivec3& coord) const;
@@ -3710,12 +3712,17 @@ private:
     ColumnManager columnManager_;
     mutable std::mutex predictedColumnMutex_;
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
+    mutable std::mutex columnHeightPrefetchMutex_;
+    mutable std::condition_variable columnHeightPrefetchCondition_;
+    mutable std::deque<glm::ivec2> pendingColumnHeightPrefetchQueue_{};
+    mutable std::unordered_set<glm::ivec2, ColumnHasher> pendingColumnHeightPrefetchSet_{};
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
     std::unordered_map<glm::ivec3, std::vector<BlockEditOverlayEntry>, ChunkHasher> blockEditOverlays_;
     mutable std::mutex blockEditOverlayMutex_;
 
     std::vector<std::thread> workerThreads_;
+    std::thread columnHeightPrefetchThread_;
     std::size_t workerThreadCount_{0};
     std::atomic<bool> shouldStop_;
 
@@ -4874,6 +4881,11 @@ void ChunkManager::Impl::clear()
     {
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        pendingColumnHeightPrefetchQueue_.clear();
+        pendingColumnHeightPrefetchSet_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
@@ -6060,11 +6072,19 @@ void ChunkManager::Impl::startWorkerThreads()
     {
         workerThreads_.emplace_back(&ChunkManager::Impl::workerThreadFunction, this);
     }
+
+    columnHeightPrefetchThread_ = std::thread(&ChunkManager::Impl::columnHeightPrefetchThreadFunction, this);
 }
 
 void ChunkManager::Impl::stopWorkerThreads()
 {
     shouldStop_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        pendingColumnHeightPrefetchQueue_.clear();
+        pendingColumnHeightPrefetchSet_.clear();
+    }
+    columnHeightPrefetchCondition_.notify_all();
     std::vector<Job> cancelledJobs = jobQueue_.stop();
     for (const Job& job : cancelledJobs)
     {
@@ -6082,6 +6102,10 @@ void ChunkManager::Impl::stopWorkerThreads()
         }
     }
     workerThreads_.clear();
+    if (columnHeightPrefetchThread_.joinable())
+    {
+        columnHeightPrefetchThread_.join();
+    }
     workerThreadCount_ = 0;
 }
 
@@ -6719,6 +6743,46 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
     }
 }
 
+void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
+{
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
+    while (!shouldStop_.load(std::memory_order_acquire))
+    {
+        glm::ivec2 column{0};
+        {
+            std::unique_lock<std::mutex> lock(columnHeightPrefetchMutex_);
+            columnHeightPrefetchCondition_.wait(lock,
+                                               [this]
+                                               {
+                                                   return shouldStop_.load(std::memory_order_acquire) ||
+                                                          !pendingColumnHeightPrefetchQueue_.empty();
+                                               });
+
+            if (shouldStop_.load(std::memory_order_acquire) && pendingColumnHeightPrefetchQueue_.empty())
+            {
+                return;
+            }
+
+            column = pendingColumnHeightPrefetchQueue_.front();
+            pendingColumnHeightPrefetchQueue_.pop_front();
+            pendingColumnHeightPrefetchSet_.erase(column);
+        }
+
+        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+        int cachedHeight = ColumnManager::kNoHeight;
+        if (tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight))
+        {
+            continue;
+        }
+
+        (void)cacheSampledColumnHeight(column, worldX, worldZ);
+    }
+}
+
 void ChunkManager::Impl::collectReusableChunkBufferPages()
 {
     const UINT64 completedRenderFenceValue = (renderFence_ != nullptr)
@@ -7295,7 +7359,10 @@ ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCov
             const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
 
             int columnHeight = ColumnManager::kNoHeight;
-            tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+            if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+            {
+                requestColumnHeightPrefetch(column);
+            }
 
             const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                             cameraColumn,
@@ -7359,7 +7426,10 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
             const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
             const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
             int columnHeight = ColumnManager::kNoHeight;
-            tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+            if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+            {
+                requestColumnHeightPrefetch(column);
+            }
 
             const int radius = columnRadiusForHeight(column,
                                                      cameraColumn,
@@ -7464,6 +7534,33 @@ int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int w
         predictedColumnHeights_[column] = height;
     }
     return height;
+}
+
+void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column) const
+{
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    constexpr std::size_t kMaxQueuedColumnHeightPrefetches = 2048u;
+
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        if (pendingColumnHeightPrefetchSet_.find(column) != pendingColumnHeightPrefetchSet_.end())
+        {
+            return;
+        }
+        if (pendingColumnHeightPrefetchQueue_.size() >= kMaxQueuedColumnHeightPrefetches)
+        {
+            return;
+        }
+
+        pendingColumnHeightPrefetchQueue_.push_back(column);
+        pendingColumnHeightPrefetchSet_.insert(column);
+    }
+
+    columnHeightPrefetchCondition_.notify_one();
 }
 
 int ChunkManager::Impl::ensureColumnHeightCached(const glm::ivec2& column,
@@ -7648,8 +7745,9 @@ RecentEditHoleDebugSnapshot ChunkManager::Impl::recentEditHoleDebugSnapshot(cons
             }
             else
             {
-                columnHeight = sampleColumn(worldX, worldZ).surfaceY;
-                info.heightSource = "sample";
+                requestColumnHeightPrefetch(column);
+                columnHeight = centerChunk.y * kChunkSizeY;
+                info.heightSource = "pending";
             }
         }
         info.columnHeight = columnHeight;
@@ -7693,7 +7791,11 @@ int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
 {
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+    int columnHeight = ColumnManager::kNoHeight;
+    if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+    {
+        requestColumnHeightPrefetch(column);
+    }
     return columnRadiusForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
 }
 
@@ -7782,7 +7884,8 @@ int ChunkManager::Impl::surfaceShellFloorChunkForHeight(const glm::ivec2& column
         int neighborHeight = ColumnManager::kNoHeight;
         if (!tryGetCachedColumnHeight(neighbor, worldX, worldZ, neighborHeight))
         {
-            neighborHeight = ensureColumnHeightCached(neighbor, worldX, worldZ);
+            requestColumnHeightPrefetch(neighbor);
+            continue;
         }
 
         if (neighborHeight != ColumnManager::kNoHeight)
@@ -7803,7 +7906,11 @@ std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
 {
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+    int columnHeight = ColumnManager::kNoHeight;
+    if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+    {
+        requestColumnHeightPrefetch(column);
+    }
     return columnSpanForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
 }
 
@@ -7911,7 +8018,11 @@ ColumnChunkIntervals ChunkManager::Impl::columnIntervalsFor(const glm::ivec2& co
 {
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    const int columnHeight = ensureColumnHeightCached(column, worldX, worldZ);
+    int columnHeight = ColumnManager::kNoHeight;
+    if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+    {
+        requestColumnHeightPrefetch(column);
+    }
     return columnIntervalsForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
 }
 
@@ -7986,7 +8097,10 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
         const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
         int columnHeight = ColumnManager::kNoHeight;
-        tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+        if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+        {
+            requestColumnHeightPrefetch(column);
+        }
         const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                         cameraColumn,
                                                                         center.y,
@@ -8122,7 +8236,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             const int worldX = coord.x * kChunkSizeX + kChunkSizeX / 2;
             const int worldZ = coord.z * kChunkSizeZ + kChunkSizeZ / 2;
             int columnHeight = ColumnManager::kNoHeight;
-            tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+            if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+            {
+                requestColumnHeightPrefetch(column);
+            }
             const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                             cameraColumn,
                                                                             evictionCenterY,
@@ -8205,7 +8322,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                 const int worldX = chunk->coord.x * kChunkSizeX + kChunkSizeX / 2;
                 const int worldZ = chunk->coord.z * kChunkSizeZ + kChunkSizeZ / 2;
                 int columnHeight = ColumnManager::kNoHeight;
-                tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
+                if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+                {
+                    requestColumnHeightPrefetch(column);
+                }
 
                 const auto [minChunkY, maxChunkY] =
                     columnSpanForHeight(column, evictionCameraColumn, evictionCenterY, lastVerticalRadius_, columnHeight);

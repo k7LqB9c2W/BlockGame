@@ -774,6 +774,7 @@ void applyCameraPose(Camera& camera,
 enum class BenchmarkScenarioKind : std::uint8_t
 {
     SpawnPreload = 0,
+    FullExactPreload,
     StraightLineSprint,
     TurnHeavyTraversal,
     VerticalTravel
@@ -789,6 +790,7 @@ struct BenchmarkConfig
     int totalChunks{kDefaultTotalRenderDistanceChunks};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
     float altitudeOffsetBlocks{24.0f};
+    double maxDurationSeconds{600.0};
     double movementDurationSeconds{0.0};
     double cooldownDurationSeconds{0.0};
     double speedBlocksPerSecond{0.0};
@@ -879,6 +881,7 @@ struct BenchmarkRuntimeState
 {
     bool started{false};
     bool completed{false};
+    bool timedOut{false};
     double elapsedSeconds{0.0};
     glm::vec3 spawnPosition{0.0f};
     glm::vec3 scenarioStartPosition{0.0f};
@@ -908,6 +911,8 @@ struct BenchmarkFrameSummary
     {
     case BenchmarkScenarioKind::SpawnPreload:
         return "spawn_preload";
+    case BenchmarkScenarioKind::FullExactPreload:
+        return "full_exact_preload";
     case BenchmarkScenarioKind::StraightLineSprint:
         return "straight_line_sprint";
     case BenchmarkScenarioKind::TurnHeavyTraversal:
@@ -942,6 +947,11 @@ struct BenchmarkFrameSummary
     if (text == "spawn_preload")
     {
         outScenario = BenchmarkScenarioKind::SpawnPreload;
+        return true;
+    }
+    if (text == "full_exact_preload" || text == "fixed_exact_preload")
+    {
+        outScenario = BenchmarkScenarioKind::FullExactPreload;
         return true;
     }
     if (text == "straight_line" || text == "straight_line_sprint")
@@ -1022,10 +1032,15 @@ struct BenchmarkFrameSummary
     (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FOG_START_BLOCKS", config.fogStartBlocks);
     config.altitudeOffsetBlocks =
         envFloatOrDefault("BLOCKGAME_BENCHMARK_ALTITUDE_OFFSET", config.altitudeOffsetBlocks);
+    config.maxDurationSeconds = std::max(
+        1.0,
+        static_cast<double>(
+            envFloatOrDefault("BLOCKGAME_BENCHMARK_MAX_DURATION_SECONDS", static_cast<float>(config.maxDurationSeconds))));
 
     switch (config.scenario)
     {
     case BenchmarkScenarioKind::SpawnPreload:
+    case BenchmarkScenarioKind::FullExactPreload:
         config.movementDurationSeconds = 0.0;
         config.cooldownDurationSeconds = 0.0;
         config.speedBlocksPerSecond = 0.0;
@@ -1502,6 +1517,7 @@ void initializeBenchmarkCamera(Camera& camera,
         applyCameraPose(camera, runtimeState.scenarioStartPosition, -20.0f, -22.0f);
         break;
     case BenchmarkScenarioKind::SpawnPreload:
+    case BenchmarkScenarioKind::FullExactPreload:
     default:
         applyCameraPose(camera, runtimeState.spawnPosition, camera.yaw, camera.pitch);
         break;
@@ -1568,6 +1584,7 @@ void applyBenchmarkCameraPose(Camera& camera,
         break;
     }
     case BenchmarkScenarioKind::SpawnPreload:
+    case BenchmarkScenarioKind::FullExactPreload:
     default:
         break;
     }
@@ -1791,7 +1808,9 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"build_config\":";
     writeJsonEscaped(out, config.buildConfig);
     out << ",\"completed\":" << (runtimeState.completed ? "true" : "false");
+    out << ",\"timed_out\":" << (runtimeState.timedOut ? "true" : "false");
     out << ",\"duration_seconds\":" << runtimeState.elapsedSeconds;
+    out << ",\"max_duration_seconds\":" << config.maxDurationSeconds;
     out << ",\"movement_seconds\":" << config.movementDurationSeconds;
     out << ",\"cooldown_seconds\":" << config.cooldownDurationSeconds;
     out << ",\"render_settings\":{"
@@ -3098,7 +3117,7 @@ int runGame()
     if (benchmarkRequested && !benchmarkConfig.enabled)
     {
         std::cerr << "Invalid benchmark configuration. Set BLOCKGAME_BENCHMARK_SCENARIO to one of "
-                  << "spawn_preload, straight_line_sprint, turn_heavy_traversal, or vertical_travel."
+                  << "spawn_preload, full_exact_preload, straight_line_sprint, turn_heavy_traversal, or vertical_travel."
                   << std::endl;
         renderer.shutdown();
         glfwDestroyWindow(window);
@@ -3349,7 +3368,8 @@ int runGame()
     benchmarkState.finalYawDegrees = camera.yaw;
     benchmarkState.finalPitchDegrees = camera.pitch;
     if (benchmarkConfig.enabled &&
-        benchmarkConfig.scenario == BenchmarkScenarioKind::SpawnPreload)
+        (benchmarkConfig.scenario == BenchmarkScenarioKind::SpawnPreload ||
+         benchmarkConfig.scenario == BenchmarkScenarioKind::FullExactPreload))
     {
         chunkManager.resetBenchmarkMetrics();
         benchmarkState.started = true;
@@ -3621,11 +3641,13 @@ int runGame()
             inputContext.cameraMouseCaptured = true;
 
             if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload &&
+                benchmarkConfig.scenario != BenchmarkScenarioKind::FullExactPreload &&
                 playerReleased &&
                 !benchmarkState.started)
             {
                 chunkManager.resetBenchmarkMetrics();
                 benchmarkState.started = true;
+                benchmarkState.timedOut = false;
                 benchmarkState.elapsedSeconds = 0.0;
                 benchmarkState.frameTimesMs.clear();
                 benchmarkState.currentSpikeStreakOver33_3Ms = 0;
@@ -3637,13 +3659,33 @@ int runGame()
             {
                 benchmarkState.elapsedSeconds += frameTime;
 
-                if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload)
+                if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload &&
+                    benchmarkConfig.scenario != BenchmarkScenarioKind::FullExactPreload)
                 {
                     applyBenchmarkCameraPose(camera, benchmarkConfig, benchmarkState);
                     if (benchmarkState.elapsedSeconds >=
                         benchmarkConfig.movementDurationSeconds + benchmarkConfig.cooldownDurationSeconds)
                     {
                         benchmarkState.completed = true;
+                        benchmarkRequestClose = true;
+                    }
+                }
+                else if (benchmarkConfig.scenario == BenchmarkScenarioKind::FullExactPreload)
+                {
+                    const bool fullExactReady =
+                        streamingStatus.phase == StreamingPhase::SteadyState &&
+                        streamingStatus.exactRequiredChunks > 0 &&
+                        streamingStatus.exactReadyChunks >= streamingStatus.exactRequiredChunks &&
+                        streamingStatus.exactPendingUploads == 0;
+                    if (fullExactReady)
+                    {
+                        benchmarkState.completed = true;
+                        benchmarkRequestClose = true;
+                    }
+                    else if (benchmarkState.elapsedSeconds >= benchmarkConfig.maxDurationSeconds)
+                    {
+                        benchmarkState.completed = true;
+                        benchmarkState.timedOut = true;
                         benchmarkRequestClose = true;
                     }
                 }

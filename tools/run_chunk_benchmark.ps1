@@ -3,8 +3,10 @@ param(
     [string]$Config = "Release",
     [string]$OutputDir = "$(Join-Path $PSScriptRoot '..\\artifacts\\chunk_benchmark')",
     [switch]$SkipBuild,
-    [int]$ExactChunks = 12,
+    [int]$ExactChunks = 48,
     [int]$TotalChunks = 0,
+    [string[]]$Scenarios = @(),
+    [int]$MaxScenarioSeconds = 600,
     [int]$FogStartBlocks = 1400,
     [int]$NotRespondingSeconds = 4,
     [int]$PostWriteGraceSeconds = 5,
@@ -201,12 +203,14 @@ if (-not (Test-Path $exePath)) {
 
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 
-$scenarios = @(
+$defaultScenarios = @(
     "spawn_preload",
+    "full_exact_preload",
     "straight_line_sprint",
     "turn_heavy_traversal",
     "vertical_travel"
 )
+$scenarios = if ($Scenarios.Count -gt 0) { $Scenarios } else { $defaultScenarios }
 
 $resolvedTotalChunks = if ($TotalChunks -gt 0) { $TotalChunks } else { $ExactChunks }
 
@@ -217,7 +221,8 @@ $envKeys = @(
     "BLOCKGAME_BENCHMARK_BUILD_CONFIG",
     "BLOCKGAME_BENCHMARK_EXACT_CHUNKS",
     "BLOCKGAME_BENCHMARK_TOTAL_CHUNKS",
-    "BLOCKGAME_BENCHMARK_FOG_START_BLOCKS"
+    "BLOCKGAME_BENCHMARK_FOG_START_BLOCKS",
+    "BLOCKGAME_BENCHMARK_MAX_DURATION_SECONDS"
 )
 $previousEnv = @{}
 foreach ($key in $envKeys) {
@@ -237,6 +242,7 @@ try {
         $env:BLOCKGAME_BENCHMARK_EXACT_CHUNKS = [string]$ExactChunks
         $env:BLOCKGAME_BENCHMARK_TOTAL_CHUNKS = [string]$resolvedTotalChunks
         $env:BLOCKGAME_BENCHMARK_FOG_START_BLOCKS = [string]$FogStartBlocks
+        $env:BLOCKGAME_BENCHMARK_MAX_DURATION_SECONDS = [string]$MaxScenarioSeconds
 
         Write-Host "Running chunk benchmark scenario $scenario ..."
         $result = Invoke-BenchmarkScenario `
@@ -344,6 +350,7 @@ $summaryLines.Add("BlockGame chunk benchmark")
 $summaryLines.Add("Build: $Config")
 $summaryLines.Add("Output: $runDir")
 $summaryLines.Add("Exact/Total/Fog: $ExactChunks / $resolvedTotalChunks / $FogStartBlocks")
+$summaryLines.Add("Scenario timeout: $MaxScenarioSeconds s")
 $summaryLines.Add(("Watchdog: not_responding={0}s post_write_grace={1}s poll_ms={2}" -f `
     $NotRespondingSeconds,
     $PostWriteGraceSeconds,
@@ -354,6 +361,11 @@ foreach ($scenario in $scenarioObjects) {
     $summaryLines.Add(("  watchdog_reason={0} exit_code={1}" -f `
         $scenario.watchdog_reason,
         $scenario.process_exit_code))
+    if ($scenario.PSObject.Properties.Name -contains "timed_out") {
+        $summaryLines.Add(("  timed_out={0} max_duration_s={1}" -f `
+            $scenario.timed_out,
+            $scenario.max_duration_seconds))
+    }
     $summaryLines.Add(("  duration_s={0:F2} generated_cps={1:F2} uploaded_cps={2:F2}" -f `
         $scenario.duration_seconds,
         $scenario.throughput.generated_chunks_per_sec,

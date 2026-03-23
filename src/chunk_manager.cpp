@@ -22,6 +22,7 @@
 #include <cstring>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -3501,7 +3502,8 @@ private:
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
                               int slabMinWorldY = std::numeric_limits<int>::min(),
-                              int slabMaxWorldY = std::numeric_limits<int>::max()) const;
+                              int slabMaxWorldY = std::numeric_limits<int>::max(),
+                              bool includeBlendDebug = false) const;
     int ensureColumnHeightCached(const glm::ivec2& column, int worldX, int worldZ) const;
     bool tryGetCachedColumnHeight(const glm::ivec2& column, int worldX, int worldZ, int& outHeight) const;
     bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
@@ -4780,7 +4782,7 @@ ColumnSample ChunkManager::Impl::sampleColumnAt(const glm::vec3& worldPos,
 {
     const int worldX = static_cast<int>(std::floor(worldPos.x));
     const int worldZ = static_cast<int>(std::floor(worldPos.z));
-    return sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
+    return sampleColumn(worldX, worldZ, slabMinWorldY, slabMaxWorldY, true);
 }
 
 void ChunkManager::Impl::clear()
@@ -11414,7 +11416,12 @@ void ChunkManager::Impl::noteChunkReadyLatency(Chunk& chunk)
 
 
 
-ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMinWorldY, int slabMaxWorldY) const
+ColumnSample ChunkManager::Impl::sampleColumn(
+    int worldX,
+    int worldZ,
+    int slabMinWorldY,
+    int slabMaxWorldY,
+    bool includeBlendDebug) const
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const SteadyClock::time_point sampleStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
@@ -11435,7 +11442,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
     }
 
     ColumnSample sample{};
-    const terrain::SurfaceColumn& surfaceColumn = surfaceMap_->column(worldX, worldZ);
+    const terrain::SurfaceColumn surfaceColumn = surfaceMap_->columnValue(worldX, worldZ);
     const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
 
     sample.dominantBiome = surfaceColumn.dominantBiome;
@@ -11461,7 +11468,7 @@ ColumnSample ChunkManager::Impl::sampleColumn(int worldX, int worldZ, int slabMi
                                  : std::numeric_limits<float>::infinity();
     sample.soilCreepOffset = 0.0f;
 
-    sample.topBlendCount = std::min(climateSample.blendCount, sample.topBlendDebug.size());
+    sample.topBlendCount = includeBlendDebug ? std::min(climateSample.blendCount, sample.topBlendDebug.size()) : 0;
     const glm::vec2 columnPos(static_cast<float>(worldX), static_cast<float>(worldZ));
     for (std::size_t i = 0; i < sample.topBlendCount; ++i)
     {

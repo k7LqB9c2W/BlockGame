@@ -417,9 +417,11 @@ void SurfaceMap::resetProfiling() noexcept
 const SurfaceFragment& SurfaceMap::getFragment(const glm::ivec2& fragmentCoord, int lodLevel) const
 {
     const FragmentKey key{fragmentCoord, lodLevel};
+    std::shared_ptr<SurfaceFragment> fragment;
+    std::shared_ptr<PendingFragmentBuild> pendingBuild;
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         auto it = fragments_.find(key);
         if (it != fragments_.end())
         {
@@ -428,48 +430,88 @@ const SurfaceFragment& SurfaceMap::getFragment(const glm::ivec2& fragmentCoord, 
                 cacheHits_.fetch_add(1, std::memory_order_relaxed);
             }
             touch(it->second);
-            return *it->second.fragment;
+            fragment = it->second.fragment;
         }
-    }
 
-    if (profilingEnabled())
-    {
-        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    auto fragment = std::make_unique<SurfaceFragment>(fragmentCoord, lodLevel);
-    generator_->generate(*fragment, lodLevel);
-
-    const SurfaceFragment* result = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        auto existing = fragments_.find(key);
-        if (existing != fragments_.end())
+        if (!fragment)
         {
-            touch(existing->second);
-            result = existing->second.fragment.get();
-        }
-        else
-        {
-            FragmentCacheEntry entry{};
-            entry.fragment = std::move(fragment);
-            entry.lruIt = lru_.emplace(lru_.begin(), key);
-            entry.inLru = true;
-
-            auto [it, inserted] = fragments_.emplace(key, std::move(entry));
-            (void)inserted;
-            if (profilingEnabled())
+            auto pendingIt = pendingBuilds_.find(key);
+            if (pendingIt != pendingBuilds_.end())
             {
-                cacheFills_.fetch_add(1, std::memory_order_relaxed);
+                pendingBuild = pendingIt->second;
+                pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
+                if (pendingBuild->exception)
+                {
+                    std::rethrow_exception(pendingBuild->exception);
+                }
+                fragment = pendingBuild->fragment;
             }
+            else
+            {
+                if (profilingEnabled())
+                {
+                    cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+                }
 
-            evictIfNeeded();
-            result = it->second.fragment.get();
+                pendingBuild = std::make_shared<PendingFragmentBuild>();
+                pendingBuilds_.emplace(key, pendingBuild);
+            }
         }
     }
 
-    return *result;
+    if (!fragment && pendingBuild && !pendingBuild->ready)
+    {
+        std::exception_ptr buildException{};
+        try
+        {
+            fragment = std::make_shared<SurfaceFragment>(fragmentCoord, lodLevel);
+            generator_->generate(*fragment, lodLevel);
+        }
+        catch (...)
+        {
+            buildException = std::current_exception();
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!buildException)
+        {
+            auto existing = fragments_.find(key);
+            if (existing != fragments_.end())
+            {
+                touch(existing->second);
+                fragment = existing->second.fragment;
+            }
+            else
+            {
+                FragmentCacheEntry entry{};
+                entry.fragment = fragment;
+                entry.lruIt = lru_.emplace(lru_.begin(), key);
+                entry.inLru = true;
+
+                auto [it, inserted] = fragments_.emplace(key, std::move(entry));
+                (void)inserted;
+                if (profilingEnabled())
+                {
+                    cacheFills_.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                fragment = it->second.fragment;
+                evictIfNeeded();
+            }
+            pendingBuild->fragment = fragment;
+        }
+        pendingBuild->exception = buildException;
+        pendingBuild->ready = true;
+        pendingBuilds_.erase(key);
+        pendingBuild->readyCondition.notify_all();
+
+        if (buildException)
+        {
+            std::rethrow_exception(buildException);
+        }
+    }
+
+    return *fragment;
 }
 
 const SurfaceColumn& SurfaceMap::column(int worldX, int worldZ, int lodLevel) const
@@ -484,10 +526,141 @@ const SurfaceColumn& SurfaceMap::column(int worldX, int worldZ, int lodLevel) co
     return fragment.column(localX, localZ);
 }
 
+SurfaceColumn SurfaceMap::columnValue(int worldX, int worldZ, int lodLevel) const
+{
+    const int stride = 1 << lodLevel;
+    const int fragmentSpan = SurfaceFragment::kSize * stride;
+    const FragmentKey key{{floorDiv(worldX, fragmentSpan), floorDiv(worldZ, fragmentSpan)}, lodLevel};
+    struct ThreadLocalFragmentCache
+    {
+        FragmentKey key{};
+        bool valid{false};
+        std::shared_ptr<SurfaceFragment> fragment{};
+    };
+    thread_local ThreadLocalFragmentCache cachedFragment{};
+
+    auto sampleFromFragment = [&](const SurfaceFragment& fragment) -> SurfaceColumn
+    {
+        const glm::ivec2 baseWorld = fragment.baseWorld();
+        const int localX = (worldX - baseWorld.x) / stride;
+        const int localZ = (worldZ - baseWorld.y) / stride;
+        return fragment.column(localX, localZ);
+    };
+
+    if (cachedFragment.valid && cachedFragment.fragment && cachedFragment.key == key)
+    {
+        if (profilingEnabled())
+        {
+            cacheHits_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return sampleFromFragment(*cachedFragment.fragment);
+    }
+
+    std::shared_ptr<SurfaceFragment> fragment;
+    std::shared_ptr<PendingFragmentBuild> pendingBuild;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto it = fragments_.find(key);
+        if (it != fragments_.end())
+        {
+            if (profilingEnabled())
+            {
+                cacheHits_.fetch_add(1, std::memory_order_relaxed);
+            }
+            touch(it->second);
+            fragment = it->second.fragment;
+        }
+
+        if (!fragment)
+        {
+            auto pendingIt = pendingBuilds_.find(key);
+            if (pendingIt != pendingBuilds_.end())
+            {
+                pendingBuild = pendingIt->second;
+                pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
+                if (pendingBuild->exception)
+                {
+                    std::rethrow_exception(pendingBuild->exception);
+                }
+                fragment = pendingBuild->fragment;
+            }
+            else
+            {
+                if (profilingEnabled())
+                {
+                    cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                pendingBuild = std::make_shared<PendingFragmentBuild>();
+                pendingBuilds_.emplace(key, pendingBuild);
+            }
+        }
+    }
+
+    // Collapse concurrent misses for the same fragment down to one build.
+    if (!fragment && pendingBuild && !pendingBuild->ready)
+    {
+        std::exception_ptr buildException{};
+        try
+        {
+            fragment = std::make_shared<SurfaceFragment>(key.coord, lodLevel);
+            generator_->generate(*fragment, lodLevel);
+        }
+        catch (...)
+        {
+            buildException = std::current_exception();
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!buildException)
+        {
+            auto existing = fragments_.find(key);
+            if (existing != fragments_.end())
+            {
+                touch(existing->second);
+                fragment = existing->second.fragment;
+            }
+            else
+            {
+                FragmentCacheEntry entry{};
+                entry.fragment = fragment;
+                entry.lruIt = lru_.emplace(lru_.begin(), key);
+                entry.inLru = true;
+
+                auto [it, inserted] = fragments_.emplace(key, std::move(entry));
+                (void)inserted;
+                if (profilingEnabled())
+                {
+                    cacheFills_.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                fragment = it->second.fragment;
+                evictIfNeeded();
+            }
+            pendingBuild->fragment = fragment;
+        }
+        pendingBuild->exception = buildException;
+        pendingBuild->ready = true;
+        pendingBuilds_.erase(key);
+        pendingBuild->readyCondition.notify_all();
+
+        if (buildException)
+        {
+            std::rethrow_exception(buildException);
+        }
+    }
+
+    cachedFragment.key = key;
+    cachedFragment.fragment = fragment;
+    cachedFragment.valid = true;
+    return sampleFromFragment(*fragment);
+}
+
 void SurfaceMap::clear()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     fragments_.clear();
+    pendingBuilds_.clear();
     lru_.clear();
 }
 

@@ -1464,9 +1464,35 @@ ClimateSample ClimateMap::sample(int worldX, int worldZ) const
     const int fragmentX = floorDiv(worldX, ClimateFragment::kSize);
     const int fragmentZ = floorDiv(worldZ, ClimateFragment::kSize);
     const glm::ivec2 key{fragmentX, fragmentZ};
+    struct ThreadLocalFragmentCache
+    {
+        glm::ivec2 key{std::numeric_limits<int>::min(), std::numeric_limits<int>::min()};
+        std::shared_ptr<ClimateFragment> fragment{};
+    };
+    thread_local ThreadLocalFragmentCache cachedFragment{};
+
+    auto sampleFromFragment = [&](const ClimateFragment& fragment) -> ClimateSample
+    {
+        const glm::ivec2 baseWorld = fragment.baseWorld();
+        const int localX = worldX - baseWorld.x;
+        const int localZ = worldZ - baseWorld.y;
+        return fragment.sample(localX, localZ);
+    };
+
+    if (cachedFragment.fragment && cachedFragment.key == key)
+    {
+        if (profilingEnabled())
+        {
+            cacheHits_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return sampleFromFragment(*cachedFragment.fragment);
+    }
+
+    std::shared_ptr<ClimateFragment> fragment;
+    std::shared_ptr<PendingFragmentBuild> pendingBuild;
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         auto it = fragments_.find(key);
         if (it != fragments_.end())
         {
@@ -1475,49 +1501,90 @@ ClimateSample ClimateMap::sample(int worldX, int worldZ) const
                 cacheHits_.fetch_add(1, std::memory_order_relaxed);
             }
             touch(it->second);
-            const glm::ivec2 baseWorld = it->second.fragment->baseWorld();
-            const int localX = worldX - baseWorld.x;
-            const int localZ = worldZ - baseWorld.y;
-            return it->second.fragment->sample(localX, localZ);
+            fragment = it->second.fragment;
+        }
+
+        if (!fragment)
+        {
+            auto pendingIt = pendingBuilds_.find(key);
+            if (pendingIt != pendingBuilds_.end())
+            {
+                pendingBuild = pendingIt->second;
+                pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
+                if (pendingBuild->exception)
+                {
+                    std::rethrow_exception(pendingBuild->exception);
+                }
+                fragment = pendingBuild->fragment;
+            }
+            else
+            {
+                if (profilingEnabled())
+                {
+                    cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                pendingBuild = std::make_shared<PendingFragmentBuild>();
+                pendingBuilds_.emplace(key, pendingBuild);
+            }
         }
     }
 
-    if (profilingEnabled())
+    // Collapse concurrent misses for the same fragment down to one build.
+    if (!fragment && pendingBuild && !pendingBuild->ready)
     {
-        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+        std::exception_ptr buildException{};
+        try
+        {
+            fragment = std::make_shared<ClimateFragment>(key);
+            generator_->generate(*fragment);
+        }
+        catch (...)
+        {
+            buildException = std::current_exception();
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!buildException)
+        {
+            auto existing = fragments_.find(key);
+            if (existing != fragments_.end())
+            {
+                touch(existing->second);
+                fragment = existing->second.fragment;
+            }
+            else
+            {
+                FragmentCacheEntry entry{};
+                entry.fragment = fragment;
+                entry.lruIt = lru_.emplace(lru_.begin(), key);
+                entry.inLru = true;
+
+                auto [it, inserted] = fragments_.emplace(key, std::move(entry));
+                (void)inserted;
+                if (profilingEnabled())
+                {
+                    cacheFills_.fetch_add(1, std::memory_order_relaxed);
+                }
+                fragment = it->second.fragment;
+                evictIfNeeded();
+            }
+            pendingBuild->fragment = fragment;
+        }
+        pendingBuild->exception = buildException;
+        pendingBuild->ready = true;
+        pendingBuilds_.erase(key);
+        pendingBuild->readyCondition.notify_all();
+
+        if (buildException)
+        {
+            std::rethrow_exception(buildException);
+        }
     }
 
-    auto fragment = std::make_unique<ClimateFragment>(key);
-    generator_->generate(*fragment);
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto existing = fragments_.find(key);
-    if (existing != fragments_.end())
-    {
-        touch(existing->second);
-        const glm::ivec2 baseWorld = existing->second.fragment->baseWorld();
-        const int localX = worldX - baseWorld.x;
-        const int localZ = worldZ - baseWorld.y;
-        return existing->second.fragment->sample(localX, localZ);
-    }
-
-    FragmentCacheEntry entry{};
-    entry.fragment = std::move(fragment);
-    entry.lruIt = lru_.emplace(lru_.begin(), key);
-    entry.inLru = true;
-
-    auto [it, inserted] = fragments_.emplace(key, std::move(entry));
-    (void)inserted;
-    if (profilingEnabled())
-    {
-        cacheFills_.fetch_add(1, std::memory_order_relaxed);
-    }
-    evictIfNeeded();
-
-    const glm::ivec2 baseWorld = it->second.fragment->baseWorld();
-    const int localX = worldX - baseWorld.x;
-    const int localZ = worldZ - baseWorld.y;
-    return it->second.fragment->sample(localX, localZ);
+    cachedFragment.key = key;
+    cachedFragment.fragment = fragment;
+    return sampleFromFragment(*fragment);
 }
 
 void ClimateMap::setProfilingEnabled(bool enabled) noexcept
@@ -1550,6 +1617,7 @@ void ClimateMap::clear()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     fragments_.clear();
+    pendingBuilds_.clear();
     lru_.clear();
 }
 

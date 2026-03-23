@@ -2,7 +2,9 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
+#include <exception>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -114,6 +116,7 @@ public:
 
     [[nodiscard]] const SurfaceFragment& getFragment(const glm::ivec2& fragmentCoord, int lodLevel = 0) const;
     [[nodiscard]] const SurfaceColumn& column(int worldX, int worldZ, int lodLevel = 0) const;
+    [[nodiscard]] SurfaceColumn columnValue(int worldX, int worldZ, int lodLevel = 0) const;
     void setProfilingEnabled(bool enabled) noexcept;
     [[nodiscard]] bool profilingEnabled() const noexcept;
     [[nodiscard]] CacheProfilingSnapshot profilingSnapshot() const noexcept;
@@ -139,9 +142,17 @@ private:
 
     struct FragmentCacheEntry
     {
-        std::unique_ptr<SurfaceFragment> fragment;
+        std::shared_ptr<SurfaceFragment> fragment;
         std::list<FragmentKey>::iterator lruIt;
         bool inLru{false};
+    };
+
+    struct PendingFragmentBuild
+    {
+        std::condition_variable readyCondition{};
+        std::shared_ptr<SurfaceFragment> fragment{};
+        std::exception_ptr exception{};
+        bool ready{false};
     };
 
     static int floorDiv(int value, int divisor) noexcept;
@@ -152,6 +163,7 @@ private:
     std::size_t maxFragments_{32};
     mutable std::mutex mutex_;
     mutable std::unordered_map<FragmentKey, FragmentCacheEntry, FragmentKeyHasher> fragments_{};
+    mutable std::unordered_map<FragmentKey, std::shared_ptr<PendingFragmentBuild>, FragmentKeyHasher> pendingBuilds_{};
     mutable std::list<FragmentKey> lru_{};
     mutable std::atomic<bool> profilingEnabled_{false};
     mutable std::atomic<std::uint64_t> cacheHits_{0};

@@ -326,14 +326,36 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
                                                        const StructureSurfaceBlockFn& surfaceBlockFn,
                                                        const StructureDensityFn& densityFn)
 {
+    struct ColumnCacheKeyHasher
+    {
+        std::size_t operator()(const glm::ivec2& value) const noexcept
+        {
+            std::size_t h1 = std::hash<int>{}(value.x);
+            std::size_t h2 = std::hash<int>{}(value.y);
+            return h1 ^ (h2 + 0x9E3779B97f4A7C15ull + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
     StructureRegion region{};
     region.key = key;
     region.worldMin = glm::ivec2(key.regionX * kStructureRegionSize, key.regionZ * kStructureRegionSize);
     region.worldMax = region.worldMin + glm::ivec2(kStructureRegionSize - 1);
     region.instances.reserve(64);
+    std::unordered_map<glm::ivec2, ColumnSample, ColumnCacheKeyHasher> columnCache{};
+    const int cacheSpan = kStructureRegionSize + ((kMaxStructureHorizontalRadius + 4) * 2);
+    columnCache.reserve(static_cast<std::size_t>(cacheSpan * cacheSpan));
 
-    auto sampleColumn = [&](int worldX, int worldZ) -> ColumnSample {
-        return sampleColumnFn(worldX, worldZ);
+    // Region builds revisit the same nearby columns heavily for tree spacing checks.
+    auto sampleColumn = [&](int worldX, int worldZ) -> const ColumnSample& {
+        const glm::ivec2 cacheKey{worldX, worldZ};
+        auto it = columnCache.find(cacheKey);
+        if (it != columnCache.end())
+        {
+            return it->second;
+        }
+        auto [insertedIt, inserted] = columnCache.emplace(cacheKey, sampleColumnFn(worldX, worldZ));
+        (void)inserted;
+        return insertedIt->second;
     };
 
     auto resolvedSurfaceBlockAt = [&](int worldX, int worldZ, const ColumnSample& sample) -> BlockId {
@@ -573,6 +595,14 @@ struct StructureRegistryProfilingSnapshot
     double averageQueryMs{0.0};
 };
 
+struct PendingStructureRegionBuild
+{
+    std::condition_variable readyCondition{};
+    std::shared_ptr<const StructureRegion> region{};
+    std::exception_ptr exception{};
+    bool ready{false};
+};
+
 class StructureRegistry
 {
 public:
@@ -600,12 +630,14 @@ public:
         surfaceBlockFn_ = std::move(surfaceBlockFn);
         densityFn_ = std::move(densityFn);
         regions_.clear();
+        pendingBuilds_.clear();
     }
 
     void clear()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         regions_.clear();
+        pendingBuilds_.clear();
     }
 
     void setProfilingEnabled(bool enabled) noexcept
@@ -707,8 +739,9 @@ public:
 private:
     [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegion(const StructureRegionKey& key) const
     {
+        std::shared_ptr<PendingStructureRegionBuild> pendingBuild;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             const auto it = regions_.find(key);
             if (it != regions_.end())
             {
@@ -718,28 +751,67 @@ private:
                 }
                 return it->second;
             }
+
+            auto pendingIt = pendingBuilds_.find(key);
+            if (pendingIt != pendingBuilds_.end())
+            {
+                pendingBuild = pendingIt->second;
+                pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
+                if (pendingBuild->exception)
+                {
+                    std::rethrow_exception(pendingBuild->exception);
+                }
+                return pendingBuild->region;
+            }
+
+            if (!sampleColumnFn_ || !surfaceBlockFn_ || !densityFn_)
+            {
+                return {};
+            }
+
+            if (profilingEnabled_.load(std::memory_order_acquire))
+            {
+                cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            pendingBuild = std::make_shared<PendingStructureRegionBuild>();
+            pendingBuilds_.emplace(key, pendingBuild);
         }
 
-        if (!sampleColumnFn_ || !surfaceBlockFn_ || !densityFn_)
+        std::shared_ptr<StructureRegion> builtRegion;
+        std::exception_ptr buildException{};
+        try
         {
-            return {};
+            builtRegion = std::make_shared<StructureRegion>(buildRegion(key));
         }
-
-        if (profilingEnabled_.load(std::memory_order_acquire))
+        catch (...)
         {
-            cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+            buildException = std::current_exception();
         }
 
-        auto builtRegion = std::make_shared<StructureRegion>(buildRegion(key));
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            const auto [it, inserted] = regions_.emplace(key, builtRegion);
-            if (inserted && profilingEnabled_.load(std::memory_order_acquire))
+            if (!buildException)
             {
-                regionsBuilt_.fetch_add(1, std::memory_order_relaxed);
+                const auto [it, inserted] = regions_.emplace(key, builtRegion);
+                if (inserted && profilingEnabled_.load(std::memory_order_acquire))
+                {
+                    regionsBuilt_.fetch_add(1, std::memory_order_relaxed);
+                }
+                pendingBuild->region = it->second;
             }
-            return it->second;
+            pendingBuild->exception = buildException;
+            pendingBuild->ready = true;
+            pendingBuilds_.erase(key);
         }
+        pendingBuild->readyCondition.notify_all();
+
+        if (buildException)
+        {
+            std::rethrow_exception(buildException);
+        }
+
+        return pendingBuild->region;
     }
 
     [[nodiscard]] StructureRegion buildRegion(const StructureRegionKey& key) const
@@ -749,6 +821,10 @@ private:
 
     mutable std::mutex mutex_;
     mutable std::unordered_map<StructureRegionKey, std::shared_ptr<StructureRegion>, StructureRegionKeyHasher> regions_{};
+    mutable std::unordered_map<StructureRegionKey,
+                               std::shared_ptr<PendingStructureRegionBuild>,
+                               StructureRegionKeyHasher>
+        pendingBuilds_{};
     SampleColumnFn sampleColumnFn_{};
     SurfaceBlockFn surfaceBlockFn_{};
     DensityFn densityFn_{};

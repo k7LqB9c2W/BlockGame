@@ -1,13 +1,15 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
-#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -286,9 +288,17 @@ private:
 
     struct FragmentCacheEntry
     {
-        std::unique_ptr<ClimateFragment> fragment;
+        std::shared_ptr<ClimateFragment> fragment;
         std::list<glm::ivec2>::iterator lruIt;
         bool inLru{false};
+    };
+
+    struct PendingFragmentBuild
+    {
+        std::condition_variable readyCondition{};
+        std::shared_ptr<ClimateFragment> fragment{};
+        std::exception_ptr exception{};
+        bool ready{false};
     };
 
     static int floorDiv(int value, int divisor) noexcept;
@@ -299,6 +309,7 @@ private:
     std::size_t maxFragments_{32};
     mutable std::mutex mutex_;
     mutable std::unordered_map<glm::ivec2, FragmentCacheEntry, IVec2Hasher> fragments_{};
+    mutable std::unordered_map<glm::ivec2, std::shared_ptr<PendingFragmentBuild>, IVec2Hasher> pendingBuilds_{};
     mutable std::list<glm::ivec2> lru_{};
     mutable std::atomic<bool> profilingEnabled_{false};
     mutable std::atomic<std::uint64_t> cacheHits_{0};

@@ -259,6 +259,10 @@ NoiseVoronoiClimateGenerator::NoiseVoronoiClimateGenerator(const BiomeDatabase& 
     chunkSpan_ = std::max(alignment, ((chunkSpan_ + alignment - 1) / alignment) * alignment);
     neighborRadius_ =
         std::max(2, static_cast<int>(std::ceil(biomeDatabase_.maxBiomeRadius() / static_cast<float>(chunkSpan_))) + 1);
+    maxChunkCacheEntries_ = std::clamp<std::size_t>(
+        static_cast<std::size_t>((neighborRadius_ * 2 + 1) * (neighborRadius_ * 2 + 1) * 64),
+        512u,
+        4096u);
 
     const auto& defs = biomeDatabase_.definitions();
     biomeSelection_.reserve(defs.size());
@@ -338,20 +342,23 @@ float NoiseVoronoiClimateGenerator::lengthSquared(const glm::ivec2& a, const glm
     return static_cast<float>(d.x * d.x + d.y * d.y);
 }
 
-const NoiseVoronoiClimateGenerator::ChunkSeeds&
-NoiseVoronoiClimateGenerator::chunkSeeds(int chunkX, int chunkZ) const
+void NoiseVoronoiClimateGenerator::touchChunkSeedCacheEntry(ChunkSeedCacheEntry& entry) const
 {
-    const glm::ivec2 key{chunkX, chunkZ};
-    std::lock_guard<std::mutex> lock(chunkMutex_);
-    auto it = chunkCache_.find(key);
-    if (it != chunkCache_.end())
+    if (!entry.inLru)
     {
-        return it->second;
+        return;
     }
-    ChunkSeeds seeds = buildChunkSeeds(chunkX, chunkZ);
-    auto [insertedIt, inserted] = chunkCache_.emplace(key, std::move(seeds));
-    (void)inserted;
-    return insertedIt->second;
+    chunkCacheLru_.splice(chunkCacheLru_.begin(), chunkCacheLru_, entry.lruIt);
+}
+
+void NoiseVoronoiClimateGenerator::evictChunkSeedCacheIfNeeded() const
+{
+    while (chunkCache_.size() > maxChunkCacheEntries_ && !chunkCacheLru_.empty())
+    {
+        const glm::ivec2 key = chunkCacheLru_.back();
+        chunkCacheLru_.pop_back();
+        chunkCache_.erase(key);
+    }
 }
 
 NoiseVoronoiClimateGenerator::ChunkSeeds
@@ -586,7 +593,7 @@ bool NoiseVoronoiClimateGenerator::isValidPlacement(const glm::ivec2& position,
 }
 
 void NoiseVoronoiClimateGenerator::gatherCandidateSeeds(const glm::ivec2& worldPos,
-                                                        std::vector<const BiomeSeed*>& outCandidates) const
+                                                        std::vector<BiomeSeed>& outCandidates) const
 {
     const int chunkX = floorDiv(worldPos.x, chunkSpan_);
     const int chunkZ = floorDiv(worldPos.y, chunkSpan_);
@@ -594,11 +601,27 @@ void NoiseVoronoiClimateGenerator::gatherCandidateSeeds(const glm::ivec2& worldP
     {
         for (int dx = -neighborRadius_; dx <= neighborRadius_; ++dx)
         {
-            const ChunkSeeds& chunk = chunkSeeds(chunkX + dx, chunkZ + dz);
-            for (const BiomeSeed& seed : chunk.seeds)
+            const glm::ivec2 key{chunkX + dx, chunkZ + dz};
+            std::lock_guard<std::mutex> lock(chunkMutex_);
+            auto it = chunkCache_.find(key);
+            if (it == chunkCache_.end())
             {
-                outCandidates.push_back(&seed);
+                ChunkSeedCacheEntry entry{};
+                entry.seeds = buildChunkSeeds(key.x, key.y);
+                entry.lruIt = chunkCacheLru_.emplace(chunkCacheLru_.begin(), key);
+                entry.inLru = true;
+                auto [insertedIt, inserted] = chunkCache_.emplace(key, std::move(entry));
+                (void)inserted;
+                it = insertedIt;
+                evictChunkSeedCacheIfNeeded();
             }
+
+            touchChunkSeedCacheEntry(it->second);
+            const std::size_t previousSize = outCandidates.size();
+            outCandidates.resize(previousSize + it->second.seeds.seeds.size());
+            std::copy(it->second.seeds.seeds.begin(),
+                      it->second.seeds.seeds.end(),
+                      outCandidates.begin() + static_cast<std::ptrdiff_t>(previousSize));
         }
     }
 }
@@ -607,8 +630,8 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos,
                                                     ClimateSample& outSample,
                                                     SampleComposition* outComposition) const
 {
-    std::vector<const BiomeSeed*> rawCandidates;
-    rawCandidates.reserve(128);
+    std::vector<BiomeSeed> rawCandidates;
+    rawCandidates.reserve(static_cast<std::size_t>((neighborRadius_ * 2 + 1) * (neighborRadius_ * 2 + 1) * 48));
     gatherCandidateSeeds(worldPos, rawCandidates);
 
     struct CandidateInfo
@@ -623,14 +646,18 @@ void NoiseVoronoiClimateGenerator::accumulateSample(const glm::ivec2& worldPos,
     std::vector<CandidateInfo> candidates;
     candidates.reserve(rawCandidates.size());
 
-    for (const BiomeSeed* candidate : rawCandidates)
+    for (const BiomeSeed& candidate : rawCandidates)
     {
-        const float distSq = lengthSquared(worldPos, candidate->position);
+        const float distSq = lengthSquared(worldPos, candidate.position);
         const float distance = std::sqrt(distSq);
-        const float normalized = distance / std::max(candidate->radius, 1.0f);
+        const float normalized = distance / std::max(candidate.radius, 1.0f);
         const float blended = std::clamp(1.0f - normalized, 0.0f, 1.0f);
         float influence = smoothStep(blended);
-        candidates.push_back(CandidateInfo{candidate, distance, std::max(candidate->radius, 1.0f), normalized, influence});
+        candidates.push_back(CandidateInfo{&candidate,
+                                           distance,
+                                           std::max(candidate.radius, 1.0f),
+                                           normalized,
+                                           influence});
     }
 
     struct WeightedSeed
@@ -1432,13 +1459,65 @@ ClimateMap::ClimateMap(std::unique_ptr<ClimateGenerator> generator, std::size_t 
     }
 }
 
-const ClimateSample& ClimateMap::sample(int worldX, int worldZ) const
+ClimateSample ClimateMap::sample(int worldX, int worldZ) const
 {
-    const ClimateFragment& fragment = fragmentForColumn(worldX, worldZ);
-    const glm::ivec2 baseWorld = fragment.baseWorld();
+    const int fragmentX = floorDiv(worldX, ClimateFragment::kSize);
+    const int fragmentZ = floorDiv(worldZ, ClimateFragment::kSize);
+    const glm::ivec2 key{fragmentX, fragmentZ};
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = fragments_.find(key);
+        if (it != fragments_.end())
+        {
+            if (profilingEnabled())
+            {
+                cacheHits_.fetch_add(1, std::memory_order_relaxed);
+            }
+            touch(it->second);
+            const glm::ivec2 baseWorld = it->second.fragment->baseWorld();
+            const int localX = worldX - baseWorld.x;
+            const int localZ = worldZ - baseWorld.y;
+            return it->second.fragment->sample(localX, localZ);
+        }
+    }
+
+    if (profilingEnabled())
+    {
+        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    auto fragment = std::make_unique<ClimateFragment>(key);
+    generator_->generate(*fragment);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto existing = fragments_.find(key);
+    if (existing != fragments_.end())
+    {
+        touch(existing->second);
+        const glm::ivec2 baseWorld = existing->second.fragment->baseWorld();
+        const int localX = worldX - baseWorld.x;
+        const int localZ = worldZ - baseWorld.y;
+        return existing->second.fragment->sample(localX, localZ);
+    }
+
+    FragmentCacheEntry entry{};
+    entry.fragment = std::move(fragment);
+    entry.lruIt = lru_.emplace(lru_.begin(), key);
+    entry.inLru = true;
+
+    auto [it, inserted] = fragments_.emplace(key, std::move(entry));
+    (void)inserted;
+    if (profilingEnabled())
+    {
+        cacheFills_.fetch_add(1, std::memory_order_relaxed);
+    }
+    evictIfNeeded();
+
+    const glm::ivec2 baseWorld = it->second.fragment->baseWorld();
     const int localX = worldX - baseWorld.x;
     const int localZ = worldZ - baseWorld.y;
-    return fragment.sample(localX, localZ);
+    return it->second.fragment->sample(localX, localZ);
 }
 
 void ClimateMap::setProfilingEnabled(bool enabled) noexcept
@@ -1483,66 +1562,6 @@ int ClimateMap::floorDiv(int value, int divisor) noexcept
         --quotient;
     }
     return quotient;
-}
-
-const ClimateFragment& ClimateMap::fragmentForColumn(int worldX, int worldZ) const
-{
-    const int fragmentX = floorDiv(worldX, ClimateFragment::kSize);
-    const int fragmentZ = floorDiv(worldZ, ClimateFragment::kSize);
-    const glm::ivec2 key{fragmentX, fragmentZ};
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = fragments_.find(key);
-        if (it != fragments_.end())
-        {
-            if (profilingEnabled())
-            {
-                cacheHits_.fetch_add(1, std::memory_order_relaxed);
-            }
-            touch(it->second);
-            return *it->second.fragment;
-        }
-    }
-
-    if (profilingEnabled())
-    {
-        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    auto fragment = std::make_unique<ClimateFragment>(key);
-    generator_->generate(*fragment);
-
-    const ClimateFragment* result = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        auto existing = fragments_.find(key);
-        if (existing != fragments_.end())
-        {
-            // Another thread populated this fragment while we were generating ours.
-            touch(existing->second);
-            result = existing->second.fragment.get();
-        }
-        else
-        {
-            FragmentCacheEntry entry{};
-            entry.fragment = std::move(fragment);
-            entry.lruIt = lru_.emplace(lru_.begin(), key);
-            entry.inLru = true;
-
-            auto [it, inserted] = fragments_.emplace(key, std::move(entry));
-            (void)inserted;
-            if (profilingEnabled())
-            {
-                cacheFills_.fetch_add(1, std::memory_order_relaxed);
-            }
-            evictIfNeeded();
-            result = it->second.fragment.get();
-        }
-    }
-
-    return *result;
 }
 
 void ClimateMap::touch(FragmentCacheEntry& entry) const

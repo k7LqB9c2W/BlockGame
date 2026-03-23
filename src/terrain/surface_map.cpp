@@ -288,7 +288,7 @@ void MapGenV1::generate(SurfaceFragment& fragment, int lodLevel)
             const int worldX = baseWorld.x + localX * stride;
             const int worldZ = baseWorld.y + localZ * stride;
 
-            const ClimateSample& climateSample = climateMap_->sample(worldX, worldZ);
+            const ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
             if (climateSample.blendCount == 0)
             {
                 continue;

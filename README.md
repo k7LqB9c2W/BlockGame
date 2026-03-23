@@ -293,7 +293,7 @@ Important note: percentile values are collected with low-overhead histograms, so
 
 BlockGame now has a visual-only distant terrain path driven by `Exact Chunks` plus `Total Chunks`.
 If `Total Chunks` is greater than `Exact Chunks`, exact voxel chunks still handle gameplay while the distant terrain path fills the horizon outside the exact radius.
-Within the exact radius, nearby chunks keep full CPU voxel/light data for gameplay and edits, while older non-interactive exact chunks can fall back to mesh-only residency and regenerate CPU data from worldgen plus the in-memory block edit overlay when needed. This keeps exact rendering intact while significantly reducing RAM growth in tall terrain.
+Within the exact radius, nearby chunks keep full CPU voxel/light data for gameplay and edits, while older non-interactive exact chunks can fall back to mesh-only residency and regenerate CPU data from worldgen plus the in-memory block edit overlay when needed. Exact chunk residency is also now interval-based per column instead of one contiguous vertical slab, so tall mountains no longer force every chunk between the player and the summit to stay exact. The climate generator now uses smaller climate fragments plus bounded fragment/seed caches so long exploration sessions do not let biome-climate memory grow without limit. Together, those changes keep exact rendering intact while significantly reducing RAM growth in tall terrain.
 
 Run an LOD benchmark with:
 

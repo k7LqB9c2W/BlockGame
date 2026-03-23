@@ -74,7 +74,7 @@ struct ClimateSample
 class ClimateFragment
 {
 public:
-    static constexpr int kSize = 256;
+    static constexpr int kSize = 64;
 
     explicit ClimateFragment(const glm::ivec2& fragmentCoord) noexcept;
 
@@ -123,6 +123,13 @@ private:
     {
         std::vector<BiomeSeed> seeds{};
         int maxRadius{0};
+    };
+
+    struct ChunkSeedCacheEntry
+    {
+        ChunkSeeds seeds{};
+        std::list<glm::ivec2>::iterator lruIt;
+        bool inLru{false};
     };
 
     struct SampleComposition
@@ -215,10 +222,13 @@ private:
     std::vector<float> oceanWeightPrefix_{};
     float totalOceanWeight_{0.0f};
 
-    mutable std::unordered_map<glm::ivec2, ChunkSeeds, ChunkKeyHasher> chunkCache_{};
+    mutable std::unordered_map<glm::ivec2, ChunkSeedCacheEntry, ChunkKeyHasher> chunkCache_{};
+    mutable std::list<glm::ivec2> chunkCacheLru_{};
     mutable std::mutex chunkMutex_;
+    std::size_t maxChunkCacheEntries_{1024};
 
-    const ChunkSeeds& chunkSeeds(int chunkX, int chunkZ) const;
+    void touchChunkSeedCacheEntry(ChunkSeedCacheEntry& entry) const;
+    void evictChunkSeedCacheIfNeeded() const;
     ChunkSeeds buildChunkSeeds(int chunkX, int chunkZ) const;
     BiomeSeed createSeed(Random& rng, int worldX, int worldZ) const;
     BiomeSeed createSeed(Random& rng, int worldX, int worldZ, const BiomeDefinition& biome) const;
@@ -233,7 +243,7 @@ private:
                           const std::vector<BiomeSeed>& seeds,
                           float spacingScale) const noexcept;
     void gatherCandidateSeeds(const glm::ivec2& worldPos,
-                              std::vector<const BiomeSeed*>& outCandidates) const;
+                              std::vector<BiomeSeed>& outCandidates) const;
     void accumulateSample(const glm::ivec2& worldPos,
                           ClimateSample& outSample,
                           SampleComposition* outComposition = nullptr) const;
@@ -256,7 +266,7 @@ public:
 
     ClimateMap(std::unique_ptr<ClimateGenerator> generator, std::size_t maxFragments = 32);
 
-    [[nodiscard]] const ClimateSample& sample(int worldX, int worldZ) const;
+    [[nodiscard]] ClimateSample sample(int worldX, int worldZ) const;
     void setProfilingEnabled(bool enabled) noexcept;
     [[nodiscard]] bool profilingEnabled() const noexcept;
     [[nodiscard]] CacheProfilingSnapshot profilingSnapshot() const noexcept;
@@ -282,7 +292,6 @@ private:
     };
 
     static int floorDiv(int value, int divisor) noexcept;
-    [[nodiscard]] const ClimateFragment& fragmentForColumn(int worldX, int worldZ) const;
     void touch(FragmentCacheEntry& entry) const;
     void evictIfNeeded() const;
 

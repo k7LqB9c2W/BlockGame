@@ -3040,6 +3040,10 @@ struct Chunk
         meshReady.store(false, std::memory_order_relaxed);
         hasBlocks.store(false, std::memory_order_relaxed);
         queuedForUpload.store(false, std::memory_order_relaxed);
+        queuedUploadBucket.store(std::numeric_limits<std::uint8_t>::max(), std::memory_order_relaxed);
+        uploadQueueTicket.store(0, std::memory_order_relaxed);
+        queuedForCommit.store(false, std::memory_order_relaxed);
+        commitQueueTicket.store(0, std::memory_order_relaxed);
         indexCount.store(0, std::memory_order_relaxed);
         vertexCount.store(0, std::memory_order_relaxed);
         bufferPageIndex.store(kInvalidChunkBufferPage, std::memory_order_relaxed);
@@ -3111,6 +3115,10 @@ struct Chunk
     std::atomic<std::size_t> vertexOffset{0};
     std::atomic<std::size_t> indexOffset{0};
     std::atomic<bool> queuedForUpload{false};
+    std::atomic<std::uint8_t> queuedUploadBucket{std::numeric_limits<std::uint8_t>::max()};
+    std::atomic<std::uint64_t> uploadQueueTicket{0};
+    std::atomic<bool> queuedForCommit{false};
+    std::atomic<std::uint64_t> commitQueueTicket{0};
 
     mutable std::mutex meshMutex;
     MeshData meshData;
@@ -3201,6 +3209,76 @@ struct BlockEditOverlayEntry
     return chunkAwaitingInitialReady(chunk) &&
            chunk.hasBlocks.load(std::memory_order_acquire);
 }
+
+enum class UploadQueueBucket : std::uint8_t
+{
+    InitialVisible = 0,
+    NearFrontVisible = 1,
+    Background = 2,
+    Retry = 3
+};
+
+inline constexpr std::size_t kUploadQueueBucketCount = 4;
+
+[[nodiscard]] constexpr std::size_t uploadQueueBucketIndex(UploadQueueBucket bucket) noexcept
+{
+    return static_cast<std::size_t>(bucket);
+}
+
+struct UploadQueueEntry
+{
+    std::weak_ptr<Chunk> chunk;
+    ChunkPriorityKey priority{};
+    std::uint64_t ticket{0};
+    std::uint64_t sequence{0};
+};
+
+struct PendingCommitQueueEntry
+{
+    std::weak_ptr<Chunk> chunk;
+    std::uint64_t ticket{0};
+    UINT64 uploadFenceValue{0};
+};
+
+[[nodiscard]] int compareChunkPriorityKeysLocal(const ChunkPriorityKey& lhs,
+                                                const ChunkPriorityKey& rhs) noexcept
+{
+    if (lhs.supportBucket != rhs.supportBucket)
+    {
+        return lhs.supportBucket < rhs.supportBucket ? -1 : 1;
+    }
+    if (lhs.horizontalDistance != rhs.horizontalDistance)
+    {
+        return lhs.horizontalDistance < rhs.horizontalDistance ? -1 : 1;
+    }
+    if (lhs.forwardBucket != rhs.forwardBucket)
+    {
+        return lhs.forwardBucket < rhs.forwardBucket ? -1 : 1;
+    }
+    if (lhs.verticalDistance != rhs.verticalDistance)
+    {
+        return lhs.verticalDistance < rhs.verticalDistance ? -1 : 1;
+    }
+    if (lhs.axisDistance != rhs.axisDistance)
+    {
+        return lhs.axisDistance < rhs.axisDistance ? -1 : 1;
+    }
+    return 0;
+}
+
+struct UploadQueueEntryComparer
+{
+    bool operator()(const UploadQueueEntry& lhs, const UploadQueueEntry& rhs) const noexcept
+    {
+        const int priorityComparison = compareChunkPriorityKeysLocal(lhs.priority, rhs.priority);
+        if (priorityComparison != 0)
+        {
+            return priorityComparison > 0;
+        }
+
+        return lhs.sequence > rhs.sequence;
+    }
+};
 
 #include "chunk_manager_far_terrain.inl"
 
@@ -3359,8 +3437,16 @@ private:
                     bool initialReadyPriority = false);
     void processJob(const Job& job);
     std::shared_ptr<Chunk> popNextChunkForUpload();
-    void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk);
-    void requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront);
+    void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket = false);
+    void requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket);
+    [[nodiscard]] ChunkPriorityKey buildUploadPriorityKey(const glm::ivec3& coord,
+                                                          const glm::ivec3& origin,
+                                                          const glm::vec3& forward) const noexcept;
+    [[nodiscard]] UploadQueueBucket classifyUploadQueueBucket(const Chunk& chunk,
+                                                              const glm::ivec3& origin,
+                                                              const glm::vec3& forward,
+                                                              bool retryBucket) const noexcept;
+    void queueChunkForCommit(const std::shared_ptr<Chunk>& chunk, UINT64 uploadFenceValue);
 
     enum class ChunkBufferPageState : std::uint8_t
     {
@@ -3798,8 +3884,16 @@ private:
         glm::ivec3 spawnChunk{0};
     };
 
-    std::deque<std::weak_ptr<Chunk>> uploadQueue_;
+    std::array<std::priority_queue<UploadQueueEntry,
+                                   std::vector<UploadQueueEntry>,
+                                   UploadQueueEntryComparer>,
+               kUploadQueueBucketCount>
+        uploadQueues_{};
     std::mutex uploadQueueMutex_;
+    std::size_t queuedUploadCount_{0};
+    std::size_t initialVisibleUploadCount_{0};
+    std::deque<PendingCommitQueueEntry> pendingCommitQueue_{};
+    std::mutex pendingCommitQueueMutex_;
     std::vector<ChunkBufferPage> bufferPages_;
     mutable std::mutex bufferPageMutex_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
@@ -3912,6 +4006,9 @@ private:
     double commitReleaseMsLastFrame_{0.0};
     double startupStateMsLastFrame_{0.0};
     double benchmarkBookkeepingMsLastFrame_{0.0};
+    std::uint64_t nextUploadQueueTicket_{1};
+    std::uint64_t nextUploadQueueSequence_{1};
+    std::uint64_t nextCommitQueueTicket_{1};
     int generationColumnCapThisFrame_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
     int lastGenerationBudget_{kVerticalStreamingConfig.generationBudget.baseJobsPerFrame};
     int lastGenerationJobsIssued_{0};
@@ -4973,7 +5070,16 @@ void ChunkManager::Impl::clear()
     }
     {
         std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-        uploadQueue_.clear();
+        for (auto& queue : uploadQueues_)
+        {
+            queue = {};
+        }
+        queuedUploadCount_ = 0;
+        initialVisibleUploadCount_ = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(pendingCommitQueueMutex_);
+        pendingCommitQueue_.clear();
     }
     uploadContext_.waitForIdle();
     deferredPendingChunkReleases_.clear();
@@ -6560,6 +6666,80 @@ void ChunkManager::Impl::processJob(const Job& job)
     }
 }
 
+ChunkPriorityKey ChunkManager::Impl::buildUploadPriorityKey(const glm::ivec3& coord,
+                                                            const glm::ivec3& origin,
+                                                            const glm::vec3& forward) const noexcept
+{
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
+    const int dx = coord.x - origin.x;
+    const int dy = coord.y - origin.y;
+    const int dz = coord.z - origin.z;
+    const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
+    const int verticalDistance = std::abs(dy);
+
+    int supportBucket = 3;
+    if (horizontalDistance == 0 && verticalDistance <= 8)
+    {
+        supportBucket = 0;
+    }
+    else if (horizontalDistance <= 1 && coord.y >= origin.y - 2 && coord.y <= origin.y + 2)
+    {
+        supportBucket = 1;
+    }
+    else if (horizontalDistance <= 2 && verticalDistance <= 2)
+    {
+        supportBucket = 2;
+    }
+
+    float facingDot = 1.0f;
+    const glm::vec2 delta(static_cast<float>(dx), static_cast<float>(dz));
+    if (glm::dot(delta, delta) > kEpsilon)
+    {
+        facingDot = glm::dot(glm::normalize(delta), forwardXZ);
+    }
+
+    int forwardBucket = 2;
+    if (facingDot >= 0.5f)
+    {
+        forwardBucket = 0;
+    }
+    else if (facingDot >= -0.2f)
+    {
+        forwardBucket = 1;
+    }
+
+    return ChunkPriorityKey{
+        supportBucket,
+        horizontalDistance,
+        forwardBucket,
+        verticalDistance,
+        std::abs(dx) + verticalDistance + std::abs(dz)};
+}
+
+UploadQueueBucket ChunkManager::Impl::classifyUploadQueueBucket(const Chunk& chunk,
+                                                                const glm::ivec3& origin,
+                                                                const glm::vec3& forward,
+                                                                bool retryBucket) const noexcept
+{
+    if (retryBucket)
+    {
+        return UploadQueueBucket::Retry;
+    }
+
+    if (chunkAwaitingInitialVisibleReady(chunk))
+    {
+        return UploadQueueBucket::InitialVisible;
+    }
+
+    const ChunkPriorityKey priority = buildUploadPriorityKey(chunk.coord, origin, forward);
+    const int frontSpan = std::max(6, targetViewDistance_ / 4);
+    const bool nearSupport = priority.supportBucket <= 2;
+    const bool frontVisible = priority.forwardBucket == 0 &&
+                              priority.horizontalDistance <= frontSpan &&
+                              priority.verticalDistance <= std::max(4, lastVerticalRadius_ / 2);
+    return (nearSupport || frontVisible) ? UploadQueueBucket::NearFrontVisible : UploadQueueBucket::Background;
+}
+
 std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
 {
     glm::ivec3 priorityOrigin{0};
@@ -6571,109 +6751,148 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
     }
 
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    if (uploadQueue_.empty())
+    for (std::size_t bucketIndex = 0; bucketIndex < uploadQueues_.size(); ++bucketIndex)
     {
-        return nullptr;
-    }
-
-    constexpr std::size_t kUploadPriorityScanLimit = 48;
-    auto bestIt = uploadQueue_.end();
-    std::shared_ptr<Chunk> bestChunk;
-    std::size_t liveEntriesScanned = 0;
-    for (auto it = uploadQueue_.begin();
-         it != uploadQueue_.end() && liveEntriesScanned < kUploadPriorityScanLimit;)
-    {
-        std::shared_ptr<Chunk> chunk = it->lock();
-        if (!chunk)
+        auto& queue = uploadQueues_[bucketIndex];
+        while (!queue.empty())
         {
-            ++uploadSkippedExpiredLastFrame_;
-            it = uploadQueue_.erase(it);
-            continue;
-        }
+            UploadQueueEntry entry = queue.top();
+            queue.pop();
+            ++uploadQueueScanEntriesLastFrame_;
 
-        const bool chunkInitialReady = chunkAwaitingInitialVisibleReady(*chunk);
-        const bool bestInitialReady = bestChunk && chunkAwaitingInitialVisibleReady(*bestChunk);
-        if (!bestChunk ||
-            (chunkInitialReady != bestInitialReady
-                 ? chunkInitialReady
-                 : isChunkCoordHigherPriority(chunk->coord, bestChunk->coord, priorityOrigin, priorityForward)))
-        {
-            bestIt = it;
-            bestChunk = chunk;
-        }
+            const std::shared_ptr<Chunk> chunk = entry.chunk.lock();
+            if (!chunk)
+            {
+                ++uploadSkippedExpiredLastFrame_;
+                continue;
+            }
 
-        ++liveEntriesScanned;
-        ++it;
+            if (!chunk->queuedForUpload.load(std::memory_order_acquire) ||
+                chunk->uploadQueueTicket.load(std::memory_order_acquire) != entry.ticket)
+            {
+                continue;
+            }
+
+            const UploadQueueBucket desiredBucket = classifyUploadQueueBucket(*chunk, priorityOrigin, priorityForward, false);
+            if (desiredBucket != static_cast<UploadQueueBucket>(bucketIndex) &&
+                desiredBucket != UploadQueueBucket::Retry)
+            {
+                const std::uint64_t ticket = nextUploadQueueTicket_++;
+                chunk->uploadQueueTicket.store(ticket, std::memory_order_release);
+                chunk->queuedUploadBucket.store(static_cast<std::uint8_t>(desiredBucket), std::memory_order_release);
+                uploadQueues_[uploadQueueBucketIndex(desiredBucket)].push(UploadQueueEntry{
+                    chunk,
+                    buildUploadPriorityKey(chunk->coord, priorityOrigin, priorityForward),
+                    ticket,
+                    nextUploadQueueSequence_++});
+                continue;
+            }
+
+            const std::uint8_t queuedBucket = chunk->queuedUploadBucket.load(std::memory_order_acquire);
+            if (queuedUploadCount_ > 0)
+            {
+                --queuedUploadCount_;
+            }
+            if (queuedBucket == static_cast<std::uint8_t>(UploadQueueBucket::InitialVisible) &&
+                initialVisibleUploadCount_ > 0)
+            {
+                --initialVisibleUploadCount_;
+            }
+            chunk->queuedForUpload.store(false, std::memory_order_release);
+            chunk->queuedUploadBucket.store(std::numeric_limits<std::uint8_t>::max(), std::memory_order_release);
+            chunk->uploadQueueTicket.store(0, std::memory_order_release);
+            return chunk;
+        }
     }
 
-    uploadQueueScanEntriesLastFrame_ += static_cast<int>(liveEntriesScanned);
-
-    if (!bestChunk || bestIt == uploadQueue_.end())
-    {
-        return nullptr;
-    }
-
-    uploadQueue_.erase(bestIt);
-    bestChunk->queuedForUpload.store(false, std::memory_order_release);
-    return bestChunk;
+    return nullptr;
 }
 
-void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk)
+void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket)
 {
     if (!chunk)
     {
         return;
     }
 
+    glm::ivec3 priorityOrigin{0};
+    glm::vec3 priorityForward{0.0f, 0.0f, -1.0f};
+    {
+        std::lock_guard<std::mutex> priorityLock(schedulingPriorityMutex_);
+        priorityOrigin = schedulingPriorityOrigin_;
+        priorityForward = schedulingPriorityForward_;
+    }
+
+    const UploadQueueBucket bucket = classifyUploadQueueBucket(*chunk, priorityOrigin, priorityForward, retryBucket);
+    const std::uint8_t desiredBucket = static_cast<std::uint8_t>(bucket);
+
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
     if (chunk->queuedForUpload.load(std::memory_order_acquire))
     {
-        return;
-    }
+        const std::uint8_t existingBucket = chunk->queuedUploadBucket.load(std::memory_order_acquire);
+        if (existingBucket <= desiredBucket)
+        {
+            return;
+        }
 
-    if (chunkAwaitingInitialVisibleReady(*chunk))
-    {
-        uploadQueue_.emplace_front(chunk);
+        if (desiredBucket == static_cast<std::uint8_t>(UploadQueueBucket::InitialVisible) &&
+            existingBucket != static_cast<std::uint8_t>(UploadQueueBucket::InitialVisible))
+        {
+            ++initialVisibleUploadCount_;
+        }
     }
     else
     {
-        uploadQueue_.emplace_back(chunk);
+        ++queuedUploadCount_;
+        if (desiredBucket == static_cast<std::uint8_t>(UploadQueueBucket::InitialVisible))
+        {
+            ++initialVisibleUploadCount_;
+        }
     }
+
+    const std::uint64_t ticket = nextUploadQueueTicket_++;
     chunk->queuedForUpload.store(true, std::memory_order_release);
+    chunk->queuedUploadBucket.store(desiredBucket, std::memory_order_release);
+    chunk->uploadQueueTicket.store(ticket, std::memory_order_release);
+    uploadQueues_[uploadQueueBucketIndex(bucket)].push(UploadQueueEntry{
+        chunk,
+        buildUploadPriorityKey(chunk->coord, priorityOrigin, priorityForward),
+        ticket,
+        nextUploadQueueSequence_++});
     storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
 
     if (shouldTrackRecentEditChunk(chunk->coord))
     {
         std::ostringstream stream;
         stream << "queue upload chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
-               << ") idx=" << chunk->indexCount.load(std::memory_order_acquire);
+               << ") idx=" << chunk->indexCount.load(std::memory_order_acquire)
+               << " bucket=" << static_cast<int>(desiredBucket);
         appendRecentEditDebugEvent(stream.str());
     }
 }
 
-void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool toFront)
+void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket)
 {
-    if (!chunk)
+    queueChunkForUpload(chunk, retryBucket);
+}
+
+void ChunkManager::Impl::queueChunkForCommit(const std::shared_ptr<Chunk>& chunk, UINT64 uploadFenceValue)
+{
+    if (!chunk || uploadFenceValue == 0)
     {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    if (chunk->queuedForUpload.load(std::memory_order_acquire))
+    std::lock_guard<std::mutex> lock(pendingCommitQueueMutex_);
+    if (chunk->queuedForCommit.load(std::memory_order_acquire))
     {
         return;
     }
 
-    if (toFront || chunkAwaitingInitialVisibleReady(*chunk))
-    {
-        uploadQueue_.emplace_front(chunk);
-    }
-    else
-    {
-        uploadQueue_.emplace_back(chunk);
-    }
-    chunk->queuedForUpload.store(true, std::memory_order_release);
-    storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
+    const std::uint64_t ticket = nextCommitQueueTicket_++;
+    chunk->queuedForCommit.store(true, std::memory_order_release);
+    chunk->commitQueueTicket.store(ticket, std::memory_order_release);
+    pendingCommitQueue_.push_back(PendingCommitQueueEntry{chunk, ticket, uploadFenceValue});
 }
 
 std::size_t ChunkManager::Impl::nextPowerOfTwo(std::size_t value) noexcept
@@ -7220,14 +7439,36 @@ void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
 void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
 {
     Chunk::PendingRenderMesh pendingMesh;
+    bool wasQueuedForUpload = false;
+    std::uint8_t queuedBucket = std::numeric_limits<std::uint8_t>::max();
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         releaseChunkAllocation(chunk);
         pendingMesh = chunk.pendingMesh;
+        wasQueuedForUpload = chunk.queuedForUpload.load(std::memory_order_acquire);
+        queuedBucket = chunk.queuedUploadBucket.load(std::memory_order_acquire);
         chunk.pendingMesh = {};
         chunk.meshData.clear();
         chunk.meshReady.store(false, std::memory_order_release);
         chunk.queuedForUpload.store(false, std::memory_order_release);
+        chunk.queuedUploadBucket.store(std::numeric_limits<std::uint8_t>::max(), std::memory_order_release);
+        chunk.uploadQueueTicket.store(0, std::memory_order_release);
+        chunk.queuedForCommit.store(false, std::memory_order_release);
+        chunk.commitQueueTicket.store(0, std::memory_order_release);
+    }
+
+    if (wasQueuedForUpload)
+    {
+        std::lock_guard<std::mutex> uploadLock(uploadQueueMutex_);
+        if (queuedUploadCount_ > 0)
+        {
+            --queuedUploadCount_;
+        }
+        if (queuedBucket == static_cast<std::uint8_t>(UploadQueueBucket::InitialVisible) &&
+            initialVisibleUploadCount_ > 0)
+        {
+            --initialVisibleUploadCount_;
+        }
     }
 
     if (!pendingMesh.valid())
@@ -7349,22 +7590,13 @@ int ChunkManager::Impl::baseUploadsPerColumnLimit(int verticalRadius) const noex
 std::size_t ChunkManager::Impl::estimateUploadQueueSize()
 {
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    return uploadQueue_.size();
+    return queuedUploadCount_;
 }
 
 std::size_t ChunkManager::Impl::estimateInitialReadyUploadQueueSize()
 {
     std::lock_guard<std::mutex> lock(uploadQueueMutex_);
-    std::size_t readyCount = 0;
-    for (const std::weak_ptr<Chunk>& weakChunk : uploadQueue_)
-    {
-        const std::shared_ptr<Chunk> chunk = weakChunk.lock();
-        if (chunk && chunkAwaitingInitialVisibleReady(*chunk))
-        {
-            ++readyCount;
-        }
-    }
-    return readyCount;
+    return initialVisibleUploadCount_;
 }
 
 ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int verticalRadius)
@@ -9106,10 +9338,16 @@ void ChunkManager::Impl::uploadReadyMeshes()
                 continue;
             }
 
+            UINT64 chunkFenceValue = 0;
             std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
             if (chunk->pendingMesh.valid() && chunk->pendingMesh.uploadFenceValue == 0)
             {
                 chunk->pendingMesh.uploadFenceValue = submittedFenceValue;
+                chunkFenceValue = submittedFenceValue;
+            }
+            if (chunkFenceValue != 0)
+            {
+                queueChunkForCommit(chunk, chunkFenceValue);
             }
         }
     }
@@ -9170,27 +9408,44 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitCollectStart).count();
     }
 
-    const auto commitChunkScanStart =
-        benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    std::vector<std::shared_ptr<Chunk>> chunks;
+    while (true)
     {
-        std::lock_guard<std::mutex> lock(chunksMutex);
-        chunks.reserve(chunks_.size());
-        for (const auto& [coord, chunk] : chunks_)
+        const auto commitChunkScanStart =
+            benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        PendingCommitQueueEntry entry{};
+        bool haveEntry = false;
         {
-            (void)coord;
-            chunks.push_back(chunk);
+            std::lock_guard<std::mutex> lock(pendingCommitQueueMutex_);
+            if (!pendingCommitQueue_.empty())
+            {
+                const PendingCommitQueueEntry& front = pendingCommitQueue_.front();
+                if (front.uploadFenceValue == 0 || completedUploadFenceValue >= front.uploadFenceValue)
+                {
+                    entry = front;
+                    pendingCommitQueue_.pop_front();
+                    haveEntry = true;
+                }
+            }
         }
-    }
-    if (benchmarkEnabled)
-    {
-        commitChunkScanMsLastFrame_ +=
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitChunkScanStart).count();
-    }
+        if (benchmarkEnabled)
+        {
+            commitChunkScanMsLastFrame_ +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - commitChunkScanStart).count();
+        }
 
-    for (const std::shared_ptr<Chunk>& chunk : chunks)
-    {
+        if (!haveEntry)
+        {
+            break;
+        }
+
+        const std::shared_ptr<Chunk> chunk = entry.chunk.lock();
         if (!chunk)
+        {
+            continue;
+        }
+
+        if (!chunk->queuedForCommit.load(std::memory_order_acquire) ||
+            chunk->commitQueueTicket.load(std::memory_order_acquire) != entry.ticket)
         {
             continue;
         }
@@ -9221,6 +9476,8 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (!chunk->pendingMesh.valid())
         {
+            chunk->queuedForCommit.store(false, std::memory_order_release);
+            chunk->commitQueueTicket.store(0, std::memory_order_release);
             if (benchmarkEnabled)
             {
                 const double meshLockedMs =
@@ -9236,6 +9493,9 @@ void ChunkManager::Impl::commitPendingChunkUploads()
         if (chunk->pendingMesh.uploadFenceValue != 0 &&
             completedUploadFenceValue < chunk->pendingMesh.uploadFenceValue)
         {
+            const UINT64 deferredFenceValue = chunk->pendingMesh.uploadFenceValue;
+            chunk->queuedForCommit.store(false, std::memory_order_release);
+            chunk->commitQueueTicket.store(0, std::memory_order_release);
             if (benchmarkEnabled)
             {
                 const double meshLockedMs =
@@ -9245,11 +9505,15 @@ void ChunkManager::Impl::commitPendingChunkUploads()
                 commitMeshLockedMsLastFrame_ += meshLockedMs;
                 commitMeshStateMsLastFrame_ += meshLockedMs;
             }
+            meshLock.unlock();
+            queueChunkForCommit(chunk, deferredFenceValue);
             continue;
         }
 
         pendingMesh = chunk->pendingMesh;
         chunk->pendingMesh = {};
+        chunk->queuedForCommit.store(false, std::memory_order_release);
+        chunk->commitQueueTicket.store(0, std::memory_order_release);
         currentMeshVersion = chunk->meshVersion.load(std::memory_order_acquire);
         stalePending = currentMeshVersion != pendingMesh.meshVersion;
         if (!stalePending)
@@ -9322,7 +9586,7 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             if (chunk->meshReady.load(std::memory_order_acquire) &&
                 chunk->state.load(std::memory_order_acquire) == ChunkState::Ready)
             {
-                queueChunkForUpload(chunk);
+                queueChunkForUpload(chunk, true);
             }
             if (benchmarkEnabled)
             {

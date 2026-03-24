@@ -809,6 +809,7 @@ struct BenchmarkSpikeRecord
     std::string suspectedSource{"unknown"};
     double chunkUpdateMs{0.0};
     double chunkUpdateResidualMs{0.0};
+    double chunkDenseResidencyMs{0.0};
     double chunkVerticalRadiusMs{0.0};
     double chunkPriorityUpdateMs{0.0};
     double chunkUploadBudgetMs{0.0};
@@ -818,6 +819,7 @@ struct BenchmarkSpikeRecord
     double chunkEvictionMs{0.0};
     double chunkRelightMs{0.0};
     double chunkUploadMs{0.0};
+    double chunkUploadQueueAgeMs{0.0};
     double chunkUploadQueuePickMs{0.0};
     double chunkPoolTrimMs{0.0};
     double chunkFarTerrainUpdateMs{0.0};
@@ -852,8 +854,20 @@ struct BenchmarkSpikeRecord
     int relightBatches{0};
     int meshedChunks{0};
     int uploadedChunks{0};
+    int uploadAttempts{0};
+    int uploadQueueScanEntries{0};
+    int uploadSkippedExpired{0};
+    int uploadSkippedNotReady{0};
+    int uploadSkippedPendingMesh{0};
+    int uploadColumnLimited{0};
+    int uploadBudgetDeferred{0};
+    int uploadRetryFailures{0};
+    int uploadScanLimitHits{0};
+    int uploadBeginFailures{0};
+    int uploadStalePendingMeshes{0};
     int jobBacklog{0};
     int uploadBacklog{0};
+    int columnPrefetchBacklog{0};
     int exactPendingChunks{0};
     int missingChunks{0};
     std::uint64_t relightRegionChunks{0};
@@ -1178,6 +1192,7 @@ struct BenchmarkFrameSummary
     const double renderMs = rendererWorkMs(rendererSnapshot);
     const double updateMs = chunkSnapshot.updateMsLastFrame;
     const double updateResidualMs = chunkSnapshot.updateResidualMsLastFrame;
+    const double denseResidencyMs = chunkSnapshot.denseResidencyMsLastFrame;
     const double verticalRadiusMs = chunkSnapshot.verticalRadiusMsLastFrame;
     const double priorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
     const double uploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
@@ -1295,6 +1310,10 @@ struct BenchmarkFrameSummary
         if (ensureVolumeMs >= 10.0 && ensureVolumeMs >= updateMs * 0.35)
         {
             return "chunk_ensure_volume";
+        }
+        if (denseResidencyMs >= 10.0 && denseResidencyMs >= updateMs * 0.35)
+        {
+            return "chunk_dense_residency";
         }
         if (schedulingMs >= 10.0 && schedulingMs >= updateMs * 0.35)
         {
@@ -1422,6 +1441,7 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
                                                           renderWorldCpuMs);
     record.chunkUpdateMs = chunkSnapshot.updateMsLastFrame;
     record.chunkUpdateResidualMs = chunkSnapshot.updateResidualMsLastFrame;
+    record.chunkDenseResidencyMs = chunkSnapshot.denseResidencyMsLastFrame;
     record.chunkVerticalRadiusMs = chunkSnapshot.verticalRadiusMsLastFrame;
     record.chunkPriorityUpdateMs = chunkSnapshot.priorityUpdateMsLastFrame;
     record.chunkUploadBudgetMs = chunkSnapshot.uploadBudgetMsLastFrame;
@@ -1431,6 +1451,7 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
     record.chunkEvictionMs = chunkSnapshot.evictionMsLastFrame;
     record.chunkRelightMs = chunkSnapshot.relightMsLastFrame;
     record.chunkUploadMs = chunkSnapshot.uploadMsLastFrame;
+    record.chunkUploadQueueAgeMs = chunkSnapshot.uploadQueueAgeMsLastFrame;
     record.chunkUploadQueuePickMs = chunkSnapshot.uploadQueuePickMsLastFrame;
     record.chunkPoolTrimMs = chunkSnapshot.poolTrimMsLastFrame;
     record.chunkFarTerrainUpdateMs = chunkSnapshot.farTerrainUpdateMsLastFrame;
@@ -1465,8 +1486,20 @@ void recordBenchmarkSpike(BenchmarkRuntimeState& runtimeState,
     record.relightBatches = chunkSnapshot.relightBatches;
     record.meshedChunks = chunkSnapshot.meshedChunks;
     record.uploadedChunks = chunkSnapshot.uploadedChunks;
+    record.uploadAttempts = chunkSnapshot.uploadAttemptsLastFrame;
+    record.uploadQueueScanEntries = chunkSnapshot.uploadQueueScanEntriesLastFrame;
+    record.uploadSkippedExpired = chunkSnapshot.uploadSkippedExpiredLastFrame;
+    record.uploadSkippedNotReady = chunkSnapshot.uploadSkippedNotReadyLastFrame;
+    record.uploadSkippedPendingMesh = chunkSnapshot.uploadSkippedPendingMeshLastFrame;
+    record.uploadColumnLimited = chunkSnapshot.uploadColumnLimitedLastFrame;
+    record.uploadBudgetDeferred = chunkSnapshot.uploadBudgetDeferredLastFrame;
+    record.uploadRetryFailures = chunkSnapshot.uploadRetryFailuresLastFrame;
+    record.uploadScanLimitHits = chunkSnapshot.uploadScanLimitHitsLastFrame;
+    record.uploadBeginFailures = chunkSnapshot.uploadBeginFailuresLastFrame;
+    record.uploadStalePendingMeshes = chunkSnapshot.uploadStalePendingMeshesLastFrame;
     record.jobBacklog = chunkSnapshot.jobQueueDepth;
     record.uploadBacklog = chunkSnapshot.uploadQueueDepth;
+    record.columnPrefetchBacklog = chunkSnapshot.columnPrefetchQueueDepth;
     record.exactPendingChunks = chunkSnapshot.exactChunksPending;
     record.missingChunks = chunkSnapshot.missingChunks;
     record.relightRegionChunks = chunkSnapshot.relightRegionChunks;
@@ -1710,6 +1743,7 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
         writeJsonEscaped(out, spike.suspectedSource);
         out << ",\"chunk_update_ms\":" << spike.chunkUpdateMs
             << ",\"chunk_update_residual_ms\":" << spike.chunkUpdateResidualMs
+            << ",\"chunk_dense_residency_ms\":" << spike.chunkDenseResidencyMs
             << ",\"chunk_vertical_radius_ms\":" << spike.chunkVerticalRadiusMs
             << ",\"chunk_priority_update_ms\":" << spike.chunkPriorityUpdateMs
             << ",\"chunk_upload_budget_ms\":" << spike.chunkUploadBudgetMs
@@ -1719,6 +1753,7 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
             << ",\"chunk_eviction_ms\":" << spike.chunkEvictionMs
             << ",\"chunk_relight_ms\":" << spike.chunkRelightMs
             << ",\"chunk_upload_ms\":" << spike.chunkUploadMs
+            << ",\"chunk_upload_queue_age_ms\":" << spike.chunkUploadQueueAgeMs
             << ",\"chunk_upload_queue_pick_ms\":" << spike.chunkUploadQueuePickMs
             << ",\"chunk_pool_trim_ms\":" << spike.chunkPoolTrimMs
             << ",\"chunk_far_terrain_update_ms\":" << spike.chunkFarTerrainUpdateMs
@@ -1753,8 +1788,20 @@ void writeSpikeSummaryJson(std::ostream& out, const BenchmarkSpikeSummary& summa
             << ",\"relight_batches_this_frame\":" << spike.relightBatches
             << ",\"meshed_this_frame\":" << spike.meshedChunks
             << ",\"uploaded_this_frame\":" << spike.uploadedChunks
+            << ",\"upload_attempts_this_frame\":" << spike.uploadAttempts
+            << ",\"upload_queue_scan_entries_this_frame\":" << spike.uploadQueueScanEntries
+            << ",\"upload_skipped_expired_this_frame\":" << spike.uploadSkippedExpired
+            << ",\"upload_skipped_not_ready_this_frame\":" << spike.uploadSkippedNotReady
+            << ",\"upload_skipped_pending_mesh_this_frame\":" << spike.uploadSkippedPendingMesh
+            << ",\"upload_column_limited_this_frame\":" << spike.uploadColumnLimited
+            << ",\"upload_budget_deferred_this_frame\":" << spike.uploadBudgetDeferred
+            << ",\"upload_retry_failures_this_frame\":" << spike.uploadRetryFailures
+            << ",\"upload_scan_limit_hits_this_frame\":" << spike.uploadScanLimitHits
+            << ",\"upload_begin_failures_this_frame\":" << spike.uploadBeginFailures
+            << ",\"upload_stale_pending_meshes_this_frame\":" << spike.uploadStalePendingMeshes
             << ",\"job_backlog\":" << spike.jobBacklog
             << ",\"upload_backlog\":" << spike.uploadBacklog
+            << ",\"column_prefetch_backlog\":" << spike.columnPrefetchBacklog
             << ",\"exact_pending_chunks\":" << spike.exactPendingChunks
             << ",\"missing_chunks\":" << spike.missingChunks
             << ",\"relight_region_chunks_this_frame\":" << spike.relightRegionChunks
@@ -1869,6 +1916,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.updateStage);
     out << ",\"update_residual\":";
     writeStageStatsJson(out, report.updateResidualStage);
+    out << ",\"dense_residency\":";
+    writeStageStatsJson(out, report.denseResidencyStage);
     out << ",\"vertical_radius\":";
     writeStageStatsJson(out, report.verticalRadiusStage);
     out << ",\"priority_update\":";
@@ -1957,8 +2006,38 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.chunkReadyWaitUploadStage);
     out << ",\"chunk_ready_upload_to_ready\":";
     writeStageStatsJson(out, report.chunkReadyUploadToReadyStage);
+    out << ",\"upload_queue_age\":";
+    writeStageStatsJson(out, report.uploadQueueAgeStage);
     out << ",\"structure_query\":";
     writeStageStatsJson(out, report.structureQueryStage);
+    out << "}";
+    out << ",\"upload_detail\":{"
+        << "\"queue_scan_entries\":";
+    writeCountStatsJson(out, report.uploadQueueScanEntries);
+    out << ",\"attempts_per_frame\":";
+    writeCountStatsJson(out, report.uploadAttemptsPerFrame);
+    out << ",\"uploaded_chunks_per_frame\":";
+    writeCountStatsJson(out, report.uploadChunksPerFrame);
+    out << ",\"uploaded_bytes_per_frame\":";
+    writeCountStatsJson(out, report.uploadBytesPerFrame);
+    out << ",\"expired_entries_per_frame\":";
+    writeCountStatsJson(out, report.uploadExpiredEntriesPerFrame);
+    out << ",\"skipped_not_ready_per_frame\":";
+    writeCountStatsJson(out, report.uploadSkippedNotReadyPerFrame);
+    out << ",\"skipped_pending_mesh_per_frame\":";
+    writeCountStatsJson(out, report.uploadSkippedPendingMeshPerFrame);
+    out << ",\"column_limited_per_frame\":";
+    writeCountStatsJson(out, report.uploadColumnLimitedPerFrame);
+    out << ",\"budget_deferred_per_frame\":";
+    writeCountStatsJson(out, report.uploadBudgetDeferredPerFrame);
+    out << ",\"retry_failures_per_frame\":";
+    writeCountStatsJson(out, report.uploadRetryFailuresPerFrame);
+    out << ",\"scan_limit_hits_per_frame\":";
+    writeCountStatsJson(out, report.uploadScanLimitHitsPerFrame);
+    out << ",\"begin_failures_per_frame\":";
+    writeCountStatsJson(out, report.uploadBeginFailuresPerFrame);
+    out << ",\"stale_pending_meshes_per_frame\":";
+    writeCountStatsJson(out, report.uploadStalePendingMeshesPerFrame);
     out << "}";
     out << ",\"relight_detail\":{"
         << "\"vertical_radius_delta\":";
@@ -1985,6 +2064,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeQueueStatsJson(out, report.jobQueueDepth);
     out << ",\"upload_backlog\":";
     writeQueueStatsJson(out, report.uploadQueueDepth);
+    out << ",\"column_prefetch_backlog\":";
+    writeQueueStatsJson(out, report.columnPrefetchQueueDepth);
     out << ",\"far_build_backlog\":";
     writeQueueStatsJson(out, report.farBuildQueueDepth);
     out << ",\"far_upload_backlog\":";
@@ -2011,11 +2092,25 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"vertical_radius_delta\":" << finalProfiling.verticalRadiusDelta
         << ",\"visible_scan_ms\":" << finalProfiling.missingScanMsLastFrame
         << ",\"update_residual_ms\":" << finalProfiling.updateResidualMsLastFrame
+        << ",\"dense_residency_ms\":" << finalProfiling.denseResidencyMsLastFrame
         << ",\"ensure_volume_ms\":" << finalProfiling.ensureVolumeMsLastFrame
         << ",\"scheduling_ms\":" << finalProfiling.schedulingMsLastFrame
         << ",\"eviction_ms\":" << finalProfiling.evictionMsLastFrame
         << ",\"upload_drain_ms\":" << finalProfiling.uploadMsLastFrame
+        << ",\"upload_queue_age_ms\":" << finalProfiling.uploadQueueAgeMsLastFrame
         << ",\"upload_queue_pick_ms\":" << finalProfiling.uploadQueuePickMsLastFrame
+        << ",\"upload_attempts_last_frame\":" << finalProfiling.uploadAttemptsLastFrame
+        << ",\"upload_queue_scan_entries_last_frame\":" << finalProfiling.uploadQueueScanEntriesLastFrame
+        << ",\"upload_skipped_expired_last_frame\":" << finalProfiling.uploadSkippedExpiredLastFrame
+        << ",\"upload_skipped_not_ready_last_frame\":" << finalProfiling.uploadSkippedNotReadyLastFrame
+        << ",\"upload_skipped_pending_mesh_last_frame\":" << finalProfiling.uploadSkippedPendingMeshLastFrame
+        << ",\"upload_column_limited_last_frame\":" << finalProfiling.uploadColumnLimitedLastFrame
+        << ",\"upload_budget_deferred_last_frame\":" << finalProfiling.uploadBudgetDeferredLastFrame
+        << ",\"upload_retry_failures_last_frame\":" << finalProfiling.uploadRetryFailuresLastFrame
+        << ",\"upload_scan_limit_hits_last_frame\":" << finalProfiling.uploadScanLimitHitsLastFrame
+        << ",\"upload_begin_failures_last_frame\":" << finalProfiling.uploadBeginFailuresLastFrame
+        << ",\"upload_stale_pending_meshes_last_frame\":" << finalProfiling.uploadStalePendingMeshesLastFrame
+        << ",\"uploaded_bytes_last_frame\":" << finalProfiling.uploadedBytesLastFrame
         << ",\"far_terrain_update_ms\":" << finalProfiling.farTerrainUpdateMsLastFrame
         << ",\"column_height_lookup_ms\":" << finalProfiling.columnHeightLookupMsLastFrame
         << ",\"column_height_sample_ms\":" << finalProfiling.columnHeightSampleMsLastFrame
@@ -2054,6 +2149,7 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs
         << ",\"structure_cache_hit_rate\":" << finalProfiling.structureCacheHitRate
         << ",\"structure_regions_built\":" << finalProfiling.structureRegionsBuilt
+        << ",\"column_prefetch_queue_depth\":" << finalProfiling.columnPrefetchQueueDepth
         << "}";
     out << ",\"final_streaming\":{"
         << "\"phase\":";

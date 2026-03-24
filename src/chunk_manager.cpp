@@ -39,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -506,6 +507,7 @@ struct ChunkBenchmarkMetrics
         uploadStage.reset();
         updateStage.reset();
         updateResidualStage.reset();
+        denseResidencyStage.reset();
         verticalRadiusStage.reset();
         priorityUpdateStage.reset();
         uploadBudgetPrepStage.reset();
@@ -550,8 +552,22 @@ struct ChunkBenchmarkMetrics
         chunkReadyMeshStage.reset();
         chunkReadyWaitUploadStage.reset();
         chunkReadyUploadToReadyStage.reset();
+        uploadQueueAgeStage.reset();
         structureQueryStage.reset();
         verticalRadiusDelta.reset();
+        uploadQueueScanEntries.reset();
+        uploadAttemptsPerFrame.reset();
+        uploadChunksPerFrame.reset();
+        uploadBytesPerFrame.reset();
+        uploadExpiredEntriesPerFrame.reset();
+        uploadSkippedNotReadyPerFrame.reset();
+        uploadSkippedPendingMeshPerFrame.reset();
+        uploadColumnLimitedPerFrame.reset();
+        uploadBudgetDeferredPerFrame.reset();
+        uploadRetryFailuresPerFrame.reset();
+        uploadScanLimitHitsPerFrame.reset();
+        uploadBeginFailuresPerFrame.reset();
+        uploadStalePendingMeshesPerFrame.reset();
         relightRegionChunks.reset();
         relightChangedChunks.reset();
         relightExternalSnapshotChunks.reset();
@@ -562,6 +578,7 @@ struct ChunkBenchmarkMetrics
         relightBlockNodesProcessed.reset();
         jobQueueDepth.reset();
         uploadQueueDepth.reset();
+        columnPrefetchQueueDepth.reset();
         farBuildQueueDepth.reset();
         farUploadQueueDepth.reset();
         generatedChunks.store(0, std::memory_order_relaxed);
@@ -581,6 +598,7 @@ struct ChunkBenchmarkMetrics
         report.uploadStage = uploadStage.snapshot();
         report.updateStage = updateStage.snapshot();
         report.updateResidualStage = updateResidualStage.snapshot();
+        report.denseResidencyStage = denseResidencyStage.snapshot();
         report.verticalRadiusStage = verticalRadiusStage.snapshot();
         report.priorityUpdateStage = priorityUpdateStage.snapshot();
         report.uploadBudgetPrepStage = uploadBudgetPrepStage.snapshot();
@@ -625,8 +643,22 @@ struct ChunkBenchmarkMetrics
         report.chunkReadyMeshStage = chunkReadyMeshStage.snapshot();
         report.chunkReadyWaitUploadStage = chunkReadyWaitUploadStage.snapshot();
         report.chunkReadyUploadToReadyStage = chunkReadyUploadToReadyStage.snapshot();
+        report.uploadQueueAgeStage = uploadQueueAgeStage.snapshot();
         report.structureQueryStage = structureQueryStage.snapshot();
         report.verticalRadiusDelta = verticalRadiusDelta.snapshot();
+        report.uploadQueueScanEntries = uploadQueueScanEntries.snapshot();
+        report.uploadAttemptsPerFrame = uploadAttemptsPerFrame.snapshot();
+        report.uploadChunksPerFrame = uploadChunksPerFrame.snapshot();
+        report.uploadBytesPerFrame = uploadBytesPerFrame.snapshot();
+        report.uploadExpiredEntriesPerFrame = uploadExpiredEntriesPerFrame.snapshot();
+        report.uploadSkippedNotReadyPerFrame = uploadSkippedNotReadyPerFrame.snapshot();
+        report.uploadSkippedPendingMeshPerFrame = uploadSkippedPendingMeshPerFrame.snapshot();
+        report.uploadColumnLimitedPerFrame = uploadColumnLimitedPerFrame.snapshot();
+        report.uploadBudgetDeferredPerFrame = uploadBudgetDeferredPerFrame.snapshot();
+        report.uploadRetryFailuresPerFrame = uploadRetryFailuresPerFrame.snapshot();
+        report.uploadScanLimitHitsPerFrame = uploadScanLimitHitsPerFrame.snapshot();
+        report.uploadBeginFailuresPerFrame = uploadBeginFailuresPerFrame.snapshot();
+        report.uploadStalePendingMeshesPerFrame = uploadStalePendingMeshesPerFrame.snapshot();
         report.relightRegionChunks = relightRegionChunks.snapshot();
         report.relightChangedChunks = relightChangedChunks.snapshot();
         report.relightExternalSnapshotChunks = relightExternalSnapshotChunks.snapshot();
@@ -637,6 +669,7 @@ struct ChunkBenchmarkMetrics
         report.relightBlockNodesProcessed = relightBlockNodesProcessed.snapshot();
         report.jobQueueDepth = jobQueueDepth.snapshot();
         report.uploadQueueDepth = uploadQueueDepth.snapshot();
+        report.columnPrefetchQueueDepth = columnPrefetchQueueDepth.snapshot();
         report.farBuildQueueDepth = farBuildQueueDepth.snapshot();
         report.farUploadQueueDepth = farUploadQueueDepth.snapshot();
         report.generatedChunks = generatedChunks.load(std::memory_order_relaxed);
@@ -654,6 +687,7 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram uploadStage{};
     AtomicLatencyHistogram updateStage{};
     AtomicLatencyHistogram updateResidualStage{};
+    AtomicLatencyHistogram denseResidencyStage{};
     AtomicLatencyHistogram verticalRadiusStage{};
     AtomicLatencyHistogram priorityUpdateStage{};
     AtomicLatencyHistogram uploadBudgetPrepStage{};
@@ -698,8 +732,22 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram chunkReadyMeshStage{};
     AtomicLatencyHistogram chunkReadyWaitUploadStage{};
     AtomicLatencyHistogram chunkReadyUploadToReadyStage{};
+    AtomicLatencyHistogram uploadQueueAgeStage{};
     AtomicLatencyHistogram structureQueryStage{};
     AtomicCountHistogram verticalRadiusDelta{};
+    AtomicCountHistogram uploadQueueScanEntries{};
+    AtomicCountHistogram uploadAttemptsPerFrame{};
+    AtomicCountHistogram uploadChunksPerFrame{};
+    AtomicCountHistogram uploadBytesPerFrame{};
+    AtomicCountHistogram uploadExpiredEntriesPerFrame{};
+    AtomicCountHistogram uploadSkippedNotReadyPerFrame{};
+    AtomicCountHistogram uploadSkippedPendingMeshPerFrame{};
+    AtomicCountHistogram uploadColumnLimitedPerFrame{};
+    AtomicCountHistogram uploadBudgetDeferredPerFrame{};
+    AtomicCountHistogram uploadRetryFailuresPerFrame{};
+    AtomicCountHistogram uploadScanLimitHitsPerFrame{};
+    AtomicCountHistogram uploadBeginFailuresPerFrame{};
+    AtomicCountHistogram uploadStalePendingMeshesPerFrame{};
     AtomicCountHistogram relightRegionChunks{};
     AtomicCountHistogram relightChangedChunks{};
     AtomicCountHistogram relightExternalSnapshotChunks{};
@@ -710,6 +758,7 @@ struct ChunkBenchmarkMetrics
     AtomicCountHistogram relightBlockNodesProcessed{};
     AtomicDepthHistogram<4096> jobQueueDepth{};
     AtomicDepthHistogram<4096> uploadQueueDepth{};
+    AtomicDepthHistogram<4096> columnPrefetchQueueDepth{};
     AtomicDepthHistogram<1024> farBuildQueueDepth{};
     AtomicDepthHistogram<1024> farUploadQueueDepth{};
     std::atomic<std::uint64_t> generatedChunks{0};
@@ -819,6 +868,10 @@ inline constexpr int kDenseCpuHorizontalRadiusMin = 4;
 inline constexpr int kDenseCpuHorizontalRadiusMax = 8;
 inline constexpr int kDenseCpuVerticalRadiusMin = 4;
 inline constexpr int kDenseCpuVerticalRadiusMax = 8;
+inline constexpr int kDenseCpuHydrationBudgetMin = 2;
+inline constexpr int kDenseCpuHydrationBudgetMax = 4;
+inline constexpr int kDenseCpuDemotionBudgetMin = 16;
+inline constexpr int kDenseCpuDemotionBudgetMax = 64;
 inline constexpr std::uint64_t kDenseCpuDemotionGraceFrames = 120u;
 inline constexpr int kExactPlayerBandRadiusMax = 6;
 inline constexpr int kExactSurfaceShellBelowSlackChunks = 1;
@@ -3297,6 +3350,8 @@ private:
     void stopWorkerThreads();
     void workerThreadFunction();
     void columnHeightPrefetchThreadFunction();
+    bool acquireNextColumnHeightPrefetch(glm::ivec2& column, std::uint64_t& token);
+    void finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const;
     void enqueueJob(const std::shared_ptr<Chunk>& chunk,
                     JobType type,
                     const glm::ivec3& coord,
@@ -3422,6 +3477,9 @@ private:
     static void addColumnChunkInterval(ColumnChunkIntervals& intervals, int minChunkY, int maxChunkY) noexcept;
     static bool chunkYWithinIntervals(int chunkY, const ColumnChunkIntervals& intervals, int slackChunks = 0) noexcept;
     static int chunkYDistanceToIntervals(int chunkY, const ColumnChunkIntervals& intervals, int slackChunks = 0) noexcept;
+    void prefetchVisibleColumnHeights(const glm::ivec3& center,
+                                      const glm::ivec3& previousCenter,
+                                      int horizontalRadius);
     void resetColumnBudgets();
     int baseUploadsPerColumnLimit(int verticalRadius) const noexcept;
     std::size_t estimateUploadQueueSize();
@@ -3508,7 +3566,47 @@ private:
     bool tryGetCachedColumnHeight(const glm::ivec2& column, int worldX, int worldZ, int& outHeight) const;
     bool tryGetPredictedColumnHeight(const glm::ivec2& column, int& outHeight) const;
     int cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const;
-    void requestColumnHeightPrefetch(const glm::ivec2& column) const;
+    enum class ColumnHeightPrefetchPriority : std::uint8_t
+    {
+        Background = 0,
+        Normal,
+        Visible,
+        Critical
+    };
+    struct ColumnHeightPrefetchRequest
+    {
+        glm::ivec2 column{0};
+        std::uint64_t token{0};
+        std::uint64_t sequence{0};
+        std::uint32_t distance{0};
+        ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
+    };
+    struct ColumnHeightPrefetchRequestState
+    {
+        std::uint64_t token{0};
+        ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
+        bool inFlight{false};
+    };
+    struct ColumnHeightPrefetchRequestCompare
+    {
+        bool operator()(const ColumnHeightPrefetchRequest& lhs,
+                        const ColumnHeightPrefetchRequest& rhs) const noexcept
+        {
+            if (lhs.priority != rhs.priority)
+            {
+                return lhs.priority < rhs.priority;
+            }
+            if (lhs.distance != rhs.distance)
+            {
+                return lhs.distance > rhs.distance;
+            }
+            return lhs.sequence > rhs.sequence;
+        }
+    };
+    void requestColumnHeightPrefetch(const glm::ivec2& column,
+                                     ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal) const;
+    void mergePredictedColumnHeight(const glm::ivec2& column, int height) const;
+    void refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const;
     void invalidatePredictedColumn(const glm::ivec2& column) const;
     std::vector<PendingStructureEdit> takePendingStructureEdits(const glm::ivec3& coord);
     std::vector<PendingStructureEdit> copyPendingStructureEdits(const glm::ivec3& coord) const;
@@ -3716,16 +3814,22 @@ private:
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     mutable std::mutex columnHeightPrefetchMutex_;
     mutable std::condition_variable columnHeightPrefetchCondition_;
-    mutable std::deque<glm::ivec2> pendingColumnHeightPrefetchQueue_{};
-    mutable std::unordered_set<glm::ivec2, ColumnHasher> pendingColumnHeightPrefetchSet_{};
+    mutable std::priority_queue<ColumnHeightPrefetchRequest,
+                                std::vector<ColumnHeightPrefetchRequest>,
+                                ColumnHeightPrefetchRequestCompare> pendingColumnHeightPrefetchQueue_{};
+    mutable std::unordered_map<glm::ivec2, ColumnHeightPrefetchRequestState, ColumnHasher>
+        pendingColumnHeightPrefetchRequests_{};
+    mutable std::uint64_t nextColumnHeightPrefetchToken_{1};
+    mutable std::uint64_t nextColumnHeightPrefetchSequence_{1};
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
     std::unordered_map<glm::ivec3, std::vector<BlockEditOverlayEntry>, ChunkHasher> blockEditOverlays_;
     mutable std::mutex blockEditOverlayMutex_;
 
     std::vector<std::thread> workerThreads_;
-    std::thread columnHeightPrefetchThread_;
+    std::vector<std::thread> columnHeightPrefetchThreads_;
     std::size_t workerThreadCount_{0};
+    std::size_t columnHeightPrefetchWorkerCount_{0};
     std::atomic<bool> shouldStop_;
 
     glm::ivec3 highlightedBlock_{0};
@@ -3768,6 +3872,7 @@ private:
     std::deque<DeferredPendingChunkRelease> deferredPendingChunkReleases_{};
     double updateMsLastFrame_{0.0};
     double updateResidualMsLastFrame_{0.0};
+    double denseResidencyMsLastFrame_{0.0};
     double verticalRadiusMsLastFrame_{0.0};
     double priorityUpdateMsLastFrame_{0.0};
     double uploadBudgetPrepMsLastFrame_{0.0};
@@ -3778,6 +3883,18 @@ private:
     double relightMsLastFrame_{0.0};
     std::size_t lastUploadBytesUsed_{0};
     std::size_t pendingUploadsLastFrame_{0};
+    double uploadQueueAgeMsLastFrame_{0.0};
+    int uploadAttemptsLastFrame_{0};
+    int uploadQueueScanEntriesLastFrame_{0};
+    int uploadSkippedExpiredLastFrame_{0};
+    int uploadSkippedNotReadyLastFrame_{0};
+    int uploadSkippedPendingMeshLastFrame_{0};
+    int uploadColumnLimitedLastFrame_{0};
+    int uploadBudgetDeferredLastFrame_{0};
+    int uploadRetryFailuresLastFrame_{0};
+    int uploadScanLimitHitsLastFrame_{0};
+    int uploadBeginFailuresLastFrame_{0};
+    int uploadStalePendingMeshesLastFrame_{0};
     double uploadQueuePickMsLastFrame_{0.0};
     double poolTrimMsLastFrame_{0.0};
     double farTerrainUpdateMsLastFrame_{0.0};
@@ -3839,14 +3956,14 @@ private:
     std::deque<std::string> recentEditDebugEvents_{};
 };
 
-inline void storeFirstBenchmarkTimestamp(std::atomic<long long>& current, std::uint64_t micros) noexcept
+inline bool storeFirstBenchmarkTimestamp(std::atomic<long long>& current, std::uint64_t micros) noexcept
 {
     long long expected = 0;
     const long long value = static_cast<long long>(micros);
-    current.compare_exchange_strong(expected,
-                                    value,
-                                    std::memory_order_relaxed,
-                                    std::memory_order_relaxed);
+    return current.compare_exchange_strong(expected,
+                                           value,
+                                           std::memory_order_relaxed,
+                                           std::memory_order_relaxed);
 }
 
 [[nodiscard]] inline std::uint64_t loadBenchmarkTimestamp(const std::atomic<long long>& current) noexcept
@@ -4218,6 +4335,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         lastCameraForward_ = glm::normalize(cameraForward);
     }
 
+    const glm::ivec3 previousCenterChunk = lastCenterChunk_;
+
     const auto now = std::chrono::steady_clock::now();
     double frameSeconds = 1.0 / 60.0;
     if (lastUpdateTime_.time_since_epoch().count() != 0)
@@ -4329,6 +4448,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     {
         viewDistance_ = preloadTargetViewDistance;
     }
+
+    prefetchVisibleColumnHeights(centerChunk, previousCenterChunk, targetViewDistance_);
 
     const auto missingScanStart = std::chrono::steady_clock::now();
     const VisibleChunkCoverage visibleCoverage =
@@ -4450,7 +4571,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
     }
     uploadReadyMeshes();
+    const auto denseResidencyStart = std::chrono::steady_clock::now();
     updateDenseChunkResidency(centerChunk);
+    denseResidencyMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - denseResidencyStart).count();
     const auto poolTrimStart = std::chrono::steady_clock::now();
     trimChunkPoolToBudget();
     poolTrimMsLastFrame_ =
@@ -4591,6 +4715,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         const auto benchmarkMetricsStart = std::chrono::steady_clock::now();
         benchmarkMetrics_.jobQueueDepth.record(jobQueue_.size());
         benchmarkMetrics_.uploadQueueDepth.record(estimateUploadQueueSize());
+        {
+            std::lock_guard<std::mutex> prefetchLock(columnHeightPrefetchMutex_);
+            benchmarkMetrics_.columnPrefetchQueueDepth.record(
+                static_cast<std::uint64_t>(pendingColumnHeightPrefetchRequests_.size()));
+        }
         benchmarkMetrics_.farBuildQueueDepth.record(
             static_cast<std::uint64_t>(std::max(farTerrainManager_.buildQueueDepth(), 0)));
         benchmarkMetrics_.farUploadQueueDepth.record(
@@ -4612,8 +4741,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         relightMsLastFrame_ +
         lastUploadMsUsed_ +
         uploadPrepareMsLastFrame_ +
-        uploadContextBeginMsLastFrame_ +
-        uploadFinalizeMsLastFrame_ +
+        denseResidencyMsLastFrame_ +
         poolTrimMsLastFrame_ +
         farTerrainUpdateMsLastFrame_ +
         startupStateMsLastFrame_ +
@@ -4628,6 +4756,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
         benchmarkMetrics_.updateStage.recordMicros(toMicros(updateMsLastFrame_));
         benchmarkMetrics_.updateResidualStage.recordMicros(toMicros(updateResidualMsLastFrame_));
+        benchmarkMetrics_.denseResidencyStage.recordMicros(toMicros(denseResidencyMsLastFrame_));
         benchmarkMetrics_.verticalRadiusStage.recordMicros(toMicros(verticalRadiusMsLastFrame_));
         benchmarkMetrics_.priorityUpdateStage.recordMicros(toMicros(priorityUpdateMsLastFrame_));
         benchmarkMetrics_.uploadBudgetPrepStage.recordMicros(toMicros(uploadBudgetPrepMsLastFrame_));
@@ -4886,8 +5015,10 @@ void ChunkManager::Impl::clear()
     }
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        pendingColumnHeightPrefetchQueue_.clear();
-        pendingColumnHeightPrefetchSet_.clear();
+        pendingColumnHeightPrefetchQueue_ = {};
+        pendingColumnHeightPrefetchRequests_.clear();
+        nextColumnHeightPrefetchToken_ = 1;
+        nextColumnHeightPrefetchSequence_ = 1;
     }
     {
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
@@ -4974,7 +5105,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
     }
 
     recordBlockEditOverlay(worldPos, BlockId::Air);
-    invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+    refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
     markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
     // Player edits must always enqueue a geometry refresh immediately; relying on the
     // deferred relight pass alone can leave the old uploaded mesh visible as a ghost block.
@@ -5032,7 +5163,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
     }
 
     recordBlockEditOverlay(placePos, block);
-    invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+    refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
     markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
     // Keep edit feedback immediate even if lighting catches up on a later relight batch.
     requestChunkRemesh(chunk);
@@ -5851,6 +5982,17 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.relightBlockNodesProcessed = relightBlockNodesProcessed;
     snapshot.throttledUploads = profilingCounters_.throttledUploads.exchange(0, std::memory_order_relaxed);
     snapshot.deferredUploads = profilingCounters_.deferredUploads.exchange(0, std::memory_order_relaxed);
+    snapshot.uploadAttemptsLastFrame = uploadAttemptsLastFrame_;
+    snapshot.uploadQueueScanEntriesLastFrame = uploadQueueScanEntriesLastFrame_;
+    snapshot.uploadSkippedExpiredLastFrame = uploadSkippedExpiredLastFrame_;
+    snapshot.uploadSkippedNotReadyLastFrame = uploadSkippedNotReadyLastFrame_;
+    snapshot.uploadSkippedPendingMeshLastFrame = uploadSkippedPendingMeshLastFrame_;
+    snapshot.uploadColumnLimitedLastFrame = uploadColumnLimitedLastFrame_;
+    snapshot.uploadBudgetDeferredLastFrame = uploadBudgetDeferredLastFrame_;
+    snapshot.uploadRetryFailuresLastFrame = uploadRetryFailuresLastFrame_;
+    snapshot.uploadScanLimitHitsLastFrame = uploadScanLimitHitsLastFrame_;
+    snapshot.uploadBeginFailuresLastFrame = uploadBeginFailuresLastFrame_;
+    snapshot.uploadStalePendingMeshesLastFrame = uploadStalePendingMeshesLastFrame_;
     snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
     snapshot.verticalRadius = lastVerticalRadius_;
     snapshot.verticalRadiusDelta = lastVerticalRadiusDelta_;
@@ -5885,9 +6027,11 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     }
 
     snapshot.uploadBudgetBytes = uploadBudgetBytesThisFrame_;
+    snapshot.uploadedBytesLastFrame = lastUploadBytesUsed_;
     snapshot.uploadColumnLimit = uploadColumnLimitThisFrame_;
     snapshot.updateMsLastFrame = updateMsLastFrame_;
     snapshot.updateResidualMsLastFrame = updateResidualMsLastFrame_;
+    snapshot.denseResidencyMsLastFrame = denseResidencyMsLastFrame_;
     snapshot.verticalRadiusMsLastFrame = verticalRadiusMsLastFrame_;
     snapshot.priorityUpdateMsLastFrame = priorityUpdateMsLastFrame_;
     snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
@@ -5897,6 +6041,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.evictionMsLastFrame = evictionMsLastFrame_;
     snapshot.relightMsLastFrame = relightMsLastFrame_;
     snapshot.uploadMsLastFrame = lastUploadMsUsed_;
+    snapshot.uploadQueueAgeMsLastFrame = uploadQueueAgeMsLastFrame_;
     snapshot.uploadQueuePickMsLastFrame = uploadQueuePickMsLastFrame_;
     snapshot.poolTrimMsLastFrame = poolTrimMsLastFrame_;
     snapshot.farTerrainUpdateMsLastFrame = farTerrainUpdateMsLastFrame_;
@@ -5923,6 +6068,12 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadQueueDepth = static_cast<int>(std::min<std::size_t>(
         estimateUploadQueueSize(),
         static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        snapshot.columnPrefetchQueueDepth = static_cast<int>(std::min<std::size_t>(
+            pendingColumnHeightPrefetchRequests_.size(),
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    }
     {
         std::lock_guard<std::mutex> lock(chunkPoolMutex_);
         snapshot.pooledChunkCount = chunkPool_.size();
@@ -6075,7 +6226,22 @@ void ChunkManager::Impl::startWorkerThreads()
         workerThreads_.emplace_back(&ChunkManager::Impl::workerThreadFunction, this);
     }
 
-    columnHeightPrefetchThread_ = std::thread(&ChunkManager::Impl::columnHeightPrefetchThreadFunction, this);
+    unsigned prefetchDesired = 1u;
+    if (concurrency >= 12 && desired >= 3u)
+    {
+        prefetchDesired = 2u;
+    }
+    if (concurrency >= 16 && desired >= 4u)
+    {
+        prefetchDesired = 3u;
+    }
+
+    columnHeightPrefetchWorkerCount_ = static_cast<std::size_t>(prefetchDesired);
+    columnHeightPrefetchThreads_.reserve(columnHeightPrefetchWorkerCount_);
+    for (std::size_t i = 0; i < columnHeightPrefetchWorkerCount_; ++i)
+    {
+        columnHeightPrefetchThreads_.emplace_back(&ChunkManager::Impl::columnHeightPrefetchThreadFunction, this);
+    }
 }
 
 void ChunkManager::Impl::stopWorkerThreads()
@@ -6083,8 +6249,10 @@ void ChunkManager::Impl::stopWorkerThreads()
     shouldStop_.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        pendingColumnHeightPrefetchQueue_.clear();
-        pendingColumnHeightPrefetchSet_.clear();
+        pendingColumnHeightPrefetchQueue_ = {};
+        pendingColumnHeightPrefetchRequests_.clear();
+        nextColumnHeightPrefetchToken_ = 1;
+        nextColumnHeightPrefetchSequence_ = 1;
     }
     columnHeightPrefetchCondition_.notify_all();
     std::vector<Job> cancelledJobs = jobQueue_.stop();
@@ -6104,11 +6272,75 @@ void ChunkManager::Impl::stopWorkerThreads()
         }
     }
     workerThreads_.clear();
-    if (columnHeightPrefetchThread_.joinable())
+    for (auto& thread : columnHeightPrefetchThreads_)
     {
-        columnHeightPrefetchThread_.join();
+        if (thread.joinable())
+        {
+            thread.join();
+        }
     }
+    columnHeightPrefetchThreads_.clear();
     workerThreadCount_ = 0;
+    columnHeightPrefetchWorkerCount_ = 0;
+}
+
+bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column, std::uint64_t& token)
+{
+    std::unique_lock<std::mutex> lock(columnHeightPrefetchMutex_);
+    while (true)
+    {
+        columnHeightPrefetchCondition_.wait(lock,
+                                            [this]
+                                            {
+                                                return shouldStop_.load(std::memory_order_acquire) ||
+                                                       !pendingColumnHeightPrefetchQueue_.empty();
+                                            });
+
+        if (shouldStop_.load(std::memory_order_acquire) && pendingColumnHeightPrefetchQueue_.empty())
+        {
+            return false;
+        }
+
+        while (!pendingColumnHeightPrefetchQueue_.empty())
+        {
+            const ColumnHeightPrefetchRequest request = pendingColumnHeightPrefetchQueue_.top();
+            pendingColumnHeightPrefetchQueue_.pop();
+
+            auto requestIt = pendingColumnHeightPrefetchRequests_.find(request.column);
+            if (requestIt == pendingColumnHeightPrefetchRequests_.end())
+            {
+                continue;
+            }
+
+            ColumnHeightPrefetchRequestState& state = requestIt->second;
+            if (state.inFlight ||
+                state.token != request.token ||
+                state.priority != request.priority)
+            {
+                continue;
+            }
+
+            state.inFlight = true;
+            column = request.column;
+            token = request.token;
+            return true;
+        }
+
+        if (shouldStop_.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+    }
+}
+
+void ChunkManager::Impl::finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const
+{
+    std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+    auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
+    if (requestIt != pendingColumnHeightPrefetchRequests_.end() && requestIt->second.token == token)
+    {
+        pendingColumnHeightPrefetchRequests_.erase(requestIt);
+    }
 }
 
 void ChunkManager::Impl::workerThreadFunction()
@@ -6354,6 +6586,7 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
         std::shared_ptr<Chunk> chunk = it->lock();
         if (!chunk)
         {
+            ++uploadSkippedExpiredLastFrame_;
             it = uploadQueue_.erase(it);
             continue;
         }
@@ -6372,6 +6605,8 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
         ++liveEntriesScanned;
         ++it;
     }
+
+    uploadQueueScanEntriesLastFrame_ += static_cast<int>(liveEntriesScanned);
 
     if (!bestChunk || bestIt == uploadQueue_.end())
     {
@@ -6405,10 +6640,7 @@ void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk
         uploadQueue_.emplace_back(chunk);
     }
     chunk->queuedForUpload.store(true, std::memory_order_release);
-    if (benchmarkMetrics_.isEnabled())
-    {
-        storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
-    }
+    storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
 
     if (shouldTrackRecentEditChunk(chunk->coord))
     {
@@ -6441,6 +6673,7 @@ void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chu
         uploadQueue_.emplace_back(chunk);
     }
     chunk->queuedForUpload.store(true, std::memory_order_release);
+    storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
 }
 
 std::size_t ChunkManager::Impl::nextPowerOfTwo(std::size_t value) noexcept
@@ -6748,29 +6981,17 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
 void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
 {
 #ifdef _WIN32
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    // Column-height prefetch blocks exact chunk coverage decisions, so keep it at normal priority.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
 
-    while (!shouldStop_.load(std::memory_order_acquire))
+    while (true)
     {
         glm::ivec2 column{0};
+        std::uint64_t token = 0;
+        if (!acquireNextColumnHeightPrefetch(column, token))
         {
-            std::unique_lock<std::mutex> lock(columnHeightPrefetchMutex_);
-            columnHeightPrefetchCondition_.wait(lock,
-                                               [this]
-                                               {
-                                                   return shouldStop_.load(std::memory_order_acquire) ||
-                                                          !pendingColumnHeightPrefetchQueue_.empty();
-                                               });
-
-            if (shouldStop_.load(std::memory_order_acquire) && pendingColumnHeightPrefetchQueue_.empty())
-            {
-                return;
-            }
-
-            column = pendingColumnHeightPrefetchQueue_.front();
-            pendingColumnHeightPrefetchQueue_.pop_front();
-            pendingColumnHeightPrefetchSet_.erase(column);
+            return;
         }
 
         const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
@@ -6778,10 +6999,12 @@ void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
         int cachedHeight = ColumnManager::kNoHeight;
         if (tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight))
         {
+            finishColumnHeightPrefetch(column, token);
             continue;
         }
 
         (void)cacheSampledColumnHeight(column, worldX, worldZ);
+        finishColumnHeightPrefetch(column, token);
     }
 }
 
@@ -7151,6 +7374,7 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     budgets.chunkLimit = 3;
     budgets.queueSize = estimateUploadQueueSize();
     const std::size_t initialReadyUploads = estimateInitialReadyUploadQueueSize();
+    const double previousQueueAgeMs = uploadQueueAgeMsLastFrame_;
     const int uploadDebtSteps = computeBacklogSteps(static_cast<int>(std::min<std::size_t>(
                                                         budgets.queueSize,
                                                         static_cast<std::size_t>(std::numeric_limits<int>::max()))),
@@ -7226,6 +7450,34 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
         budgets.chunkLimit = std::min(budgets.chunkLimit + urgencySteps, 6);
         budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
         budgets.timeBudgetMs = std::min(3.0, budgets.timeBudgetMs + 0.35 * static_cast<double>(urgencySteps));
+    }
+
+    const int queueAgePressureSteps = computeBacklogSteps(
+        static_cast<int>(std::min(previousQueueAgeMs, 5000.0)),
+        150,
+        150);
+    int latencyPressureSteps =
+        std::min(queueAgePressureSteps + static_cast<int>(std::min<std::size_t>(initialReadyUploads, 4)), 4);
+    const double frameBudgetMs = 1000.0 / 60.0;
+    const double frameHeadroomMs = std::clamp(frameBudgetMs + 2.0 - smoothedFrameMs_, -4.0, 4.0);
+    int latencyPressureCap = (frameHeadroomMs >= 1.5) ? 4 : ((frameHeadroomMs >= 0.0) ? 3 : 2);
+    if (initialReadyUploads == 0 && frameHeadroomMs < 0.0)
+    {
+        latencyPressureCap = 1;
+    }
+    latencyPressureSteps = std::min(latencyPressureSteps, latencyPressureCap);
+    if (latencyPressureSteps > 0)
+    {
+        const int maxChunkLimit = exactPreload ? 10 : (interactiveUploadWindow ? 8 : 7);
+        const int maxColumnLimit = exactPreload ? 12 : 10;
+        const double maxTimeBudgetMs = exactPreload ? 5.0 : (interactiveUploadWindow ? 4.5 : 4.0);
+
+        budgets.byteBudget += 8ull * 1024ull * 1024ull * static_cast<std::size_t>(latencyPressureSteps);
+        budgets.chunkLimit = std::min(maxChunkLimit, budgets.chunkLimit + latencyPressureSteps);
+        budgets.columnLimit =
+            std::min(maxColumnLimit, budgets.columnLimit + (latencyPressureSteps + 1) / 2);
+        budgets.timeBudgetMs =
+            std::min(maxTimeBudgetMs, budgets.timeBudgetMs + 0.50 * static_cast<double>(latencyPressureSteps));
     }
 
     return budgets;
@@ -7361,10 +7613,7 @@ ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCov
             const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
 
             int columnHeight = ColumnManager::kNoHeight;
-            if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-            {
-                requestColumnHeightPrefetch(column);
-            }
+            (void)tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
 
             const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                             cameraColumn,
@@ -7430,7 +7679,7 @@ int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
             int columnHeight = ColumnManager::kNoHeight;
             if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
             {
-                requestColumnHeightPrefetch(column);
+                requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Critical);
             }
 
             const int radius = columnRadiusForHeight(column,
@@ -7509,13 +7758,22 @@ bool ChunkManager::Impl::tryGetCachedColumnHeight(const glm::ivec2& column,
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - lookupStart).count()));
     }
+
+    int predictedHeight = ColumnManager::kNoHeight;
+    const bool havePredictedHeight = tryGetPredictedColumnHeight(column, predictedHeight);
     if (highest != ColumnManager::kNoHeight)
     {
-        outHeight = highest;
+        outHeight = havePredictedHeight ? std::max(highest, predictedHeight) : highest;
         return true;
     }
 
-    return tryGetPredictedColumnHeight(column, outHeight);
+    if (havePredictedHeight)
+    {
+        outHeight = predictedHeight;
+        return true;
+    }
+
+    return false;
 }
 
 int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int worldX, int worldZ) const
@@ -7531,14 +7789,12 @@ int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int w
                     std::chrono::steady_clock::now() - sampleStart).count()));
     }
     const int height = sample.surfaceY;
-    {
-        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
-        predictedColumnHeights_[column] = height;
-    }
+    mergePredictedColumnHeight(column, height);
     return height;
 }
 
-void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column) const
+void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
+                                                     ColumnHeightPrefetchPriority priority) const
 {
     if (shouldStop_.load(std::memory_order_acquire))
     {
@@ -7546,23 +7802,231 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column) c
     }
 
     constexpr std::size_t kMaxQueuedColumnHeightPrefetches = 2048u;
+    const glm::ivec3 centerChunk = lastCenterChunk_;
+    const std::uint32_t distance = static_cast<std::uint32_t>(std::max(std::abs(column.x - centerChunk.x),
+                                                                       std::abs(column.y - centerChunk.z)));
 
+    bool shouldNotify = false;
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        if (pendingColumnHeightPrefetchSet_.find(column) != pendingColumnHeightPrefetchSet_.end())
+        auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
+        if (requestIt != pendingColumnHeightPrefetchRequests_.end())
         {
-            return;
-        }
-        if (pendingColumnHeightPrefetchQueue_.size() >= kMaxQueuedColumnHeightPrefetches)
-        {
-            return;
-        }
+            ColumnHeightPrefetchRequestState& state = requestIt->second;
+            if (state.inFlight || state.priority >= priority)
+            {
+                return;
+            }
 
-        pendingColumnHeightPrefetchQueue_.push_back(column);
-        pendingColumnHeightPrefetchSet_.insert(column);
+            state.token = nextColumnHeightPrefetchToken_++;
+            state.priority = priority;
+            state.inFlight = false;
+            pendingColumnHeightPrefetchQueue_.push(
+                ColumnHeightPrefetchRequest{column, state.token, nextColumnHeightPrefetchSequence_++, distance, priority});
+            shouldNotify = true;
+        }
+        else
+        {
+            const bool latencySensitive = priority >= ColumnHeightPrefetchPriority::Critical;
+            if (pendingColumnHeightPrefetchRequests_.size() >= kMaxQueuedColumnHeightPrefetches && !latencySensitive)
+            {
+                return;
+            }
+
+            const std::uint64_t token = nextColumnHeightPrefetchToken_++;
+            pendingColumnHeightPrefetchRequests_.emplace(column,
+                                                         ColumnHeightPrefetchRequestState{
+                                                             token,
+                                                             priority,
+                                                             false});
+            pendingColumnHeightPrefetchQueue_.push(
+                ColumnHeightPrefetchRequest{column, token, nextColumnHeightPrefetchSequence_++, distance, priority});
+            shouldNotify = true;
+        }
     }
 
-    columnHeightPrefetchCondition_.notify_one();
+    if (shouldNotify)
+    {
+        columnHeightPrefetchCondition_.notify_one();
+    }
+}
+
+void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
+                                                      const glm::ivec3& previousCenter,
+                                                      int horizontalRadius)
+{
+    if (horizontalRadius <= 0 || shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const bool havePreviousCenter = updateFrameIndex_ > 1;
+    const glm::ivec2 movementDelta = havePreviousCenter
+        ? glm::ivec2{center.x - previousCenter.x, center.z - previousCenter.z}
+        : glm::ivec2{0, 0};
+    const int horizontalShift = std::max(std::abs(movementDelta.x), std::abs(movementDelta.y));
+    const int verticalShift = havePreviousCenter ? std::abs(center.y - previousCenter.y) : 0;
+    const bool horizontalDominant = horizontalShift > 0 && horizontalShift >= verticalShift;
+    const bool verticalDominant = verticalShift > horizontalShift;
+    const bool needsStaticWarmup = !horizontalDominant &&
+                                   !verticalDominant &&
+                                   targetViewDistance_ > viewDistance_ + 1;
+    if (!horizontalDominant && !needsStaticWarmup)
+    {
+        return;
+    }
+
+    struct PrefetchCandidate
+    {
+        glm::ivec2 column{0};
+        ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
+        float score{0.0f};
+    };
+
+    const int requestBudget = horizontalDominant ? 64 : 32;
+    std::vector<PrefetchCandidate> candidates;
+    candidates.reserve(96u);
+    std::unordered_set<glm::ivec2, ColumnHasher> queuedColumns;
+    queuedColumns.reserve(128u);
+    const std::size_t candidateCap = 128u;
+
+    auto addCandidate = [&](const glm::ivec2& column, ColumnHeightPrefetchPriority priority, float score)
+    {
+        if (candidates.size() >= candidateCap && priority < ColumnHeightPrefetchPriority::Critical)
+        {
+            return;
+        }
+
+        if (!queuedColumns.insert(column).second)
+        {
+            return;
+        }
+
+        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+        int cachedHeight = ColumnManager::kNoHeight;
+        if (tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight))
+        {
+            return;
+        }
+
+        candidates.push_back(PrefetchCandidate{column, priority, score});
+    };
+
+    if (horizontalDominant)
+    {
+        glm::vec2 forward = normalizePriorityForwardXZ(lastCameraForward_);
+        const glm::vec2 movementVector(static_cast<float>(movementDelta.x), static_cast<float>(movementDelta.y));
+        if (glm::dot(movementVector, movementVector) > kEpsilon)
+        {
+            forward = glm::normalize(movementVector);
+        }
+        const glm::vec2 side{-forward.y, forward.x};
+        const int startDistance = std::max(horizontalRadius - 1, 1);
+        const int lookahead = std::clamp(horizontalRadius / 4, 4, 10);
+        const int endDistance = horizontalRadius + lookahead;
+        const int nearHalfWidth = std::clamp(horizontalRadius / 16, 1, 2);
+        const int farHalfWidth = std::clamp(horizontalRadius / 12, 2, 4);
+
+        for (int distance = startDistance; distance <= endDistance; distance += 2)
+        {
+            const bool insideExact = distance <= horizontalRadius;
+            const bool justOutside = distance <= horizontalRadius + 2;
+            const int sideHalfWidth = insideExact ? nearHalfWidth : farHalfWidth;
+            const glm::vec2 anchor = glm::vec2(static_cast<float>(center.x), static_cast<float>(center.z)) +
+                                     forward * static_cast<float>(distance);
+
+            for (int sideOffset = -sideHalfWidth; sideOffset <= sideHalfWidth; ++sideOffset)
+            {
+                const glm::vec2 sample = anchor + side * static_cast<float>(sideOffset);
+                const glm::ivec2 column{static_cast<int>(std::lround(sample.x)),
+                                        static_cast<int>(std::lround(sample.y))};
+
+                ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
+                if (insideExact && std::abs(sideOffset) <= 1)
+                {
+                    priority = ColumnHeightPrefetchPriority::Critical;
+                }
+                else if (insideExact || justOutside)
+                {
+                    priority = ColumnHeightPrefetchPriority::Visible;
+                }
+
+                addCandidate(column,
+                             priority,
+                             static_cast<float>(distance) + static_cast<float>(std::abs(sideOffset)) * 0.4f);
+            }
+        }
+    }
+    else
+    {
+        auto addPerimeter = [&](int ring)
+        {
+            const int stride = ring < 16 ? 2 : 4;
+            for (int dx = -ring; dx <= ring; dx += stride)
+            {
+                addCandidate(glm::ivec2{center.x + dx, center.z - ring},
+                             ColumnHeightPrefetchPriority::Visible,
+                             static_cast<float>(ring));
+                addCandidate(glm::ivec2{center.x + dx, center.z + ring},
+                             ColumnHeightPrefetchPriority::Visible,
+                             static_cast<float>(ring));
+            }
+
+            for (int dz = -ring + stride; dz <= ring - stride; dz += stride)
+            {
+                addCandidate(glm::ivec2{center.x - ring, center.z + dz},
+                             ColumnHeightPrefetchPriority::Visible,
+                             static_cast<float>(ring));
+                addCandidate(glm::ivec2{center.x + ring, center.z + dz},
+                             ColumnHeightPrefetchPriority::Visible,
+                             static_cast<float>(ring));
+            }
+        };
+
+        const int ringStart = std::max(viewDistance_ + 1, 1);
+        const int ringEnd = std::min(targetViewDistance_, ringStart + 2);
+        for (int ring = ringStart; ring <= ringEnd; ++ring)
+        {
+            addPerimeter(ring);
+        }
+    }
+
+    if (candidates.empty())
+    {
+        return;
+    }
+
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const PrefetchCandidate& lhs, const PrefetchCandidate& rhs)
+              {
+                  if (lhs.priority != rhs.priority)
+                  {
+                      return lhs.priority > rhs.priority;
+                  }
+                  if (lhs.score != rhs.score)
+                  {
+                      return lhs.score < rhs.score;
+                  }
+                  if (lhs.column.x != rhs.column.x)
+                  {
+                      return lhs.column.x < rhs.column.x;
+                  }
+                  return lhs.column.y < rhs.column.y;
+              });
+
+    int requested = 0;
+    for (const PrefetchCandidate& candidate : candidates)
+    {
+        if (requested >= requestBudget)
+        {
+            break;
+        }
+
+        requestColumnHeightPrefetch(candidate.column, candidate.priority);
+        ++requested;
+    }
 }
 
 int ChunkManager::Impl::ensureColumnHeightCached(const glm::ivec2& column,
@@ -7576,6 +8040,38 @@ int ChunkManager::Impl::ensureColumnHeightCached(const glm::ivec2& column,
     }
 
     return cacheSampledColumnHeight(column, worldX, worldZ);
+}
+
+void ChunkManager::Impl::mergePredictedColumnHeight(const glm::ivec2& column, int height) const
+{
+    if (height == ColumnManager::kNoHeight)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+    auto [it, inserted] = predictedColumnHeights_.try_emplace(column, height);
+    if (!inserted)
+    {
+        it->second = std::max(it->second, height);
+    }
+}
+
+void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const
+{
+    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+    const int highest = columnManager_.highestSolidBlock(worldX, worldZ);
+
+    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+    if (highest == ColumnManager::kNoHeight)
+    {
+        predictedColumnHeights_.erase(column);
+    }
+    else
+    {
+        predictedColumnHeights_[column] = highest;
+    }
 }
 
 void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) const
@@ -7747,7 +8243,7 @@ RecentEditHoleDebugSnapshot ChunkManager::Impl::recentEditHoleDebugSnapshot(cons
             }
             else
             {
-                requestColumnHeightPrefetch(column);
+                requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Background);
                 columnHeight = centerChunk.y * kChunkSizeY;
                 info.heightSource = "pending";
             }
@@ -7886,7 +8382,6 @@ int ChunkManager::Impl::surfaceShellFloorChunkForHeight(const glm::ivec2& column
         int neighborHeight = ColumnManager::kNoHeight;
         if (!tryGetCachedColumnHeight(neighbor, worldX, worldZ, neighborHeight))
         {
-            requestColumnHeightPrefetch(neighbor);
             continue;
         }
 
@@ -8101,7 +8596,7 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         int columnHeight = ColumnManager::kNoHeight;
         if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
         {
-            requestColumnHeightPrefetch(column);
+            requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Visible);
         }
         const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                         cameraColumn,
@@ -8240,7 +8735,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             int columnHeight = ColumnManager::kNoHeight;
             if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
             {
-                requestColumnHeightPrefetch(column);
+                requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Normal);
             }
             const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                             cameraColumn,
@@ -8326,7 +8821,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                 int columnHeight = ColumnManager::kNoHeight;
                 if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
                 {
-                    requestColumnHeightPrefetch(column);
+                    requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Background);
                 }
 
                 const auto [minChunkY, maxChunkY] =
@@ -8347,7 +8842,6 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             }
 
             columnManager_.removeChunk(chunk->coord);
-            invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             recycleChunkGPU(*chunk);
             recycleChunkObject(std::move(chunk));
             ++evictedCount;
@@ -8401,6 +8895,18 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
 void ChunkManager::Impl::uploadReadyMeshes()
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    uploadQueueAgeMsLastFrame_ = 0.0;
+    uploadAttemptsLastFrame_ = 0;
+    uploadQueueScanEntriesLastFrame_ = 0;
+    uploadSkippedExpiredLastFrame_ = 0;
+    uploadSkippedNotReadyLastFrame_ = 0;
+    uploadSkippedPendingMeshLastFrame_ = 0;
+    uploadColumnLimitedLastFrame_ = 0;
+    uploadBudgetDeferredLastFrame_ = 0;
+    uploadRetryFailuresLastFrame_ = 0;
+    uploadScanLimitHitsLastFrame_ = 0;
+    uploadBeginFailuresLastFrame_ = 0;
+    uploadStalePendingMeshesLastFrame_ = 0;
     uploadQueuePickMsLastFrame_ = 0.0;
     uploadPrepareMsLastFrame_ = 0.0;
     uploadContextBeginMsLastFrame_ = 0.0;
@@ -8432,9 +8938,29 @@ void ChunkManager::Impl::uploadReadyMeshes()
     const auto uploadContextBeginStart = std::chrono::steady_clock::now();
     if (uploadContext_.ready() && !uploadContext_.begin())
     {
+        uploadBeginFailuresLastFrame_ = 1;
         lastUploadBytesUsed_ = 0;
         lastUploadMsUsed_ = 0.0;
         pendingUploadsLastFrame_ = estimateUploadQueueSize();
+        if (benchmarkEnabled)
+        {
+            benchmarkMetrics_.uploadBeginFailuresPerFrame.record(1);
+            benchmarkMetrics_.uploadAttemptsPerFrame.record(0);
+            benchmarkMetrics_.uploadChunksPerFrame.record(0);
+            benchmarkMetrics_.uploadBytesPerFrame.record(0);
+            benchmarkMetrics_.uploadQueueScanEntries.record(
+                static_cast<std::uint64_t>(std::max(uploadQueueScanEntriesLastFrame_, 0)));
+            benchmarkMetrics_.uploadExpiredEntriesPerFrame.record(
+                static_cast<std::uint64_t>(std::max(uploadSkippedExpiredLastFrame_, 0)));
+            benchmarkMetrics_.uploadSkippedNotReadyPerFrame.record(0);
+            benchmarkMetrics_.uploadSkippedPendingMeshPerFrame.record(0);
+            benchmarkMetrics_.uploadColumnLimitedPerFrame.record(0);
+            benchmarkMetrics_.uploadBudgetDeferredPerFrame.record(0);
+            benchmarkMetrics_.uploadRetryFailuresPerFrame.record(0);
+            benchmarkMetrics_.uploadScanLimitHitsPerFrame.record(0);
+            benchmarkMetrics_.uploadStalePendingMeshesPerFrame.record(
+                static_cast<std::uint64_t>(std::max(uploadStalePendingMeshesLastFrame_, 0)));
+        }
         return;
     }
     uploadContextBeginMsLastFrame_ =
@@ -8448,6 +8974,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         }
 
         ++attempts;
+        uploadAttemptsLastFrame_ = static_cast<int>(attempts);
         std::shared_ptr<Chunk> chunk;
         if (benchmarkEnabled)
         {
@@ -8468,6 +8995,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         if (!chunk->meshReady.load(std::memory_order_acquire) ||
             chunk->state.load(std::memory_order_acquire) != ChunkState::Ready)
         {
+            ++uploadSkippedNotReadyLastFrame_;
             continue;
         }
 
@@ -8475,6 +9003,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
             std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
             if (chunk->pendingMesh.valid())
             {
+                ++uploadSkippedPendingMeshLastFrame_;
                 requeueChunkForUpload(chunk, false);
                 continue;
             }
@@ -8484,6 +9013,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         int& columnUploads = uploadsPerColumn[columnKey];
         if (columnUploads >= columnUploadLimit)
         {
+            ++uploadColumnLimitedLastFrame_;
             requeueChunkForUpload(chunk, false);
             profilingCounters_.throttledUploads.fetch_add(1, std::memory_order_relaxed);
             continue;
@@ -8501,6 +9031,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         const bool allowOversizeUpload = !uploadedAnything && pendingUploadsLastFrame_ <= 2;
         if (totalBytes > remainingBudget && totalBytes > 0 && !allowOversizeUpload)
         {
+            ++uploadBudgetDeferredLastFrame_;
             requeueChunkForUpload(chunk, false);
             profilingCounters_.deferredUploads.fetch_add(1, std::memory_order_relaxed);
             if (uploadedAnything)
@@ -8513,6 +9044,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
         const auto uploadChunkStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
         if (!uploadChunkMesh(*chunk, uploadBatchId))
         {
+            ++uploadRetryFailuresLastFrame_;
             requeueChunkForUpload(chunk, true);
             if (uploadedAnything)
             {
@@ -8556,6 +9088,11 @@ void ChunkManager::Impl::uploadReadyMeshes()
         }
     }
 
+    if (attempts >= kUploadQueueScanLimit && estimateUploadQueueSize() > 0)
+    {
+        uploadScanLimitHitsLastFrame_ = 1;
+    }
+
     const auto uploadFinalizeStart = std::chrono::steady_clock::now();
     uploadContext_.flush();
     if (uploadedAnything)
@@ -8591,6 +9128,32 @@ void ChunkManager::Impl::uploadReadyMeshes()
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadFinalizeStart).count();
 
     pendingUploadsLastFrame_ = estimateUploadQueueSize();
+    if (benchmarkEnabled)
+    {
+        benchmarkMetrics_.uploadQueueScanEntries.record(
+            static_cast<std::uint64_t>(std::max(uploadQueueScanEntriesLastFrame_, 0)));
+        benchmarkMetrics_.uploadAttemptsPerFrame.record(static_cast<std::uint64_t>(std::max(uploadAttemptsLastFrame_, 0)));
+        benchmarkMetrics_.uploadChunksPerFrame.record(static_cast<std::uint64_t>(std::max(uploadedChunkCount, 0)));
+        benchmarkMetrics_.uploadBytesPerFrame.record(static_cast<std::uint64_t>(lastUploadBytesUsed_));
+        benchmarkMetrics_.uploadExpiredEntriesPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadSkippedExpiredLastFrame_, 0)));
+        benchmarkMetrics_.uploadSkippedNotReadyPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadSkippedNotReadyLastFrame_, 0)));
+        benchmarkMetrics_.uploadSkippedPendingMeshPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadSkippedPendingMeshLastFrame_, 0)));
+        benchmarkMetrics_.uploadColumnLimitedPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadColumnLimitedLastFrame_, 0)));
+        benchmarkMetrics_.uploadBudgetDeferredPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadBudgetDeferredLastFrame_, 0)));
+        benchmarkMetrics_.uploadRetryFailuresPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadRetryFailuresLastFrame_, 0)));
+        benchmarkMetrics_.uploadScanLimitHitsPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadScanLimitHitsLastFrame_, 0)));
+        benchmarkMetrics_.uploadBeginFailuresPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadBeginFailuresLastFrame_, 0)));
+        benchmarkMetrics_.uploadStalePendingMeshesPerFrame.record(
+            static_cast<std::uint64_t>(std::max(uploadStalePendingMeshesLastFrame_, 0)));
+    }
 }
 
 void ChunkManager::Impl::commitPendingChunkUploads()
@@ -8746,6 +9309,7 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             benchmarkEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (stalePending)
         {
+            ++uploadStalePendingMeshesLastFrame_;
             if (pendingMesh.pageIndex != kInvalidChunkBufferPage)
             {
                 releaseChunkAllocationRange(pendingMesh.pageIndex,
@@ -8792,9 +9356,18 @@ void ChunkManager::Impl::commitPendingChunkUploads()
 bool ChunkManager::Impl::uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
-    if (benchmarkEnabled)
+    const std::uint64_t uploadStartMicros = steadyMicrosNow();
+    storeFirstBenchmarkTimestamp(chunk.uploadStartTimestampMicros, uploadStartMicros);
+    const std::uint64_t queuedMicros = loadBenchmarkTimestamp(chunk.uploadQueuedTimestampMicros);
+    if (queuedMicros > 0 && uploadStartMicros > queuedMicros)
     {
-        storeFirstBenchmarkTimestamp(chunk.uploadStartTimestampMicros, steadyMicrosNow());
+        const std::uint64_t queueAgeMicros = uploadStartMicros - queuedMicros;
+        uploadQueueAgeMsLastFrame_ =
+            std::max(uploadQueueAgeMsLastFrame_, static_cast<double>(queueAgeMicros) / 1000.0);
+        if (benchmarkEnabled)
+        {
+            benchmarkMetrics_.uploadQueueAgeStage.recordMicros(queueAgeMicros);
+        }
     }
     const auto meshLockStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     const auto recordMeshLock = [&]()
@@ -11779,8 +12352,11 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
         benchmarkMetrics_.generateBlocksMeshLockStage.recordMicros(static_cast<std::uint64_t>(lockMicros));
     }
 
+    const glm::ivec2 column{chunk.coord.x, chunk.coord.z};
     columnManager_.updateChunkHeights(chunk.coord, scratch.highestSolidWorlds);
-    invalidatePredictedColumn({chunk.coord.x, chunk.coord.z});
+    mergePredictedColumnHeight(column,
+                               columnManager_.highestSolidBlock(column.x * kChunkSizeX + kChunkSizeX / 2,
+                                                               column.y * kChunkSizeZ + kChunkSizeZ / 2));
     markSkyLightColumnDirty({chunk.coord.x, chunk.coord.z});
     return true;
 }
@@ -12123,6 +12699,12 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
 {
     const int horizontalRadius = denseCpuHorizontalRadius();
     const int verticalRadius = denseCpuVerticalRadius();
+    const int hydrationBudget = std::clamp(1 + horizontalRadius / 3,
+                                           kDenseCpuHydrationBudgetMin,
+                                           kDenseCpuHydrationBudgetMax);
+    const int demotionBudget = std::clamp(hydrationBudget * 8,
+                                          kDenseCpuDemotionBudgetMin,
+                                          kDenseCpuDemotionBudgetMax);
 
     std::vector<std::shared_ptr<Chunk>> chunks;
     {
@@ -12139,6 +12721,18 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
     std::vector<std::shared_ptr<Chunk>> toDemote;
     toHydrate.reserve(chunks.size());
     toDemote.reserve(chunks.size());
+
+    const auto densePriority = [&centerChunk](const std::shared_ptr<Chunk>& chunk)
+    {
+        const int horizontalDistance =
+            std::max(std::abs(chunk->coord.x - centerChunk.x), std::abs(chunk->coord.z - centerChunk.z));
+        const int verticalDistance = std::abs(chunk->coord.y - centerChunk.y);
+        return std::tuple<int, int, int, int>{
+            horizontalDistance,
+            verticalDistance,
+            chunk->coord.y,
+            chunk->coord.x};
+    };
 
     for (const std::shared_ptr<Chunk>& chunk : chunks)
     {
@@ -12176,8 +12770,29 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
         }
     }
 
-    for (const std::shared_ptr<Chunk>& chunk : toHydrate)
+    std::sort(toHydrate.begin(),
+              toHydrate.end(),
+              [&densePriority](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
+              {
+                  return densePriority(lhs) < densePriority(rhs);
+              });
+    std::sort(toDemote.begin(),
+              toDemote.end(),
+              [&densePriority](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs)
+              {
+                  return densePriority(lhs) > densePriority(rhs);
+              });
+
+    // Keep dense CPU hydration incremental so altitude changes do not rebuild hundreds of chunks
+    // on the main thread in a single frame.
+    const std::size_t hydrateCount =
+        std::min<std::size_t>(toHydrate.size(), static_cast<std::size_t>(std::max(0, hydrationBudget)));
+    const std::size_t demoteCount =
+        std::min<std::size_t>(toDemote.size(), static_cast<std::size_t>(std::max(0, demotionBudget)));
+
+    for (std::size_t i = 0; i < hydrateCount; ++i)
     {
+        const std::shared_ptr<Chunk>& chunk = toHydrate[i];
         if (chunk && ensureChunkCpuDataResident(*chunk))
         {
             std::lock_guard<std::mutex> lock(chunk->meshMutex);
@@ -12185,8 +12800,9 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
         }
     }
 
-    for (const std::shared_ptr<Chunk>& chunk : toDemote)
+    for (std::size_t i = 0; i < demoteCount; ++i)
     {
+        const std::shared_ptr<Chunk>& chunk = toDemote[i];
         if (chunk)
         {
             releaseChunkCpuData(*chunk);
@@ -12272,7 +12888,7 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
             {
                 chunk->hasBlocks.store(true, std::memory_order_release);
                 columnManager_.updateChunk(makeChunkBlockView(*chunk));
-                invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
+                refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
                 markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
             }
         }
@@ -12570,6 +13186,3 @@ std::string ChunkManager::biomeNameAt(const glm::vec3& worldPos) const
 {
     return impl_->biomeNameAt(worldPos);
 }
-
-
-

@@ -874,8 +874,19 @@ inline constexpr int kDenseCpuDemotionBudgetMin = 16;
 inline constexpr int kDenseCpuDemotionBudgetMax = 64;
 inline constexpr std::uint64_t kDenseCpuDemotionGraceFrames = 120u;
 inline constexpr int kExactPlayerBandRadiusMax = 6;
+inline constexpr int kExactPlayerBandHorizontalRadius = 8;
 inline constexpr int kExactSurfaceShellBelowSlackChunks = 1;
 inline constexpr int kExactSurfaceShellAirAboveChunks = 1;
+inline constexpr int kMovementEnvelopeCoreRadiusMin = 4;
+inline constexpr int kMovementEnvelopeCoreRadiusMax = 8;
+inline constexpr int kMovementEnvelopeTurnReserveRadiusMin = 8;
+inline constexpr int kMovementEnvelopeTurnReserveRadiusMax = 18;
+inline constexpr int kMovementEnvelopeTurnReserveHalfWidthMin = 5;
+inline constexpr int kMovementEnvelopeTurnReserveHalfWidthMax = 14;
+inline constexpr int kMovementEnvelopeCorridorHalfWidthMin = 2;
+inline constexpr int kMovementEnvelopeCorridorHalfWidthMax = 8;
+inline constexpr int kMovementEnvelopeCorridorWidthStep = 6;
+inline constexpr int kMovementEnvelopeRearSlackChunks = 2;
 
 // Debug logging and D3D helper utilities stay near the top because multiple chunk subsystems depend on them.
 [[nodiscard]] bool chunkManagerDebugLoggingEnabled() noexcept;
@@ -2964,7 +2975,9 @@ struct ChunkYInterval
 
 struct ColumnChunkIntervals
 {
-    std::array<ChunkYInterval, 2> intervals{};
+    static constexpr std::size_t kMaxIntervals = 8;
+
+    std::array<ChunkYInterval, kMaxIntervals> intervals{};
     std::uint8_t count{0};
 
     [[nodiscard]] bool empty() const noexcept
@@ -3353,6 +3366,8 @@ struct ChunkManager::Impl
     std::string biomeNameAt(const glm::vec3& worldPos) const;
 
 private:
+    enum class ColumnHeightPrefetchPriority : std::uint8_t;
+
     struct TreeDensityNoise
     {
         TreeDensityNoise() = default;
@@ -3428,7 +3443,9 @@ private:
     void stopWorkerThreads();
     void workerThreadFunction();
     void columnHeightPrefetchThreadFunction();
-    bool acquireNextColumnHeightPrefetch(glm::ivec2& column, std::uint64_t& token);
+    bool acquireNextColumnHeightPrefetch(glm::ivec2& column,
+                                         std::uint64_t& token,
+                                         ColumnHeightPrefetchPriority& priority);
     void finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const;
     void enqueueJob(const std::shared_ptr<Chunk>& chunk,
                     JobType type,
@@ -3542,6 +3559,12 @@ private:
                                   const glm::ivec2& cameraColumn,
                                   int verticalRadius) const;
     int surfaceShellFloorChunkForHeight(const glm::ivec2& column, int columnHeight) const;
+    [[nodiscard]] bool columnUsesPlayerBand(const glm::ivec2& column,
+                                            const glm::ivec2& cameraColumn) const noexcept;
+    ColumnChunkIntervals playerBandIntervalsForColumn(const glm::ivec2& column,
+                                                      const glm::ivec2& cameraColumn,
+                                                      int cameraChunkY,
+                                                      int verticalRadius) const;
     std::pair<int, int> columnSpanFor(const glm::ivec2& column,
                                       const glm::ivec2& cameraColumn,
                                       int cameraChunkY,
@@ -3561,8 +3584,51 @@ private:
                                                   int verticalRadius,
                                                   int columnHeight) const;
     static void addColumnChunkInterval(ColumnChunkIntervals& intervals, int minChunkY, int maxChunkY) noexcept;
+    static void mergeColumnChunkIntervals(ColumnChunkIntervals& dst,
+                                          const ColumnChunkIntervals& src) noexcept;
     static bool chunkYWithinIntervals(int chunkY, const ColumnChunkIntervals& intervals, int slackChunks = 0) noexcept;
     static int chunkYDistanceToIntervals(int chunkY, const ColumnChunkIntervals& intervals, int slackChunks = 0) noexcept;
+    enum class ColumnSlabOccupancyState : std::uint8_t
+    {
+        DefinitelyEmpty = 0,
+        DefinitelyOccupied,
+        MaybeOccupied
+    };
+    struct ColumnSlabOccupancy
+    {
+        ColumnChunkIntervals terrainIntervals{};
+        ColumnChunkIntervals waterIntervals{};
+        ColumnChunkIntervals structureIntervals{};
+        ColumnChunkIntervals editIntervals{};
+        ColumnChunkIntervals occupiedIntervals{};
+        ColumnChunkIntervals maybeIntervals{};
+    };
+    [[nodiscard]] int adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
+                                                float neighborAverage) const noexcept;
+    ColumnSlabOccupancy buildColumnSlabOccupancy(const glm::ivec2& column) const;
+    ColumnSlabOccupancy cachedColumnSlabOccupancy(const glm::ivec2& column) const;
+    bool tryGetCachedColumnSlabOccupancy(const glm::ivec2& column, ColumnSlabOccupancy& out) const;
+    [[nodiscard]] static ColumnSlabOccupancyState classifyColumnSlab(const ColumnSlabOccupancy& occupancy,
+                                                                     int chunkY) noexcept;
+    void invalidateColumnSlabOccupancy(const glm::ivec2& column) const;
+    void invalidateAllColumnSlabOccupancy() const;
+    void updateMovementEnvelopeState(const glm::ivec3& center, const glm::ivec3& previousCenter) noexcept;
+    enum class MovementEnvelopeBucket : std::uint8_t
+    {
+        Core = 0,
+        Corridor,
+        TurnReserve,
+        Background
+    };
+    enum class SchedulingBand : std::uint8_t
+    {
+        Protected = 0,
+        Background
+    };
+    [[nodiscard]] MovementEnvelopeBucket movementEnvelopeBucketForColumn(const glm::ivec2& column,
+                                                                         const glm::ivec3& center,
+                                                                         int horizontalRadius,
+                                                                         int lookaheadChunks = 0) const noexcept;
     void prefetchVisibleColumnHeights(const glm::ivec3& center,
                                       const glm::ivec3& previousCenter,
                                       int horizontalRadius);
@@ -3588,6 +3654,9 @@ private:
         int missing{0};
         int ready{0};
         int required{0};
+        int protectedMissing{0};
+        int protectedReady{0};
+        int protectedRequired{0};
     };
     VisibleChunkCoverage scanVisibleChunkCoverage(const glm::ivec3& center,
                                                   int horizontalRadius,
@@ -3601,9 +3670,13 @@ private:
         bool budgetExhausted{false};
     };
 
-    RingProgress ensureVolume(const glm::ivec3& center, int horizontalRadius, int verticalRadius, int& jobBudget);
+    RingProgress ensureVolume(const glm::ivec3& center,
+                              int horizontalRadius,
+                              int verticalRadius,
+                              int& jobBudget,
+                              SchedulingBand band);
     void removeDistantChunks(const glm::ivec3& center, int horizontalThreshold, int verticalThreshold);
-    bool ensureChunkAsync(const glm::ivec3& coord);
+    bool ensureChunkAsync(const glm::ivec3& coord, bool forceResident = false);
     void uploadReadyMeshes();
     bool uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId);
     void buildChunkMeshAsync(Chunk& chunk);
@@ -3906,6 +3979,8 @@ private:
     ColumnManager columnManager_;
     mutable std::mutex predictedColumnMutex_;
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
+    mutable std::mutex columnSlabOccupancyMutex_;
+    mutable std::unordered_map<glm::ivec2, ColumnSlabOccupancy, ColumnHasher> columnSlabOccupancyCache_{};
     mutable std::mutex columnHeightPrefetchMutex_;
     mutable std::condition_variable columnHeightPrefetchCondition_;
     mutable std::priority_queue<ColumnHeightPrefetchRequest,
@@ -4017,6 +4092,9 @@ private:
     int lastMissingChunks_{0};
     int cachedExactReadyChunks_{0};
     int cachedExactRequiredChunks_{0};
+    int lastProtectedMissingChunks_{0};
+    int lastProtectedReadyChunks_{0};
+    int lastProtectedRequiredChunks_{0};
     int lastColumnCap_{kVerticalStreamingConfig.maxGenerationJobsPerColumn};
     int lastBacklogSteps_{0};
     bool startupEnabled_{true};
@@ -4029,6 +4107,11 @@ private:
     std::chrono::steady_clock::time_point lastJobQueuePriorityRefreshTime_{};
     glm::vec3 lastCameraForward_{0.0f, 0.0f, -1.0f};
     glm::ivec3 lastCenterChunk_{0};
+    glm::vec2 movementEnvelopeForwardXZ_{0.0f, -1.0f};
+    int lastHorizontalMovementShift_{0};
+    int lastVerticalMovementShift_{0};
+    bool protectedPressureActive_{false};
+    bool severeProtectedPressureActive_{false};
     std::chrono::steady_clock::time_point lastUpdateTime_{};
     std::uint64_t updateFrameIndex_{0};
     double smoothedFrameMs_{16.0};
@@ -4451,10 +4534,22 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const int clampedWorldY = std::max(worldY, 0);
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
     lastCenterChunk_ = centerChunk;
+    updateMovementEnvelopeState(centerChunk, previousCenterChunk);
+    glm::vec3 priorityForward(lastCameraForward_.x, lastCameraForward_.y, lastCameraForward_.z);
+    priorityForward.x = movementEnvelopeForwardXZ_.x;
+    priorityForward.z = movementEnvelopeForwardXZ_.y;
+    if (glm::dot(priorityForward, priorityForward) > kEpsilon)
+    {
+        priorityForward = glm::normalize(priorityForward);
+    }
+    else
+    {
+        priorityForward = lastCameraForward_;
+    }
     {
         std::lock_guard<std::mutex> lock(schedulingPriorityMutex_);
         schedulingPriorityOrigin_ = centerChunk;
-        schedulingPriorityForward_ = lastCameraForward_;
+        schedulingPriorityForward_ = priorityForward;
     }
 
     if (!startupEnabled_ || !startupState_.preloadStarted)
@@ -4497,18 +4592,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                                                : renderSettings_.exactChunks);
     kFarPlane = computeFarPlaneForDistanceBlocks(visibleDistanceBlocks);
 
-    const auto uploadBudgetStart = std::chrono::steady_clock::now();
-    UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
-    uploadBudgetPrepMsLastFrame_ =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadBudgetStart).count();
-    uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
-    uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
-    uploadChunkLimitThisFrame_ = uploadBudgets.chunkLimit;
-    resetRelightBudgetForFrame();
-    uploadBudgetMsThisFrame_ = uploadBudgets.timeBudgetMs;
-    pendingUploadsLastFrame_ = uploadBudgets.queueSize;
-
-    const glm::vec2 desiredPriorityForwardXZ = normalizePriorityForwardXZ(lastCameraForward_);
+    const glm::vec2 desiredPriorityForwardXZ = normalizePriorityForwardXZ(priorityForward);
     const glm::ivec3 priorityDelta = centerChunk - lastJobQueuePriorityOrigin_;
     const int priorityHorizontalShift = std::max(std::abs(priorityDelta.x), std::abs(priorityDelta.z));
     const int priorityVerticalShift = std::abs(priorityDelta.y);
@@ -4530,7 +4614,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (shouldRefreshJobQueuePriority)
     {
         const auto priorityUpdateStart = std::chrono::steady_clock::now();
-        const bool updatedPriority = jobQueue_.tryUpdatePriorityState(centerChunk, lastCameraForward_);
+        const bool updatedPriority = jobQueue_.tryUpdatePriorityState(centerChunk, priorityForward);
         priorityUpdateMsLastFrame_ =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - priorityUpdateStart).count();
         if (updatedPriority)
@@ -4554,6 +4638,27 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const int missingChunks = visibleCoverage.missing;
     missingScanMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - missingScanStart).count();
+    lastProtectedMissingChunks_ = visibleCoverage.protectedMissing;
+    lastProtectedReadyChunks_ = visibleCoverage.protectedReady;
+    lastProtectedRequiredChunks_ = visibleCoverage.protectedRequired;
+    protectedPressureActive_ = visibleCoverage.protectedMissing > 0;
+    severeProtectedPressureActive_ =
+        protectedPressureActive_ &&
+        (visibleCoverage.protectedMissing >= 24 ||
+         missingChunks >= 96 ||
+         (lastHorizontalMovementShift_ > 0 && visibleCoverage.protectedMissing >= 8));
+
+    const auto uploadBudgetStart = std::chrono::steady_clock::now();
+    UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
+    uploadBudgetPrepMsLastFrame_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadBudgetStart).count();
+    uploadBudgetBytesThisFrame_ = uploadBudgets.byteBudget;
+    uploadColumnLimitThisFrame_ = uploadBudgets.columnLimit;
+    uploadChunkLimitThisFrame_ = uploadBudgets.chunkLimit;
+    resetRelightBudgetForFrame();
+    uploadBudgetMsThisFrame_ = uploadBudgets.timeBudgetMs;
+    pendingUploadsLastFrame_ = uploadBudgets.queueSize;
+
     const int backlogSteps = computeBacklogSteps(missingChunks,
                                                  kVerticalStreamingConfig.generationBudget.backlogStartThreshold,
                                                  kVerticalStreamingConfig.generationBudget.backlogStepSize);
@@ -4565,15 +4670,40 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     generationColumnCapThisFrame_ = columnCap;
 
-    const int generationBudgetTarget =
+    int generationBudgetTarget =
         computeGenerationBudget(targetViewDistance_, verticalRadius, backlogSteps);
-    const int ringBudget = computeRingExpansionBudget(missingChunks);
+    int ringBudget = computeRingExpansionBudget(missingChunks);
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
+    if (exactOnly)
+    {
+        generationBudgetTarget += 6 + std::max(verticalRadius - kVerticalStreamingConfig.minRadiusChunks, 0);
+        ringBudget += 1;
+    }
+    if (protectedPressureActive_)
+    {
+        generationBudgetTarget += std::max(8, visibleCoverage.protectedMissing / 8);
+        ringBudget += 1;
+        if (columnCap < std::numeric_limits<int>::max())
+        {
+            columnCap += 2;
+        }
+    }
+    if (severeProtectedPressureActive_)
+    {
+        generationBudgetTarget += std::max(12, visibleCoverage.protectedMissing / 4);
+        ringBudget += 2;
+        columnCap = std::numeric_limits<int>::max();
+    }
+    generationColumnCapThisFrame_ = columnCap;
 
     const std::size_t workerSlots = std::max<std::size_t>(workerThreadCount_, 1);
     const std::size_t outstandingGenerateCap = std::clamp<std::size_t>(
-        64u + workerSlots * 24u + static_cast<std::size_t>(std::max(verticalRadius, 0)) * 4u,
-        64u,
-        384u);
+        96u + workerSlots * 32u +
+            static_cast<std::size_t>(std::max(verticalRadius, 0)) * 6u +
+            (protectedPressureActive_ ? 64u : 0u) +
+            (severeProtectedPressureActive_ ? 64u : 0u),
+        96u,
+        512u);
     const std::size_t outstandingGenerateJobs = jobQueue_.outstanding(JobType::Generate);
     const int generationHeadroom = (outstandingGenerateJobs >= outstandingGenerateCap)
         ? 0
@@ -4588,15 +4718,15 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     int jobBudget = effectiveGenerationBudgetTarget;
     ensureVolumeMsLastFrame_ = 0.0;
-    const auto timedEnsureVolume = [&](int horizontalRadius)
+    const auto timedEnsureVolume = [&](int horizontalRadius, SchedulingBand band)
     {
         if (!benchmarkEnabled)
         {
-            return ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget);
+            return ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget, band);
         }
 
         const auto ensureVolumeStart = std::chrono::steady_clock::now();
-        RingProgress progress = ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget);
+        RingProgress progress = ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget, band);
         ensureVolumeMsLastFrame_ +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ensureVolumeStart).count();
         return progress;
@@ -4605,7 +4735,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const auto schedulingStart = std::chrono::steady_clock::now();
     for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
     {
-        RingProgress progress = timedEnsureVolume(ring);
+        RingProgress progress = timedEnsureVolume(ring, SchedulingBand::Protected);
         if (progress.budgetExhausted)
         {
             break;
@@ -4616,7 +4746,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     while (jobBudget > 0 && viewDistance_ < preloadTargetViewDistance && ringsExpanded < ringBudget)
     {
         const int nextRing = viewDistance_ + 1;
-        RingProgress progress = timedEnsureVolume(nextRing);
+        RingProgress progress = timedEnsureVolume(nextRing, SchedulingBand::Protected);
 
         if (progress.budgetExhausted)
         {
@@ -4631,6 +4761,18 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         }
 
         break;
+    }
+
+    if (!protectedPressureActive_ && jobBudget > 0)
+    {
+        for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
+        {
+            RingProgress progress = timedEnsureVolume(ring, SchedulingBand::Background);
+            if (progress.budgetExhausted)
+            {
+                break;
+            }
+        }
     }
     schedulingMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedulingStart).count();
@@ -5119,6 +5261,7 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.clear();
     }
+    invalidateAllColumnSlabOccupancy();
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
         pendingColumnHeightPrefetchQueue_ = {};
@@ -5142,6 +5285,14 @@ void ChunkManager::Impl::clear()
     lastMissingChunks_ = 0;
     cachedExactReadyChunks_ = 0;
     cachedExactRequiredChunks_ = 0;
+    lastProtectedMissingChunks_ = 0;
+    lastProtectedReadyChunks_ = 0;
+    lastProtectedRequiredChunks_ = 0;
+    protectedPressureActive_ = false;
+    severeProtectedPressureActive_ = false;
+    movementEnvelopeForwardXZ_ = glm::vec2{0.0f, -1.0f};
+    lastHorizontalMovementShift_ = 0;
+    lastVerticalMovementShift_ = 0;
     lastJobQueuePriorityOrigin_ = glm::ivec3{0};
     lastJobQueuePriorityForwardXZ_ = glm::vec2{0.0f, -1.0f};
     lastJobQueuePriorityRefreshTime_ = SteadyClock::time_point{};
@@ -5941,6 +6092,14 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     lastMissingChunks_ = 0;
     cachedExactReadyChunks_ = 0;
     cachedExactRequiredChunks_ = 0;
+    lastProtectedMissingChunks_ = 0;
+    lastProtectedReadyChunks_ = 0;
+    lastProtectedRequiredChunks_ = 0;
+    protectedPressureActive_ = false;
+    severeProtectedPressureActive_ = false;
+    movementEnvelopeForwardXZ_ = normalizePriorityForwardXZ(lastCameraForward_);
+    lastHorizontalMovementShift_ = 0;
+    lastVerticalMovementShift_ = 0;
     lastJobQueuePriorityOrigin_ = startupState_.spawnChunk;
     lastJobQueuePriorityForwardXZ_ = normalizePriorityForwardXZ(lastCameraForward_);
     lastJobQueuePriorityRefreshTime_ = SteadyClock::time_point{};
@@ -6305,17 +6464,25 @@ void ChunkManager::Impl::startWorkerThreads()
     }
 
     unsigned desired = 1u;
-    if (concurrency >= 12)
+    if (concurrency >= 16)
+    {
+        desired = 6u;
+    }
+    else if (concurrency >= 12)
+    {
+        desired = 5u;
+    }
+    else if (concurrency >= 8)
     {
         desired = 4u;
     }
-    else if (concurrency >= 8)
+    else if (concurrency >= 6)
     {
         desired = 3u;
     }
     else
     {
-        desired = std::max(1u, concurrency > 3 ? concurrency - 3 : 1u);
+        desired = std::max(1u, concurrency > 2 ? concurrency - 2 : 1u);
     }
 
     if (kVerticalStreamingConfig.maxWorkerThreads > 0)
@@ -6333,11 +6500,11 @@ void ChunkManager::Impl::startWorkerThreads()
     }
 
     unsigned prefetchDesired = 1u;
-    if (concurrency >= 12 && desired >= 3u)
+    if (concurrency >= 12 && desired >= 4u)
     {
         prefetchDesired = 2u;
     }
-    if (concurrency >= 16 && desired >= 4u)
+    if (concurrency >= 16 && desired >= 5u)
     {
         prefetchDesired = 3u;
     }
@@ -6390,7 +6557,9 @@ void ChunkManager::Impl::stopWorkerThreads()
     columnHeightPrefetchWorkerCount_ = 0;
 }
 
-bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column, std::uint64_t& token)
+bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
+                                                         std::uint64_t& token,
+                                                         ColumnHeightPrefetchPriority& priority)
 {
     std::unique_lock<std::mutex> lock(columnHeightPrefetchMutex_);
     while (true)
@@ -6429,6 +6598,7 @@ bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column, std
             state.inFlight = true;
             column = request.column;
             token = request.token;
+            priority = request.priority;
             return true;
         }
 
@@ -6452,7 +6622,7 @@ void ChunkManager::Impl::finishColumnHeightPrefetch(const glm::ivec2& column, st
 void ChunkManager::Impl::workerThreadFunction()
 {
 #ifdef _WIN32
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
     while (true)
     {
@@ -7200,15 +7370,17 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
 void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
 {
 #ifdef _WIN32
-    // Column-height prefetch blocks exact chunk coverage decisions, so keep it at normal priority.
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    // This thread now handles both height and occupancy prefetch. Keep it below normal so
+    // speculative far-column work cannot starve the main thread into a non-responsive state.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
 
     while (true)
     {
         glm::ivec2 column{0};
         std::uint64_t token = 0;
-        if (!acquireNextColumnHeightPrefetch(column, token))
+        ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
+        if (!acquireNextColumnHeightPrefetch(column, token, priority))
         {
             return;
         }
@@ -7216,13 +7388,25 @@ void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
         const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
         const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
         int cachedHeight = ColumnManager::kNoHeight;
-        if (tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight))
+        const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
+        ColumnSlabOccupancy occupancy{};
+        const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+        if (haveHeight && haveOccupancy)
         {
             finishColumnHeightPrefetch(column, token);
             continue;
         }
 
-        (void)cacheSampledColumnHeight(column, worldX, worldZ);
+        if (!haveHeight)
+        {
+            (void)cacheSampledColumnHeight(column, worldX, worldZ);
+        }
+        const bool shouldBuildOccupancy =
+            priority >= ColumnHeightPrefetchPriority::Visible;
+        if (shouldBuildOccupancy && !haveOccupancy)
+        {
+            (void)cachedColumnSlabOccupancy(column);
+        }
         finishColumnHeightPrefetch(column, token);
     }
 }
@@ -7603,7 +7787,8 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
 {
     UploadBudgets budgets{};
     budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
-    budgets.chunkLimit = 3;
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
+    budgets.chunkLimit = exactOnly ? 4 : 3;
     budgets.queueSize = estimateUploadQueueSize();
     const std::size_t initialReadyUploads = estimateInitialReadyUploadQueueSize();
     const double previousQueueAgeMs = uploadQueueAgeMsLastFrame_;
@@ -7624,29 +7809,30 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
         if (exactPreload)
         {
             budgets.byteBudget = 16ull * 1024ull * 1024ull;
-            budgets.columnLimit = std::min(budgets.columnLimit + 2, 8);
-            budgets.chunkLimit = 4;
-            budgets.timeBudgetMs = 2.0;
+            budgets.columnLimit = std::min(budgets.columnLimit + 2, 9);
+            budgets.chunkLimit = exactOnly ? 5 : 4;
+            budgets.timeBudgetMs = exactOnly ? 2.75 : 2.0;
         }
         else if (interactiveUploadWindow)
         {
             budgets.byteBudget = 16ull * 1024ull * 1024ull;
-            budgets.columnLimit = std::min(budgets.columnLimit + 1, 7);
-            budgets.chunkLimit = 3;
-            budgets.timeBudgetMs = 1.5;
+            budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 2 : 1), exactOnly ? 8 : 7);
+            budgets.chunkLimit = exactOnly ? 4 : 3;
+            budgets.timeBudgetMs = exactOnly ? 2.25 : 1.5;
         }
         else
         {
             budgets.byteBudget = 20ull * 1024ull * 1024ull;
-            budgets.chunkLimit = 3;
-            budgets.timeBudgetMs = 2.0;
+            budgets.chunkLimit = exactOnly ? 4 : 3;
+            budgets.timeBudgetMs = exactOnly ? 2.5 : 2.0;
         }
     }
     else
     {
         budgets.byteBudget = 20ull * 1024ull * 1024ull;
-        budgets.chunkLimit = 3;
-        budgets.timeBudgetMs = 2.0;
+        budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 1 : 0), exactOnly ? 8 : budgets.columnLimit);
+        budgets.chunkLimit = exactOnly ? 4 : 3;
+        budgets.timeBudgetMs = exactOnly ? 2.5 : 2.0;
     }
 
     if (uploadDebtSteps > 0)
@@ -7679,9 +7865,10 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     {
         const int urgencySteps = std::min<int>(static_cast<int>(initialReadyUploads), 2);
         budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(urgencySteps);
-        budgets.chunkLimit = std::min(budgets.chunkLimit + urgencySteps, 6);
-        budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
-        budgets.timeBudgetMs = std::min(3.0, budgets.timeBudgetMs + 0.35 * static_cast<double>(urgencySteps));
+        budgets.chunkLimit = std::min(budgets.chunkLimit + urgencySteps, exactOnly ? 7 : 6);
+        budgets.columnLimit = std::min(budgets.columnLimit + 1, exactOnly ? 11 : 10);
+        budgets.timeBudgetMs =
+            std::min(exactOnly ? 3.5 : 3.0, budgets.timeBudgetMs + 0.35 * static_cast<double>(urgencySteps));
     }
 
     const int queueAgePressureSteps = computeBacklogSteps(
@@ -7700,9 +7887,13 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     latencyPressureSteps = std::min(latencyPressureSteps, latencyPressureCap);
     if (latencyPressureSteps > 0)
     {
-        const int maxChunkLimit = exactPreload ? 10 : (interactiveUploadWindow ? 8 : 7);
-        const int maxColumnLimit = exactPreload ? 12 : 10;
-        const double maxTimeBudgetMs = exactPreload ? 5.0 : (interactiveUploadWindow ? 4.5 : 4.0);
+        const int maxChunkLimit = exactPreload ? (exactOnly ? 11 : 10)
+                                               : (interactiveUploadWindow ? (exactOnly ? 9 : 8)
+                                                                          : (exactOnly ? 8 : 7));
+        const int maxColumnLimit = exactPreload ? (exactOnly ? 13 : 12) : (exactOnly ? 11 : 10);
+        const double maxTimeBudgetMs = exactPreload ? (exactOnly ? 5.5 : 5.0)
+                                                    : (interactiveUploadWindow ? (exactOnly ? 5.0 : 4.5)
+                                                                               : (exactOnly ? 4.5 : 4.0));
 
         budgets.byteBudget += 8ull * 1024ull * 1024ull * static_cast<std::size_t>(latencyPressureSteps);
         budgets.chunkLimit = std::min(maxChunkLimit, budgets.chunkLimit + latencyPressureSteps);
@@ -7710,6 +7901,22 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
             std::min(maxColumnLimit, budgets.columnLimit + (latencyPressureSteps + 1) / 2);
         budgets.timeBudgetMs =
             std::min(maxTimeBudgetMs, budgets.timeBudgetMs + 0.50 * static_cast<double>(latencyPressureSteps));
+    }
+
+    if (protectedPressureActive_)
+    {
+        budgets.byteBudget += 8ull * 1024ull * 1024ull;
+        budgets.columnLimit = std::min(budgets.columnLimit + 2, exactOnly ? 13 : 11);
+        budgets.chunkLimit = std::max(budgets.chunkLimit, exactOnly ? 6 : 5);
+        budgets.timeBudgetMs = std::max(budgets.timeBudgetMs, exactOnly ? 3.5 : 3.0);
+    }
+
+    if (severeProtectedPressureActive_)
+    {
+        budgets.byteBudget += 8ull * 1024ull * 1024ull;
+        budgets.columnLimit = std::min(budgets.columnLimit + 2, exactOnly ? 14 : 12);
+        budgets.chunkLimit = std::max(budgets.chunkLimit, exactOnly ? 8 : 6);
+        budgets.timeBudgetMs = std::max(budgets.timeBudgetMs, exactOnly ? 4.5 : 3.5);
     }
 
     return budgets;
@@ -7841,12 +8048,18 @@ ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCov
             const int chunkX = center.x + dx;
             const int chunkZ = center.z + dz;
             const glm::ivec2 column{chunkX, chunkZ};
+            const bool protectedColumn =
+                movementEnvelopeBucketForColumn(column, center, horizontalRadius) != MovementEnvelopeBucket::Background;
             const int worldX = chunkX * kChunkSizeX + kChunkSizeX / 2;
             const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
 
             int columnHeight = ColumnManager::kNoHeight;
             (void)tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
 
+            ColumnSlabOccupancy occupancy{};
+            const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+            const ColumnChunkIntervals playerBand =
+                playerBandIntervalsForColumn(column, cameraColumn, cameraChunkY, verticalRadius);
             const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                             cameraColumn,
                                                                             cameraChunkY,
@@ -7858,10 +8071,31 @@ ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCov
                 for (int chunkY = interval.minChunkY; chunkY <= interval.maxChunkY; ++chunkY)
                 {
                     ++coverage.required;
+                    if (protectedColumn)
+                    {
+                        ++coverage.protectedRequired;
+                    }
+                    const bool withinPlayerBand = chunkYWithinIntervals(chunkY, playerBand);
+                    if (haveOccupancy &&
+                        !withinPlayerBand &&
+                        classifyColumnSlab(occupancy, chunkY) == ColumnSlabOccupancyState::DefinitelyEmpty)
+                    {
+                        ++coverage.ready;
+                        if (protectedColumn)
+                        {
+                            ++coverage.protectedReady;
+                        }
+                        continue;
+                    }
+
                     const auto stateIt = chunkStates.find(glm::ivec3{chunkX, chunkY, chunkZ});
                     if (stateIt == chunkStates.end())
                     {
                         ++coverage.missing;
+                        if (protectedColumn)
+                        {
+                            ++coverage.protectedMissing;
+                        }
                         continue;
                     }
 
@@ -7869,6 +8103,10 @@ ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCov
                     if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
                     {
                         ++coverage.ready;
+                        if (protectedColumn)
+                        {
+                            ++coverage.protectedReady;
+                        }
                     }
                 }
             }
@@ -8115,7 +8353,9 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
         float score{0.0f};
     };
 
-    const int requestBudget = horizontalDominant ? 64 : 32;
+    const int requestBudget = horizontalDominant
+        ? (severeProtectedPressureActive_ ? 112 : (protectedPressureActive_ ? 96 : 80))
+        : 40;
     std::vector<PrefetchCandidate> candidates;
     candidates.reserve(96u);
     std::unordered_set<glm::ivec2, ColumnHasher> queuedColumns;
@@ -8137,7 +8377,11 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
         const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
         const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
         int cachedHeight = ColumnManager::kNoHeight;
-        if (tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight))
+        const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
+        const bool needsOccupancy = priority >= ColumnHeightPrefetchPriority::Visible;
+        ColumnSlabOccupancy occupancy{};
+        const bool haveOccupancy = !needsOccupancy || tryGetCachedColumnSlabOccupancy(column, occupancy);
+        if (haveHeight && haveOccupancy)
         {
             return;
         }
@@ -8628,6 +8872,32 @@ int ChunkManager::Impl::surfaceShellFloorChunkForHeight(const glm::ivec2& column
     return std::max(0, baseChunk - kExactSurfaceShellBelowSlackChunks);
 }
 
+bool ChunkManager::Impl::columnUsesPlayerBand(const glm::ivec2& column,
+                                              const glm::ivec2& cameraColumn) const noexcept
+{
+    const int horizontalDistance = std::max(std::abs(column.x - cameraColumn.x),
+                                            std::abs(column.y - cameraColumn.y));
+    return horizontalDistance <= kExactPlayerBandHorizontalRadius;
+}
+
+ColumnChunkIntervals ChunkManager::Impl::playerBandIntervalsForColumn(const glm::ivec2& column,
+                                                                      const glm::ivec2& cameraColumn,
+                                                                      int cameraChunkY,
+                                                                      int verticalRadius) const
+{
+    ColumnChunkIntervals intervals{};
+    if (!columnUsesPlayerBand(column, cameraColumn))
+    {
+        return intervals;
+    }
+
+    const int cameraBandRadius = cameraBandRadiusForColumn(column, cameraColumn, verticalRadius);
+    addColumnChunkInterval(intervals,
+                           std::max(0, cameraChunkY - cameraBandRadius),
+                           std::max(0, cameraChunkY + cameraBandRadius));
+    return intervals;
+}
+
 std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
                                                        const glm::ivec2& cameraColumn,
                                                        int cameraChunkY,
@@ -8656,8 +8926,8 @@ void ChunkManager::Impl::addColumnChunkInterval(ColumnChunkIntervals& intervals,
     maxChunkY = std::max(minChunkY, maxChunkY);
 
     ChunkYInterval pending{minChunkY, maxChunkY};
-    std::array<ChunkYInterval, 2> merged{};
-    std::uint8_t mergedCount = 0;
+    std::array<ChunkYInterval, ColumnChunkIntervals::kMaxIntervals + 1> merged{};
+    std::size_t mergedCount = 0;
     bool inserted = false;
 
     for (std::uint8_t i = 0; i < intervals.count; ++i)
@@ -8689,8 +8959,30 @@ void ChunkManager::Impl::addColumnChunkInterval(ColumnChunkIntervals& intervals,
         merged[mergedCount++] = pending;
     }
 
-    intervals.intervals = merged;
-    intervals.count = mergedCount;
+    if (mergedCount > ColumnChunkIntervals::kMaxIntervals)
+    {
+        intervals.intervals.fill(ChunkYInterval{});
+        intervals.intervals[0] = ChunkYInterval{merged.front().minChunkY,
+                                                merged[mergedCount - 1].maxChunkY};
+        intervals.count = 1;
+        return;
+    }
+
+    intervals.intervals.fill(ChunkYInterval{});
+    for (std::size_t i = 0; i < mergedCount; ++i)
+    {
+        intervals.intervals[i] = merged[i];
+    }
+    intervals.count = static_cast<std::uint8_t>(mergedCount);
+}
+
+void ChunkManager::Impl::mergeColumnChunkIntervals(ColumnChunkIntervals& dst,
+                                                   const ColumnChunkIntervals& src) noexcept
+{
+    for (std::uint8_t i = 0; i < src.count; ++i)
+    {
+        addColumnChunkInterval(dst, src.intervals[i].minChunkY, src.intervals[i].maxChunkY);
+    }
 }
 
 bool ChunkManager::Impl::chunkYWithinIntervals(int chunkY,
@@ -8740,6 +9032,360 @@ int ChunkManager::Impl::chunkYDistanceToIntervals(int chunkY,
     return bestDistance;
 }
 
+int ChunkManager::Impl::adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
+                                                  float neighborAverage) const noexcept
+{
+    const BiomeDefinition* biome = surfaceColumn.dominantBiome;
+    int adjustedSurfaceY = surfaceColumn.surfaceY;
+    if (biome == nullptr)
+    {
+        return adjustedSurfaceY;
+    }
+
+    const auto& soilCreep = biome->terrainSettings.soilCreep;
+    if (soilCreep.strength <= 0.0f || surfaceColumn.soilCreepCoefficient <= 0.0f)
+    {
+        return adjustedSurfaceY;
+    }
+
+    const float strength = std::clamp(surfaceColumn.soilCreepCoefficient * soilCreep.strength, 0.0f, 1.0f);
+    float offset = (neighborAverage - static_cast<float>(adjustedSurfaceY)) * strength;
+    if (soilCreep.maxStep > 0)
+    {
+        const float maxStep = static_cast<float>(soilCreep.maxStep);
+        offset = std::clamp(offset, -maxStep, maxStep);
+    }
+    if (soilCreep.maxDepth > 0)
+    {
+        const float maxDepth = static_cast<float>(soilCreep.maxDepth);
+        offset = std::clamp(offset, -maxDepth, maxDepth);
+    }
+
+    return static_cast<int>(std::round(static_cast<float>(adjustedSurfaceY) + offset));
+}
+
+ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccupancy(const glm::ivec2& column) const
+{
+    ColumnSlabOccupancy occupancy{};
+
+    const int baseWorldX = column.x * kChunkSizeX;
+    const int baseWorldZ = column.y * kChunkSizeZ;
+    constexpr int kSampleExtentX = kChunkSizeX + 2;
+    constexpr int kSampleExtentZ = kChunkSizeZ + 2;
+
+    std::array<terrain::SurfaceColumn, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)> surfaceColumns{};
+    auto sampleIndex = [](int sampleX, int sampleZ) noexcept {
+        return static_cast<std::size_t>(sampleZ * kSampleExtentX + sampleX);
+    };
+
+    if (surfaceMap_)
+    {
+        for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
+        {
+            for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
+            {
+                surfaceColumns[sampleIndex(sampleX + 1, sampleZ + 1)] =
+                    surfaceMap_->columnValue(baseWorldX + sampleX, baseWorldZ + sampleZ);
+            }
+        }
+
+        auto computeNeighborAverage = [&](int localX, int localZ) noexcept {
+            float sum = 0.0f;
+            int count = 0;
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                for (int dz = -1; dz <= 1; ++dz)
+                {
+                    if (dx == 0 && dz == 0)
+                    {
+                        continue;
+                    }
+                    sum += static_cast<float>(
+                        surfaceColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surfaceY);
+                    ++count;
+                }
+            }
+            return count > 0 ? sum / static_cast<float>(count) : 0.0f;
+        };
+
+        int highestTerrainWorld = std::numeric_limits<int>::min();
+        int minWaterBottomWorld = std::numeric_limits<int>::max();
+        int maxWaterTopWorld = std::numeric_limits<int>::min();
+
+        for (int localX = 0; localX < kChunkSizeX; ++localX)
+        {
+            for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+            {
+                const terrain::SurfaceColumn& surfaceColumn = surfaceColumns[sampleIndex(localX + 1, localZ + 1)];
+                const BiomeDefinition* biome = surfaceColumn.dominantBiome;
+                if (biome == nullptr)
+                {
+                    continue;
+                }
+
+                const int adjustedSurfaceY =
+                    adjustedSurfaceYForColumn(surfaceColumn, computeNeighborAverage(localX, localZ));
+                highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
+
+                const auto& waterFill = biome->terrainSettings.waterFill;
+                if (!waterFill.enabled || adjustedSurfaceY >= globalSeaLevel_)
+                {
+                    continue;
+                }
+
+                int waterBottomWorld = adjustedSurfaceY + 1;
+                int waterTopWorld = globalSeaLevel_;
+                if (waterFill.maxDepth > 0)
+                {
+                    waterBottomWorld = std::max(waterBottomWorld, waterTopWorld - waterFill.maxDepth + 1);
+                }
+                minWaterBottomWorld = std::min(minWaterBottomWorld, waterBottomWorld);
+                maxWaterTopWorld = std::max(maxWaterTopWorld, waterTopWorld);
+            }
+        }
+
+        if (highestTerrainWorld >= 0)
+        {
+            addColumnChunkInterval(occupancy.terrainIntervals, 0, floorDiv(highestTerrainWorld, kChunkSizeY));
+        }
+        if (maxWaterTopWorld >= 0 && minWaterBottomWorld <= maxWaterTopWorld)
+        {
+            addColumnChunkInterval(occupancy.waterIntervals,
+                                   floorDiv(std::max(0, minWaterBottomWorld), kChunkSizeY),
+                                   floorDiv(std::max(0, maxWaterTopWorld), kChunkSizeY));
+        }
+    }
+
+    const glm::ivec3 structureQueryMin(baseWorldX, 0, baseWorldZ);
+    const glm::ivec3 structureQueryMax(baseWorldX + kChunkSizeX - 1,
+                                       std::numeric_limits<int>::max() / 4,
+                                       baseWorldZ + kChunkSizeZ - 1);
+    const std::vector<StructureInstance> structures = queryStructureInstances(structureQueryMin, structureQueryMax, 0);
+    for (const StructureInstance& instance : structures)
+    {
+        addColumnChunkInterval(occupancy.structureIntervals,
+                               floorDiv(std::max(0, instance.bounds.min.y), kChunkSizeY),
+                               floorDiv(std::max(0, instance.bounds.max.y), kChunkSizeY));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pendingStructureMutex_);
+        for (const auto& [coord, edits] : pendingStructureEdits_)
+        {
+            if (coord.x != column.x || coord.z != column.y)
+            {
+                continue;
+            }
+
+            const bool hasSolidEdit = std::any_of(edits.begin(),
+                                                  edits.end(),
+                                                  [](const PendingStructureEdit& edit) {
+                                                      return edit.block != BlockId::Air;
+                                                  });
+            if (hasSolidEdit)
+            {
+                addColumnChunkInterval(occupancy.editIntervals, coord.y, coord.y);
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+        for (const auto& [coord, overlays] : blockEditOverlays_)
+        {
+            if (coord.x != column.x || coord.z != column.y)
+            {
+                continue;
+            }
+
+            const bool hasSolidOverlay = std::any_of(overlays.begin(),
+                                                     overlays.end(),
+                                                     [](const BlockEditOverlayEntry& overlay) {
+                                                         return overlay.block != BlockId::Air;
+                                                     });
+            if (hasSolidOverlay)
+            {
+                addColumnChunkInterval(occupancy.editIntervals, coord.y, coord.y);
+            }
+        }
+    }
+
+    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.terrainIntervals);
+    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.waterIntervals);
+    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.structureIntervals);
+    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.editIntervals);
+    return occupancy;
+}
+
+ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::cachedColumnSlabOccupancy(const glm::ivec2& column) const
+{
+    {
+        std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+        auto it = columnSlabOccupancyCache_.find(column);
+        if (it != columnSlabOccupancyCache_.end())
+        {
+            return it->second;
+        }
+    }
+
+    ColumnSlabOccupancy built = buildColumnSlabOccupancy(column);
+    {
+        std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+        auto [it, inserted] = columnSlabOccupancyCache_.emplace(column, built);
+        if (!inserted)
+        {
+            return it->second;
+        }
+    }
+    return built;
+}
+
+bool ChunkManager::Impl::tryGetCachedColumnSlabOccupancy(const glm::ivec2& column,
+                                                         ColumnSlabOccupancy& out) const
+{
+    std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+    auto it = columnSlabOccupancyCache_.find(column);
+    if (it == columnSlabOccupancyCache_.end())
+    {
+        return false;
+    }
+
+    out = it->second;
+    return true;
+}
+
+ChunkManager::Impl::ColumnSlabOccupancyState
+ChunkManager::Impl::classifyColumnSlab(const ColumnSlabOccupancy& occupancy, int chunkY) noexcept
+{
+    if (chunkYWithinIntervals(chunkY, occupancy.occupiedIntervals))
+    {
+        return ColumnSlabOccupancyState::DefinitelyOccupied;
+    }
+    if (chunkYWithinIntervals(chunkY, occupancy.maybeIntervals))
+    {
+        return ColumnSlabOccupancyState::MaybeOccupied;
+    }
+    return ColumnSlabOccupancyState::DefinitelyEmpty;
+}
+
+void ChunkManager::Impl::invalidateColumnSlabOccupancy(const glm::ivec2& column) const
+{
+    std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+    columnSlabOccupancyCache_.erase(column);
+}
+
+void ChunkManager::Impl::invalidateAllColumnSlabOccupancy() const
+{
+    std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+    columnSlabOccupancyCache_.clear();
+}
+
+void ChunkManager::Impl::updateMovementEnvelopeState(const glm::ivec3& center,
+                                                     const glm::ivec3& previousCenter) noexcept
+{
+    const bool havePreviousCenter = updateFrameIndex_ > 1;
+    const glm::ivec2 movementDelta = havePreviousCenter
+        ? glm::ivec2{center.x - previousCenter.x, center.z - previousCenter.z}
+        : glm::ivec2{0, 0};
+    lastHorizontalMovementShift_ = std::max(std::abs(movementDelta.x), std::abs(movementDelta.y));
+    lastVerticalMovementShift_ = havePreviousCenter ? std::abs(center.y - previousCenter.y) : 0;
+
+    glm::vec2 desiredForward = normalizePriorityForwardXZ(lastCameraForward_);
+    if (glm::dot(desiredForward, desiredForward) <= kEpsilon)
+    {
+        desiredForward = movementEnvelopeForwardXZ_;
+    }
+
+    glm::vec2 blendedForward = desiredForward;
+    const glm::vec2 movementVector(static_cast<float>(movementDelta.x), static_cast<float>(movementDelta.y));
+    if (glm::dot(movementVector, movementVector) > kEpsilon)
+    {
+        const glm::vec2 movementForward = glm::normalize(movementVector);
+        const float movementWeight = lastHorizontalMovementShift_ >= 2 ? 0.80f : 0.65f;
+        const float facingWeight = 1.0f - movementWeight;
+        blendedForward = movementForward * movementWeight + desiredForward * facingWeight;
+    }
+    else if (glm::dot(movementEnvelopeForwardXZ_, movementEnvelopeForwardXZ_) > kEpsilon)
+    {
+        blendedForward = movementEnvelopeForwardXZ_ * 0.65f + desiredForward * 0.35f;
+    }
+
+    if (glm::dot(blendedForward, blendedForward) > kEpsilon)
+    {
+        movementEnvelopeForwardXZ_ = glm::normalize(blendedForward);
+    }
+    else
+    {
+        movementEnvelopeForwardXZ_ = glm::vec2{0.0f, -1.0f};
+    }
+}
+
+ChunkManager::Impl::MovementEnvelopeBucket ChunkManager::Impl::movementEnvelopeBucketForColumn(
+    const glm::ivec2& column,
+    const glm::ivec3& center,
+    int horizontalRadius,
+    int lookaheadChunks) const noexcept
+{
+    const int dx = column.x - center.x;
+    const int dz = column.y - center.z;
+    const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
+    if (horizontalDistance == 0)
+    {
+        return MovementEnvelopeBucket::Core;
+    }
+
+    const int safeHorizontalRadius = std::max(horizontalRadius, 1);
+    const int coreRadius = std::clamp(safeHorizontalRadius / 8,
+                                      kMovementEnvelopeCoreRadiusMin,
+                                      kMovementEnvelopeCoreRadiusMax);
+    if (horizontalDistance <= coreRadius)
+    {
+        return MovementEnvelopeBucket::Core;
+    }
+
+    glm::vec2 forward = movementEnvelopeForwardXZ_;
+    if (glm::dot(forward, forward) <= kEpsilon)
+    {
+        forward = normalizePriorityForwardXZ(lastCameraForward_);
+    }
+    if (glm::dot(forward, forward) <= kEpsilon)
+    {
+        forward = glm::vec2{0.0f, -1.0f};
+    }
+
+    const glm::vec2 side{-forward.y, forward.x};
+    const glm::vec2 delta(static_cast<float>(dx), static_cast<float>(dz));
+    const float forwardDistance = glm::dot(delta, forward) + static_cast<float>(lookaheadChunks);
+    const float sideDistance = std::abs(glm::dot(delta, side));
+    const int corridorHalfWidth =
+        std::clamp(kMovementEnvelopeCorridorHalfWidthMin +
+                       static_cast<int>(std::max(forwardDistance, 0.0f)) / kMovementEnvelopeCorridorWidthStep,
+                   kMovementEnvelopeCorridorHalfWidthMin,
+                   kMovementEnvelopeCorridorHalfWidthMax);
+    const int corridorForwardReach = safeHorizontalRadius + std::clamp(safeHorizontalRadius / 4, 4, 12);
+    if (forwardDistance >= -1.0f &&
+        forwardDistance <= static_cast<float>(corridorForwardReach) &&
+        sideDistance <= static_cast<float>(corridorHalfWidth))
+    {
+        return MovementEnvelopeBucket::Corridor;
+    }
+
+    const int turnReserveRadius = std::clamp(safeHorizontalRadius / 3,
+                                             kMovementEnvelopeTurnReserveRadiusMin,
+                                             kMovementEnvelopeTurnReserveRadiusMax);
+    const int turnReserveHalfWidth = std::clamp(safeHorizontalRadius / 4,
+                                                kMovementEnvelopeTurnReserveHalfWidthMin,
+                                                kMovementEnvelopeTurnReserveHalfWidthMax);
+    if (horizontalDistance <= turnReserveRadius &&
+        forwardDistance >= -static_cast<float>(kMovementEnvelopeRearSlackChunks) &&
+        sideDistance <= static_cast<float>(turnReserveHalfWidth))
+    {
+        return MovementEnvelopeBucket::TurnReserve;
+    }
+
+    return MovementEnvelopeBucket::Background;
+}
+
 ColumnChunkIntervals ChunkManager::Impl::columnIntervalsFor(const glm::ivec2& column,
                                                             const glm::ivec2& cameraColumn,
                                                             int cameraChunkY,
@@ -8762,11 +9408,16 @@ ColumnChunkIntervals ChunkManager::Impl::columnIntervalsForHeight(const glm::ive
                                                                   int columnHeight) const
 {
     ColumnChunkIntervals intervals{};
+    mergeColumnChunkIntervals(intervals,
+                              playerBandIntervalsForColumn(column, cameraColumn, cameraChunkY, verticalRadius));
 
-    const int cameraBandRadius = cameraBandRadiusForColumn(column, cameraColumn, verticalRadius);
-    addColumnChunkInterval(intervals,
-                           std::max(0, cameraChunkY - cameraBandRadius),
-                           std::max(0, cameraChunkY + cameraBandRadius));
+    ColumnSlabOccupancy occupancy{};
+    if (tryGetCachedColumnSlabOccupancy(column, occupancy))
+    {
+        mergeColumnChunkIntervals(intervals, occupancy.occupiedIntervals);
+        mergeColumnChunkIntervals(intervals, occupancy.maybeIntervals);
+        return intervals;
+    }
 
     if (columnHeight != ColumnManager::kNoHeight)
     {
@@ -8794,16 +9445,29 @@ std::pair<int, int> ChunkManager::Impl::columnSpanForHeight(const glm::ivec2& co
 ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ivec3& center,
                                                                   int horizontalRadius,
                                                                   int verticalRadius,
-                                                                  int& jobBudget)
+                                                                  int& jobBudget,
+                                                                  SchedulingBand band)
 {
     bool missingFound = false;
 
     const glm::ivec2 cameraColumn{center.x, center.z};
+    glm::vec2 forward = movementEnvelopeForwardXZ_;
+    if (glm::dot(forward, forward) <= kEpsilon)
+    {
+        forward = normalizePriorityForwardXZ(lastCameraForward_);
+    }
+    if (glm::dot(forward, forward) <= kEpsilon)
+    {
+        forward = glm::vec2{0.0f, -1.0f};
+    }
+    const glm::vec2 side{-forward.y, forward.x};
 
     struct Candidate
     {
         glm::ivec3 coord;
+        int bucketRank{0};
         float priority{0.0f};
+        bool forceResident{false};
     };
 
     std::vector<Candidate> candidates;
@@ -8817,8 +9481,19 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
                                   maxJobsPerColumn < std::numeric_limits<int>::max();
 
     auto enqueueColumn = [&](int chunkX, int chunkZ) {
-        glm::ivec2 column{chunkX, chunkZ};
+        const glm::ivec2 column{chunkX, chunkZ};
         if (!visitedColumns.insert(column).second)
+        {
+            return;
+        }
+
+        const MovementEnvelopeBucket bucket = movementEnvelopeBucketForColumn(column, center, horizontalRadius);
+        const bool protectedColumn = bucket != MovementEnvelopeBucket::Background;
+        if (band == SchedulingBand::Protected && !protectedColumn)
+        {
+            return;
+        }
+        if (band == SchedulingBand::Background && protectedColumn)
         {
             return;
         }
@@ -8828,8 +9503,21 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         int columnHeight = ColumnManager::kNoHeight;
         if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
         {
-            requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Visible);
+            requestColumnHeightPrefetch(column,
+                                        protectedColumn ? ColumnHeightPrefetchPriority::Visible
+                                                        : ColumnHeightPrefetchPriority::Normal);
         }
+        ColumnSlabOccupancy occupancy{};
+        const bool shouldPrefetchOccupancy = !columnUsesPlayerBand(column, cameraColumn);
+        if (shouldPrefetchOccupancy)
+        {
+            requestColumnHeightPrefetch(column,
+                                        protectedColumn ? ColumnHeightPrefetchPriority::Visible
+                                                        : ColumnHeightPrefetchPriority::Normal);
+        }
+        const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+        const ColumnChunkIntervals playerBand =
+            playerBandIntervalsForColumn(column, cameraColumn, center.y, verticalRadius);
         const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                         cameraColumn,
                                                                         center.y,
@@ -8840,13 +9528,43 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
             const ChunkYInterval interval = intervals.intervals[intervalIndex];
             for (int chunkY = interval.minChunkY; chunkY <= interval.maxChunkY; ++chunkY)
             {
+                const bool forceResident = chunkYWithinIntervals(chunkY, playerBand);
+                if (haveOccupancy &&
+                    !forceResident &&
+                    classifyColumnSlab(occupancy, chunkY) == ColumnSlabOccupancyState::DefinitelyEmpty)
+                {
+                    continue;
+                }
+
                 const glm::ivec3 coord{chunkX, chunkY, chunkZ};
                 const int dx = coord.x - center.x;
                 const int dy = coord.y - center.y;
                 const int dz = coord.z - center.z;
+                const glm::vec2 delta(static_cast<float>(dx), static_cast<float>(dz));
                 const float horizontal = std::sqrt(static_cast<float>(dx * dx + dz * dz));
-                const float priority = horizontal + 0.5f * static_cast<float>(std::abs(dy));
-                candidates.push_back(Candidate{coord, priority});
+                const float forwardDistance = glm::dot(delta, forward);
+                const float sideDistance = std::abs(glm::dot(delta, side));
+                float priority = horizontal + 0.45f * static_cast<float>(std::abs(dy));
+                if (bucket == MovementEnvelopeBucket::Core)
+                {
+                    priority += 0.10f * sideDistance;
+                }
+                else if (bucket == MovementEnvelopeBucket::Corridor)
+                {
+                    priority += 0.15f * sideDistance - 0.18f * std::max(forwardDistance, 0.0f);
+                }
+                else if (bucket == MovementEnvelopeBucket::TurnReserve)
+                {
+                    priority += 0.20f * sideDistance + 0.10f * std::max(-forwardDistance, 0.0f);
+                }
+                else
+                {
+                    priority += 0.10f * std::max(-forwardDistance, 0.0f);
+                }
+                candidates.push_back(Candidate{coord,
+                                               static_cast<int>(bucket),
+                                               priority,
+                                               forceResident});
             }
         }
     };
@@ -8870,6 +9588,10 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
     }
 
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
+        if (lhs.bucketRank != rhs.bucketRank)
+        {
+            return lhs.bucketRank < rhs.bucketRank;
+        }
         if (lhs.priority == rhs.priority)
         {
             if (lhs.coord.y == rhs.coord.y)
@@ -8907,7 +9629,7 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
             continue;
         }
 
-        if (ensureChunkAsync(candidate.coord))
+        if (ensureChunkAsync(candidate.coord, candidate.forceResident))
         {
             --jobBudget;
             ++columnJobs;
@@ -9086,11 +9808,21 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
     }
 }
 
-bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord)
+bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord, bool forceResident)
 {
     if (coord.y < 0)
     {
         return false;
+    }
+
+    if (!forceResident)
+    {
+        ColumnSlabOccupancy occupancy{};
+        if (tryGetCachedColumnSlabOccupancy({coord.x, coord.z}, occupancy) &&
+            classifyColumnSlab(occupancy, coord.y) == ColumnSlabOccupancyState::DefinitelyEmpty)
+        {
+            return false;
+        }
     }
 
     try
@@ -12628,12 +13360,18 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
 std::vector<PendingStructureEdit> ChunkManager::Impl::takePendingStructureEdits(const glm::ivec3& coord)
 {
     std::vector<PendingStructureEdit> edits;
-    std::lock_guard<std::mutex> lock(pendingStructureMutex_);
-    auto it = pendingStructureEdits_.find(coord);
-    if (it != pendingStructureEdits_.end())
     {
-        edits = std::move(it->second);
-        pendingStructureEdits_.erase(it);
+        std::lock_guard<std::mutex> lock(pendingStructureMutex_);
+        auto it = pendingStructureEdits_.find(coord);
+        if (it != pendingStructureEdits_.end())
+        {
+            edits = std::move(it->second);
+            pendingStructureEdits_.erase(it);
+        }
+    }
+    if (!edits.empty())
+    {
+        invalidateColumnSlabOccupancy({coord.x, coord.z});
     }
     return edits;
 }
@@ -12667,21 +13405,24 @@ void ChunkManager::Impl::recordBlockEditOverlay(const glm::ivec3& worldPos, Bloc
     }
 
     const std::uint16_t localIndex = blockOverlayLocalIndex(local.x, local.y, local.z);
-    std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
-    auto& overlays = blockEditOverlays_[chunkCoord];
-    auto it = std::find_if(overlays.begin(),
-                           overlays.end(),
-                           [localIndex](const BlockEditOverlayEntry& entry) {
-                               return entry.localIndex == localIndex;
-                           });
-    if (it != overlays.end())
     {
-        it->block = block;
+        std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+        auto& overlays = blockEditOverlays_[chunkCoord];
+        auto it = std::find_if(overlays.begin(),
+                               overlays.end(),
+                               [localIndex](const BlockEditOverlayEntry& entry) {
+                                   return entry.localIndex == localIndex;
+                               });
+        if (it != overlays.end())
+        {
+            it->block = block;
+        }
+        else
+        {
+            overlays.push_back(BlockEditOverlayEntry{localIndex, block});
+        }
     }
-    else
-    {
-        overlays.push_back(BlockEditOverlayEntry{localIndex, block});
-    }
+    invalidateColumnSlabOccupancy({chunkCoord.x, chunkCoord.z});
 }
 
 bool ChunkManager::Impl::tryGetBlockEditOverlay(const glm::ivec3& worldPos, BlockId& outBlock) const
@@ -13123,6 +13864,11 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
             pendingStructureEdits_[edit.chunkCoord].push_back(edit);
             touchedChunks.insert(edit.chunkCoord);
         }
+    }
+
+    for (const glm::ivec3& coord : touchedChunks)
+    {
+        invalidateColumnSlabOccupancy({coord.x, coord.z});
     }
 
     for (const glm::ivec3& coord : touchedChunks)

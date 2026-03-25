@@ -164,6 +164,33 @@ struct StructureRegionKeyHasher
     }
 };
 
+struct StructureChunkColumnHasher
+{
+    std::size_t operator()(const glm::ivec2& value) const noexcept
+    {
+        std::size_t h1 = std::hash<int>{}(value.x);
+        std::size_t h2 = std::hash<int>{}(value.y);
+        return h1 ^ (h2 + 0x9E3779B97f4A7C15ull + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+struct StructureChunkColumnSpan
+{
+    int minChunkY{std::numeric_limits<int>::max()};
+    int maxChunkY{std::numeric_limits<int>::min()};
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return minChunkY <= maxChunkY;
+    }
+
+    void include(int minY, int maxY) noexcept
+    {
+        minChunkY = std::min(minChunkY, minY);
+        maxChunkY = std::max(maxChunkY, maxY);
+    }
+};
+
 struct StructureBvhNode
 {
     StructureAabb bounds{};
@@ -315,6 +342,7 @@ struct StructureRegion
     glm::ivec2 worldMax{0};
     std::vector<StructureInstance> instances;
     StructureBvh bvh{};
+    std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher> chunkColumnSpans{};
 };
 
 using StructureSampleColumnFn = std::function<ColumnSample(int worldX, int worldZ)>;
@@ -580,6 +608,25 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
         }
     }
 
+    region.chunkColumnSpans.reserve(region.instances.size() * 4u);
+    for (const StructureInstance& instance : region.instances)
+    {
+        const int minChunkX = floorDiv(instance.bounds.min.x, kChunkSizeX);
+        const int maxChunkX = floorDiv(instance.bounds.max.x, kChunkSizeX);
+        const int minChunkZ = floorDiv(instance.bounds.min.z, kChunkSizeZ);
+        const int maxChunkZ = floorDiv(instance.bounds.max.z, kChunkSizeZ);
+        const int minChunkY = floorDiv(std::max(0, instance.bounds.min.y), kChunkSizeY);
+        const int maxChunkY = floorDiv(std::max(0, instance.bounds.max.y), kChunkSizeY);
+
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX)
+        {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; ++chunkZ)
+            {
+                region.chunkColumnSpans[glm::ivec2{chunkX, chunkZ}].include(minChunkY, maxChunkY);
+            }
+        }
+    }
+
     region.bvh.build(region.instances);
     return region;
 }
@@ -734,6 +781,50 @@ public:
             return {};
         }
         return region->instances;
+    }
+
+    [[nodiscard]] StructureChunkColumnSpan queryChunkColumnSpan(const glm::ivec2& chunkColumn) const
+    {
+        const SteadyClock::time_point queryStart = SteadyClock::now();
+        StructureChunkColumnSpan merged{};
+        const int minWorldX = chunkColumn.x * kChunkSizeX;
+        const int maxWorldX = minWorldX + kChunkSizeX - 1;
+        const int minWorldZ = chunkColumn.y * kChunkSizeZ;
+        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                const std::shared_ptr<const StructureRegion> region =
+                    getOrBuildRegion(StructureRegionKey{regionX, regionZ});
+                if (!region)
+                {
+                    continue;
+                }
+
+                const auto it = region->chunkColumnSpans.find(chunkColumn);
+                if (it != region->chunkColumnSpans.end() && it->second.valid())
+                {
+                    merged.include(it->second.minChunkY, it->second.maxChunkY);
+                }
+            }
+        }
+
+        if (profilingEnabled_.load(std::memory_order_acquire))
+        {
+            queryCount_.fetch_add(1, std::memory_order_relaxed);
+            const auto elapsedMicros =
+                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+            totalQueryMicros_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedMicros, 0)),
+                                        std::memory_order_relaxed);
+        }
+
+        return merged;
     }
 
 private:

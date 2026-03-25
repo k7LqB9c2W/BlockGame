@@ -59,13 +59,13 @@ std::atomic<int> gActiveVerticalRadius{kVerticalStreamingConfig.minRadiusChunks}
 constexpr glm::ivec3 kRelightNeighborPadding(1, 1, 1);
 constexpr glm::ivec3 kRelightReservationPadding(1, 1, 1);
 constexpr std::size_t kRelightMaxPendingDirtyCoordsPerRegion = 12;
-constexpr std::uint64_t kRelightBaseBudgetUnits = 1'500'000ull;
-constexpr std::uint64_t kRelightPerWorkerBudgetUnits = 250'000ull;
-constexpr std::uint64_t kRelightBacklogBudgetUnitsPerRegion = 32'768ull;
-constexpr std::uint64_t kRelightMaxBudgetUnits = 4'000'000ull;
-constexpr std::uint64_t kRelightMinBudgetUnits = 750'000ull;
-constexpr int kRelightMinBatchBudget = 2;
-constexpr int kRelightMaxBatchBudget = 8;
+constexpr std::uint64_t kRelightBaseBudgetUnits = 2'500'000ull;
+constexpr std::uint64_t kRelightPerWorkerBudgetUnits = 500'000ull;
+constexpr std::uint64_t kRelightBacklogBudgetUnitsPerRegion = 49'152ull;
+constexpr std::uint64_t kRelightMaxBudgetUnits = 8'000'000ull;
+constexpr std::uint64_t kRelightMinBudgetUnits = 1'500'000ull;
+constexpr int kRelightMinBatchBudget = 3;
+constexpr int kRelightMaxBatchBudget = 16;
 using SteadyClock = std::chrono::steady_clock;
 
 [[nodiscard]] std::uint64_t steadyMicrosNow() noexcept
@@ -3597,11 +3597,13 @@ private:
     struct ColumnSlabOccupancy
     {
         ColumnChunkIntervals terrainIntervals{};
+        ColumnChunkIntervals surfaceShellIntervals{};
         ColumnChunkIntervals waterIntervals{};
         ColumnChunkIntervals structureIntervals{};
         ColumnChunkIntervals editIntervals{};
         ColumnChunkIntervals occupiedIntervals{};
         ColumnChunkIntervals maybeIntervals{};
+        int highestOccupiedChunkY{-1};
     };
     [[nodiscard]] int adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
                                                 float neighborAverage) const noexcept;
@@ -4763,6 +4765,27 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         break;
     }
 
+    if (exactOnly && jobBudget > 0)
+    {
+        const std::size_t lookaheadTrigger =
+            std::max<std::size_t>(64u, workerSlots * 16u);
+        const std::size_t outstandingGenerateJobsAfterExpansion = jobQueue_.outstanding(JobType::Generate);
+        if (outstandingGenerateJobsAfterExpansion <= lookaheadTrigger)
+        {
+            const int protectedLookaheadRings = severeProtectedPressureActive_ ? 8 :
+                                                (protectedPressureActive_ ? 6 : 4);
+            const int lookaheadEnd = std::min(preloadTargetViewDistance, viewDistance_ + protectedLookaheadRings);
+            for (int ring = viewDistance_ + 1; ring <= lookaheadEnd && jobBudget > 0; ++ring)
+            {
+                RingProgress progress = timedEnsureVolume(ring, SchedulingBand::Protected);
+                if (progress.budgetExhausted)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
     if (!protectedPressureActive_ && jobBudget > 0)
     {
         for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
@@ -4795,16 +4818,22 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         startupEnabled_ &&
         startupState_.preloadStarted &&
         startupState_.phase == StreamingPhase::ExactPreload;
+    const bool allowMainThreadRelightAssist =
+        exactOnly &&
+        missingChunks > 0 &&
+        smoothedFrameMs_ <= 15.5;
     relightMsLastFrame_ = 0.0;
-    if (allowMainThreadRelightWindow)
+    if (allowMainThreadRelightWindow || allowMainThreadRelightAssist)
     {
         const auto relightStart = std::chrono::steady_clock::now();
+        const int activeRelightProcessors = activeRelightProcessors_.load(std::memory_order_acquire);
         const bool allowMainThreadRelightNow =
             workerThreadCount_ == 0 ||
-            activeRelightProcessors_.load(std::memory_order_acquire) == 0;
+            activeRelightProcessors == 0 ||
+            (allowMainThreadRelightAssist && activeRelightProcessors < 2);
         if (allowMainThreadRelightNow)
         {
-            processPendingRelightRequests(1);
+            processPendingRelightRequests(allowMainThreadRelightAssist && severeProtectedPressureActive_ ? 2 : 1);
         }
         relightMsLastFrame_ =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
@@ -4866,6 +4895,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const auto startupStateStart = std::chrono::steady_clock::now();
     if (startupEnabled_ && startupState_.preloadStarted)
     {
+        const bool exactOnlyMode = renderSettings_.totalChunks <= renderSettings_.exactChunks;
         const bool nearReady = missingChunks == 0;
         const bool uploadReady = pendingUploadsLastFrame_ <= 8;
         const bool exactReady = nearReady && uploadReady;
@@ -4876,11 +4906,19 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             startupState_.playerReleaseReady = exactReady;
             if (exactReady)
             {
-                startupState_.phase = StreamingPhase::InteractiveNearOnly;
                 startupState_.phaseTimeSeconds = 0.0;
                 startupState_.healthyTimeSeconds = 0.0;
-                startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks, 6);
                 startupState_.playerReleaseReady = true;
+                if (exactOnlyMode)
+                {
+                    startupState_.phase = StreamingPhase::SteadyState;
+                    startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+                }
+                else
+                {
+                    startupState_.phase = StreamingPhase::InteractiveNearOnly;
+                    startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks, 6);
+                }
             }
             else if (startupState_.phaseTimeSeconds >= 2.0 && startupState_.exactNearCurrentChunks > 4)
             {
@@ -6466,23 +6504,23 @@ void ChunkManager::Impl::startWorkerThreads()
     unsigned desired = 1u;
     if (concurrency >= 16)
     {
-        desired = 6u;
+        desired = 8u;
     }
     else if (concurrency >= 12)
     {
-        desired = 5u;
+        desired = 6u;
     }
     else if (concurrency >= 8)
     {
-        desired = 4u;
+        desired = 5u;
     }
     else if (concurrency >= 6)
     {
-        desired = 3u;
+        desired = 4u;
     }
     else
     {
-        desired = std::max(1u, concurrency > 2 ? concurrency - 2 : 1u);
+        desired = std::max(1u, concurrency > 1 ? concurrency - 1 : 1u);
     }
 
     if (kVerticalStreamingConfig.maxWorkerThreads > 0)
@@ -6500,13 +6538,29 @@ void ChunkManager::Impl::startWorkerThreads()
     }
 
     unsigned prefetchDesired = 1u;
-    if (concurrency >= 12 && desired >= 4u)
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
+    if (exactOnly)
     {
-        prefetchDesired = 2u;
+        prefetchDesired = std::clamp(std::max(2u, concurrency / 2), 2u, 8u);
     }
-    if (concurrency >= 16 && desired >= 5u)
+    else
     {
-        prefetchDesired = 3u;
+        if (concurrency >= 8 && desired >= 4u)
+        {
+            prefetchDesired = 2u;
+        }
+        if (concurrency >= 12 && desired >= 5u)
+        {
+            prefetchDesired = 3u;
+        }
+        if (concurrency >= 16 && desired >= 6u)
+        {
+            prefetchDesired = 4u;
+        }
+        if (concurrency >= 20 && desired >= 7u)
+        {
+            prefetchDesired = 5u;
+        }
     }
 
     columnHeightPrefetchWorkerCount_ = static_cast<std::size_t>(prefetchDesired);
@@ -7370,9 +7424,10 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
 void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
 {
 #ifdef _WIN32
-    // This thread now handles both height and occupancy prefetch. Keep it below normal so
-    // speculative far-column work cannot starve the main thread into a non-responsive state.
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    // Keep speculative background work below normal, but let visible discovery run at
+    // normal priority so exact-only streaming can feed generation continuously.
+    int currentThreadPriority = THREAD_PRIORITY_BELOW_NORMAL;
+    SetThreadPriority(GetCurrentThread(), currentThreadPriority);
 #endif
 
     while (true)
@@ -7384,6 +7439,17 @@ void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
         {
             return;
         }
+
+#ifdef _WIN32
+        const int desiredThreadPriority = priority >= ColumnHeightPrefetchPriority::Visible
+            ? THREAD_PRIORITY_NORMAL
+            : THREAD_PRIORITY_BELOW_NORMAL;
+        if (desiredThreadPriority != currentThreadPriority)
+        {
+            SetThreadPriority(GetCurrentThread(), desiredThreadPriority);
+            currentThreadPriority = desiredThreadPriority;
+        }
+#endif
 
         const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
         const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
@@ -7397,15 +7463,26 @@ void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
             continue;
         }
 
-        if (!haveHeight)
-        {
-            (void)cacheSampledColumnHeight(column, worldX, worldZ);
-        }
         const bool shouldBuildOccupancy =
             priority >= ColumnHeightPrefetchPriority::Visible;
+        ColumnSlabOccupancy resolvedOccupancy = occupancy;
+        bool resolvedHaveOccupancy = haveOccupancy;
         if (shouldBuildOccupancy && !haveOccupancy)
         {
-            (void)cachedColumnSlabOccupancy(column);
+            resolvedOccupancy = cachedColumnSlabOccupancy(column);
+            resolvedHaveOccupancy = true;
+        }
+        if (!haveHeight)
+        {
+            if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
+            {
+                mergePredictedColumnHeight(column,
+                                           resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
+            }
+            else
+            {
+                (void)cacheSampledColumnHeight(column, worldX, worldZ);
+            }
         }
         finishColumnHeightPrefetch(column, token);
     }
@@ -7788,7 +7865,7 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     UploadBudgets budgets{};
     budgets.columnLimit = baseUploadsPerColumnLimit(verticalRadius);
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
-    budgets.chunkLimit = exactOnly ? 4 : 3;
+    budgets.chunkLimit = exactOnly ? 5 : 3;
     budgets.queueSize = estimateUploadQueueSize();
     const std::size_t initialReadyUploads = estimateInitialReadyUploadQueueSize();
     const double previousQueueAgeMs = uploadQueueAgeMsLastFrame_;
@@ -7808,31 +7885,32 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     {
         if (exactPreload)
         {
-            budgets.byteBudget = 16ull * 1024ull * 1024ull;
-            budgets.columnLimit = std::min(budgets.columnLimit + 2, 9);
-            budgets.chunkLimit = exactOnly ? 5 : 4;
-            budgets.timeBudgetMs = exactOnly ? 2.75 : 2.0;
+            budgets.byteBudget = exactOnly ? 24ull * 1024ull * 1024ull : 16ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 4 : 2), exactOnly ? 12 : 9);
+            budgets.chunkLimit = exactOnly ? 6 : 4;
+            budgets.timeBudgetMs = exactOnly ? 3.25 : 2.0;
         }
         else if (interactiveUploadWindow)
         {
-            budgets.byteBudget = 16ull * 1024ull * 1024ull;
-            budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 2 : 1), exactOnly ? 8 : 7);
-            budgets.chunkLimit = exactOnly ? 4 : 3;
-            budgets.timeBudgetMs = exactOnly ? 2.25 : 1.5;
+            budgets.byteBudget = exactOnly ? 24ull * 1024ull * 1024ull : 16ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 3 : 1), exactOnly ? 10 : 7);
+            budgets.chunkLimit = exactOnly ? 5 : 3;
+            budgets.timeBudgetMs = exactOnly ? 2.75 : 1.5;
         }
         else
         {
-            budgets.byteBudget = 20ull * 1024ull * 1024ull;
-            budgets.chunkLimit = exactOnly ? 4 : 3;
-            budgets.timeBudgetMs = exactOnly ? 2.5 : 2.0;
+            budgets.byteBudget = exactOnly ? 24ull * 1024ull * 1024ull : 20ull * 1024ull * 1024ull;
+            budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 2 : 0), exactOnly ? 10 : budgets.columnLimit);
+            budgets.chunkLimit = exactOnly ? 5 : 3;
+            budgets.timeBudgetMs = exactOnly ? 3.0 : 2.0;
         }
     }
     else
     {
-        budgets.byteBudget = 20ull * 1024ull * 1024ull;
-        budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 1 : 0), exactOnly ? 8 : budgets.columnLimit);
-        budgets.chunkLimit = exactOnly ? 4 : 3;
-        budgets.timeBudgetMs = exactOnly ? 2.5 : 2.0;
+        budgets.byteBudget = exactOnly ? 24ull * 1024ull * 1024ull : 20ull * 1024ull * 1024ull;
+        budgets.columnLimit = std::min(budgets.columnLimit + (exactOnly ? 2 : 0), exactOnly ? 10 : budgets.columnLimit);
+        budgets.chunkLimit = exactOnly ? 5 : 3;
+        budgets.timeBudgetMs = exactOnly ? 3.0 : 2.0;
     }
 
     if (uploadDebtSteps > 0)
@@ -7842,22 +7920,28 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
             const int clampedSteps = std::min(uploadDebtSteps, 2);
             budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(clampedSteps);
             budgets.chunkLimit += clampedSteps;
-            budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
-            budgets.timeBudgetMs = std::min(2.5, budgets.timeBudgetMs + 0.25 * static_cast<double>(clampedSteps));
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, exactOnly ? 13 : 10);
+            budgets.timeBudgetMs =
+                std::min(exactOnly ? 4.5 : 2.5, budgets.timeBudgetMs + 0.35 * static_cast<double>(clampedSteps));
         }
         else if (interactiveUploadWindow)
         {
             budgets.byteBudget += 4ull * 1024ull * 1024ull;
-            budgets.chunkLimit = std::min(budgets.chunkLimit + 1, 4);
-            budgets.columnLimit = std::min(budgets.columnLimit + 1, 8);
+            budgets.chunkLimit = std::min(budgets.chunkLimit + 1, exactOnly ? 6 : 4);
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, exactOnly ? 11 : 8);
+            if (exactOnly)
+            {
+                budgets.timeBudgetMs = std::min(3.5, budgets.timeBudgetMs + 0.25);
+            }
         }
         else
         {
             const int clampedSteps = std::min(uploadDebtSteps, 2);
             budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(clampedSteps);
             budgets.chunkLimit += clampedSteps;
-            budgets.columnLimit = std::min(budgets.columnLimit + 1, 10);
-            budgets.timeBudgetMs = std::min(2.5, budgets.timeBudgetMs + 0.25 * static_cast<double>(clampedSteps));
+            budgets.columnLimit = std::min(budgets.columnLimit + 1, exactOnly ? 12 : 10);
+            budgets.timeBudgetMs =
+                std::min(exactOnly ? 4.0 : 2.5, budgets.timeBudgetMs + 0.35 * static_cast<double>(clampedSteps));
         }
     }
 
@@ -7865,10 +7949,10 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     {
         const int urgencySteps = std::min<int>(static_cast<int>(initialReadyUploads), 2);
         budgets.byteBudget += 4ull * 1024ull * 1024ull * static_cast<std::size_t>(urgencySteps);
-        budgets.chunkLimit = std::min(budgets.chunkLimit + urgencySteps, exactOnly ? 7 : 6);
-        budgets.columnLimit = std::min(budgets.columnLimit + 1, exactOnly ? 11 : 10);
+        budgets.chunkLimit = std::min(budgets.chunkLimit + urgencySteps, exactOnly ? 8 : 6);
+        budgets.columnLimit = std::min(budgets.columnLimit + 1, exactOnly ? 12 : 10);
         budgets.timeBudgetMs =
-            std::min(exactOnly ? 3.5 : 3.0, budgets.timeBudgetMs + 0.35 * static_cast<double>(urgencySteps));
+            std::min(exactOnly ? 4.25 : 3.0, budgets.timeBudgetMs + 0.45 * static_cast<double>(urgencySteps));
     }
 
     const int queueAgePressureSteps = computeBacklogSteps(
@@ -7906,17 +7990,17 @@ ChunkManager::Impl::UploadBudgets ChunkManager::Impl::computeUploadBudgets(int v
     if (protectedPressureActive_)
     {
         budgets.byteBudget += 8ull * 1024ull * 1024ull;
-        budgets.columnLimit = std::min(budgets.columnLimit + 2, exactOnly ? 13 : 11);
-        budgets.chunkLimit = std::max(budgets.chunkLimit, exactOnly ? 6 : 5);
-        budgets.timeBudgetMs = std::max(budgets.timeBudgetMs, exactOnly ? 3.5 : 3.0);
+        budgets.columnLimit = std::min(budgets.columnLimit + 2, exactOnly ? 14 : 11);
+        budgets.chunkLimit = std::max(budgets.chunkLimit, exactOnly ? 8 : 5);
+        budgets.timeBudgetMs = std::max(budgets.timeBudgetMs, exactOnly ? 4.5 : 3.0);
     }
 
     if (severeProtectedPressureActive_)
     {
         budgets.byteBudget += 8ull * 1024ull * 1024ull;
-        budgets.columnLimit = std::min(budgets.columnLimit + 2, exactOnly ? 14 : 12);
-        budgets.chunkLimit = std::max(budgets.chunkLimit, exactOnly ? 8 : 6);
-        budgets.timeBudgetMs = std::max(budgets.timeBudgetMs, exactOnly ? 4.5 : 3.5);
+        budgets.columnLimit = std::min(budgets.columnLimit + 2, exactOnly ? 16 : 12);
+        budgets.chunkLimit = std::max(budgets.chunkLimit, exactOnly ? 10 : 6);
+        budgets.timeBudgetMs = std::max(budgets.timeBudgetMs, exactOnly ? 5.5 : 3.5);
     }
 
     return budgets;
@@ -8271,7 +8355,7 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
         return;
     }
 
-    constexpr std::size_t kMaxQueuedColumnHeightPrefetches = 2048u;
+    constexpr std::size_t kMaxQueuedColumnHeightPrefetches = 4096u;
     const glm::ivec3 centerChunk = lastCenterChunk_;
     const std::uint32_t distance = static_cast<std::uint32_t>(std::max(std::abs(column.x - centerChunk.x),
                                                                        std::abs(column.y - centerChunk.z)));
@@ -8338,10 +8422,15 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
     const int verticalShift = havePreviousCenter ? std::abs(center.y - previousCenter.y) : 0;
     const bool horizontalDominant = horizontalShift > 0 && horizontalShift >= verticalShift;
     const bool verticalDominant = verticalShift > horizontalShift;
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     const bool needsStaticWarmup = !horizontalDominant &&
                                    !verticalDominant &&
                                    targetViewDistance_ > viewDistance_ + 1;
-    if (!horizontalDominant && !needsStaticWarmup)
+    const bool needsStaticDiscovery = !horizontalDominant &&
+                                      !verticalDominant &&
+                                      exactOnly &&
+                                      lastMissingChunks_ > 0;
+    if (!horizontalDominant && !needsStaticWarmup && !needsStaticDiscovery)
     {
         return;
     }
@@ -8354,13 +8443,13 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
     };
 
     const int requestBudget = horizontalDominant
-        ? (severeProtectedPressureActive_ ? 112 : (protectedPressureActive_ ? 96 : 80))
-        : 40;
+        ? (severeProtectedPressureActive_ ? 160 : (protectedPressureActive_ ? 128 : 96))
+        : (needsStaticDiscovery ? 144 : 48);
     std::vector<PrefetchCandidate> candidates;
     candidates.reserve(96u);
     std::unordered_set<glm::ivec2, ColumnHasher> queuedColumns;
     queuedColumns.reserve(128u);
-    const std::size_t candidateCap = 128u;
+    const std::size_t candidateCap = needsStaticDiscovery ? 224u : 160u;
 
     auto addCandidate = [&](const glm::ivec2& column, ColumnHeightPrefetchPriority priority, float score)
     {
@@ -8460,11 +8549,35 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
             }
         };
 
-        const int ringStart = std::max(viewDistance_ + 1, 1);
-        const int ringEnd = std::min(targetViewDistance_, ringStart + 2);
-        for (int ring = ringStart; ring <= ringEnd; ++ring)
+        if (needsStaticDiscovery)
         {
-            addPerimeter(ring);
+            const int ringEnd = std::max(targetViewDistance_, 1);
+            const int ringStart = std::max(1, ringEnd - 6);
+            for (int ring = ringStart; ring <= ringEnd; ++ring)
+            {
+                addPerimeter(ring);
+            }
+
+            const int laneStep = std::max(4, ringEnd / 6);
+            const int lanePhase = static_cast<int>(updateFrameIndex_ % static_cast<std::uint64_t>(laneStep));
+            for (int offset = -ringEnd + lanePhase; offset <= ringEnd; offset += laneStep)
+            {
+                addCandidate(glm::ivec2{center.x + offset, center.z},
+                             ColumnHeightPrefetchPriority::Visible,
+                             static_cast<float>(std::abs(offset)));
+                addCandidate(glm::ivec2{center.x, center.z + offset},
+                             ColumnHeightPrefetchPriority::Visible,
+                             static_cast<float>(std::abs(offset)));
+            }
+        }
+        else
+        {
+            const int ringStart = std::max(viewDistance_ + 1, 1);
+            const int ringEnd = std::min(targetViewDistance_, ringStart + 2);
+            for (int ring = ringStart; ring <= ringEnd; ++ring)
+            {
+                addPerimeter(ring);
+            }
         }
     }
 
@@ -9067,6 +9180,11 @@ int ChunkManager::Impl::adjustedSurfaceYForColumn(const terrain::SurfaceColumn& 
 ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccupancy(const glm::ivec2& column) const
 {
     ColumnSlabOccupancy occupancy{};
+    auto noteChunkInterval = [&](int minChunkY, int maxChunkY)
+    {
+        occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, maxChunkY);
+        addColumnChunkInterval(occupancy.terrainIntervals, minChunkY, maxChunkY);
+    };
 
     const int baseWorldX = column.x * kChunkSizeX;
     const int baseWorldZ = column.y * kChunkSizeZ;
@@ -9146,26 +9264,27 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
 
         if (highestTerrainWorld >= 0)
         {
-            addColumnChunkInterval(occupancy.terrainIntervals, 0, floorDiv(highestTerrainWorld, kChunkSizeY));
+            const int highestChunkY = floorDiv(highestTerrainWorld, kChunkSizeY);
+            noteChunkInterval(0, highestChunkY);
+            const int shellFloorChunk = surfaceShellFloorChunkForHeight(column, highestTerrainWorld);
+            addColumnChunkInterval(occupancy.surfaceShellIntervals,
+                                   std::max(0, shellFloorChunk),
+                                   std::max(highestChunkY, highestChunkY + kExactSurfaceShellAirAboveChunks));
         }
         if (maxWaterTopWorld >= 0 && minWaterBottomWorld <= maxWaterTopWorld)
         {
-            addColumnChunkInterval(occupancy.waterIntervals,
-                                   floorDiv(std::max(0, minWaterBottomWorld), kChunkSizeY),
-                                   floorDiv(std::max(0, maxWaterTopWorld), kChunkSizeY));
+            const int minChunkY = floorDiv(std::max(0, minWaterBottomWorld), kChunkSizeY);
+            const int maxChunkY = floorDiv(std::max(0, maxWaterTopWorld), kChunkSizeY);
+            occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, maxChunkY);
+            addColumnChunkInterval(occupancy.waterIntervals, minChunkY, maxChunkY);
         }
     }
 
-    const glm::ivec3 structureQueryMin(baseWorldX, 0, baseWorldZ);
-    const glm::ivec3 structureQueryMax(baseWorldX + kChunkSizeX - 1,
-                                       std::numeric_limits<int>::max() / 4,
-                                       baseWorldZ + kChunkSizeZ - 1);
-    const std::vector<StructureInstance> structures = queryStructureInstances(structureQueryMin, structureQueryMax, 0);
-    for (const StructureInstance& instance : structures)
+    const StructureChunkColumnSpan structureSpan = structureRegistry_.queryChunkColumnSpan(column);
+    if (structureSpan.valid())
     {
-        addColumnChunkInterval(occupancy.structureIntervals,
-                               floorDiv(std::max(0, instance.bounds.min.y), kChunkSizeY),
-                               floorDiv(std::max(0, instance.bounds.max.y), kChunkSizeY));
+        occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, structureSpan.maxChunkY);
+        addColumnChunkInterval(occupancy.structureIntervals, structureSpan.minChunkY, structureSpan.maxChunkY);
     }
 
     {
@@ -9184,6 +9303,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
                                                   });
             if (hasSolidEdit)
             {
+                occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, coord.y);
                 addColumnChunkInterval(occupancy.editIntervals, coord.y, coord.y);
             }
         }
@@ -9205,6 +9325,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
                                                      });
             if (hasSolidOverlay)
             {
+                occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, coord.y);
                 addColumnChunkInterval(occupancy.editIntervals, coord.y, coord.y);
             }
         }
@@ -9408,13 +9529,25 @@ ColumnChunkIntervals ChunkManager::Impl::columnIntervalsForHeight(const glm::ive
                                                                   int columnHeight) const
 {
     ColumnChunkIntervals intervals{};
-    mergeColumnChunkIntervals(intervals,
-                              playerBandIntervalsForColumn(column, cameraColumn, cameraChunkY, verticalRadius));
+    const ColumnChunkIntervals playerBand =
+        playerBandIntervalsForColumn(column, cameraColumn, cameraChunkY, verticalRadius);
+    mergeColumnChunkIntervals(intervals, playerBand);
 
     ColumnSlabOccupancy occupancy{};
     if (tryGetCachedColumnSlabOccupancy(column, occupancy))
     {
-        mergeColumnChunkIntervals(intervals, occupancy.occupiedIntervals);
+        const bool keepFullOccupiedColumn = !playerBand.empty();
+        if (keepFullOccupiedColumn)
+        {
+            mergeColumnChunkIntervals(intervals, occupancy.occupiedIntervals);
+        }
+        else
+        {
+            mergeColumnChunkIntervals(intervals, occupancy.surfaceShellIntervals);
+            mergeColumnChunkIntervals(intervals, occupancy.waterIntervals);
+            mergeColumnChunkIntervals(intervals, occupancy.structureIntervals);
+            mergeColumnChunkIntervals(intervals, occupancy.editIntervals);
+        }
         mergeColumnChunkIntervals(intervals, occupancy.maybeIntervals);
         return intervals;
     }
@@ -9451,6 +9584,7 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
     bool missingFound = false;
 
     const glm::ivec2 cameraColumn{center.x, center.z};
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     glm::vec2 forward = movementEnvelopeForwardXZ_;
     if (glm::dot(forward, forward) <= kEpsilon)
     {
@@ -9489,6 +9623,9 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
 
         const MovementEnvelopeBucket bucket = movementEnvelopeBucketForColumn(column, center, horizontalRadius);
         const bool protectedColumn = bucket != MovementEnvelopeBucket::Background;
+        const ColumnHeightPrefetchPriority occupancyPriority =
+            (protectedColumn || exactOnly) ? ColumnHeightPrefetchPriority::Visible
+                                           : ColumnHeightPrefetchPriority::Normal;
         if (band == SchedulingBand::Protected && !protectedColumn)
         {
             return;
@@ -9503,17 +9640,13 @@ ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ive
         int columnHeight = ColumnManager::kNoHeight;
         if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
         {
-            requestColumnHeightPrefetch(column,
-                                        protectedColumn ? ColumnHeightPrefetchPriority::Visible
-                                                        : ColumnHeightPrefetchPriority::Normal);
+            requestColumnHeightPrefetch(column, occupancyPriority);
         }
         ColumnSlabOccupancy occupancy{};
         const bool shouldPrefetchOccupancy = !columnUsesPlayerBand(column, cameraColumn);
         if (shouldPrefetchOccupancy)
         {
-            requestColumnHeightPrefetch(column,
-                                        protectedColumn ? ColumnHeightPrefetchPriority::Visible
-                                                        : ColumnHeightPrefetchPriority::Normal);
+            requestColumnHeightPrefetch(column, occupancyPriority);
         }
         const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
         const ColumnChunkIntervals playerBand =
@@ -11735,6 +11868,7 @@ void ChunkManager::Impl::ensureSkyLightColumnCacheForChunks(const std::vector<st
 
 std::uint64_t ChunkManager::Impl::computeRelightBudgetUnits()
 {
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     std::size_t pendingRegionCount = 0;
     {
         std::lock_guard<std::mutex> lock(relightStateMutex_);
@@ -11745,24 +11879,59 @@ std::uint64_t ChunkManager::Impl::computeRelightBudgetUnits()
     budget += std::min<std::uint64_t>(workerThreadCount_, 4u) * kRelightPerWorkerBudgetUnits;
     budget += std::min<std::uint64_t>(pendingRegionCount * kRelightBacklogBudgetUnitsPerRegion,
                                       kRelightMaxBudgetUnits / 2);
+    if (exactOnly)
+    {
+        budget += 1'000'000ull;
+    }
+    if (lastMissingChunks_ > 0)
+    {
+        budget += std::min<std::uint64_t>(static_cast<std::uint64_t>(lastMissingChunks_) * 2048ull,
+                                          1'000'000ull);
+    }
+    if (protectedPressureActive_)
+    {
+        budget += 750'000ull;
+    }
+    if (severeProtectedPressureActive_)
+    {
+        budget += 1'250'000ull;
+    }
 
     const std::uint64_t uploadPenalty =
-        std::min<std::uint64_t>(pendingUploadsLastFrame_ * 2048ull, kRelightBaseBudgetUnits / 2);
+        std::min<std::uint64_t>(pendingUploadsLastFrame_ * (exactOnly ? 1024ull : 2048ull),
+                                kRelightBaseBudgetUnits / 2);
     budget = (budget > uploadPenalty) ? (budget - uploadPenalty / 2) : budget;
     return std::clamp<std::uint64_t>(budget, kRelightMinBudgetUnits, kRelightMaxBudgetUnits);
 }
 
 int ChunkManager::Impl::computeRelightBatchBudget()
 {
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     std::size_t pendingRegionCount = 0;
     {
         std::lock_guard<std::mutex> lock(relightStateMutex_);
         pendingRegionCount = pendingRelightRegions_.size();
     }
 
-    int batchBudget = kRelightMinBatchBudget + static_cast<int>(std::min<std::size_t>(workerThreadCount_, 4) / 2);
+    int batchBudget = kRelightMinBatchBudget + static_cast<int>(std::min<std::size_t>(workerThreadCount_, 6) / 2);
     batchBudget += static_cast<int>(std::min<std::size_t>(pendingRegionCount / 12, 3));
-    if (pendingUploadsLastFrame_ > 256)
+    if (exactOnly)
+    {
+        batchBudget += 2;
+    }
+    if (lastMissingChunks_ > 0)
+    {
+        batchBudget += std::min(lastMissingChunks_ / 256, 2);
+    }
+    if (protectedPressureActive_)
+    {
+        batchBudget += 2;
+    }
+    if (severeProtectedPressureActive_)
+    {
+        batchBudget += 2;
+    }
+    if (pendingUploadsLastFrame_ > 256 && !protectedPressureActive_)
     {
         batchBudget = std::max(kRelightMinBatchBudget, batchBudget - 1);
     }
@@ -12039,7 +12208,7 @@ void ChunkManager::Impl::processPendingRelightRequests(int maxBatches)
     }
 
     const int kMaxConcurrentRelightProcessors =
-        std::clamp(static_cast<int>(std::max<std::size_t>(workerThreadCount_, 1) / 2), 1, 2);
+        std::clamp(static_cast<int>(std::max<std::size_t>(workerThreadCount_, 1) / 2), 1, 4);
     int activeProcessors = activeRelightProcessors_.load(std::memory_order_acquire);
     while (activeProcessors < kMaxConcurrentRelightProcessors)
     {

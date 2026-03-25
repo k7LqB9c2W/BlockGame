@@ -1,0 +1,36 @@
+BlockGame chunk benchmark
+Build: Release
+Output: C:\Users\Jacob\Documents\code\BlockGame\straight_line_sprint\20260324-102831
+Exact/Total/Fog: 48 / 48 / 1400
+Scenario timeout: 180 s
+Watchdog: not_responding=4s post_write_grace=5s poll_ms=500
+
+Scenario: post_release_exact_fill
+  watchdog_reason=completed exit_code=0
+  timed_out=True max_duration_s=180.0000
+  duration_s=180.01 generated_cps=13.16 uploaded_cps=11.62
+  chunk_ready_ms median=262.14 p95=4194.30
+  ready_breakdown_avg_ms wait_generate=465.45 generate=34.07 wait_mesh_enqueue=350.31 wait_mesh_start=6.19
+  ready_breakdown_avg_ms mesh=0.73 wait_upload=72.79 upload_to_ready=14.70
+  relight_avg_ms=2.11 upload_backlog avg=0.79 p95=0.00
+  column_prefetch_backlog avg=218.69 p95=807.00
+  update_avg_ms=3.84 residual_avg_ms=0.01 dense_residency_avg_ms=0.15 visible_scan_avg_ms=1.79
+  ensure_volume_avg_ms=1.09 scheduling_avg_ms=1.09 eviction_avg_ms=0.70 upload_drain_avg_ms=0.06
+  upload_pick_avg_ms=0.00 upload_queue_age_avg_ms=176.80 upload_queue_age_p95_ms=524.29
+  far_terrain_avg_ms=0.00 pool_trim_avg_ms=0.00 priority_avg_ms=0.00 upload_prepare_avg_ms=0.01
+  upload_begin_avg_ms=0.01 upload_finalize_avg_ms=0.00 column_lookup_avg_ms=0.00 column_sample_avg_ms=31.30
+  commit_collect_avg_ms=0.00 commit_scan_avg_ms=0.00 commit_mesh_avg_ms=0.00 commit_page_avg_ms=0.01 commit_release_avg_ms=0.00
+  commit_mesh_wait_avg_ms=0.00 commit_mesh_locked_avg_ms=0.00
+  generate_lock_avg_ms=0.17 upload_mesh_lock_avg_ms=0.24 neighborhood_lock_avg_ms=0.14 skylight_cache_lock_avg_ms=0.25
+  upload_detail attempts_avg=1.18 uploaded_chunks_avg=0.19 uploaded_bytes_avg_kib=6.47 scan_entries_avg=0.19
+  upload_detail totals expired=0 not_ready=5 pending_mesh=0 column_limit=0 budget=0 retry=0
+  upload_detail totals scan_limit_hits=0 begin_failures=0 stale_pending_meshes=32
+  relight region_chunks avg=37.59 p95=127.00 changed_chunks avg=5.30 p95=31.00
+  relight external_snapshots avg=43.54 p95=127.00 sky_above_scans avg=0.00 p95=0.00
+  relight sky_seed avg=307.10 p95=2047.00 sky_nodes avg=20345.12 p95=131071.00
+  vertical_radius_delta avg=0.00 p95=0.00
+  climate_hit_rate=99.99% surface_hit_rate=99.99%
+  pool chunks=0 bytes_mib=0.00 budget_mib=96.00
+  frame_avg_ms=16.67 frame_p95_ms=17.98 avg_fps=60.00
+  spikes over50=0 over100=0 streak33=0
+

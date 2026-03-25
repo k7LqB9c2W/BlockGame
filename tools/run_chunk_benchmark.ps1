@@ -206,6 +206,7 @@ New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 $defaultScenarios = @(
     "spawn_preload",
     "full_exact_preload",
+    "post_release_exact_fill",
     "straight_line_sprint",
     "turn_heavy_traversal",
     "vertical_travel"

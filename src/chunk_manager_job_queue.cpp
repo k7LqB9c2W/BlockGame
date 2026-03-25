@@ -119,6 +119,7 @@ bool JobQueue::push(const Job& job)
 
     queues_[jobTypeIndex(job.type)].push(wrap(job));
     queuedJobCount_.fetch_add(1, std::memory_order_relaxed);
+    ++queuedServiceCounts_[jobServiceClassIndex(job.serviceClass)];
     condition_.notify_one();
     return true;
 }
@@ -136,6 +137,8 @@ bool JobQueue::tryPop(Job& job)
     queues_[queueIndex].pop();
     queuedJobCount_.fetch_sub(1, std::memory_order_relaxed);
     ++activeCounts_[queueIndex];
+    --queuedServiceCounts_[jobServiceClassIndex(job.serviceClass)];
+    ++activeServiceCounts_[jobServiceClassIndex(job.serviceClass)];
     return true;
 }
 
@@ -177,6 +180,8 @@ Job JobQueue::waitAndPop()
         queues_[queueIndex].pop();
         queuedJobCount_.fetch_sub(1, std::memory_order_relaxed);
         ++activeCounts_[queueIndex];
+        --queuedServiceCounts_[jobServiceClassIndex(job.serviceClass)];
+        ++activeServiceCounts_[jobServiceClassIndex(job.serviceClass)];
         return job;
     }
 }
@@ -196,10 +201,13 @@ std::vector<Job> JobQueue::stop()
     {
         while (!queue.empty())
         {
-            cancelledJobs.push_back(queue.top().job);
+            const Job job = queue.top().job;
+            --queuedServiceCounts_[jobServiceClassIndex(job.serviceClass)];
+            cancelledJobs.push_back(job);
             queue.pop();
         }
     }
+    queuedServiceCounts_.fill(0);
     queuedJobCount_.store(0, std::memory_order_relaxed);
     condition_.notify_all();
     return cancelledJobs;
@@ -226,6 +234,13 @@ std::size_t JobQueue::outstanding(JobType type) const
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t index = jobTypeIndex(type);
     return queues_[index].size() + activeCounts_[index];
+}
+
+std::size_t JobQueue::outstanding(JobServiceClass serviceClass) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t index = jobServiceClassIndex(serviceClass);
+    return queuedServiceCounts_[index] + activeServiceCounts_[index];
 }
 
 void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
@@ -355,9 +370,10 @@ JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
 {
     const ChunkPriorityKey priority = buildChunkPriorityKey(job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
     const int lifecycleBias = job.initialReadyPriority ? 0 : 1;
+    const int serviceBias = static_cast<int>(job.serviceClass);
     const int bias = (job.type == JobType::Mesh) ? 0 : 1;
     const std::uint64_t sequence = nextSequence_++;
-    return PrioritizedJob{job, priority, lifecycleBias, bias, sequence};
+    return PrioritizedJob{job, priority, lifecycleBias, serviceBias, bias, sequence};
 }
 
 int JobQueue::comparePrioritizedJobs(const PrioritizedJob& lhs,
@@ -366,6 +382,10 @@ int JobQueue::comparePrioritizedJobs(const PrioritizedJob& lhs,
     if (lhs.lifecycleBias != rhs.lifecycleBias)
     {
         return lhs.lifecycleBias < rhs.lifecycleBias ? -1 : 1;
+    }
+    if (lhs.serviceBias != rhs.serviceBias)
+    {
+        return lhs.serviceBias < rhs.serviceBias ? -1 : 1;
     }
     const int priorityComparison = compareChunkPriorityKeys(lhs.priority, rhs.priority);
     if (priorityComparison != 0)
@@ -487,6 +507,27 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
         return meshIndex;
     }
 
+    const PrioritizedJob& generateTop = queues_[generateIndex].top();
+    const PrioritizedJob& meshTop = queues_[meshIndex].top();
+    const bool generateLatencySensitive =
+        generateTop.serviceBias <= static_cast<int>(JobServiceClass::LocalInteraction);
+    const bool meshLatencySensitive =
+        meshTop.serviceBias <= static_cast<int>(JobServiceClass::LocalInteraction);
+
+    if (workerConcurrency_ > 1)
+    {
+        const bool reserveGenerateLane = generateLatencySensitive && activeCounts_[generateIndex] == 0;
+        const bool reserveMeshLane = meshLatencySensitive && activeCounts_[meshIndex] == 0;
+        if (reserveGenerateLane != reserveMeshLane)
+        {
+            return reserveGenerateLane ? generateIndex : meshIndex;
+        }
+        if (reserveGenerateLane && reserveMeshLane)
+        {
+            return comparePrioritizedJobs(meshTop, generateTop) <= 0 ? meshIndex : generateIndex;
+        }
+    }
+
     const std::array<std::size_t, kJobTypeCount> targets = computeStageTargetsLocked();
     const bool generateUnderTarget = activeCounts_[generateIndex] < targets[generateIndex];
     const bool meshUnderTarget = activeCounts_[meshIndex] < targets[meshIndex];
@@ -496,8 +537,6 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
         return meshUnderTarget ? meshIndex : generateIndex;
     }
 
-    const PrioritizedJob& generateTop = queues_[generateIndex].top();
-    const PrioritizedJob& meshTop = queues_[meshIndex].top();
     if (generateTop.lifecycleBias != meshTop.lifecycleBias)
     {
         return (generateTop.lifecycleBias < meshTop.lifecycleBias) ? generateIndex : meshIndex;
@@ -542,13 +581,18 @@ void JobQueue::setWorkerConcurrency(std::size_t workerCount) noexcept
     condition_.notify_all();
 }
 
-void JobQueue::jobCompleted(JobType type) noexcept
+void JobQueue::jobCompleted(JobType type, JobServiceClass serviceClass) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t index = jobTypeIndex(type);
     if (activeCounts_[index] > 0)
     {
         --activeCounts_[index];
+    }
+    const std::size_t serviceIndex = jobServiceClassIndex(serviceClass);
+    if (activeServiceCounts_[serviceIndex] > 0)
+    {
+        --activeServiceCounts_[serviceIndex];
     }
     condition_.notify_one();
 }

@@ -75,9 +75,9 @@ struct VerticalStreamingConfig
     int baseEvictionChunksPerFrame{64};
     int maxEvictionChunksPerFrame{128};
     int evictionBudgetBoostDivisor{96};
-    int uploadBasePerColumn{6};
+    int uploadBasePerColumn{8};
     int uploadRampDivisor{1};
-    int uploadMaxPerColumn{40};
+    int uploadMaxPerColumn{56};
     int maxGenerationJobsPerColumn{24};
     int backlogColumnCapReleaseThreshold{2048};
     int verticalRadiusFalloffStep{8};

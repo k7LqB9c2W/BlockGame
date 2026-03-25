@@ -55,9 +55,24 @@ enum class JobType : std::uint8_t
 
 inline constexpr std::size_t kJobTypeCount = 2;
 
+enum class JobServiceClass : std::uint8_t
+{
+    InitialVisible = 0,
+    LocalInteraction = 1,
+    Standard = 2,
+    Refinement = 3
+};
+
+inline constexpr std::size_t kJobServiceClassCount = 4;
+
 [[nodiscard]] constexpr std::size_t jobTypeIndex(JobType type) noexcept
 {
     return static_cast<std::size_t>(type);
+}
+
+[[nodiscard]] constexpr std::size_t jobServiceClassIndex(JobServiceClass serviceClass) noexcept
+{
+    return static_cast<std::size_t>(serviceClass);
 }
 
 struct Job
@@ -67,17 +82,20 @@ struct Job
     std::shared_ptr<Chunk> chunk;
     std::uint32_t generationEpoch{0};
     bool initialReadyPriority{false};
+    JobServiceClass serviceClass{JobServiceClass::Standard};
 
     Job(JobType jobType,
         const glm::ivec3& coord,
         std::shared_ptr<Chunk> chunkRef,
         std::uint32_t epoch = 0,
-        bool initialPriority = false)
+        bool initialPriority = false,
+        JobServiceClass service = JobServiceClass::Standard)
         : type(jobType),
           chunkCoord(coord),
           chunk(std::move(chunkRef)),
           generationEpoch(epoch),
-          initialReadyPriority(initialPriority)
+          initialReadyPriority(initialPriority),
+          serviceClass(service)
     {
     }
 };
@@ -108,10 +126,11 @@ public:
     std::size_t size() const;
     std::size_t size(JobType type) const;
     std::size_t outstanding(JobType type) const;
+    std::size_t outstanding(JobServiceClass serviceClass) const;
     void updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     bool tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     void setWorkerConcurrency(std::size_t workerCount) noexcept;
-    void jobCompleted(JobType type) noexcept;
+    void jobCompleted(JobType type, JobServiceClass serviceClass) noexcept;
 
 private:
     struct PrioritizedJob
@@ -119,6 +138,7 @@ private:
         Job job;
         ChunkPriorityKey priority{};
         int lifecycleBias{0};
+        int serviceBias{0};
         int stageBias{0};
         std::uint64_t sequence{0};
     };
@@ -143,6 +163,8 @@ private:
     glm::vec2 priorityForwardXZ_{0.0f, -1.0f};
     std::array<std::priority_queue<PrioritizedJob, std::vector<PrioritizedJob>, JobComparer>, kJobTypeCount> queues_{};
     std::array<std::size_t, kJobTypeCount> activeCounts_{};
+    std::array<std::size_t, kJobServiceClassCount> queuedServiceCounts_{};
+    std::array<std::size_t, kJobServiceClassCount> activeServiceCounts_{};
     std::atomic<std::size_t> queuedJobCount_{0};
     std::size_t workerConcurrency_{1};
     std::uint64_t nextSequence_{0};

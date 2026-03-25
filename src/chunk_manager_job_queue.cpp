@@ -93,7 +93,7 @@ glm::vec2 normalizePriorityForwardXZ(const glm::vec3& forward) noexcept
     glm::vec2 forwardXZ(forward.x, forward.z);
     if (glm::dot(forwardXZ, forwardXZ) <= kEpsilon)
     {
-        return {0.0f, -1.0f};
+        return {0.0f, 0.0f};
     }
 
     return glm::normalize(forwardXZ);
@@ -232,7 +232,17 @@ void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& fo
 {
     std::lock_guard<std::mutex> lock(mutex_);
     const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
-    const float facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    const bool hadForward = glm::dot(priorityForwardXZ_, priorityForwardXZ_) > kEpsilon;
+    const bool haveForward = glm::dot(forwardXZ, forwardXZ) > kEpsilon;
+    float facingDot = 1.0f;
+    if (hadForward && haveForward)
+    {
+        facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    }
+    else if (hadForward != haveForward)
+    {
+        facingDot = 0.0f;
+    }
     if (origin == priorityOrigin_ && facingDot >= 0.995f)
     {
         return;
@@ -283,7 +293,17 @@ bool JobQueue::tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3&
     }
 
     const glm::vec2 forwardXZ = normalizePriorityForwardXZ(forward);
-    const float facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    const bool hadForward = glm::dot(priorityForwardXZ_, priorityForwardXZ_) > kEpsilon;
+    const bool haveForward = glm::dot(forwardXZ, forwardXZ) > kEpsilon;
+    float facingDot = 1.0f;
+    if (hadForward && haveForward)
+    {
+        facingDot = glm::dot(priorityForwardXZ_, forwardXZ);
+    }
+    else if (hadForward != haveForward)
+    {
+        facingDot = 0.0f;
+    }
     if (origin == priorityOrigin_ && facingDot >= 0.995f)
     {
         return true;

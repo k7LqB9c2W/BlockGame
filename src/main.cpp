@@ -899,6 +899,8 @@ struct BenchmarkRuntimeState
     bool timedOut{false};
     double elapsedSeconds{0.0};
     double completionHoldSeconds{0.0};
+    double exactRequiredStableSeconds{0.0};
+    int lastExactRequiredChunks{-1};
     glm::vec3 spawnPosition{0.0f};
     glm::vec3 scenarioStartPosition{0.0f};
     glm::vec3 finalCameraPosition{0.0f};
@@ -3484,6 +3486,8 @@ int runGame()
         benchmarkState.started = true;
         benchmarkState.elapsedSeconds = 0.0;
         benchmarkState.completionHoldSeconds = 0.0;
+        benchmarkState.exactRequiredStableSeconds = 0.0;
+        benchmarkState.lastExactRequiredChunks = -1;
         benchmarkState.scenarioStartPosition = benchmarkState.spawnPosition;
         benchmarkState.frameTimesMs.clear();
         benchmarkState.currentSpikeStreakOver33_3Ms = 0;
@@ -3761,6 +3765,8 @@ int runGame()
                 benchmarkState.timedOut = false;
                 benchmarkState.elapsedSeconds = 0.0;
                 benchmarkState.completionHoldSeconds = 0.0;
+                benchmarkState.exactRequiredStableSeconds = 0.0;
+                benchmarkState.lastExactRequiredChunks = -1;
                 benchmarkState.frameTimesMs.clear();
                 benchmarkState.currentSpikeStreakOver33_3Ms = 0;
                 benchmarkState.spikeSummary = BenchmarkSpikeSummary{};
@@ -3772,11 +3778,26 @@ int runGame()
                 benchmarkState.elapsedSeconds += frameTime;
                 const auto updateExactFillCompletion = [&]()
                 {
+                    const ChunkProfilingSnapshot benchmarkProfiling = chunkManager.sampleProfilingSnapshot();
+                    if (streamingStatus.exactRequiredChunks == benchmarkState.lastExactRequiredChunks)
+                    {
+                        benchmarkState.exactRequiredStableSeconds += frameTime;
+                    }
+                    else
+                    {
+                        benchmarkState.lastExactRequiredChunks = streamingStatus.exactRequiredChunks;
+                        benchmarkState.exactRequiredStableSeconds = 0.0;
+                    }
+                    const bool discoverySettled =
+                        benchmarkState.exactRequiredStableSeconds >= 5.0 &&
+                        benchmarkProfiling.exactChunksPending == 0 &&
+                        benchmarkProfiling.uploadQueueDepth == 0;
                     const bool fullExactReady =
                         streamingStatus.phase == StreamingPhase::SteadyState &&
                         streamingStatus.exactRequiredChunks > 0 &&
                         streamingStatus.exactReadyChunks >= streamingStatus.exactRequiredChunks &&
-                        streamingStatus.exactPendingUploads == 0;
+                        streamingStatus.exactPendingUploads == 0 &&
+                        discoverySettled;
                     if (fullExactReady)
                     {
                         benchmarkState.completionHoldSeconds += frameTime;

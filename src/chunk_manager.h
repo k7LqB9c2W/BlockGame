@@ -75,26 +75,26 @@ struct VerticalStreamingConfig
     int baseEvictionChunksPerFrame{64};
     int maxEvictionChunksPerFrame{128};
     int evictionBudgetBoostDivisor{96};
-    int uploadBasePerColumn{4};
+    int uploadBasePerColumn{6};
     int uploadRampDivisor{1};
-    int uploadMaxPerColumn{24};
-    int maxGenerationJobsPerColumn{12};
-    int backlogColumnCapReleaseThreshold{4096};
+    int uploadMaxPerColumn{40};
+    int maxGenerationJobsPerColumn{24};
+    int backlogColumnCapReleaseThreshold{2048};
     int verticalRadiusFalloffStep{8};
 
     struct GenerationBudgetSettings
     {
-        int baseJobsPerFrame{64};
-        float jobsPerHorizontalRing{4.0f};
+        int baseJobsPerFrame{96};
+        float jobsPerHorizontalRing{5.0f};
         float jobsPerVerticalLayer{2.0f};
         int backlogStartThreshold{128};
         int backlogStepSize{128};
-        int backlogBoostPerStep{24};
-        int maxJobsPerFrame{768};
+        int backlogBoostPerStep{40};
+        int maxJobsPerFrame{1536};
         int minRingExpansionsPerFrame{1};
-        int maxRingExpansionsPerFrame{8};
+        int maxRingExpansionsPerFrame{12};
         int backlogRingStepSize{128};
-        int columnCapBoostPerStep{4};
+        int columnCapBoostPerStep{6};
     } generationBudget{};
 
     int maxWorkerThreads{0};

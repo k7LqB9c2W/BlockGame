@@ -474,7 +474,15 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         prefetchTarget = 1;
         if (!playableBacklog)
         {
-            prefetchTarget = std::min<std::size_t>(prefetchBacklog, std::min<std::size_t>(totalWorkers, 2));
+            prefetchTarget = std::min<std::size_t>(prefetchBacklog, std::min<std::size_t>(totalWorkers, 4));
+        }
+        else if (totalWorkers >= 12 && prefetchBacklog > 512)
+        {
+            prefetchTarget = 4;
+        }
+        else if (totalWorkers >= 10 && prefetchBacklog > 128)
+        {
+            prefetchTarget = 3;
         }
         else if (latencySensitivePressure == 0 && totalWorkers >= 8 && prefetchBacklog > 1)
         {
@@ -491,6 +499,10 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
                 ? (totalWorkers - prefetchTarget)
                 : 0;
             bulkShellTarget = std::min<std::size_t>(bulkShellBacklog, std::min<std::size_t>(remainingCapacity, 2));
+        }
+        else if (totalWorkers >= 12 && prefetchBacklog < 256 && latencySensitivePressure == 0)
+        {
+            bulkShellTarget = 1;
         }
         else if (latencySensitivePressure == 0 && totalWorkers >= 10)
         {
@@ -547,33 +559,33 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         return targets;
     }
 
-    double meshShare = 0.5;
+    double meshShare = 0.25;
     if (generateInitialReadyTop && meshInitialReadyTop)
     {
         if (generateBacklog > meshBacklog * 2)
         {
-            meshShare = 0.35;
+            meshShare = 0.18;
         }
         else if (generateBacklog > meshBacklog)
         {
-            meshShare = 0.40;
+            meshShare = 0.22;
         }
         else if (meshBacklog > generateBacklog * 2)
         {
-            meshShare = 0.60;
+            meshShare = 0.35;
         }
         else if (meshBacklog > generateBacklog)
         {
-            meshShare = 0.50;
+            meshShare = 0.30;
         }
         else
         {
-            meshShare = 0.45;
+            meshShare = 0.25;
         }
     }
     else if (meshBacklog == 0 && generateBacklog > 0)
     {
-        meshShare = 0.4;
+        meshShare = 0.15;
     }
     else if (generateBacklog == 0 && meshBacklog > 0)
     {
@@ -581,11 +593,11 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     }
     else if (meshBacklog > generateBacklog * 2)
     {
-        meshShare = 0.65;
+        meshShare = 0.40;
     }
     else if (generateBacklog > meshBacklog * 2)
     {
-        meshShare = 0.35;
+        meshShare = 0.18;
     }
 
     std::size_t meshTarget = static_cast<std::size_t>(std::round(meshShare * static_cast<double>(playableWorkers)));

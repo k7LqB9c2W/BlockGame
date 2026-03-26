@@ -2266,6 +2266,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeCountStatsJson(out, report.uploadBeginFailuresPerFrame);
     out << ",\"stale_pending_meshes_per_frame\":";
     writeCountStatsJson(out, report.uploadStalePendingMeshesPerFrame);
+    out << ",\"nonlocal_cpu_upload_chunks_per_frame\":";
+    writeCountStatsJson(out, report.nonlocalCpuUploadChunksPerFrame);
     out << "}";
     out << ",\"relight_detail\":{"
         << "\"vertical_radius_delta\":";
@@ -2343,6 +2345,7 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"upload_scan_limit_hits_last_frame\":" << finalProfiling.uploadScanLimitHitsLastFrame
         << ",\"upload_begin_failures_last_frame\":" << finalProfiling.uploadBeginFailuresLastFrame
         << ",\"upload_stale_pending_meshes_last_frame\":" << finalProfiling.uploadStalePendingMeshesLastFrame
+        << ",\"nonlocal_cpu_upload_chunks_last_frame\":" << finalProfiling.nonlocalCpuUploadChunksLastFrame
         << ",\"uploaded_bytes_last_frame\":" << finalProfiling.uploadedBytesLastFrame
         << ",\"far_terrain_update_ms\":" << finalProfiling.farTerrainUpdateMsLastFrame
         << ",\"column_height_lookup_ms\":" << finalProfiling.columnHeightLookupMsLastFrame
@@ -2382,6 +2385,10 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs
         << ",\"structure_cache_hit_rate\":" << finalProfiling.structureCacheHitRate
         << ",\"structure_regions_built\":" << finalProfiling.structureRegionsBuilt
+        << ",\"exact_cpu_authoritative_chunks\":" << finalProfiling.exactCpuAuthoritativeChunks
+        << ",\"exact_gpu_resident_nonlocal_chunks\":" << finalProfiling.exactGpuResidentNonlocalChunks
+        << ",\"exact_cpu_materializing_chunks\":" << finalProfiling.exactCpuMaterializingChunks
+        << ",\"exact_gpu_pending_retire_chunks\":" << finalProfiling.exactGpuPendingRetireChunks
         << ",\"ensure_volume_columns_visited_last_frame\":" << finalProfiling.ensureVolumeColumnsVisitedLastFrame
         << ",\"ensure_volume_candidates_built_last_frame\":" << finalProfiling.ensureVolumeCandidatesBuiltLastFrame
         << ",\"ensure_volume_existing_chunk_skips_last_frame\":" << finalProfiling.ensureVolumeExistingChunkSkipsLastFrame

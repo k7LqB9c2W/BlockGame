@@ -591,6 +591,7 @@ struct ChunkBenchmarkMetrics
         uploadScanLimitHitsPerFrame.reset();
         uploadBeginFailuresPerFrame.reset();
         uploadStalePendingMeshesPerFrame.reset();
+        nonlocalCpuUploadChunksPerFrame.reset();
         relightRegionChunks.reset();
         relightChangedChunks.reset();
         relightExternalSnapshotChunks.reset();
@@ -705,6 +706,7 @@ struct ChunkBenchmarkMetrics
         report.uploadScanLimitHitsPerFrame = uploadScanLimitHitsPerFrame.snapshot();
         report.uploadBeginFailuresPerFrame = uploadBeginFailuresPerFrame.snapshot();
         report.uploadStalePendingMeshesPerFrame = uploadStalePendingMeshesPerFrame.snapshot();
+        report.nonlocalCpuUploadChunksPerFrame = nonlocalCpuUploadChunksPerFrame.snapshot();
         report.relightRegionChunks = relightRegionChunks.snapshot();
         report.relightChangedChunks = relightChangedChunks.snapshot();
         report.relightExternalSnapshotChunks = relightExternalSnapshotChunks.snapshot();
@@ -817,6 +819,7 @@ struct ChunkBenchmarkMetrics
     AtomicCountHistogram uploadScanLimitHitsPerFrame{};
     AtomicCountHistogram uploadBeginFailuresPerFrame{};
     AtomicCountHistogram uploadStalePendingMeshesPerFrame{};
+    AtomicCountHistogram nonlocalCpuUploadChunksPerFrame{};
     AtomicCountHistogram relightRegionChunks{};
     AtomicCountHistogram relightChangedChunks{};
     AtomicCountHistogram relightExternalSnapshotChunks{};
@@ -3014,6 +3017,14 @@ enum class ChunkState : std::uint8_t
     Remeshing
 };
 
+enum class ExactChunkResidencyMode : std::uint8_t
+{
+    CpuAuthoritative = 0,
+    GpuResidentNonlocal,
+    CpuMaterializing,
+    GpuPendingRetire
+};
+
 const char* chunkStateLabel(ChunkState state) noexcept
 {
     switch (state)
@@ -3096,7 +3107,8 @@ struct Chunk
           maxWorldY(minWorldY + kChunkSizeY - 1),
           blocks(kChunkBlockCount, BlockId::Air),
           lightLevels(kChunkBlockCount, packLightLevels(kMaxLightLevel, 0)),
-          state(ChunkState::Empty)
+          state(ChunkState::Empty),
+          residencyMode(ExactChunkResidencyMode::CpuMaterializing)
     {
     }
 
@@ -3122,6 +3134,7 @@ struct Chunk
             std::fill(lightLevels.begin(), lightLevels.end(), packLightLevels(kMaxLightLevel, 0));
         }
         state.store(ChunkState::Empty, std::memory_order_relaxed);
+        residencyMode.store(ExactChunkResidencyMode::CpuMaterializing, std::memory_order_relaxed);
         meshData.trimForReuse();
         meshReady.store(false, std::memory_order_relaxed);
         hasBlocks.store(false, std::memory_order_relaxed);
@@ -3197,6 +3210,7 @@ struct Chunk
     std::vector<BlockId> blocks;
     std::vector<std::uint8_t> lightLevels;
     std::atomic<ChunkState> state;
+    std::atomic<ExactChunkResidencyMode> residencyMode;
 
     std::atomic<std::uint32_t> indexCount{0};
     std::atomic<std::size_t> vertexCount{0};
@@ -3900,13 +3914,11 @@ private:
                                                        const glm::ivec3& centerChunk) const noexcept;
     [[nodiscard]] bool shouldKeepChunkInteractive(const glm::ivec3& coord,
                                                   const glm::ivec3& centerChunk) const;
+    [[nodiscard]] ExactChunkResidencyMode classifyExactChunkResidencyMode(const Chunk& chunk,
+                                                                          const glm::ivec3& centerChunk) const;
     [[nodiscard]] static JobServiceClass classifyJobServiceClass(bool initialReadyPriority,
                                                                  bool localInteractionPriority,
                                                                  bool refinementPriority) noexcept;
-    [[nodiscard]] bool shouldKeepChunkCpuDense(const Chunk& chunk,
-                                               const glm::ivec3& centerChunk,
-                                               int horizontalRadius,
-                                               int verticalRadius) const;
     [[nodiscard]] bool ensureChunkCpuDataResident(Chunk& chunk);
     [[nodiscard]] bool chunkHasPendingStructureEdits(const glm::ivec3& coord) const;
     void releaseChunkCpuData(Chunk& chunk);
@@ -4358,6 +4370,7 @@ private:
     int uploadScanLimitHitsLastFrame_{0};
     int uploadBeginFailuresLastFrame_{0};
     int uploadStalePendingMeshesLastFrame_{0};
+    int nonlocalCpuUploadChunksLastFrame_{0};
     int ensureVolumeColumnsVisitedLastFrame_{0};
     int ensureVolumeCandidatesBuiltLastFrame_{0};
     int ensureVolumeExistingChunkSkipsLastFrame_{0};
@@ -6727,6 +6740,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadScanLimitHitsLastFrame = uploadScanLimitHitsLastFrame_;
     snapshot.uploadBeginFailuresLastFrame = uploadBeginFailuresLastFrame_;
     snapshot.uploadStalePendingMeshesLastFrame = uploadStalePendingMeshesLastFrame_;
+    snapshot.nonlocalCpuUploadChunksLastFrame = nonlocalCpuUploadChunksLastFrame_;
     snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
     snapshot.verticalRadius = lastVerticalRadius_;
     snapshot.verticalRadiusDelta = lastVerticalRadiusDelta_;
@@ -6841,6 +6855,33 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.structureRegionsBuilt = structureSnapshot.regionsBuilt;
     snapshot.exactChunksReady = status.exactReadyChunks;
     snapshot.exactChunksPending = std::max(status.exactRequiredChunks - status.exactReadyChunks, 0);
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        for (const auto& [coord, chunk] : chunks_)
+        {
+            (void)coord;
+            if (!chunk)
+            {
+                continue;
+            }
+
+            switch (chunk->residencyMode.load(std::memory_order_acquire))
+            {
+            case ExactChunkResidencyMode::CpuAuthoritative:
+                ++snapshot.exactCpuAuthoritativeChunks;
+                break;
+            case ExactChunkResidencyMode::GpuResidentNonlocal:
+                ++snapshot.exactGpuResidentNonlocalChunks;
+                break;
+            case ExactChunkResidencyMode::CpuMaterializing:
+                ++snapshot.exactCpuMaterializingChunks;
+                break;
+            case ExactChunkResidencyMode::GpuPendingRetire:
+                ++snapshot.exactGpuPendingRetireChunks;
+                break;
+            }
+        }
+    }
 
     return snapshot;
 }
@@ -11778,6 +11819,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
     uploadScanLimitHitsLastFrame_ = 0;
     uploadBeginFailuresLastFrame_ = 0;
     uploadStalePendingMeshesLastFrame_ = 0;
+    nonlocalCpuUploadChunksLastFrame_ = 0;
     uploadQueuePickMsLastFrame_ = 0.0;
     uploadPrepareMsLastFrame_ = 0.0;
     uploadContextBeginMsLastFrame_ = 0.0;
@@ -11831,6 +11873,7 @@ void ChunkManager::Impl::uploadReadyMeshes()
             benchmarkMetrics_.uploadScanLimitHitsPerFrame.record(0);
             benchmarkMetrics_.uploadStalePendingMeshesPerFrame.record(
                 static_cast<std::uint64_t>(std::max(uploadStalePendingMeshesLastFrame_, 0)));
+            benchmarkMetrics_.nonlocalCpuUploadChunksPerFrame.record(0);
         }
         return;
     }
@@ -11922,6 +11965,10 @@ void ChunkManager::Impl::uploadReadyMeshes()
                 break;
             }
             continue;
+        }
+        if (chunk->residencyMode.load(std::memory_order_acquire) != ExactChunkResidencyMode::CpuAuthoritative)
+        {
+            ++nonlocalCpuUploadChunksLastFrame_;
         }
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
         chunk->meshReady.store(false, std::memory_order_release);
@@ -12030,6 +12077,8 @@ void ChunkManager::Impl::uploadReadyMeshes()
             static_cast<std::uint64_t>(std::max(uploadBeginFailuresLastFrame_, 0)));
         benchmarkMetrics_.uploadStalePendingMeshesPerFrame.record(
             static_cast<std::uint64_t>(std::max(uploadStalePendingMeshesLastFrame_, 0)));
+        benchmarkMetrics_.nonlocalCpuUploadChunksPerFrame.record(
+            static_cast<std::uint64_t>(std::max(nonlocalCpuUploadChunksLastFrame_, 0)));
     }
 }
 
@@ -15804,6 +15853,33 @@ bool ChunkManager::Impl::shouldKeepChunkInteractive(const glm::ivec3& coord,
            shouldTrackRecentEditChunk(coord);
 }
 
+ExactChunkResidencyMode ChunkManager::Impl::classifyExactChunkResidencyMode(const Chunk& chunk,
+                                                                            const glm::ivec3& centerChunk) const
+{
+    if (shouldKeepChunkInteractive(chunk.coord, centerChunk))
+    {
+        return chunk.cpuDataResident ? ExactChunkResidencyMode::CpuAuthoritative
+                                     : ExactChunkResidencyMode::CpuMaterializing;
+    }
+
+    const ChunkState state = chunk.state.load(std::memory_order_acquire);
+    const bool requiresLegacyCpuFallback =
+        state != ChunkState::Uploaded ||
+        chunk.inFlight.load(std::memory_order_acquire) > 0 ||
+        chunk.queuedForUpload.load(std::memory_order_acquire) ||
+        chunk.pendingMesh.valid() ||
+        chunk.pendingMeshRefresh.load(std::memory_order_acquire) ||
+        chunk.meshReady.load(std::memory_order_acquire) ||
+        chunkHasPendingStructureEdits(chunk.coord);
+    if (requiresLegacyCpuFallback)
+    {
+        return ExactChunkResidencyMode::CpuMaterializing;
+    }
+
+    return chunk.cpuDataResident ? ExactChunkResidencyMode::GpuPendingRetire
+                                 : ExactChunkResidencyMode::GpuResidentNonlocal;
+}
+
 JobServiceClass ChunkManager::Impl::classifyJobServiceClass(bool initialReadyPriority,
                                                             bool localInteractionPriority,
                                                             bool refinementPriority) noexcept
@@ -15823,40 +15899,9 @@ JobServiceClass ChunkManager::Impl::classifyJobServiceClass(bool initialReadyPri
     return JobServiceClass::Standard;
 }
 
-bool ChunkManager::Impl::shouldKeepChunkCpuDense(const Chunk& chunk,
-                                                 const glm::ivec3& centerChunk,
-                                                 int horizontalRadius,
-                                                 int verticalRadius) const
-{
-    const ChunkState state = chunk.state.load(std::memory_order_acquire);
-    if (state != ChunkState::Uploaded)
-    {
-        return true;
-    }
-
-    if (chunk.inFlight.load(std::memory_order_acquire) > 0 ||
-        chunk.queuedForUpload.load(std::memory_order_acquire) ||
-        chunk.pendingMesh.valid() ||
-        chunk.pendingMeshRefresh.load(std::memory_order_acquire) ||
-        chunk.meshReady.load(std::memory_order_acquire) ||
-        chunkHasPendingStructureEdits(chunk.coord))
-    {
-        return true;
-    }
-
-    if (shouldKeepChunkInteractive(chunk.coord, centerChunk))
-    {
-        return true;
-    }
-
-    const int horizontalDistance =
-        std::max(std::abs(chunk.coord.x - centerChunk.x), std::abs(chunk.coord.z - centerChunk.z));
-    const int verticalDistance = std::abs(chunk.coord.y - centerChunk.y);
-    return horizontalDistance <= horizontalRadius && verticalDistance <= verticalRadius;
-}
-
 bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
 {
+    chunk.residencyMode.store(ExactChunkResidencyMode::CpuMaterializing, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         if (chunk.cpuDataResident &&
@@ -15864,6 +15909,10 @@ bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
             chunk.lightLevels.size() == static_cast<std::size_t>(kChunkBlockCount))
         {
             chunk.lastDenseFrameTouched = updateFrameIndex_;
+            chunk.residencyMode.store(shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_)
+                                          ? ExactChunkResidencyMode::CpuAuthoritative
+                                          : ExactChunkResidencyMode::CpuMaterializing,
+                                      std::memory_order_release);
             return true;
         }
     }
@@ -15881,6 +15930,10 @@ bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
                           std::memory_order_release);
     rebuildChunkBaseLighting(chunk);
     chunk.lastDenseFrameTouched = updateFrameIndex_;
+    chunk.residencyMode.store(shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_)
+                                  ? ExactChunkResidencyMode::CpuAuthoritative
+                                  : ExactChunkResidencyMode::CpuMaterializing,
+                              std::memory_order_release);
     return true;
 }
 
@@ -15904,12 +15957,12 @@ void ChunkManager::Impl::releaseChunkCpuData(Chunk& chunk)
     }
 
     chunk.releaseCpuData();
+    chunk.residencyMode.store(ExactChunkResidencyMode::GpuResidentNonlocal, std::memory_order_release);
 }
 
 void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk)
 {
     const int horizontalRadius = denseCpuHorizontalRadius();
-    const int verticalRadius = denseCpuVerticalRadius();
     const int baseHydrationBudget = std::clamp(1 + horizontalRadius / 3,
                                                kDenseCpuHydrationBudgetMin,
                                                kDenseCpuHydrationBudgetMax);
@@ -15958,7 +16011,11 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
             continue;
         }
 
-        const bool keepDense = shouldKeepChunkCpuDense(*chunk, centerChunk, horizontalRadius, verticalRadius);
+        const ExactChunkResidencyMode residencyMode = classifyExactChunkResidencyMode(*chunk, centerChunk);
+        chunk->residencyMode.store(residencyMode, std::memory_order_release);
+        const bool keepDense =
+            residencyMode == ExactChunkResidencyMode::CpuAuthoritative ||
+            residencyMode == ExactChunkResidencyMode::CpuMaterializing;
         if (keepDense)
         {
             if (chunk->cpuDataResident)

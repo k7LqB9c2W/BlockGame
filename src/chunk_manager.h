@@ -309,6 +309,7 @@ struct ChunkProfilingSnapshot
     int uploadScanLimitHitsLastFrame{0};
     int uploadBeginFailuresLastFrame{0};
     int uploadStalePendingMeshesLastFrame{0};
+    int nonlocalCpuUploadChunksLastFrame{0};
     int evictedChunks{0};
     int verticalRadius{0};
     int verticalRadiusDelta{0};
@@ -333,6 +334,10 @@ struct ChunkProfilingSnapshot
     int ensureVolumeColumnCapSkipsLastFrame{0};
     int exactChunksReady{0};
     int exactChunksPending{0};
+    int exactCpuAuthoritativeChunks{0};
+    int exactGpuResidentNonlocalChunks{0};
+    int exactCpuMaterializingChunks{0};
+    int exactGpuPendingRetireChunks{0};
     std::size_t pooledChunkCount{0};
     std::size_t pooledChunkBytes{0};
     std::size_t pooledChunkBudgetBytes{0};
@@ -465,6 +470,7 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats uploadScanLimitHitsPerFrame{};
     BenchmarkStageStats uploadBeginFailuresPerFrame{};
     BenchmarkStageStats uploadStalePendingMeshesPerFrame{};
+    BenchmarkStageStats nonlocalCpuUploadChunksPerFrame{};
     BenchmarkStageStats relightRegionChunks{};
     BenchmarkStageStats relightChangedChunks{};
     BenchmarkStageStats relightExternalSnapshotChunks{};

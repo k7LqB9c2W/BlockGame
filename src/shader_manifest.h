@@ -13,7 +13,7 @@ struct ShaderCompileSpec
     const char* target;
 };
 
-inline constexpr std::array<ShaderCompileSpec, 32> kBlockGameShaderCompileSpecs{{
+inline constexpr std::array<ShaderCompileSpec, 38> kBlockGameShaderCompileSpecs{{
     {"world_vs.hlsl", "main", "vs_5_0"},
     {"mob_vs.hlsl", "main", "vs_5_0"},
     {"block_outline_vs.hlsl", "main", "vs_5_0"},
@@ -46,6 +46,12 @@ inline constexpr std::array<ShaderCompileSpec, 32> kBlockGameShaderCompileSpecs{
     {"far_lod_chunk_face_prefix_cs.hlsl", "FarLodChunkFacePrefixScanMain", "cs_5_0"},
     {"far_lod_chunk_face_prefix_cs.hlsl", "FarLodChunkFacePrefixAddMain", "cs_5_0"},
     {"far_lod_chunk_face_emit_cs.hlsl", "FarLodChunkFaceEmitMain", "cs_5_0"},
+    {"exact_chunk_synth_cs.hlsl", "ExactChunkSynthMain", "cs_5_0"},
+    {"exact_chunk_structure_stamp_cs.hlsl", "ExactChunkStructureStampMain", "cs_5_0"},
+    {"exact_chunk_light_cs.hlsl", "ExactChunkLightMain", "cs_5_0"},
+    {"exact_chunk_face_count_cs.hlsl", "ExactChunkFaceCountMain", "cs_5_0"},
+    {"exact_chunk_face_prefix_cs.hlsl", "ExactChunkFacePrefixMain", "cs_5_0"},
+    {"exact_chunk_face_emit_cs.hlsl", "ExactChunkFaceEmitMain", "cs_5_0"},
 }};
 
 inline std::string sanitizeShaderName(std::string_view value)

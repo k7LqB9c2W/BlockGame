@@ -2959,6 +2959,36 @@ struct StructureVoxelEdit
     bool replaceSolid{false};
 };
 
+struct GpuExactColumnDescriptor
+{
+    std::int32_t surfaceY{0};
+    std::int32_t highestSolidWorld{std::numeric_limits<int>::min()};
+    std::int32_t waterTopWorld{std::numeric_limits<int>::min()};
+    std::int32_t waterBottomWorld{std::numeric_limits<int>::max()};
+    std::int32_t stripeOffset{0};
+    std::uint32_t flags{0};
+    std::uint32_t stripePeriod{0};
+    std::uint32_t stripeThickness{0};
+    std::uint32_t incomingSky{static_cast<std::uint32_t>(kMaxLightLevel)};
+    std::uint32_t grassTintIndex{0};
+    std::uint32_t surfaceBlock{0};
+    std::uint32_t fillerBlock{0};
+    std::uint32_t waterBlock{0};
+    std::uint32_t stripeBlock{0};
+    std::uint32_t reserved0{0};
+    std::uint32_t reserved1{0};
+};
+static_assert(sizeof(GpuExactColumnDescriptor) == 64u);
+
+struct GpuExactSparseVoxel
+{
+    std::uint32_t packedLocalPos{0};
+    std::uint32_t block{0};
+    std::uint32_t flags{0};
+    std::uint32_t reserved{0};
+};
+static_assert(sizeof(GpuExactSparseVoxel) == 16u);
+
 #include "chunk_manager_structure_registry.inl"
 
 struct MeshData
@@ -3108,6 +3138,30 @@ struct Chunk
         }
     };
 
+    struct ExactGpuResources
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> columnBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> sparseVoxelBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> voxelBuffer;
+        D3D12_RESOURCE_STATES columnState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES sparseVoxelState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES voxelState{D3D12_RESOURCE_STATE_COMMON};
+        std::uint32_t sparseVoxelCapacity{0};
+        UINT64 readyFenceValue{0};
+
+        void reset() noexcept
+        {
+            columnBuffer.Reset();
+            sparseVoxelBuffer.Reset();
+            voxelBuffer.Reset();
+            columnState = D3D12_RESOURCE_STATE_COMMON;
+            sparseVoxelState = D3D12_RESOURCE_STATE_COMMON;
+            voxelState = D3D12_RESOURCE_STATE_COMMON;
+            sparseVoxelCapacity = 0;
+            readyFenceValue = 0;
+        }
+    };
+
     explicit Chunk(const glm::ivec3& c)
         : coord(c),
           minWorldY(c.y * kChunkSizeY),
@@ -3126,8 +3180,11 @@ struct Chunk
         std::vector<BlockId>().swap(blocks);
         std::vector<std::uint8_t>().swap(lightLevels);
         structureVoxelEdits.clear();
+        gpuExactSparseVoxels.clear();
         exactColumnDescriptorsReady = false;
         structureVoxelEditsReady = false;
+        gpuExactColumnDescriptorsReady = false;
+        gpuExactSparseVoxelsReady = false;
         state.store(ChunkState::Empty, std::memory_order_relaxed);
         residencyMode.store(ExactChunkResidencyMode::CpuMaterializing, std::memory_order_relaxed);
         meshData.trimForReuse();
@@ -3163,10 +3220,17 @@ struct Chunk
         lightingRevision.store(0, std::memory_order_relaxed);
         appliedLightingRevision.store(0, std::memory_order_relaxed);
         skyLightCacheGeneration.store(0, std::memory_order_relaxed);
+        exactGpuBuildVersion.store(0, std::memory_order_relaxed);
+        exactGpuBuildQueued.store(false, std::memory_order_relaxed);
+        exactGpuBuildInFlight.store(false, std::memory_order_relaxed);
+        exactGpuResident.store(false, std::memory_order_relaxed);
+        exactGpuRecordIndex.store(std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
+        exactGpuFaceCapacityHint.store(0, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident = false;
         lastDenseFrameTouched = 0;
         pendingMesh = {};
+        exactGpu.reset();
     }
 
     void ensureCpuDataAllocated()
@@ -3204,8 +3268,12 @@ struct Chunk
     int maxWorldY{0};
     std::array<terrain::ExactChunkColumnDescriptor, kColumnCount> exactColumnDescriptors{};
     bool exactColumnDescriptorsReady{false};
+    std::array<GpuExactColumnDescriptor, kColumnCount> gpuExactColumnDescriptors{};
+    bool gpuExactColumnDescriptorsReady{false};
     std::vector<StructureVoxelEdit> structureVoxelEdits;
     bool structureVoxelEditsReady{false};
+    std::vector<GpuExactSparseVoxel> gpuExactSparseVoxels;
+    bool gpuExactSparseVoxelsReady{false};
     std::vector<BlockId> blocks;
     std::vector<std::uint8_t> lightLevels;
     std::atomic<ChunkState> state;
@@ -3246,10 +3314,17 @@ struct Chunk
     std::atomic<std::uint64_t> lightingRevision{0};
     std::atomic<std::uint64_t> appliedLightingRevision{0};
     std::atomic<std::uint64_t> skyLightCacheGeneration{0};
+    std::atomic<std::uint32_t> exactGpuBuildVersion{0};
+    std::atomic<bool> exactGpuBuildQueued{false};
+    std::atomic<bool> exactGpuBuildInFlight{false};
+    std::atomic<bool> exactGpuResident{false};
+    std::atomic<std::uint32_t> exactGpuRecordIndex{std::numeric_limits<std::uint32_t>::max()};
+    std::atomic<std::uint32_t> exactGpuFaceCapacityHint{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     bool cpuDataResident{false};
     std::uint64_t lastDenseFrameTouched{0};
     PendingRenderMesh pendingMesh{};
+    ExactGpuResources exactGpu{};
 };
 
 } // namespace chunk_manager_detail
@@ -3263,6 +3338,36 @@ namespace
 [[nodiscard]] ChunkBlockView makeChunkBlockView(const Chunk& chunk) noexcept
 {
     return ChunkBlockView{chunk.coord, chunk.minWorldY, std::span<const BlockId>(chunk.blocks)};
+}
+
+[[nodiscard]] GpuExactColumnDescriptor packGpuExactColumnDescriptor(
+    const terrain::ExactChunkColumnDescriptor& descriptor,
+    std::uint8_t incomingSky) noexcept
+{
+    GpuExactColumnDescriptor packed{};
+    packed.surfaceY = descriptor.surfaceY;
+    packed.highestSolidWorld = descriptor.highestSolidWorld;
+    packed.waterTopWorld = descriptor.waterTopWorld;
+    packed.waterBottomWorld = descriptor.waterBottomWorld;
+    packed.stripeOffset = descriptor.stripeOffset;
+    packed.flags = descriptor.flags;
+    packed.stripePeriod = descriptor.stripePeriod;
+    packed.stripeThickness = descriptor.stripeThickness;
+    packed.incomingSky = incomingSky;
+    packed.grassTintIndex = descriptor.grassTintIndex;
+    packed.surfaceBlock = static_cast<std::uint32_t>(descriptor.surfaceBlock);
+    packed.fillerBlock = static_cast<std::uint32_t>(descriptor.fillerBlock);
+    packed.waterBlock = static_cast<std::uint32_t>(descriptor.waterBlock);
+    packed.stripeBlock = static_cast<std::uint32_t>(descriptor.stripeBlock);
+    return packed;
+}
+
+[[nodiscard]] std::uint32_t packGpuExactLocalVoxelPos(const glm::ivec3& localPos) noexcept
+{
+    const std::uint32_t x = static_cast<std::uint32_t>(std::clamp(localPos.x, 0, kChunkSizeX - 1));
+    const std::uint32_t y = static_cast<std::uint32_t>(std::clamp(localPos.y, 0, kChunkSizeY - 1));
+    const std::uint32_t z = static_cast<std::uint32_t>(std::clamp(localPos.z, 0, kChunkSizeZ - 1));
+    return x | (y << 5u) | (z << 10u);
 }
 
 struct ProfilingCounters
@@ -3324,6 +3429,9 @@ enum class UploadQueueBucket : std::uint8_t
 };
 
 inline constexpr std::size_t kUploadQueueBucketCount = 4;
+inline constexpr std::uint32_t kInvalidExactGpuDrawRecordIndex = std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::uint32_t kExactGpuDrawRecordOverflowFlag = 0x80000000u;
+inline constexpr std::uint32_t kExactGpuDrawRecordFaceCountMask = 0x7fffffffu;
 
 [[nodiscard]] constexpr std::size_t uploadQueueBucketIndex(UploadQueueBucket bucket) noexcept
 {
@@ -3667,6 +3775,7 @@ private:
 
         Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> drawRecordBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> vertexUploadBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> indexUploadBuffer;
         D3D12_VERTEX_BUFFER_VIEW vertexView{};
@@ -3675,10 +3784,14 @@ private:
         std::byte* mappedIndexData{nullptr};
         D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES drawRecordState{D3D12_RESOURCE_STATE_COMMON};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
+        std::size_t recordCapacity{0};
         std::size_t vertexCursor{0};
         std::size_t indexCursor{0};
+        std::size_t recordCursor{0};
+        std::size_t recordActiveCount{0};
         std::size_t residentChunks{0};
         std::size_t pendingChunks{0};
         UINT64 pendingBatchId{0};
@@ -3692,6 +3805,7 @@ private:
         std::uint32_t pageIndex{kInvalidChunkBufferPage};
         std::size_t vertexOffset{0};
         std::size_t indexOffset{0};
+        std::uint32_t recordIndex{std::numeric_limits<std::uint32_t>::max()};
     };
 
     struct DeferredPendingChunkRelease
@@ -3702,6 +3816,30 @@ private:
         std::size_t vertexCount{0};
         std::size_t indexCount{0};
         UINT64 uploadFenceValue{0};
+    };
+
+    struct ExactGpuBuildRequest
+    {
+        std::shared_ptr<Chunk> chunk;
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+    };
+
+    struct PendingExactGpuBuild
+    {
+        std::shared_ptr<Chunk> chunk;
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+        std::uint32_t faceCapacity{0};
+        ChunkAllocation allocation{};
+        UINT64 computeFenceValue{0};
+        Microsoft::WRL::ComPtr<ID3D12Resource> drawRecordReadbackBuffer;
+        ChunkRenderBatch::GpuCullRecord* mappedDrawRecord{nullptr};
+
+        [[nodiscard]] bool valid() const noexcept
+        {
+            return chunk != nullptr && allocation.pageIndex != kInvalidChunkBufferPage;
+        }
     };
 
     static std::size_t nextPowerOfTwo(std::size_t value) noexcept;
@@ -3723,6 +3861,9 @@ private:
     void collectDeferredPendingChunkReleases();
     void deferPendingChunkRelease(const Chunk::PendingRenderMesh& pendingMesh);
     void commitPendingChunkUploads();
+    void queueChunkForExactGpuBuild(const std::shared_ptr<Chunk>& chunk, std::uint32_t buildVersion);
+    void submitPendingExactGpuBuilds();
+    void commitPendingExactGpuBuilds();
     void releaseChunkAllocation(Chunk& chunk);
     void recycleChunkGPU(Chunk& chunk);
     void destroyBufferPages();
@@ -8737,6 +8878,7 @@ std::size_t ChunkManager::Impl::estimateChunkRetainedBytes(const Chunk& chunk) n
            chunk.blocks.capacity() * sizeof(BlockId) +
            chunk.lightLevels.capacity() * sizeof(std::uint8_t) +
            chunk.structureVoxelEdits.capacity() * sizeof(StructureVoxelEdit) +
+           chunk.gpuExactSparseVoxels.capacity() * sizeof(GpuExactSparseVoxel) +
            chunk.meshData.retainedBytes();
 }
 
@@ -12723,6 +12865,8 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     std::vector<BlockId> chunkBlocks;
     std::vector<std::uint8_t> chunkLightLevels;
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
+    std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
+    bool haveColumnDescriptors = false;
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         if (!chunk.hasBlocks.load(std::memory_order_acquire))
@@ -12733,6 +12877,11 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         }
 
         incomingSky = chunk.skyLightFromAboveCache;
+        haveColumnDescriptors = chunk.exactColumnDescriptorsReady;
+        if (haveColumnDescriptors)
+        {
+            columnDescriptors = chunk.exactColumnDescriptors;
+        }
         if (chunk.cpuDataResident)
         {
             chunkBlocks = chunk.blocks;
@@ -12759,16 +12908,30 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
     const glm::vec3 chunkOrigin(static_cast<float>(baseWorldX), static_cast<float>(baseWorldY), static_cast<float>(baseWorldZ));
     std::array<std::uint8_t, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> grassTintByColumn{};
-    for (int localX = 0; localX < kChunkSizeX; ++localX)
+    if (haveColumnDescriptors)
     {
-        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+        for (int localX = 0; localX < kChunkSizeX; ++localX)
         {
-            const ColumnSample columnSample = sampleColumn(baseWorldX + localX,
-                                                           baseWorldZ + localZ,
-                                                           baseWorldY,
-                                                           baseWorldY + kChunkSizeY - 1);
-            grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)] =
-                static_cast<std::uint8_t>(grassTintIndexForBiome(columnSample.dominantBiome));
+            for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+            {
+                const std::size_t descriptorIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
+                grassTintByColumn[descriptorIndex] = columnDescriptors[descriptorIndex].grassTintIndex;
+            }
+        }
+    }
+    else
+    {
+        for (int localX = 0; localX < kChunkSizeX; ++localX)
+        {
+            for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+            {
+                const ColumnSample columnSample = sampleColumn(baseWorldX + localX,
+                                                               baseWorldZ + localZ,
+                                                               baseWorldY,
+                                                               baseWorldY + kChunkSizeY - 1);
+                grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)] =
+                    static_cast<std::uint8_t>(grassTintIndexForBiome(columnSample.dominantBiome));
+            }
         }
     }
 
@@ -15628,6 +15791,16 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     }
 
     std::vector<StructureVoxelEdit> structureVoxelEdits = queryStructureVoxelEditsForChunk(chunk.coord);
+    const std::vector<PendingStructureEdit> pendingStructureEditsForGpu = copyPendingStructureEdits(chunk.coord);
+    std::vector<BlockEditOverlayEntry> blockOverlayEntriesForGpu;
+    {
+        std::lock_guard<std::mutex> overlayLock(blockEditOverlayMutex_);
+        auto overlayIt = blockEditOverlays_.find(chunk.coord);
+        if (overlayIt != blockEditOverlays_.end())
+        {
+            blockOverlayEntriesForGpu = overlayIt->second;
+        }
+    }
     const bool anyDescriptorBlocks = std::any_of(columnDescriptors.begin(),
                                                  columnDescriptors.end(),
                                                  [](const terrain::ExactChunkColumnDescriptor& descriptor)
@@ -15636,11 +15809,67 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
                                                  });
     const bool anyBlocks = anyDescriptorBlocks ||
                            !structureVoxelEdits.empty() ||
+                           !pendingStructureEditsForGpu.empty() ||
+                           !blockOverlayEntriesForGpu.empty() ||
                            chunkHasPendingStructureEdits(chunk.coord) ||
                            chunkHasBlockEditOverlay(chunk.coord);
     const bool localAuthoritative = shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_);
     ChunkBuildScratch scratch(chunk);
     std::vector<PendingStructureEdit> pendingEdits;
+    std::array<GpuExactColumnDescriptor, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>
+        gpuColumnDescriptors{};
+    for (std::size_t i = 0; i < gpuColumnDescriptors.size(); ++i)
+    {
+        gpuColumnDescriptors[i] =
+            packGpuExactColumnDescriptor(columnDescriptors[i], chunk.skyLightFromAboveCache[i]);
+    }
+    std::vector<GpuExactSparseVoxel> gpuSparseVoxels;
+    gpuSparseVoxels.reserve(structureVoxelEdits.size() +
+                            pendingStructureEditsForGpu.size() +
+                            blockOverlayEntriesForGpu.size());
+    for (const StructureVoxelEdit& edit : structureVoxelEdits)
+    {
+        const glm::ivec3 local = localBlockCoords(edit.worldPos, chunk.coord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.y < 0 || local.y >= kChunkSizeY ||
+            local.z < 0 || local.z >= kChunkSizeZ)
+        {
+            continue;
+        }
+
+        gpuSparseVoxels.push_back(GpuExactSparseVoxel{
+            packGpuExactLocalVoxelPos(local),
+            static_cast<std::uint32_t>(edit.block),
+            edit.replaceSolid ? 1u : 0u,
+            0u});
+    }
+    for (const PendingStructureEdit& edit : pendingStructureEditsForGpu)
+    {
+        const glm::ivec3 local = localBlockCoords(edit.worldPos, chunk.coord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.y < 0 || local.y >= kChunkSizeY ||
+            local.z < 0 || local.z >= kChunkSizeZ)
+        {
+            continue;
+        }
+
+        gpuSparseVoxels.push_back(GpuExactSparseVoxel{
+            packGpuExactLocalVoxelPos(local),
+            static_cast<std::uint32_t>(edit.block),
+            edit.replaceSolid ? 1u : 0u,
+            0u});
+    }
+    for (const BlockEditOverlayEntry& overlay : blockOverlayEntriesForGpu)
+    {
+        const int localX = overlay.localIndex % kChunkSizeX;
+        const int localZ = (overlay.localIndex / kChunkSizeX) % kChunkSizeZ;
+        const int localY = overlay.localIndex / (kChunkSizeX * kChunkSizeZ);
+        gpuSparseVoxels.push_back(GpuExactSparseVoxel{
+            packGpuExactLocalVoxelPos(glm::ivec3(localX, localY, localZ)),
+            static_cast<std::uint32_t>(overlay.block),
+            1u,
+            0u});
+    }
 
     const auto meshLockStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     {
@@ -15670,8 +15899,12 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
 
         chunk.exactColumnDescriptors = columnDescriptors;
         chunk.exactColumnDescriptorsReady = true;
+        chunk.gpuExactColumnDescriptors = gpuColumnDescriptors;
+        chunk.gpuExactColumnDescriptorsReady = true;
         chunk.structureVoxelEdits = std::move(structureVoxelEdits);
         chunk.structureVoxelEditsReady = true;
+        chunk.gpuExactSparseVoxels = std::move(gpuSparseVoxels);
+        chunk.gpuExactSparseVoxelsReady = true;
         chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
         if (!localAuthoritative)
         {
@@ -16083,6 +16316,18 @@ ExactChunkResidencyMode ChunkManager::Impl::classifyExactChunkResidencyMode(cons
                                      : ExactChunkResidencyMode::CpuMaterializing;
     }
 
+    if (chunk.exactGpuResident.load(std::memory_order_acquire))
+    {
+        return chunk.cpuDataResident ? ExactChunkResidencyMode::GpuPendingRetire
+                                     : ExactChunkResidencyMode::GpuResidentNonlocal;
+    }
+
+    if (chunk.exactGpuBuildQueued.load(std::memory_order_acquire) ||
+        chunk.exactGpuBuildInFlight.load(std::memory_order_acquire))
+    {
+        return ExactChunkResidencyMode::CpuMaterializing;
+    }
+
     const ChunkState state = chunk.state.load(std::memory_order_acquire);
     const bool requiresLegacyCpuFallback =
         state != ChunkState::Uploaded ||
@@ -16162,6 +16407,13 @@ void ChunkManager::Impl::releaseChunkCpuData(Chunk& chunk)
     std::lock_guard<std::mutex> lock(chunk.meshMutex);
     if (!chunk.cpuDataResident)
     {
+        return;
+    }
+
+    if (chunk.exactGpuResident.load(std::memory_order_acquire))
+    {
+        chunk.releaseCpuData();
+        chunk.residencyMode.store(ExactChunkResidencyMode::GpuResidentNonlocal, std::memory_order_release);
         return;
     }
 

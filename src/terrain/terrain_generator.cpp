@@ -21,6 +21,15 @@ namespace terrain
 {
 namespace
 {
+enum class GrassTintIndex : std::uint8_t
+{
+    None = 0,
+    Default = 1,
+    DarkForest = 2,
+    Taiga = 3,
+    Warm = 4,
+};
+
 [[nodiscard]] bool terrainDebugLoggingEnabled() noexcept
 {
     static const bool enabled = []()
@@ -40,6 +49,27 @@ namespace
 inline std::size_t columnIndex(int x, int z, int strideX) noexcept
 {
     return static_cast<std::size_t>(z) * static_cast<std::size_t>(strideX) + static_cast<std::size_t>(x);
+}
+
+[[nodiscard]] std::uint8_t grassTintIndexForBiome(const BiomeDefinition* biome) noexcept
+{
+    if (!biome)
+    {
+        return static_cast<std::uint8_t>(GrassTintIndex::Default);
+    }
+    if (biome->id == "dark_forest")
+    {
+        return static_cast<std::uint8_t>(GrassTintIndex::DarkForest);
+    }
+    if (isTaigaBiome(*biome))
+    {
+        return static_cast<std::uint8_t>(GrassTintIndex::Taiga);
+    }
+    if (biome->id == "savanna" || biome->id == "desert")
+    {
+        return static_cast<std::uint8_t>(GrassTintIndex::Warm);
+    }
+    return static_cast<std::uint8_t>(GrassTintIndex::Default);
 }
 
 float hashToUnitFloat(int x, int y, int z) noexcept
@@ -328,6 +358,7 @@ ChunkGenerationSummary TerrainGenerator::describeChunkColumns(const glm::ivec3& 
             const BiomeDefinition& biome = *sample.dominantBiome;
             descriptor.flags |= ExactChunkColumnDescriptor::kFlagHasBiome;
             descriptor.biomeIndex = static_cast<std::uint32_t>(biomeDatabase_.definitionIndex(biome));
+            descriptor.grassTintIndex = grassTintIndexForBiome(sample.dominantBiome);
 
             const float neighborAverage = computeNeighborAverage(localX, localZ);
             int adjustedSurfaceY = sample.surfaceY;

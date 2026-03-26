@@ -1,0 +1,260 @@
+static const uint kExactChunkSize = 16u;
+static const uint kExactChunkColumnCount = kExactChunkSize * kExactChunkSize;
+static const uint kExactChunkVoxelCount = kExactChunkSize * kExactChunkSize * kExactChunkSize;
+static const uint kExactChunkPlaneCount = 102u;
+static const uint kExactChunkMaxDescriptorsPerPlane = kExactChunkSize * kExactChunkSize;
+static const uint kExactChunkFaceDescriptorCount = kExactChunkPlaneCount * kExactChunkMaxDescriptorsPerPlane;
+static const uint kMaterialFlagWater = 0x01u;
+static const uint kMaterialFlagGrassTintShift = 2u;
+static const uint kMaterialFlagGrassSideTint = 0x20u;
+static const uint kExactDrawRecordOverflowFlag = 0x80000000u;
+static const uint kExactDrawRecordFaceCountMask = 0x7fffffffu;
+
+static const uint kBlockAir = 0u;
+static const uint kBlockGrass = 1u;
+static const uint kBlockLeaves = 3u;
+static const uint kBlockWater = 5u;
+static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockDebugLamp = 10u;
+static const uint kBlockDarkOakLeaves = 12u;
+static const uint kBlockBirchLeaves = 14u;
+static const uint kBlockAcaciaLeaves = 16u;
+
+static const uint kGrassTintDefault = 1u;
+static const uint kGrassTintDarkForest = 2u;
+static const uint kGrassTintTaiga = 3u;
+static const uint kGrassTintWarm = 4u;
+
+struct GpuExactColumnDescriptor
+{
+    int surfaceY;
+    int highestSolidWorld;
+    int waterTopWorld;
+    int waterBottomWorld;
+    int stripeOffset;
+    uint flags;
+    uint stripePeriod;
+    uint stripeThickness;
+    uint incomingSky;
+    uint grassTintIndex;
+    uint surfaceBlock;
+    uint fillerBlock;
+    uint waterBlock;
+    uint stripeBlock;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct GpuExactSparseVoxel
+{
+    uint packedLocalPos;
+    uint block;
+    uint flags;
+    uint reserved;
+};
+
+struct GpuExactFaceDescriptor
+{
+    uint packedLocal;
+    uint reserved0;
+    uint reserved1;
+    uint reserved2;
+};
+
+struct GpuBlockFaceUv
+{
+    float2 base;
+    float2 size;
+};
+
+struct WorldVertex
+{
+    float3 position;
+    float3 normal;
+    float2 tileCoord;
+    float2 atlasBase;
+    float2 atlasSize;
+    uint lightingData;
+};
+
+struct GpuCullRecord
+{
+    float4 boundsMin;
+    float4 boundsMax;
+    uint indexCount;
+    uint firstIndexLocation;
+    int baseVertex;
+    uint reserved;
+};
+
+uint voxelIndex(uint x, uint y, uint z)
+{
+    return y * (kExactChunkSize * kExactChunkSize) + z * kExactChunkSize + x;
+}
+
+uint columnIndex(uint x, uint z)
+{
+    return z * kExactChunkSize + x;
+}
+
+uint encodeVoxel(uint blockId, uint skyLight, uint blockLight)
+{
+    return (blockId & 0xFFu) | ((skyLight & 0x0Fu) << 8u) | ((blockLight & 0x0Fu) << 12u);
+}
+
+uint voxelBlock(uint packedVoxel)
+{
+    return packedVoxel & 0xFFu;
+}
+
+uint voxelSkyLight(uint packedVoxel)
+{
+    return (packedVoxel >> 8u) & 0x0Fu;
+}
+
+uint voxelBlockLight(uint packedVoxel)
+{
+    return (packedVoxel >> 12u) & 0x0Fu;
+}
+
+uint repackVoxelLights(uint packedVoxel, uint skyLight, uint blockLight)
+{
+    return encodeVoxel(voxelBlock(packedVoxel), skyLight, blockLight);
+}
+
+uint decodeLocalX(uint packedLocalPos)
+{
+    return packedLocalPos & 0x1Fu;
+}
+
+uint decodeLocalY(uint packedLocalPos)
+{
+    return (packedLocalPos >> 5u) & 0x1Fu;
+}
+
+uint decodeLocalZ(uint packedLocalPos)
+{
+    return (packedLocalPos >> 10u) & 0x1Fu;
+}
+
+uint packFaceLocal(uint x, uint y, uint z, uint faceId)
+{
+    return x | (y << 5u) | (z << 10u) | (faceId << 15u);
+}
+
+uint faceLocalX(uint packed)
+{
+    return packed & 0x1Fu;
+}
+
+uint faceLocalY(uint packed)
+{
+    return (packed >> 5u) & 0x1Fu;
+}
+
+uint faceLocalZ(uint packed)
+{
+    return (packed >> 10u) & 0x1Fu;
+}
+
+uint faceLocalFaceId(uint packed)
+{
+    return (packed >> 15u) & 0x7u;
+}
+
+bool isLeafBlock(uint blockId)
+{
+    return blockId == kBlockLeaves ||
+           blockId == kBlockSpruceLeaves ||
+           blockId == kBlockDarkOakLeaves ||
+           blockId == kBlockBirchLeaves ||
+           blockId == kBlockAcaciaLeaves;
+}
+
+bool isAlphaCutoutBlock(uint blockId)
+{
+    return isLeafBlock(blockId);
+}
+
+bool isOpaqueForLighting(uint blockId)
+{
+    return blockId != kBlockAir &&
+           blockId != kBlockWater &&
+           !isLeafBlock(blockId);
+}
+
+uint skyAttenuationForBlock(uint blockId)
+{
+    if (blockId == kBlockAir)
+    {
+        return 0u;
+    }
+    if (isLeafBlock(blockId))
+    {
+        return 1u;
+    }
+    if (blockId == kBlockWater)
+    {
+        return 2u;
+    }
+    return 15u;
+}
+
+uint blockEmissionForBlock(uint blockId)
+{
+    return blockId == kBlockDebugLamp ? 14u : 0u;
+}
+
+bool isAoSolid(uint blockId)
+{
+    return blockId != kBlockAir && blockId != kBlockWater;
+}
+
+bool shouldRenderBlockFace(uint owningBlock, uint neighborBlock)
+{
+    if (owningBlock == kBlockAir)
+    {
+        return false;
+    }
+
+    if (neighborBlock == kBlockAir)
+    {
+        return true;
+    }
+
+    if (isAlphaCutoutBlock(owningBlock))
+    {
+        if (isAlphaCutoutBlock(neighborBlock))
+        {
+            return owningBlock != neighborBlock;
+        }
+
+        return neighborBlock == kBlockWater;
+    }
+
+    if (owningBlock == kBlockWater)
+    {
+        return neighborBlock == kBlockAir;
+    }
+
+    return neighborBlock == kBlockWater || isAlphaCutoutBlock(neighborBlock);
+}
+
+float2 projectTileCoord(uint faceId, float3 position)
+{
+    if (faceId == 0u || faceId == 1u)
+    {
+        return float2(position.x, position.z);
+    }
+    if (faceId == 4u || faceId == 5u)
+    {
+        return float2(position.z, position.y);
+    }
+    return float2(position.x, position.y);
+}
+
+uint packLightingData(uint skyLight, uint blockLight, uint aoLevel, uint materialFlags)
+{
+    const uint packedLight = ((skyLight & 0x0Fu) << 4u) | (blockLight & 0x0Fu);
+    return packedLight | ((aoLevel & 0x03u) << 8u) | ((materialFlags & 0x3Fu) << 10u);
+}

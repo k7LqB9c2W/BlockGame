@@ -101,6 +101,10 @@ struct ExactChunkColumnDescriptor
     std::int32_t stripeOffset{0};
     std::uint16_t stripePeriod{0};
     std::uint16_t stripeThickness{0};
+    std::uint8_t grassTintIndex{0};
+    std::uint8_t reserved0{0};
+    std::uint8_t reserved1{0};
+    std::uint8_t reserved2{0};
     BlockId surfaceBlock{};
     BlockId fillerBlock{};
     BlockId waterBlock{};

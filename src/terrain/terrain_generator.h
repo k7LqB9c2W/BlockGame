@@ -73,6 +73,40 @@ struct ChunkGenerationSummary
     bool anySolid{false};
 };
 
+struct ExactChunkColumnDescriptor
+{
+    static constexpr std::uint32_t kInvalidBiomeIndex = std::numeric_limits<std::uint32_t>::max();
+    static constexpr std::uint32_t kFlagHasBiome = 1u << 0;
+    static constexpr std::uint32_t kFlagHasSolid = 1u << 1;
+    static constexpr std::uint32_t kFlagHasWater = 1u << 2;
+    static constexpr std::uint32_t kFlagStripesEnabled = 1u << 3;
+    static constexpr std::uint32_t kFlagColumnHasStripes = 1u << 4;
+    static constexpr std::uint32_t kFlagDominantIsOcean = 1u << 5;
+
+    [[nodiscard]] bool hasBiome() const noexcept { return (flags & kFlagHasBiome) != 0; }
+    [[nodiscard]] bool hasSolid() const noexcept { return (flags & kFlagHasSolid) != 0; }
+    [[nodiscard]] bool hasWater() const noexcept { return (flags & kFlagHasWater) != 0; }
+    [[nodiscard]] bool stripesEnabled() const noexcept { return (flags & kFlagStripesEnabled) != 0; }
+    [[nodiscard]] bool columnHasStripes() const noexcept { return (flags & kFlagColumnHasStripes) != 0; }
+
+    std::uint32_t flags{0};
+    std::uint32_t biomeIndex{kInvalidBiomeIndex};
+    std::int32_t surfaceY{0};
+    std::int32_t originalSurfaceY{0};
+    std::int32_t minSurfaceY{0};
+    std::int32_t maxSurfaceY{0};
+    std::int32_t highestSolidWorld{std::numeric_limits<int>::min()};
+    std::int32_t waterTopWorld{std::numeric_limits<int>::min()};
+    std::int32_t waterBottomWorld{std::numeric_limits<int>::max()};
+    std::int32_t stripeOffset{0};
+    std::uint16_t stripePeriod{0};
+    std::uint16_t stripeThickness{0};
+    BlockId surfaceBlock{};
+    BlockId fillerBlock{};
+    BlockId waterBlock{};
+    BlockId stripeBlock{};
+};
+
 struct TerrainColumnBlocks
 {
     BlockId surfaceBlock{};
@@ -98,6 +132,21 @@ public:
                      int seaLevel,
                      SampleColumnFn sampler);
 
+    ChunkGenerationSummary describeChunkColumns(const glm::ivec3& chunkCoord,
+                                                int minWorldY,
+                                                int maxWorldY,
+                                                int chunkSizeX,
+                                                int chunkSizeY,
+                                                int chunkSizeZ,
+                                                std::span<ExactChunkColumnDescriptor> outDescriptors,
+                                                std::span<ColumnBuildResult> outColumns) const;
+    void materializeChunkColumns(int minWorldY,
+                                 int maxWorldY,
+                                 int chunkSizeX,
+                                 int chunkSizeY,
+                                 int chunkSizeZ,
+                                 std::span<const ExactChunkColumnDescriptor> descriptors,
+                                 const BlockSetter& setBlock) const;
     ChunkGenerationSummary generateChunkColumns(const glm::ivec3& chunkCoord,
                                                 int minWorldY,
                                                 int maxWorldY,
@@ -105,6 +154,7 @@ public:
                                                 int chunkSizeY,
                                                 int chunkSizeZ,
                                                 const BlockSetter& setBlock,
+                                                std::span<ExactChunkColumnDescriptor> outDescriptors,
                                                 std::span<ColumnBuildResult> outColumns) const;
 
 private:

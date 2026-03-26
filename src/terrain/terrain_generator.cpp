@@ -240,22 +240,22 @@ TerrainGenerator::TerrainGenerator(const ClimateMap& climateMap,
     }
 }
 
-ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& chunkCoord,
+ChunkGenerationSummary TerrainGenerator::describeChunkColumns(const glm::ivec3& chunkCoord,
                                                               int minWorldY,
                                                               int maxWorldY,
                                                               int chunkSizeX,
                                                               int chunkSizeY,
                                                               int chunkSizeZ,
-                                                              const BlockSetter& setBlock,
+                                                              std::span<ExactChunkColumnDescriptor> outDescriptors,
                                                               std::span<ColumnBuildResult> outColumns) const
 {
     if (outColumns.size() < static_cast<std::size_t>(chunkSizeX * chunkSizeZ))
     {
         throw std::invalid_argument("outColumns span is smaller than the chunk column count");
     }
-    if (!setBlock)
+    if (outDescriptors.size() < static_cast<std::size_t>(chunkSizeX * chunkSizeZ))
     {
-        throw std::invalid_argument("TerrainGenerator requires a block setter callback");
+        throw std::invalid_argument("descriptor span is smaller than the chunk column count");
     }
 
     ChunkGenerationSummary summary{};
@@ -312,11 +312,13 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
             const int worldX = baseWorldX + localX;
             const int worldZ = baseWorldZ + localZ;
             ColumnBuildResult result{};
+            ExactChunkColumnDescriptor descriptor{};
             result.sample = sampler_(worldX, worldZ, minWorldY, maxWorldY);
             ColumnSample& sample = result.sample;
 
             const std::size_t columnIdx = columnIndex(localX, localZ, chunkSizeX);
             outColumns[columnIdx] = result;
+            outDescriptors[columnIdx] = descriptor;
 
             if (!sample.dominantBiome)
             {
@@ -324,6 +326,8 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
             }
 
             const BiomeDefinition& biome = *sample.dominantBiome;
+            descriptor.flags |= ExactChunkColumnDescriptor::kFlagHasBiome;
+            descriptor.biomeIndex = static_cast<std::uint32_t>(biomeDatabase_.definitionIndex(biome));
 
             const float neighborAverage = computeNeighborAverage(localX, localZ);
             int adjustedSurfaceY = sample.surfaceY;
@@ -371,9 +375,30 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                 slabHasWater = waterBottomWorld <= waterTopWorld;
             }
 
+            descriptor.surfaceY = adjustedSurfaceY;
+            descriptor.originalSurfaceY = sample.originalSurfaceY;
+            descriptor.minSurfaceY = sample.minSurfaceY;
+            descriptor.maxSurfaceY = sample.maxSurfaceY;
+            descriptor.waterTopWorld = waterTopWorld;
+            descriptor.waterBottomWorld = waterBottomWorld;
+            descriptor.waterBlock = waterFill.block;
+            if (sample.slabHasSolid)
+            {
+                descriptor.flags |= ExactChunkColumnDescriptor::kFlagHasSolid;
+            }
+            if (slabHasWater)
+            {
+                descriptor.flags |= ExactChunkColumnDescriptor::kFlagHasWater;
+            }
+            if (sample.dominantIsOcean)
+            {
+                descriptor.flags |= ExactChunkColumnDescriptor::kFlagDominantIsOcean;
+            }
+
             outColumns[columnIdx].sample = sample;
             if (!sample.slabHasSolid && !slabHasWater)
             {
+                outDescriptors[columnIdx] = descriptor;
                 continue;
             }
 
@@ -396,6 +421,8 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                 resolveTerrainColumnBlocks(biome, sample, worldX, worldZ, seaLevel_);
             const BlockId surfaceBlock = resolvedBlocks.surfaceBlock;
             const BlockId fillerBlock = resolvedBlocks.fillerBlock;
+            descriptor.surfaceBlock = surfaceBlock;
+            descriptor.fillerBlock = fillerBlock;
 
 
             const int highestSolidWorld = std::min(sample.slabHighestSolidY, maxWorldY);
@@ -413,59 +440,141 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
                                              ? static_cast<int>(hashToUnitFloat(worldX, adjustedSurfaceY * 31 + 7, worldZ)
                                                                * static_cast<float>(stripePeriod))
                                              : 0;
-
-                for (int localY = 0; localY <= highestLocalY; ++localY)
+                if (stripesEnabled)
                 {
-                    const int worldY = minWorldY + localY;
-                    BlockId block = BlockId::Air;
-                    if (worldY < adjustedSurfaceY)
-                    {
-                        block = fillerBlock;
-                        if (columnHasStripes)
-                        {
-                            const int pattern = (worldY + stripeOffset) % stripePeriod;
-                            if (pattern < stripes.thickness)
-                            {
-                                block = stripes.block;
-                            }
-                        }
-                    }
-                    else if (worldY == adjustedSurfaceY)
-                    {
-                        block = surfaceBlock;
-                    }
-
-                    if (block == BlockId::Air)
-                    {
-                        continue;
-                    }
-
-                    setBlock(localX, localY, localZ, block);
-                    outColumns[columnIdx].wroteSolid = true;
-                    summary.anySolid = true;
+                    descriptor.flags |= ExactChunkColumnDescriptor::kFlagStripesEnabled;
                 }
-
+                if (columnHasStripes)
+                {
+                    descriptor.flags |= ExactChunkColumnDescriptor::kFlagColumnHasStripes;
+                }
+                descriptor.stripePeriod = static_cast<std::uint16_t>(stripePeriod);
+                descriptor.stripeThickness = static_cast<std::uint16_t>(std::max(0, stripes.thickness));
+                descriptor.stripeOffset = stripeOffset;
+                descriptor.stripeBlock = stripes.block;
                 outColumns[columnIdx].highestSolidWorld = highestSolidWorld;
+                outColumns[columnIdx].wroteSolid = true;
+                descriptor.highestSolidWorld = highestSolidWorld;
+                summary.anySolid = true;
+                (void)highestLocalY;
             }
 
             if (slabHasWater)
             {
-                for (int worldY = waterBottomWorld; worldY <= waterTopWorld; ++worldY)
-                {
-                    const int localY = worldY - minWorldY;
-                    if (localY < 0 || localY >= chunkSizeY)
-                    {
-                        continue;
-                    }
-                    setBlock(localX, localY, localZ, waterFill.block);
-                    outColumns[columnIdx].wroteSolid = true;
-                    summary.anySolid = true;
-                }
                 outColumns[columnIdx].waterTopWorld = waterTopWorld;
+                outColumns[columnIdx].wroteSolid = true;
+                summary.anySolid = true;
             }
+
+            outDescriptors[columnIdx] = descriptor;
         }
     }
 
+    return summary;
+}
+
+void TerrainGenerator::materializeChunkColumns(int minWorldY,
+                                               int maxWorldY,
+                                               int chunkSizeX,
+                                               int chunkSizeY,
+                                               int chunkSizeZ,
+                                               std::span<const ExactChunkColumnDescriptor> descriptors,
+                                               const BlockSetter& setBlock) const
+{
+    if (descriptors.size() < static_cast<std::size_t>(chunkSizeX * chunkSizeZ))
+    {
+        throw std::invalid_argument("descriptor span is smaller than the chunk column count");
+    }
+    if (!setBlock)
+    {
+        throw std::invalid_argument("TerrainGenerator requires a block setter callback");
+    }
+
+    for (int localX = 0; localX < chunkSizeX; ++localX)
+    {
+        for (int localZ = 0; localZ < chunkSizeZ; ++localZ)
+        {
+            const ExactChunkColumnDescriptor& descriptor =
+                descriptors[columnIndex(localX, localZ, chunkSizeX)];
+            if (!descriptor.hasBiome())
+            {
+                continue;
+            }
+
+            if (descriptor.hasSolid() && descriptor.highestSolidWorld >= minWorldY)
+            {
+                const int highestLocalY = std::min(descriptor.highestSolidWorld - minWorldY, chunkSizeY - 1);
+                for (int localY = 0; localY <= highestLocalY; ++localY)
+                {
+                    const int worldY = minWorldY + localY;
+                    BlockId block = BlockId::Air;
+                    if (worldY < descriptor.surfaceY)
+                    {
+                        block = descriptor.fillerBlock;
+                        if (descriptor.columnHasStripes() && descriptor.stripePeriod > 0 &&
+                            descriptor.stripeThickness > 0)
+                        {
+                            const int pattern = (worldY + descriptor.stripeOffset) %
+                                                static_cast<int>(descriptor.stripePeriod);
+                            if (pattern < static_cast<int>(descriptor.stripeThickness))
+                            {
+                                block = descriptor.stripeBlock;
+                            }
+                        }
+                    }
+                    else if (worldY == descriptor.surfaceY)
+                    {
+                        block = descriptor.surfaceBlock;
+                    }
+
+                    if (block != BlockId::Air)
+                    {
+                        setBlock(localX, localY, localZ, block);
+                    }
+                }
+            }
+
+            if (descriptor.hasWater())
+            {
+                for (int worldY = descriptor.waterBottomWorld; worldY <= descriptor.waterTopWorld; ++worldY)
+                {
+                    const int localY = worldY - minWorldY;
+                    if (localY < 0 || localY >= chunkSizeY || worldY < minWorldY || worldY > maxWorldY)
+                    {
+                        continue;
+                    }
+                    setBlock(localX, localY, localZ, descriptor.waterBlock);
+                }
+            }
+        }
+    }
+}
+
+ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& chunkCoord,
+                                                              int minWorldY,
+                                                              int maxWorldY,
+                                                              int chunkSizeX,
+                                                              int chunkSizeY,
+                                                              int chunkSizeZ,
+                                                              const BlockSetter& setBlock,
+                                                              std::span<ExactChunkColumnDescriptor> outDescriptors,
+                                                              std::span<ColumnBuildResult> outColumns) const
+{
+    const ChunkGenerationSummary summary = describeChunkColumns(chunkCoord,
+                                                                minWorldY,
+                                                                maxWorldY,
+                                                                chunkSizeX,
+                                                                chunkSizeY,
+                                                                chunkSizeZ,
+                                                                outDescriptors,
+                                                                outColumns);
+    materializeChunkColumns(minWorldY,
+                            maxWorldY,
+                            chunkSizeX,
+                            chunkSizeY,
+                            chunkSizeZ,
+                            outDescriptors,
+                            setBlock);
     return summary;
 }
 

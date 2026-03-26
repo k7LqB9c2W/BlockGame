@@ -193,6 +193,7 @@ public:
     [[nodiscard]] const BiomeDefinition& biome(const std::string& id) const;
     [[nodiscard]] const BiomeDefinition* tryGetBiome(const std::string& id) const noexcept;
     [[nodiscard]] const BiomeDefinition& definitionByIndex(std::size_t index) const;
+    [[nodiscard]] std::size_t definitionIndex(const BiomeDefinition& definition) const;
     [[nodiscard]] const std::vector<BiomeDefinition>& definitions() const noexcept { return definitions_; }
     [[nodiscard]] std::size_t biomeCount() const noexcept { return definitions_.size(); }
     [[nodiscard]] float maxFootprintMultiplier() const noexcept { return maxFootprintMultiplier_; }

@@ -538,6 +538,17 @@ const BiomeDefinition& BiomeDatabase::definitionByIndex(std::size_t index) const
     return definitions_[index];
 }
 
+std::size_t BiomeDatabase::definitionIndex(const BiomeDefinition& definition) const
+{
+    const std::string normalized = toLowerCopy(definition.id);
+    auto it = indexById_.find(normalized);
+    if (it == indexById_.end())
+    {
+        throw std::out_of_range("Biome definition is not present in this database");
+    }
+    return it->second;
+}
+
 void BiomeDatabase::loadFromDirectory(const std::filesystem::path& directory)
 {
     namespace fs = std::filesystem;

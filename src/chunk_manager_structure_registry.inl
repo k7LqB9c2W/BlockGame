@@ -39,6 +39,15 @@ struct StructureInstance
     BlockId leavesBlock{BlockId::Leaves};
 };
 
+[[nodiscard]] inline bool structureVoxelReplacesSolid(const StructureInstance& instance, BlockId block) noexcept
+{
+    if (instance.type == StructureType::TaigaSpruce)
+    {
+        return block == BlockId::SpruceLog;
+    }
+    return block == instance.trunkBlock;
+}
+
 template <typename Callback>
 inline bool forEachStructureVoxel(const StructureInstance& instance, Callback&& callback)
 {
@@ -188,6 +197,17 @@ struct StructureChunkColumnSpan
     {
         minChunkY = std::min(minChunkY, minY);
         maxChunkY = std::max(maxChunkY, maxY);
+    }
+};
+
+struct StructureChunkVoxelSpan
+{
+    std::uint32_t offset{0};
+    std::uint32_t count{0};
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return count > 0;
     }
 };
 
@@ -341,8 +361,10 @@ struct StructureRegion
     glm::ivec2 worldMin{0};
     glm::ivec2 worldMax{0};
     std::vector<StructureInstance> instances;
+    std::vector<StructureVoxelEdit> voxelEdits;
     StructureBvh bvh{};
     std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher> chunkColumnSpans{};
+    std::unordered_map<glm::ivec3, StructureChunkVoxelSpan, ChunkHasher> chunkVoxelSpans{};
 };
 
 using StructureSampleColumnFn = std::function<ColumnSample(int worldX, int worldZ)>;
@@ -609,6 +631,8 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
     }
 
     region.chunkColumnSpans.reserve(region.instances.size() * 4u);
+    std::unordered_map<glm::ivec3, std::vector<StructureVoxelEdit>, ChunkHasher> voxelEditsByChunk{};
+    voxelEditsByChunk.reserve(region.instances.size() * 4u);
     for (const StructureInstance& instance : region.instances)
     {
         const int minChunkX = floorDiv(instance.bounds.min.x, kChunkSizeX);
@@ -625,6 +649,57 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
                 region.chunkColumnSpans[glm::ivec2{chunkX, chunkZ}].include(minChunkY, maxChunkY);
             }
         }
+
+        forEachStructureVoxel(instance,
+                              [&](int worldX, int worldY, int worldZ, BlockId block)
+                              {
+                                  const glm::ivec3 chunkCoord{
+                                      floorDiv(worldX, kChunkSizeX),
+                                      floorDiv(worldY, kChunkSizeY),
+                                      floorDiv(worldZ, kChunkSizeZ)};
+                                  voxelEditsByChunk[chunkCoord].push_back(StructureVoxelEdit{
+                                      glm::ivec3{worldX, worldY, worldZ},
+                                      block,
+                                      structureVoxelReplacesSolid(instance, block)});
+                                  return false;
+                              });
+    }
+
+    std::vector<glm::ivec3> voxelChunkCoords;
+    voxelChunkCoords.reserve(voxelEditsByChunk.size());
+    for (const auto& [chunkCoord, edits] : voxelEditsByChunk)
+    {
+        (void)edits;
+        voxelChunkCoords.push_back(chunkCoord);
+    }
+    std::sort(voxelChunkCoords.begin(),
+              voxelChunkCoords.end(),
+              [](const glm::ivec3& lhs, const glm::ivec3& rhs)
+              {
+                  if (lhs.x != rhs.x)
+                  {
+                      return lhs.x < rhs.x;
+                  }
+                  if (lhs.y != rhs.y)
+                  {
+                      return lhs.y < rhs.y;
+                  }
+                  return lhs.z < rhs.z;
+              });
+    region.chunkVoxelSpans.reserve(voxelChunkCoords.size());
+    for (const glm::ivec3& chunkCoord : voxelChunkCoords)
+    {
+        auto chunkIt = voxelEditsByChunk.find(chunkCoord);
+        if (chunkIt == voxelEditsByChunk.end() || chunkIt->second.empty())
+        {
+            continue;
+        }
+
+        StructureChunkVoxelSpan span{};
+        span.offset = static_cast<std::uint32_t>(region.voxelEdits.size());
+        span.count = static_cast<std::uint32_t>(chunkIt->second.size());
+        region.voxelEdits.insert(region.voxelEdits.end(), chunkIt->second.begin(), chunkIt->second.end());
+        region.chunkVoxelSpans.emplace(chunkCoord, span);
     }
 
     region.bvh.build(region.instances);
@@ -847,6 +922,16 @@ public:
         return region->instances;
     }
 
+    [[nodiscard]] std::vector<StructureVoxelEdit> copyRegionVoxelEdits(const StructureRegionKey& key) const
+    {
+        const std::shared_ptr<const StructureRegion> region = getOrBuildRegion(key);
+        if (!region)
+        {
+            return {};
+        }
+        return region->voxelEdits;
+    }
+
     [[nodiscard]] StructureChunkColumnSpan queryChunkColumnSpan(const glm::ivec2& chunkColumn) const
     {
         const SteadyClock::time_point queryStart = SteadyClock::now();
@@ -946,6 +1031,97 @@ public:
         }
 
         return merged;
+    }
+
+    [[nodiscard]] std::vector<StructureVoxelEdit> queryChunkVoxelEdits(const glm::ivec3& chunkCoord) const
+    {
+        std::vector<StructureVoxelEdit> result;
+        const int minWorldX = chunkCoord.x * kChunkSizeX;
+        const int maxWorldX = minWorldX + kChunkSizeX - 1;
+        const int minWorldZ = chunkCoord.z * kChunkSizeZ;
+        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                const std::shared_ptr<const StructureRegion> region =
+                    getOrBuildRegion(StructureRegionKey{regionX, regionZ});
+                if (!region)
+                {
+                    continue;
+                }
+
+                const auto spanIt = region->chunkVoxelSpans.find(chunkCoord);
+                if (spanIt == region->chunkVoxelSpans.end() || !spanIt->second.valid())
+                {
+                    continue;
+                }
+
+                const StructureChunkVoxelSpan span = spanIt->second;
+                result.insert(result.end(),
+                              region->voxelEdits.begin() + span.offset,
+                              region->voxelEdits.begin() + span.offset + span.count);
+            }
+        }
+
+        return result;
+    }
+
+    [[nodiscard]] std::vector<StructureVoxelEdit> queryChunkVoxelEditsReady(const glm::ivec3& chunkCoord,
+                                                                             bool* outAllRegionsReady = nullptr,
+                                                                             std::vector<StructureRegionKey>* outMissingRegions = nullptr) const
+    {
+        bool allRegionsReady = true;
+        std::vector<StructureVoxelEdit> result;
+        const int minWorldX = chunkCoord.x * kChunkSizeX;
+        const int maxWorldX = minWorldX + kChunkSizeX - 1;
+        const int minWorldZ = chunkCoord.z * kChunkSizeZ;
+        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                const StructureRegionKey key{regionX, regionZ};
+                const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
+                if (!region)
+                {
+                    allRegionsReady = false;
+                    if (outMissingRegions != nullptr)
+                    {
+                        outMissingRegions->push_back(key);
+                    }
+                    continue;
+                }
+
+                const auto spanIt = region->chunkVoxelSpans.find(chunkCoord);
+                if (spanIt == region->chunkVoxelSpans.end() || !spanIt->second.valid())
+                {
+                    continue;
+                }
+
+                const StructureChunkVoxelSpan span = spanIt->second;
+                result.insert(result.end(),
+                              region->voxelEdits.begin() + span.offset,
+                              region->voxelEdits.begin() + span.offset + span.count);
+            }
+        }
+
+        if (outAllRegionsReady != nullptr)
+        {
+            *outAllRegionsReady = allRegionsReady;
+        }
+
+        return result;
     }
 
     [[nodiscard]] std::shared_ptr<const StructureRegion> warmRegion(const StructureRegionKey& key) const

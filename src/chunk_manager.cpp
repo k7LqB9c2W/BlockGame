@@ -2952,6 +2952,13 @@ inline bool acaciaHasSpacingConflict(const AcaciaTreeCandidate& candidate,
     return false;
 }
 
+struct StructureVoxelEdit
+{
+    glm::ivec3 worldPos{0};
+    BlockId block{BlockId::Air};
+    bool replaceSolid{false};
+};
+
 #include "chunk_manager_structure_registry.inl"
 
 struct MeshData
@@ -3105,11 +3112,10 @@ struct Chunk
         : coord(c),
           minWorldY(c.y * kChunkSizeY),
           maxWorldY(minWorldY + kChunkSizeY - 1),
-          blocks(kChunkBlockCount, BlockId::Air),
-          lightLevels(kChunkBlockCount, packLightLevels(kMaxLightLevel, 0)),
           state(ChunkState::Empty),
           residencyMode(ExactChunkResidencyMode::CpuMaterializing)
     {
+        skyLightFromAboveCache.fill(kMaxLightLevel);
     }
 
     void reset(const glm::ivec3& c)
@@ -3117,22 +3123,11 @@ struct Chunk
         coord = c;
         minWorldY = c.y * kChunkSizeY;
         maxWorldY = minWorldY + kChunkSizeY - 1;
-        if (blocks.size() != static_cast<std::size_t>(kChunkBlockCount))
-        {
-            blocks.assign(kChunkBlockCount, BlockId::Air);
-        }
-        else
-        {
-            std::fill(blocks.begin(), blocks.end(), BlockId::Air);
-        }
-        if (lightLevels.size() != static_cast<std::size_t>(kChunkBlockCount))
-        {
-            lightLevels.assign(kChunkBlockCount, packLightLevels(kMaxLightLevel, 0));
-        }
-        else
-        {
-            std::fill(lightLevels.begin(), lightLevels.end(), packLightLevels(kMaxLightLevel, 0));
-        }
+        std::vector<BlockId>().swap(blocks);
+        std::vector<std::uint8_t>().swap(lightLevels);
+        structureVoxelEdits.clear();
+        exactColumnDescriptorsReady = false;
+        structureVoxelEditsReady = false;
         state.store(ChunkState::Empty, std::memory_order_relaxed);
         residencyMode.store(ExactChunkResidencyMode::CpuMaterializing, std::memory_order_relaxed);
         meshData.trimForReuse();
@@ -3169,7 +3164,7 @@ struct Chunk
         appliedLightingRevision.store(0, std::memory_order_relaxed);
         skyLightCacheGeneration.store(0, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
-        cpuDataResident = true;
+        cpuDataResident = false;
         lastDenseFrameTouched = 0;
         pendingMesh = {};
     }
@@ -3207,6 +3202,10 @@ struct Chunk
     glm::ivec3 coord;
     int minWorldY{0};
     int maxWorldY{0};
+    std::array<terrain::ExactChunkColumnDescriptor, kColumnCount> exactColumnDescriptors{};
+    bool exactColumnDescriptorsReady{false};
+    std::vector<StructureVoxelEdit> structureVoxelEdits;
+    bool structureVoxelEditsReady{false};
     std::vector<BlockId> blocks;
     std::vector<std::uint8_t> lightLevels;
     std::atomic<ChunkState> state;
@@ -3248,7 +3247,7 @@ struct Chunk
     std::atomic<std::uint64_t> appliedLightingRevision{0};
     std::atomic<std::uint64_t> skyLightCacheGeneration{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
-    bool cpuDataResident{true};
+    bool cpuDataResident{false};
     std::uint64_t lastDenseFrameTouched{0};
     PendingRenderMesh pendingMesh{};
 };
@@ -3388,7 +3387,86 @@ struct UploadQueueEntryComparer
 
 #include "chunk_manager_far_terrain.inl"
 
-struct ChunkBuildScratch;
+struct ChunkBuildScratch
+{
+    explicit ChunkBuildScratch(const Chunk& chunk)
+        : coord(chunk.coord),
+          minWorldY(chunk.minWorldY),
+          maxWorldY(chunk.maxWorldY),
+          blocks(kChunkBlockCount, BlockId::Air)
+    {
+        highestSolidWorlds.fill(ColumnManager::kNoHeight);
+    }
+
+    void setGeneratedLocalBlock(int localX, int localY, int localZ, BlockId block)
+    {
+        if (localX < 0 || localX >= kChunkSizeX ||
+            localZ < 0 || localZ >= kChunkSizeZ ||
+            localY < 0 || localY >= kChunkSizeY)
+        {
+            return;
+        }
+
+        blocks[blockIndex(localX, localY, localZ)] = block;
+    }
+
+    [[nodiscard]] int scanColumnHighestWorld(int localX, int localZ) const noexcept
+    {
+        for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
+        {
+            if (isSolid(blocks[blockIndex(localX, localY, localZ)]))
+            {
+                return minWorldY + localY;
+            }
+        }
+        return ColumnManager::kNoHeight;
+    }
+
+    bool setWorldBlock(int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
+    {
+        const glm::ivec3 worldPos{worldX, worldY, worldZ};
+        const glm::ivec3 local = localBlockCoords(worldPos, coord);
+        if (local.x < 0 || local.x >= kChunkSizeX ||
+            local.z < 0 || local.z >= kChunkSizeZ ||
+            worldY < minWorldY || worldY > maxWorldY)
+        {
+            return false;
+        }
+
+        const int localY = worldY - minWorldY;
+        BlockId& destination = blocks[blockIndex(local.x, localY, local.z)];
+        if (!replaceSolid && destination != BlockId::Air)
+        {
+            return false;
+        }
+
+        const BlockId previous = destination;
+        if (previous == block)
+        {
+            return false;
+        }
+
+        destination = block;
+
+        const std::size_t heightIndex = columnIndex(local.x, local.z);
+        if (isSolid(block))
+        {
+            highestSolidWorlds[heightIndex] = std::max(highestSolidWorlds[heightIndex], worldY);
+        }
+        else if (isSolid(previous) && highestSolidWorlds[heightIndex] == worldY)
+        {
+            highestSolidWorlds[heightIndex] = scanColumnHighestWorld(local.x, local.z);
+        }
+        return true;
+    }
+
+    glm::ivec3 coord{0};
+    int minWorldY{0};
+    int maxWorldY{0};
+    std::vector<BlockId> blocks;
+    std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> highestSolidWorlds{};
+};
+
 template <typename WriteBlockFn>
 void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBlockFn&& writeBlock);
 
@@ -3947,6 +4025,9 @@ private:
                              std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>&
                                  columnResults,
                              std::vector<PendingStructureEdit>* consumedPendingEdits = nullptr);
+    void rebuildChunkBaseLighting(const std::vector<BlockId>& blocks,
+                                  const std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ>& skyLightFromAbove,
+                                  std::vector<std::uint8_t>& outLightLevels) const;
     void rebuildChunkBaseLighting(Chunk& chunk) const;
     ColumnSample sampleColumn(int worldX,
                               int worldZ,
@@ -4029,12 +4110,18 @@ private:
     void applyBlockEditOverlay(ChunkBuildScratch& scratch, const glm::ivec3& chunkCoord) const;
     void recordBlockEditOverlay(const glm::ivec3& worldPos, BlockId block);
     bool tryGetBlockEditOverlay(const glm::ivec3& worldPos, BlockId& outBlock) const;
+    bool chunkHasBlockEditOverlay(const glm::ivec3& coord) const;
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     std::vector<StructureInstance> queryStructureInstances(const glm::ivec3& minWorld,
                                                            const glm::ivec3& maxWorld,
                                                            int lodLevel = 0,
                                                            bool* outAllRegionsReady = nullptr,
                                                            std::vector<StructureRegionKey>* outMissingRegions = nullptr) const;
+    std::vector<StructureVoxelEdit> queryStructureVoxelEditsForChunk(const glm::ivec3& coord) const;
+    std::vector<StructureVoxelEdit> queryStructureVoxelEditsForChunkReady(
+        const glm::ivec3& coord,
+        bool* outAllRegionsReady = nullptr,
+        std::vector<StructureRegionKey>* outMissingRegions = nullptr) const;
     void warmStructureRegionsForColumn(const glm::ivec2& column);
     void registerDeferredStructureChunkBuild(const glm::ivec3& coord,
                                              const glm::ivec3& queryMin,
@@ -7373,10 +7460,6 @@ void ChunkManager::Impl::processJob(const Job& job)
 
         if (chunk->hasBlocks.load(std::memory_order_acquire))
         {
-            {
-                std::lock_guard<std::mutex> lock(chunk->meshMutex);
-                rebuildChunkBaseLighting(*chunk);
-            }
             chunk->pendingMeshRefresh.store(false, std::memory_order_release);
             chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
             setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Meshing);
@@ -7390,7 +7473,7 @@ void ChunkManager::Impl::processJob(const Job& job)
                        0,
                        true,
                        JobServiceClass::InitialVisible);
-            if (!stationaryExactFillModeActive_ || shouldKeepChunkInteractive(job.chunkCoord, lastCenterChunk_))
+            if (chunk->cpuDataResident && shouldKeepChunkInteractive(job.chunkCoord, lastCenterChunk_))
             {
                 queueRelightRequest(job.chunkCoord, false);
             }
@@ -8653,6 +8736,7 @@ std::size_t ChunkManager::Impl::estimateChunkRetainedBytes(const Chunk& chunk) n
     return sizeof(Chunk) +
            chunk.blocks.capacity() * sizeof(BlockId) +
            chunk.lightLevels.capacity() * sizeof(std::uint8_t) +
+           chunk.structureVoxelEdits.capacity() * sizeof(StructureVoxelEdit) +
            chunk.meshData.retainedBytes();
 }
 
@@ -12510,14 +12594,38 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
                   return lhs->coord.z < rhs->coord.z;
               });
 
+    std::unordered_map<glm::ivec3, std::vector<BlockId>, ChunkHasher> transientNeighborBlocks;
+    std::unordered_map<glm::ivec3, std::vector<std::uint8_t>, ChunkHasher> transientNeighborLightLevels;
+    transientNeighborBlocks.reserve(lockedNeighbors.size());
+    transientNeighborLightLevels.reserve(lockedNeighbors.size());
+    for (const auto& sampleChunk : lockedNeighbors)
+    {
+        if (!sampleChunk || sampleChunk->cpuDataResident)
+        {
+            continue;
+        }
+
+        ChunkBuildScratch scratch(*sampleChunk);
+        std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
+        buildChunkCpuBlocks(*sampleChunk, scratch, false, columnResults, nullptr);
+        std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
+        {
+            std::lock_guard<std::mutex> lock(sampleChunk->meshMutex);
+            incomingSky = sampleChunk->skyLightFromAboveCache;
+        }
+        transientNeighborBlocks.emplace(sampleChunk->coord, scratch.blocks);
+        auto& transientLightLevels = transientNeighborLightLevels[sampleChunk->coord];
+        rebuildChunkBaseLighting(transientNeighborBlocks[sampleChunk->coord], incomingSky, transientLightLevels);
+    }
+
     std::vector<std::unique_lock<std::mutex>> locks;
     locks.reserve(lockedNeighbors.size());
     const auto lockStageStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     for (const auto& sampleChunk : lockedNeighbors)
     {
-        if (sampleChunk && !sampleChunk->cpuDataResident)
+        if (!sampleChunk || !sampleChunk->cpuDataResident)
         {
-            (void)ensureChunkCpuDataResident(*sampleChunk);
+            continue;
         }
         locks.emplace_back(sampleChunk->meshMutex);
     }
@@ -12568,11 +12676,29 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
 
                 const int localY = worldPos.y - sampleChunk.minWorldY;
                 const std::size_t voxelIndex = blockIndex(local.x, localY, local.z);
+                if (sampleChunk.cpuDataResident)
+                {
+                    snapshot.set(sampleX,
+                                 sampleY,
+                                 sampleZ,
+                                 sampleChunk.blocks[voxelIndex],
+                                 sampleChunk.lightLevels[voxelIndex]);
+                    continue;
+                }
+
+                auto transientBlocksIt = transientNeighborBlocks.find(sampleChunkCoord);
+                auto transientLightsIt = transientNeighborLightLevels.find(sampleChunkCoord);
+                if (transientBlocksIt == transientNeighborBlocks.end() ||
+                    transientLightsIt == transientNeighborLightLevels.end())
+                {
+                    continue;
+                }
+
                 snapshot.set(sampleX,
                              sampleY,
                              sampleZ,
-                             sampleChunk.blocks[voxelIndex],
-                             sampleChunk.lightLevels[voxelIndex]);
+                             transientBlocksIt->second[voxelIndex],
+                             transientLightsIt->second[voxelIndex]);
             }
         }
     }
@@ -12589,12 +12715,14 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
 
 void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 {
-    if (!ensureChunkCpuDataResident(chunk))
+    if (!chunk.cpuDataResident && shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_) &&
+        !ensureChunkCpuDataResident(chunk))
     {
         return;
     }
     std::vector<BlockId> chunkBlocks;
     std::vector<std::uint8_t> chunkLightLevels;
+    std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         if (!chunk.hasBlocks.load(std::memory_order_acquire))
@@ -12604,8 +12732,21 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
             return;
         }
 
-        chunkBlocks = chunk.blocks;
-        chunkLightLevels = chunk.lightLevels;
+        incomingSky = chunk.skyLightFromAboveCache;
+        if (chunk.cpuDataResident)
+        {
+            chunkBlocks = chunk.blocks;
+            chunkLightLevels = chunk.lightLevels;
+        }
+    }
+
+    if (chunkBlocks.empty())
+    {
+        ChunkBuildScratch scratch(chunk);
+        std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
+        buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr);
+        chunkBlocks = std::move(scratch.blocks);
+        rebuildChunkBaseLighting(chunkBlocks, incomingSky, chunkLightLevels);
     }
 
     const ChunkNeighborhoodSnapshot neighborhood =
@@ -13627,15 +13768,26 @@ void ChunkManager::Impl::ensureSkyLightColumnCacheForChunks(const std::vector<st
               });
     chunksToLock.erase(std::unique(chunksToLock.begin(), chunksToLock.end()), chunksToLock.end());
 
+    std::unordered_map<glm::ivec3, std::vector<BlockId>, ChunkHasher> transientBlocks;
+    transientBlocks.reserve(chunksToLock.size());
+    for (const auto& chunk : chunksToLock)
+    {
+        if (!chunk || chunk->cpuDataResident)
+        {
+            continue;
+        }
+
+        ChunkBuildScratch scratch(*chunk);
+        std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
+        buildChunkCpuBlocks(*chunk, scratch, false, columnResults, nullptr);
+        transientBlocks.emplace(chunk->coord, std::move(scratch.blocks));
+    }
+
     std::vector<std::unique_lock<std::mutex>> locks;
     locks.reserve(chunksToLock.size());
     const auto lockStageStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     for (auto& chunk : chunksToLock)
     {
-        if (chunk && !chunk->cpuDataResident)
-        {
-            (void)ensureChunkCpuDataResident(*chunk);
-        }
         locks.emplace_back(chunk->meshMutex);
     }
 
@@ -13671,9 +13823,22 @@ void ChunkManager::Impl::ensureSkyLightColumnCacheForChunks(const std::vector<st
                 {
                     const std::size_t columnIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
                     std::uint8_t sky = incomingSky[columnIndex];
+                    const std::span<const BlockId> blockSpan =
+                        chunk->cpuDataResident
+                            ? std::span<const BlockId>(chunk->blocks)
+                            : [&]() -> std::span<const BlockId>
+                            {
+                                  auto it = transientBlocks.find(chunk->coord);
+                                  if (it == transientBlocks.end())
+                                  {
+                                      return {};
+                                  }
+                                  return std::span<const BlockId>(it->second);
+                              }();
                     for (int localY = kChunkSizeY - 1; localY >= 0 && sky > 0; --localY)
                     {
-                        const BlockId block = chunk->blocks[blockIndex(localX, localY, localZ)];
+                        const BlockId block =
+                            blockSpan.empty() ? BlockId::Air : blockSpan[blockIndex(localX, localY, localZ)];
                         if (isOpaqueForLighting(block))
                         {
                             sky = 0;
@@ -15147,6 +15312,40 @@ std::vector<StructureInstance> ChunkManager::Impl::queryStructureInstances(const
     return instances;
 }
 
+std::vector<StructureVoxelEdit> ChunkManager::Impl::queryStructureVoxelEditsForChunk(const glm::ivec3& coord) const
+{
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point queryStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    std::vector<StructureVoxelEdit> edits = structureRegistry_.queryChunkVoxelEdits(coord);
+    if (benchmarkEnabled)
+    {
+        const auto queryMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+        benchmarkMetrics_.structureQueryStage.recordMicros(
+            static_cast<std::uint64_t>(std::max<std::int64_t>(queryMicros, 0)));
+    }
+    return edits;
+}
+
+std::vector<StructureVoxelEdit> ChunkManager::Impl::queryStructureVoxelEditsForChunkReady(
+    const glm::ivec3& coord,
+    bool* outAllRegionsReady,
+    std::vector<StructureRegionKey>* outMissingRegions) const
+{
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point queryStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    std::vector<StructureVoxelEdit> edits =
+        structureRegistry_.queryChunkVoxelEditsReady(coord, outAllRegionsReady, outMissingRegions);
+    if (benchmarkEnabled)
+    {
+        const auto queryMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+        benchmarkMetrics_.structureQueryStage.recordMicros(
+            static_cast<std::uint64_t>(std::max<std::int64_t>(queryMicros, 0)));
+    }
+    return edits;
+}
+
 void ChunkManager::Impl::warmStructureRegionsForColumn(const glm::ivec2& column)
 {
     const int minWorldX = column.x * kChunkSizeX;
@@ -15219,31 +15418,26 @@ std::vector<PendingStructureEdit> ChunkManager::Impl::buildDeferredStructureEdit
                                                                                           const glm::ivec3& queryMax,
                                                                                           int lodLevel) const
 {
+    (void)queryMin;
+    (void)queryMax;
+    (void)lodLevel;
     bool allRegionsReady = true;
-    std::vector<StructureInstance> structures =
-        queryStructureInstances(queryMin, queryMax, lodLevel, &allRegionsReady, nullptr);
-    if (!allRegionsReady || structures.empty())
+    std::vector<StructureVoxelEdit> structureVoxelEdits =
+        queryStructureVoxelEditsForChunkReady(coord, &allRegionsReady, nullptr);
+    if (!allRegionsReady || structureVoxelEdits.empty())
     {
         return {};
     }
 
     std::vector<PendingStructureEdit> edits;
-    for (const StructureInstance& instance : structures)
+    edits.reserve(structureVoxelEdits.size());
+    for (const StructureVoxelEdit& edit : structureVoxelEdits)
     {
-        stampStructureInstanceIntoTarget(instance,
-                                        [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
-                                        {
-                                            const glm::ivec3 worldPos{worldX, worldY, worldZ};
-                                            if (worldToChunkCoords(worldX, worldY, worldZ) != coord)
-                                            {
-                                                return;
-                                            }
-                                            edits.push_back(PendingStructureEdit{
-                                                coord,
-                                                worldPos,
-                                                block,
-                                                replaceSolid});
-                                        });
+        edits.push_back(PendingStructureEdit{
+            coord,
+            edit.worldPos,
+            edit.block,
+            edit.replaceSolid});
     }
     return edits;
 }
@@ -15294,86 +15488,6 @@ void ChunkManager::Impl::flushReadyDeferredStructureChunks()
 
 namespace
 {
-struct ChunkBuildScratch
-{
-    explicit ChunkBuildScratch(const Chunk& chunk)
-        : coord(chunk.coord),
-          minWorldY(chunk.minWorldY),
-          maxWorldY(chunk.maxWorldY),
-          blocks(kChunkBlockCount, BlockId::Air)
-    {
-        highestSolidWorlds.fill(ColumnManager::kNoHeight);
-    }
-
-    void setGeneratedLocalBlock(int localX, int localY, int localZ, BlockId block)
-    {
-        if (localX < 0 || localX >= kChunkSizeX ||
-            localZ < 0 || localZ >= kChunkSizeZ ||
-            localY < 0 || localY >= kChunkSizeY)
-        {
-            return;
-        }
-
-        blocks[blockIndex(localX, localY, localZ)] = block;
-    }
-
-    [[nodiscard]] int scanColumnHighestWorld(int localX, int localZ) const noexcept
-    {
-        for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
-        {
-            if (isSolid(blocks[blockIndex(localX, localY, localZ)]))
-            {
-                return minWorldY + localY;
-            }
-        }
-        return ColumnManager::kNoHeight;
-    }
-
-    bool setWorldBlock(int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
-    {
-        const glm::ivec3 worldPos{worldX, worldY, worldZ};
-        const glm::ivec3 local = localBlockCoords(worldPos, coord);
-        if (local.x < 0 || local.x >= kChunkSizeX ||
-            local.z < 0 || local.z >= kChunkSizeZ ||
-            worldY < minWorldY || worldY > maxWorldY)
-        {
-            return false;
-        }
-
-        const int localY = worldY - minWorldY;
-        BlockId& destination = blocks[blockIndex(local.x, localY, local.z)];
-        if (!replaceSolid && destination != BlockId::Air)
-        {
-            return false;
-        }
-
-        const BlockId previous = destination;
-        if (previous == block)
-        {
-            return false;
-        }
-
-        destination = block;
-
-        const std::size_t heightIndex = columnIndex(local.x, local.z);
-        if (isSolid(block))
-        {
-            highestSolidWorlds[heightIndex] = std::max(highestSolidWorlds[heightIndex], worldY);
-        }
-        else if (isSolid(previous) && highestSolidWorlds[heightIndex] == worldY)
-        {
-            highestSolidWorlds[heightIndex] = scanColumnHighestWorld(local.x, local.z);
-        }
-        return true;
-    }
-
-    glm::ivec3 coord{0};
-    int minWorldY{0};
-    int maxWorldY{0};
-    std::vector<BlockId> blocks;
-    std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> highestSolidWorlds{};
-};
-
 template <typename WriteBlockFn>
 void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBlockFn&& writeBlock)
 {
@@ -15491,18 +15605,42 @@ void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBl
 bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generationEpoch)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
-    ChunkBuildScratch scratch(chunk);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-    std::vector<PendingStructureEdit> pendingEdits;
-    buildChunkCpuBlocks(chunk, scratch, true, columnResults, &pendingEdits);
+    std::array<terrain::ExactChunkColumnDescriptor, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>
+        columnDescriptors{};
+    std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> highestSolidWorlds{};
+    highestSolidWorlds.fill(ColumnManager::kNoHeight);
 
-    // `hasBlocks` controls whether the chunk enters relight/mesh/upload. Water-only
-    // slabs and canopy-only slabs must count here even though they do not raise the
-    // column manager's "highest solid" height.
-    const bool anyBlocks =
-        std::any_of(scratch.blocks.begin(),
-                    scratch.blocks.end(),
-                    [](BlockId block) { return block != BlockId::Air; });
+    if (terrainGenerator_)
+    {
+        terrainGenerator_->describeChunkColumns(chunk.coord,
+                                               chunk.minWorldY,
+                                               chunk.maxWorldY,
+                                               kChunkSizeX,
+                                               kChunkSizeY,
+                                               kChunkSizeZ,
+                                               columnDescriptors,
+                                               columnResults);
+    }
+    for (std::size_t i = 0; i < highestSolidWorlds.size(); ++i)
+    {
+        highestSolidWorlds[i] = columnResults[i].highestSolidWorld;
+    }
+
+    std::vector<StructureVoxelEdit> structureVoxelEdits = queryStructureVoxelEditsForChunk(chunk.coord);
+    const bool anyDescriptorBlocks = std::any_of(columnDescriptors.begin(),
+                                                 columnDescriptors.end(),
+                                                 [](const terrain::ExactChunkColumnDescriptor& descriptor)
+                                                 {
+                                                     return descriptor.hasSolid() || descriptor.hasWater();
+                                                 });
+    const bool anyBlocks = anyDescriptorBlocks ||
+                           !structureVoxelEdits.empty() ||
+                           chunkHasPendingStructureEdits(chunk.coord) ||
+                           chunkHasBlockEditOverlay(chunk.coord);
+    const bool localAuthoritative = shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_);
+    ChunkBuildScratch scratch(chunk);
+    std::vector<PendingStructureEdit> pendingEdits;
 
     const auto meshLockStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     {
@@ -15530,12 +15668,52 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
             return false;
         }
 
-        // Publish the fully built block slab in one short handoff so upload/commit only contends on swaps.
+        chunk.exactColumnDescriptors = columnDescriptors;
+        chunk.exactColumnDescriptorsReady = true;
+        chunk.structureVoxelEdits = std::move(structureVoxelEdits);
+        chunk.structureVoxelEditsReady = true;
+        chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
+        if (!localAuthoritative)
+        {
+            chunk.releaseCpuData();
+        }
+    }
+
+    if (localAuthoritative)
+    {
+        buildChunkCpuBlocks(chunk, scratch, true, columnResults, &pendingEdits);
+
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        const bool staleGeneration =
+            chunk.generationEpoch.load(std::memory_order_acquire) != generationEpoch ||
+            chunk.state.load(std::memory_order_acquire) != ChunkState::Generating;
+        if (staleGeneration)
+        {
+            if (!pendingEdits.empty())
+            {
+                std::lock_guard<std::mutex> pendingLock(pendingStructureMutex_);
+                auto& restoredEdits = pendingStructureEdits_[chunk.coord];
+                restoredEdits.insert(restoredEdits.end(),
+                                     std::make_move_iterator(pendingEdits.begin()),
+                                     std::make_move_iterator(pendingEdits.end()));
+            }
+
+            if (benchmarkEnabled)
+            {
+                const auto lockMicros =
+                    std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - meshLockStart).count();
+                benchmarkMetrics_.generateBlocksMeshLockStage.recordMicros(static_cast<std::uint64_t>(lockMicros));
+            }
+            return false;
+        }
+
         chunk.ensureCpuDataAllocated();
         chunk.blocks = std::move(scratch.blocks);
         chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
+        rebuildChunkBaseLighting(chunk);
         chunk.lastDenseFrameTouched = updateFrameIndex_;
     }
+
     if (benchmarkEnabled)
     {
         const auto lockMicros =
@@ -15544,7 +15722,7 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     }
 
     const glm::ivec2 column{chunk.coord.x, chunk.coord.z};
-    columnManager_.updateChunkHeights(chunk.coord, scratch.highestSolidWorlds);
+    columnManager_.updateChunkHeights(chunk.coord, highestSolidWorlds);
     mergePredictedColumnHeight(column,
                                columnManager_.highestSolidBlock(column.x * kChunkSizeX + kChunkSizeX / 2,
                                                                column.y * kChunkSizeZ + kChunkSizeZ / 2));
@@ -15654,6 +15832,13 @@ bool ChunkManager::Impl::tryGetBlockEditOverlay(const glm::ivec3& worldPos, Bloc
     return true;
 }
 
+bool ChunkManager::Impl::chunkHasBlockEditOverlay(const glm::ivec3& coord) const
+{
+    std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+    auto it = blockEditOverlays_.find(coord);
+    return it != blockEditOverlays_.end() && !it->second.empty();
+}
+
 void ChunkManager::Impl::applyBlockEditOverlay(ChunkBuildScratch& scratch, const glm::ivec3& chunkCoord) const
 {
     std::vector<BlockEditOverlayEntry> overlays;
@@ -15702,9 +15887,49 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& columnResults,
     std::vector<PendingStructureEdit>* consumedPendingEdits)
 {
-    const int baseWorldX = chunk.coord.x * kChunkSizeX;
-    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
     warmMetadataPagesForChunk(chunk.coord);
+
+    std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
+    std::vector<StructureVoxelEdit> structureVoxelEdits;
+    bool haveStoredDescriptors = false;
+    bool haveStoredStructureEdits = false;
+    {
+        std::lock_guard<std::mutex> lock(chunk.meshMutex);
+        haveStoredDescriptors = chunk.exactColumnDescriptorsReady;
+        if (haveStoredDescriptors)
+        {
+            columnDescriptors = chunk.exactColumnDescriptors;
+        }
+        haveStoredStructureEdits = chunk.structureVoxelEditsReady;
+        if (haveStoredStructureEdits)
+        {
+            structureVoxelEdits = chunk.structureVoxelEdits;
+        }
+    }
+
+    if (!haveStoredDescriptors)
+    {
+        if (terrainGenerator_)
+        {
+            terrainGenerator_->describeChunkColumns(chunk.coord,
+                                                   chunk.minWorldY,
+                                                   chunk.maxWorldY,
+                                                   kChunkSizeX,
+                                                   kChunkSizeY,
+                                                   kChunkSizeZ,
+                                                   columnDescriptors,
+                                                   columnResults);
+        }
+    }
+    else
+    {
+        for (std::size_t i = 0; i < columnDescriptors.size(); ++i)
+        {
+            columnResults[i].highestSolidWorld = columnDescriptors[i].highestSolidWorld;
+            columnResults[i].waterTopWorld = columnDescriptors[i].waterTopWorld;
+            columnResults[i].wroteSolid = columnDescriptors[i].hasSolid() || columnDescriptors[i].hasWater();
+        }
+    }
 
     auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
     {
@@ -15718,51 +15943,39 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
         }
         scratch.setGeneratedLocalBlock(localX, localY, localZ, block);
     };
-
     if (terrainGenerator_)
     {
-        terrainGenerator_->generateChunkColumns(chunk.coord,
-                                                chunk.minWorldY,
-                                                chunk.maxWorldY,
-                                                kChunkSizeX,
-                                                kChunkSizeY,
-                                                kChunkSizeZ,
-                                                setBlockDirect,
-                                                columnResults);
+        terrainGenerator_->materializeChunkColumns(chunk.minWorldY,
+                                                   chunk.maxWorldY,
+                                                   kChunkSizeX,
+                                                   kChunkSizeY,
+                                                   kChunkSizeZ,
+                                                   columnDescriptors,
+                                                   setBlockDirect);
     }
 
     for (std::size_t i = 0; i < columnResults.size(); ++i)
     {
-        scratch.highestSolidWorlds[i] = columnResults[i].highestSolidWorld;
+        scratch.highestSolidWorlds[i] = columnDescriptors[i].highestSolidWorld;
     }
 
-    const glm::ivec3 queryMin(baseWorldX, chunk.minWorldY, baseWorldZ);
-    const glm::ivec3 queryMax(baseWorldX + kChunkSizeX - 1, chunk.maxWorldY, baseWorldZ + kChunkSizeZ - 1);
-    bool allStructureRegionsReady = true;
-    std::vector<StructureRegionKey> missingStructureRegions;
-    std::vector<StructureInstance> structures =
-        queryStructureInstances(queryMin, queryMax, 0, &allStructureRegionsReady, &missingStructureRegions);
-    if (stationaryExactFillModeActive_ && !allStructureRegionsReady)
+    if (!haveStoredStructureEdits)
     {
-        warmStructureRegionsForColumn({chunk.coord.x, chunk.coord.z});
-        missingStructureRegions.clear();
-        allStructureRegionsReady = true;
-        structures = queryStructureInstances(queryMin, queryMax, 0, &allStructureRegionsReady, &missingStructureRegions);
-    }
-    for (const StructureInstance& instance : structures)
-    {
-        stampStructureInstanceIntoTarget(instance,
-                                        [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid) {
-                                            scratch.setWorldBlock(worldX, worldY, worldZ, block, replaceSolid);
-                                        });
-    }
-    if (!allStructureRegionsReady)
-    {
-        registerDeferredStructureChunkBuild(chunk.coord, queryMin, queryMax, 0, missingStructureRegions);
+        structureVoxelEdits = queryStructureVoxelEditsForChunk(chunk.coord);
+        clearDeferredStructureChunkBuild(chunk.coord);
     }
     else
     {
         clearDeferredStructureChunkBuild(chunk.coord);
+    }
+
+    for (const StructureVoxelEdit& edit : structureVoxelEdits)
+    {
+        scratch.setWorldBlock(edit.worldPos.x,
+                              edit.worldPos.y,
+                              edit.worldPos.z,
+                              edit.block,
+                              edit.replaceSolid);
     }
 
     std::vector<PendingStructureEdit> pendingEdits = includePendingStructureEdits
@@ -15781,20 +15994,23 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     }
 }
 
-void ChunkManager::Impl::rebuildChunkBaseLighting(Chunk& chunk) const
+void ChunkManager::Impl::rebuildChunkBaseLighting(
+    const std::vector<BlockId>& blocks,
+    const std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ>& skyLightFromAbove,
+    std::vector<std::uint8_t>& outLightLevels) const
 {
-    chunk.lightLevels.assign(kChunkBlockCount, packLightLevels(0, 0));
+    outLightLevels.assign(kChunkBlockCount, packLightLevels(0, 0));
     for (int localX = 0; localX < kChunkSizeX; ++localX)
     {
         for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
         {
             const std::size_t localColumnIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
-            std::uint8_t incomingSky = chunk.skyLightFromAboveCache[localColumnIndex];
+            std::uint8_t incomingSky = skyLightFromAbove[localColumnIndex];
 
             for (int localY = kChunkSizeY - 1; localY >= 0; --localY)
             {
                 const std::size_t idx = blockIndex(localX, localY, localZ);
-                const BlockId block = chunk.blocks[idx];
+                const BlockId block = blocks[idx];
                 if (isOpaqueForLighting(block))
                 {
                     incomingSky = 0;
@@ -15806,10 +16022,15 @@ void ChunkManager::Impl::rebuildChunkBaseLighting(Chunk& chunk) const
                         std::max(0, static_cast<int>(incomingSky) - static_cast<int>(attenuation)));
                 }
 
-                chunk.lightLevels[idx] = packLightLevels(incomingSky, blockLightingProperties(block).blockEmission);
+                outLightLevels[idx] = packLightLevels(incomingSky, blockLightingProperties(block).blockEmission);
             }
         }
     }
+}
+
+void ChunkManager::Impl::rebuildChunkBaseLighting(Chunk& chunk) const
+{
+    rebuildChunkBaseLighting(chunk.blocks, chunk.skyLightFromAboveCache, chunk.lightLevels);
 }
 
 int ChunkManager::Impl::denseCpuHorizontalRadius() const noexcept
@@ -15869,8 +16090,7 @@ ExactChunkResidencyMode ChunkManager::Impl::classifyExactChunkResidencyMode(cons
         chunk.queuedForUpload.load(std::memory_order_acquire) ||
         chunk.pendingMesh.valid() ||
         chunk.pendingMeshRefresh.load(std::memory_order_acquire) ||
-        chunk.meshReady.load(std::memory_order_acquire) ||
-        chunkHasPendingStructureEdits(chunk.coord);
+        chunk.meshReady.load(std::memory_order_acquire);
     if (requiresLegacyCpuFallback)
     {
         return ExactChunkResidencyMode::CpuMaterializing;
@@ -16097,6 +16317,19 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
 bool ChunkManager::Impl::applyPendingStructureEditsLocked(Chunk& chunk)
 {
     std::vector<PendingStructureEdit> edits = takePendingStructureEdits(chunk.coord);
+    if (!edits.empty())
+    {
+        if (!chunk.structureVoxelEditsReady)
+        {
+            chunk.structureVoxelEdits.clear();
+            chunk.structureVoxelEditsReady = true;
+        }
+        chunk.structureVoxelEdits.reserve(chunk.structureVoxelEdits.size() + edits.size());
+        for (const PendingStructureEdit& edit : edits)
+        {
+            chunk.structureVoxelEdits.push_back(StructureVoxelEdit{edit.worldPos, edit.block, edit.replaceSolid});
+        }
+    }
 
     bool wroteSolid = false;
     for (const PendingStructureEdit& edit : edits)
@@ -16155,6 +16388,12 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
         auto chunk = getChunkShared(coord);
         if (!chunk)
         {
+            continue;
+        }
+
+        if (!chunk->cpuDataResident && !shouldKeepChunkInteractive(coord, lastCenterChunk_))
+        {
+            chunk->hasBlocks.store(true, std::memory_order_release);
             continue;
         }
 

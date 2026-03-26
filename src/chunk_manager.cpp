@@ -513,6 +513,11 @@ struct ChunkBenchmarkMetrics
         uploadBudgetPrepStage.reset();
         visibleScanStage.reset();
         ensureVolumeStage.reset();
+        ensureVolumeColumnPrepStage.reset();
+        ensureVolumeSortStage.reset();
+        ensureVolumeDispatchStage.reset();
+        ensureVolumeChunkLookupStage.reset();
+        ensureVolumeEnqueueStage.reset();
         schedulingStage.reset();
         evictionStage.reset();
         mainThreadRelightStage.reset();
@@ -546,6 +551,20 @@ struct ChunkBenchmarkMetrics
         lodIndirectBuildStage.reset();
         chunkReadyLatency.reset();
         chunkReadyWaitGenerateStage.reset();
+        chunkReadyRequestQueuedGenerateStage.reset();
+        chunkReadyRequestQueuedMeshStage.reset();
+        chunkReadyRequestQueuedPrefetchStage.reset();
+        chunkReadyRequestQueuedBulkStage.reset();
+        chunkReadyRequestLatencySensitiveOutstandingStage.reset();
+        chunkReadyStartQueuedGenerateStage.reset();
+        chunkReadyStartQueuedMeshStage.reset();
+        chunkReadyStartQueuedPrefetchStage.reset();
+        chunkReadyStartQueuedBulkStage.reset();
+        chunkReadyStartActiveGenerateStage.reset();
+        chunkReadyStartActiveMeshStage.reset();
+        chunkReadyStartActivePrefetchStage.reset();
+        chunkReadyStartActiveBulkStage.reset();
+        chunkReadyStartLatencySensitiveOutstandingStage.reset();
         chunkReadyGenerateStage.reset();
         chunkReadyWaitMeshEnqueueStage.reset();
         chunkReadyWaitMeshStartStage.reset();
@@ -554,6 +573,10 @@ struct ChunkBenchmarkMetrics
         chunkReadyUploadToReadyStage.reset();
         uploadQueueAgeStage.reset();
         structureQueryStage.reset();
+        ensureVolumeColumnsVisited.reset();
+        ensureVolumeCandidatesBuilt.reset();
+        ensureVolumeExistingChunkSkips.reset();
+        ensureVolumeColumnCapSkips.reset();
         verticalRadiusDelta.reset();
         uploadQueueScanEntries.reset();
         uploadAttemptsPerFrame.reset();
@@ -604,6 +627,11 @@ struct ChunkBenchmarkMetrics
         report.uploadBudgetPrepStage = uploadBudgetPrepStage.snapshot();
         report.visibleScanStage = visibleScanStage.snapshot();
         report.ensureVolumeStage = ensureVolumeStage.snapshot();
+        report.ensureVolumeColumnPrepStage = ensureVolumeColumnPrepStage.snapshot();
+        report.ensureVolumeSortStage = ensureVolumeSortStage.snapshot();
+        report.ensureVolumeDispatchStage = ensureVolumeDispatchStage.snapshot();
+        report.ensureVolumeChunkLookupStage = ensureVolumeChunkLookupStage.snapshot();
+        report.ensureVolumeEnqueueStage = ensureVolumeEnqueueStage.snapshot();
         report.schedulingStage = schedulingStage.snapshot();
         report.evictionStage = evictionStage.snapshot();
         report.mainThreadRelightStage = mainThreadRelightStage.snapshot();
@@ -637,6 +665,20 @@ struct ChunkBenchmarkMetrics
         report.lodIndirectBuildStage = lodIndirectBuildStage.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
         report.chunkReadyWaitGenerateStage = chunkReadyWaitGenerateStage.snapshot();
+        report.chunkReadyRequestQueuedGenerateStage = chunkReadyRequestQueuedGenerateStage.snapshot();
+        report.chunkReadyRequestQueuedMeshStage = chunkReadyRequestQueuedMeshStage.snapshot();
+        report.chunkReadyRequestQueuedPrefetchStage = chunkReadyRequestQueuedPrefetchStage.snapshot();
+        report.chunkReadyRequestQueuedBulkStage = chunkReadyRequestQueuedBulkStage.snapshot();
+        report.chunkReadyRequestLatencySensitiveOutstandingStage = chunkReadyRequestLatencySensitiveOutstandingStage.snapshot();
+        report.chunkReadyStartQueuedGenerateStage = chunkReadyStartQueuedGenerateStage.snapshot();
+        report.chunkReadyStartQueuedMeshStage = chunkReadyStartQueuedMeshStage.snapshot();
+        report.chunkReadyStartQueuedPrefetchStage = chunkReadyStartQueuedPrefetchStage.snapshot();
+        report.chunkReadyStartQueuedBulkStage = chunkReadyStartQueuedBulkStage.snapshot();
+        report.chunkReadyStartActiveGenerateStage = chunkReadyStartActiveGenerateStage.snapshot();
+        report.chunkReadyStartActiveMeshStage = chunkReadyStartActiveMeshStage.snapshot();
+        report.chunkReadyStartActivePrefetchStage = chunkReadyStartActivePrefetchStage.snapshot();
+        report.chunkReadyStartActiveBulkStage = chunkReadyStartActiveBulkStage.snapshot();
+        report.chunkReadyStartLatencySensitiveOutstandingStage = chunkReadyStartLatencySensitiveOutstandingStage.snapshot();
         report.chunkReadyGenerateStage = chunkReadyGenerateStage.snapshot();
         report.chunkReadyWaitMeshEnqueueStage = chunkReadyWaitMeshEnqueueStage.snapshot();
         report.chunkReadyWaitMeshStartStage = chunkReadyWaitMeshStartStage.snapshot();
@@ -645,6 +687,10 @@ struct ChunkBenchmarkMetrics
         report.chunkReadyUploadToReadyStage = chunkReadyUploadToReadyStage.snapshot();
         report.uploadQueueAgeStage = uploadQueueAgeStage.snapshot();
         report.structureQueryStage = structureQueryStage.snapshot();
+        report.ensureVolumeColumnsVisited = ensureVolumeColumnsVisited.snapshot();
+        report.ensureVolumeCandidatesBuilt = ensureVolumeCandidatesBuilt.snapshot();
+        report.ensureVolumeExistingChunkSkips = ensureVolumeExistingChunkSkips.snapshot();
+        report.ensureVolumeColumnCapSkips = ensureVolumeColumnCapSkips.snapshot();
         report.verticalRadiusDelta = verticalRadiusDelta.snapshot();
         report.uploadQueueScanEntries = uploadQueueScanEntries.snapshot();
         report.uploadAttemptsPerFrame = uploadAttemptsPerFrame.snapshot();
@@ -693,6 +739,11 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram uploadBudgetPrepStage{};
     AtomicLatencyHistogram visibleScanStage{};
     AtomicLatencyHistogram ensureVolumeStage{};
+    AtomicLatencyHistogram ensureVolumeColumnPrepStage{};
+    AtomicLatencyHistogram ensureVolumeSortStage{};
+    AtomicLatencyHistogram ensureVolumeDispatchStage{};
+    AtomicLatencyHistogram ensureVolumeChunkLookupStage{};
+    AtomicLatencyHistogram ensureVolumeEnqueueStage{};
     AtomicLatencyHistogram schedulingStage{};
     AtomicLatencyHistogram evictionStage{};
     AtomicLatencyHistogram mainThreadRelightStage{};
@@ -726,6 +777,20 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram lodIndirectBuildStage{};
     AtomicLatencyHistogram chunkReadyLatency{};
     AtomicLatencyHistogram chunkReadyWaitGenerateStage{};
+    AtomicCountHistogram chunkReadyRequestQueuedGenerateStage{};
+    AtomicCountHistogram chunkReadyRequestQueuedMeshStage{};
+    AtomicCountHistogram chunkReadyRequestQueuedPrefetchStage{};
+    AtomicCountHistogram chunkReadyRequestQueuedBulkStage{};
+    AtomicCountHistogram chunkReadyRequestLatencySensitiveOutstandingStage{};
+    AtomicCountHistogram chunkReadyStartQueuedGenerateStage{};
+    AtomicCountHistogram chunkReadyStartQueuedMeshStage{};
+    AtomicCountHistogram chunkReadyStartQueuedPrefetchStage{};
+    AtomicCountHistogram chunkReadyStartQueuedBulkStage{};
+    AtomicCountHistogram chunkReadyStartActiveGenerateStage{};
+    AtomicCountHistogram chunkReadyStartActiveMeshStage{};
+    AtomicCountHistogram chunkReadyStartActivePrefetchStage{};
+    AtomicCountHistogram chunkReadyStartActiveBulkStage{};
+    AtomicCountHistogram chunkReadyStartLatencySensitiveOutstandingStage{};
     AtomicLatencyHistogram chunkReadyGenerateStage{};
     AtomicLatencyHistogram chunkReadyWaitMeshEnqueueStage{};
     AtomicLatencyHistogram chunkReadyWaitMeshStartStage{};
@@ -734,6 +799,10 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram chunkReadyUploadToReadyStage{};
     AtomicLatencyHistogram uploadQueueAgeStage{};
     AtomicLatencyHistogram structureQueryStage{};
+    AtomicCountHistogram ensureVolumeColumnsVisited{};
+    AtomicCountHistogram ensureVolumeCandidatesBuilt{};
+    AtomicCountHistogram ensureVolumeExistingChunkSkips{};
+    AtomicCountHistogram ensureVolumeColumnCapSkips{};
     AtomicCountHistogram verticalRadiusDelta{};
     AtomicCountHistogram uploadQueueScanEntries{};
     AtomicCountHistogram uploadAttemptsPerFrame{};
@@ -3076,6 +3145,9 @@ struct Chunk
         meshDoneTimestampMicros.store(0, std::memory_order_relaxed);
         uploadQueuedTimestampMicros.store(0, std::memory_order_relaxed);
         uploadStartTimestampMicros.store(0, std::memory_order_relaxed);
+        requestQueuedByType.fill(0);
+        requestActiveByType.fill(0);
+        requestLatencySensitiveOutstanding = 0;
         lightBoundaryDirtyMask = 0;
         pendingMeshRefresh.store(false, std::memory_order_relaxed);
         meshVersion.store(0, std::memory_order_relaxed);
@@ -3151,6 +3223,9 @@ struct Chunk
     std::atomic<long long> meshDoneTimestampMicros{0};
     std::atomic<long long> uploadQueuedTimestampMicros{0};
     std::atomic<long long> uploadStartTimestampMicros{0};
+    std::array<std::uint16_t, kJobTypeCount> requestQueuedByType{};
+    std::array<std::uint16_t, kJobTypeCount> requestActiveByType{};
+    std::uint16_t requestLatencySensitiveOutstanding{0};
     std::uint8_t lightBoundaryDirtyMask{0};
     std::atomic<bool> pendingMeshRefresh{false};
     std::atomic<std::uint32_t> meshVersion{0};
@@ -3300,6 +3375,8 @@ struct UploadQueueEntryComparer
 #include "chunk_manager_far_terrain.inl"
 
 struct ChunkBuildScratch;
+template <typename WriteBlockFn>
+void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBlockFn&& writeBlock);
 
 } // namespace
 
@@ -3447,15 +3524,19 @@ private:
     void startWorkerThreads();
     void stopWorkerThreads();
     void workerThreadFunction();
-    void columnHeightPrefetchThreadFunction();
     void startBulkShellOracle(const glm::ivec3& center, int horizontalRadius);
     void stopBulkShellOracle();
-    void bulkShellOracleThreadFunction(const std::shared_ptr<BulkShellOracleBatch>& batch);
     bool acquireNextColumnHeightPrefetch(glm::ivec2& column,
                                          std::uint64_t& token,
                                          ColumnHeightPrefetchPriority& priority,
                                          bool& buildOccupancy);
     void finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const;
+    void refillColumnHeightPrefetchJobs();
+    void refillBulkShellOracleJobs();
+    bool processColumnHeightPrefetchJob();
+    bool processBulkShellOracleJob();
+    [[nodiscard]] std::size_t targetColumnHeightPrefetchJobs() const noexcept;
+    [[nodiscard]] std::size_t targetBulkShellOracleJobs() const noexcept;
     void enqueueJob(const std::shared_ptr<Chunk>& chunk,
                     JobType type,
                     const glm::ivec3& coord,
@@ -3556,10 +3637,6 @@ private:
     int computeVerticalRadius(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
     int updateEvictionCenterChunkY(int targetChunkY) noexcept;
     int computeEvictionBudget(std::size_t pendingEvictions) const noexcept;
-    int columnRadiusFor(const glm::ivec2& column,
-                        const glm::ivec2& cameraColumn,
-                        int cameraChunkY,
-                        int verticalRadius) const;
     int columnRadiusForHeight(const glm::ivec2& column,
                               const glm::ivec2& cameraColumn,
                               int cameraChunkY,
@@ -3575,19 +3652,11 @@ private:
                                                       const glm::ivec2& cameraColumn,
                                                       int cameraChunkY,
                                                       int verticalRadius) const;
-    std::pair<int, int> columnSpanFor(const glm::ivec2& column,
-                                      const glm::ivec2& cameraColumn,
-                                      int cameraChunkY,
-                                      int verticalRadius) const;
     std::pair<int, int> columnSpanForHeight(const glm::ivec2& column,
                                             const glm::ivec2& cameraColumn,
                                             int cameraChunkY,
                                             int verticalRadius,
                                             int columnHeight) const;
-    ColumnChunkIntervals columnIntervalsFor(const glm::ivec2& column,
-                                            const glm::ivec2& cameraColumn,
-                                            int cameraChunkY,
-                                            int verticalRadius) const;
     ColumnChunkIntervals columnIntervalsForHeight(const glm::ivec2& column,
                                                   const glm::ivec2& cameraColumn,
                                                   int cameraChunkY,
@@ -3623,8 +3692,51 @@ private:
         std::atomic<std::size_t> nextFragmentIndex{0};
         std::atomic<std::size_t> remainingFragments{0};
     };
+    struct MetadataColumnValue
+    {
+        terrain::SurfaceColumn surface{};
+        float distanceToCoast{std::numeric_limits<float>::infinity()};
+        bool dominantIsOcean{false};
+    };
+    struct MetadataPage
+    {
+        static constexpr int kSize = terrain::SurfaceFragment::kSize;
+
+        glm::ivec2 key{0};
+        glm::ivec2 baseWorld{0};
+        std::array<MetadataColumnValue, static_cast<std::size_t>(kSize * kSize)> columns{};
+
+        [[nodiscard]] const MetadataColumnValue& column(int localX, int localZ) const noexcept
+        {
+            const int clampedX = std::clamp(localX, 0, kSize - 1);
+            const int clampedZ = std::clamp(localZ, 0, kSize - 1);
+            const std::size_t index = static_cast<std::size_t>(clampedZ) * kSize + static_cast<std::size_t>(clampedX);
+            return columns[index];
+        }
+    };
+    struct PendingMetadataPageBuild
+    {
+        std::condition_variable readyCondition{};
+        std::shared_ptr<MetadataPage> page{};
+        std::exception_ptr exception{};
+        bool ready{false};
+    };
+    struct DeferredStructureChunkBuild
+    {
+        glm::ivec3 queryMin{0};
+        glm::ivec3 queryMax{0};
+        int lodLevel{0};
+        std::vector<StructureRegionKey> missingRegions{};
+    };
     [[nodiscard]] int adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
                                                 float neighborAverage) const noexcept;
+    [[nodiscard]] static glm::ivec2 metadataPageKeyForWorld(int worldX, int worldZ) noexcept;
+    [[nodiscard]] std::shared_ptr<const MetadataPage> getOrBuildMetadataPage(const glm::ivec2& pageKey) const;
+    [[nodiscard]] std::shared_ptr<const MetadataPage> tryGetMetadataPage(const glm::ivec2& pageKey) const;
+    void pinMetadataWindow(const glm::ivec3& center, int horizontalRadius);
+    void trimMetadataPages();
+    void warmMetadataPagesForChunk(const glm::ivec3& chunkCoord) const;
+    void warmMetadataPagesForColumn(const glm::ivec2& column) const;
     ColumnSlabOccupancy buildColumnSlabOccupancy(const glm::ivec2& column) const;
     ColumnSlabOccupancy cachedColumnSlabOccupancy(const glm::ivec2& column) const;
     bool tryGetCachedColumnSlabOccupancy(const glm::ivec2& column, ColumnSlabOccupancy& out) const;
@@ -3640,11 +3752,6 @@ private:
         Core = 0,
         Corridor,
         TurnReserve,
-        Background
-    };
-    enum class SchedulingBand : std::uint8_t
-    {
-        Protected = 0,
         Background
     };
     [[nodiscard]] MovementEnvelopeBucket movementEnvelopeBucketForColumn(const glm::ivec2& column,
@@ -3680,23 +3787,103 @@ private:
         int protectedReady{0};
         int protectedRequired{0};
     };
-    VisibleChunkCoverage scanVisibleChunkCoverage(const glm::ivec3& center,
-                                                  int horizontalRadius,
-                                                  int verticalRadius) const;
-    int estimateMissingChunks(const glm::ivec3& center, int horizontalRadius, int verticalRadius) const;
-    StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
-
-    struct RingProgress
+    enum class FrontierDemandState : std::uint8_t
     {
-        bool fullyLoaded{false};
-        bool budgetExhausted{false};
+        Missing = 0,
+        QueuedGenerate,
+        Generating,
+        Meshing,
+        Ready
     };
-
-    RingProgress ensureVolume(const glm::ivec3& center,
-                              int horizontalRadius,
-                              int verticalRadius,
-                              int& jobBudget,
-                              SchedulingBand band);
+    struct FrontierColumnState
+    {
+        ColumnChunkIntervals intervals{};
+        ColumnChunkIntervals playerBand{};
+        bool countedVisible{false};
+        bool countedExact{false};
+    };
+    struct FrontierChunkDemand
+    {
+        FrontierDemandState state{FrontierDemandState::Missing};
+        bool forceResident{false};
+        bool countedVisible{false};
+        bool countedExact{false};
+        std::uint64_t version{1};
+    };
+    struct FrontierChunkLifecycleState
+    {
+        FrontierDemandState state{FrontierDemandState::Missing};
+    };
+    struct FrontierDispatchEntry
+    {
+        glm::ivec3 coord{0};
+        ChunkPriorityKey priority{};
+        bool localInteraction{false};
+        std::uint64_t version{0};
+        std::uint64_t sequence{0};
+        std::uint64_t priorityEpoch{0};
+    };
+    struct FrontierDispatchEntryCompare
+    {
+        bool operator()(const FrontierDispatchEntry& lhs, const FrontierDispatchEntry& rhs) const noexcept
+        {
+            if (lhs.localInteraction != rhs.localInteraction)
+            {
+                return !lhs.localInteraction && rhs.localInteraction;
+            }
+            if (lhs.priority.supportBucket != rhs.priority.supportBucket)
+            {
+                return lhs.priority.supportBucket > rhs.priority.supportBucket;
+            }
+            if (lhs.priority.horizontalDistance != rhs.priority.horizontalDistance)
+            {
+                return lhs.priority.horizontalDistance > rhs.priority.horizontalDistance;
+            }
+            if (lhs.priority.forwardBucket != rhs.priority.forwardBucket)
+            {
+                return lhs.priority.forwardBucket > rhs.priority.forwardBucket;
+            }
+            if (lhs.priority.verticalDistance != rhs.priority.verticalDistance)
+            {
+                return lhs.priority.verticalDistance > rhs.priority.verticalDistance;
+            }
+            if (lhs.priority.axisDistance != rhs.priority.axisDistance)
+            {
+                return lhs.priority.axisDistance > rhs.priority.axisDistance;
+            }
+            return lhs.sequence > rhs.sequence;
+        }
+    };
+    struct FrontierCoverage
+    {
+        int visibleRequired{0};
+        int visibleReady{0};
+        int exactRequired{0};
+        int exactReady{0};
+    };
+    StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
+    void resetStreamingFrontier() noexcept;
+    void invalidateStreamingFrontierColumn(const glm::ivec2& column) const;
+    void invalidateAllStreamingFrontierColumns() const;
+    FrontierCoverage streamingFrontierCoverageSnapshot() const noexcept;
+    void refreshStreamingFrontier(const glm::ivec3& center,
+                                  int visibleRadius,
+                                  int preloadRadius,
+                                  int verticalRadius,
+                                  int exactMetricRadius);
+    int dispatchStreamingFrontierGenerateJobs(const glm::ivec3& center,
+                                              const glm::vec3& priorityForward,
+                                              int jobBudget);
+    void setStreamingFrontierDemandState(const glm::ivec3& coord, FrontierDemandState state);
+    void queueStreamingFrontierDispatchEntryLocked(const glm::ivec3& coord,
+                                                   const FrontierChunkDemand& demand);
+    void refreshStreamingFrontierDispatchPriorityStateLocked(const glm::ivec3& center,
+                                                             const glm::vec3& priorityForward);
+    void setStreamingChunkLifecycleState(const glm::ivec3& coord, FrontierDemandState state);
+    void clearStreamingChunkLifecycleState(const glm::ivec3& coord);
+    void clearStreamingChunkLifecycleStates() noexcept;
+    bool tryGetStreamingChunkLifecycleState(const glm::ivec3& coord, FrontierDemandState& outState) const noexcept;
+    void syncStreamingFrontierDemandFromRegistry(const glm::ivec3& coord);
     void removeDistantChunks(const glm::ivec3& center, int horizontalThreshold, int verticalThreshold);
     bool ensureChunkAsync(const glm::ivec3& coord,
                           bool forceResident = false,
@@ -3781,6 +3968,15 @@ private:
         bool buildOccupancy{false};
         bool inFlight{false};
     };
+    struct FullRadiusColumnDiscoveryState
+    {
+        glm::ivec3 center{0};
+        int radius{0};
+        int nextRing{0};
+        int nextEdge{0};
+        int nextOffset{0};
+        bool initialized{false};
+    };
     struct ColumnHeightPrefetchRequestCompare
     {
         bool operator()(const ColumnHeightPrefetchRequest& lhs,
@@ -3801,10 +3997,16 @@ private:
             return lhs.sequence > rhs.sequence;
         }
     };
-    void requestColumnHeightPrefetch(const glm::ivec2& column,
-                                     ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal,
+    bool requestColumnHeightPrefetch(const glm::ivec2& column,
+                                     ColumnHeightPrefetchPriority priority =
+                                         ColumnHeightPrefetchPriority::Normal,
                                      bool buildOccupancy = false) const;
-    void requestFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius) const;
+    [[nodiscard]] std::size_t columnHeightPrefetchQueueLimit(ColumnHeightPrefetchPriority priority,
+                                                             bool buildOccupancy) const noexcept;
+    void resetFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept;
+    [[nodiscard]] bool nextFullRadiusColumnDiscoveryColumn(glm::ivec2& outColumn,
+                                                           ColumnHeightPrefetchPriority& outPriority) noexcept;
+    void requestFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius);
     void mergePredictedColumnHeight(const glm::ivec2& column, int height) const;
     void refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const;
     void invalidatePredictedColumn(const glm::ivec2& column) const;
@@ -3818,7 +4020,21 @@ private:
     void dispatchStructureEdits(const std::vector<PendingStructureEdit>& edits);
     std::vector<StructureInstance> queryStructureInstances(const glm::ivec3& minWorld,
                                                            const glm::ivec3& maxWorld,
-                                                           int lodLevel = 0) const;
+                                                           int lodLevel = 0,
+                                                           bool* outAllRegionsReady = nullptr,
+                                                           std::vector<StructureRegionKey>* outMissingRegions = nullptr) const;
+    void warmStructureRegionsForColumn(const glm::ivec2& column);
+    void registerDeferredStructureChunkBuild(const glm::ivec3& coord,
+                                             const glm::ivec3& queryMin,
+                                             const glm::ivec3& queryMax,
+                                             int lodLevel,
+                                             const std::vector<StructureRegionKey>& missingRegions);
+    void clearDeferredStructureChunkBuild(const glm::ivec3& coord);
+    void flushReadyDeferredStructureChunks();
+    std::vector<PendingStructureEdit> buildDeferredStructureEditsForChunk(const glm::ivec3& coord,
+                                                                          const glm::ivec3& queryMin,
+                                                                          const glm::ivec3& queryMax,
+                                                                          int lodLevel) const;
     static bool chunkHasSolidBlocks(const Chunk& chunk) noexcept;
     void recycleChunkObject(std::shared_ptr<Chunk> chunk);
     std::pair<glm::vec2, glm::vec2> atlasUvFor(BlockId block, BlockFace face) const;
@@ -4018,12 +4234,40 @@ private:
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
     JobQueue jobQueue_;
     ColumnManager columnManager_;
+    mutable std::mutex metadataPageMutex_;
+    mutable std::unordered_map<glm::ivec2, std::shared_ptr<MetadataPage>, ColumnHasher> metadataPages_{};
+    mutable std::unordered_map<glm::ivec2, std::shared_ptr<PendingMetadataPageBuild>, ColumnHasher>
+        pendingMetadataPageBuilds_{};
+    std::unordered_set<glm::ivec2, ColumnHasher> pinnedMetadataPageKeys_{};
+    mutable std::mutex streamingFrontierMutex_;
+    mutable std::unordered_set<glm::ivec2, ColumnHasher> streamingFrontierDirtyColumns_{};
+    mutable bool streamingFrontierDirtyAllColumns_{false};
+    std::unordered_map<glm::ivec2, FrontierColumnState, ColumnHasher> streamingFrontierColumns_{};
+    std::unordered_map<glm::ivec3, FrontierChunkDemand, ChunkHasher> streamingFrontierDemands_{};
+    std::unordered_map<glm::ivec3, FrontierChunkLifecycleState, ChunkHasher> streamingChunkLifecycleStates_{};
+    std::priority_queue<FrontierDispatchEntry,
+                        std::vector<FrontierDispatchEntry>,
+                        FrontierDispatchEntryCompare>
+        streamingFrontierDispatchQueue_{};
+    glm::ivec3 streamingFrontierCenter_{0};
+    int streamingFrontierVisibleRadius_{0};
+    int streamingFrontierPreloadRadius_{0};
+    int streamingFrontierVerticalRadius_{0};
+    int streamingFrontierExactMetricRadius_{0};
+    int streamingFrontierVisibleRequired_{0};
+    int streamingFrontierVisibleReady_{0};
+    int streamingFrontierExactRequired_{0};
+    int streamingFrontierExactReady_{0};
+    std::uint64_t nextStreamingFrontierSequence_{1};
+    bool streamingFrontierInitialized_{false};
+    glm::ivec3 streamingFrontierDispatchOrigin_{0};
+    glm::vec2 streamingFrontierDispatchForwardXZ_{0.0f, -1.0f};
+    std::uint64_t streamingFrontierDispatchPriorityEpoch_{1};
     mutable std::mutex predictedColumnMutex_;
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     mutable std::mutex columnSlabOccupancyMutex_;
     mutable std::unordered_map<glm::ivec2, ColumnSlabOccupancy, ColumnHasher> columnSlabOccupancyCache_{};
     mutable std::mutex columnHeightPrefetchMutex_;
-    mutable std::condition_variable columnHeightPrefetchCondition_;
     mutable std::priority_queue<ColumnHeightPrefetchRequest,
                                 std::vector<ColumnHeightPrefetchRequest>,
                                 ColumnHeightPrefetchRequestCompare> pendingColumnHeightPrefetchQueue_{};
@@ -4031,16 +4275,18 @@ private:
         pendingColumnHeightPrefetchRequests_{};
     mutable std::uint64_t nextColumnHeightPrefetchToken_{1};
     mutable std::uint64_t nextColumnHeightPrefetchSequence_{1};
+    FullRadiusColumnDiscoveryState fullRadiusColumnDiscovery_{};
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
+    std::unordered_map<glm::ivec3, DeferredStructureChunkBuild, ChunkHasher> deferredStructureChunkBuilds_{};
+    mutable std::mutex deferredStructureMutex_;
     std::unordered_map<glm::ivec3, std::vector<BlockEditOverlayEntry>, ChunkHasher> blockEditOverlays_;
     mutable std::mutex blockEditOverlayMutex_;
 
     std::vector<std::thread> workerThreads_;
-    std::vector<std::thread> columnHeightPrefetchThreads_;
-    std::vector<std::thread> bulkShellOracleThreads_;
     std::size_t workerThreadCount_{0};
     std::size_t columnHeightPrefetchWorkerCount_{0};
+    std::size_t bulkShellOracleWorkerCount_{0};
     std::shared_ptr<BulkShellOracleBatch> bulkShellOracleBatch_{};
     std::atomic<bool> shouldStop_;
 
@@ -4090,6 +4336,11 @@ private:
     double uploadBudgetPrepMsLastFrame_{0.0};
     double missingScanMsLastFrame_{0.0};
     double ensureVolumeMsLastFrame_{0.0};
+    double ensureVolumeColumnPrepMsLastFrame_{0.0};
+    double ensureVolumeSortMsLastFrame_{0.0};
+    double ensureVolumeDispatchMsLastFrame_{0.0};
+    double ensureVolumeChunkLookupMsLastFrame_{0.0};
+    double ensureVolumeEnqueueMsLastFrame_{0.0};
     double schedulingMsLastFrame_{0.0};
     double evictionMsLastFrame_{0.0};
     double relightMsLastFrame_{0.0};
@@ -4107,6 +4358,10 @@ private:
     int uploadScanLimitHitsLastFrame_{0};
     int uploadBeginFailuresLastFrame_{0};
     int uploadStalePendingMeshesLastFrame_{0};
+    int ensureVolumeColumnsVisitedLastFrame_{0};
+    int ensureVolumeCandidatesBuiltLastFrame_{0};
+    int ensureVolumeExistingChunkSkipsLastFrame_{0};
+    int ensureVolumeColumnCapSkipsLastFrame_{0};
     double uploadQueuePickMsLastFrame_{0.0};
     double poolTrimMsLastFrame_{0.0};
     double farTerrainUpdateMsLastFrame_{0.0};
@@ -4157,6 +4412,7 @@ private:
     double movementEnvelopeStationarySeconds_{0.0};
     bool movementEnvelopeIdleMode_{false};
     bool movementEnvelopeTurnActive_{false};
+    bool stationaryExactFillModeActive_{false};
     bool protectedPressureActive_{false};
     bool severeProtectedPressureActive_{false};
     std::atomic<bool> refinementBackpressureActive_{false};
@@ -4694,26 +4950,61 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     {
         viewDistance_ = preloadTargetViewDistance;
     }
+    viewDistance_ = targetViewDistance_;
 
+    pinMetadataWindow(centerChunk, renderSettings_.exactChunks);
     prefetchVisibleColumnHeights(centerChunk, previousCenterChunk, targetViewDistance_);
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     const bool needsFullExactCoverageMetrics = exactOnly && renderSettings_.exactChunks > targetViewDistance_;
-    if (needsFullExactCoverageMetrics)
-    {
-        requestFullRadiusColumnDiscovery(centerChunk, renderSettings_.exactChunks);
-    }
+
+    ensureVolumeMsLastFrame_ = 0.0;
+    ensureVolumeColumnPrepMsLastFrame_ = 0.0;
+    ensureVolumeSortMsLastFrame_ = 0.0;
+    ensureVolumeDispatchMsLastFrame_ = 0.0;
+    ensureVolumeChunkLookupMsLastFrame_ = 0.0;
+    ensureVolumeEnqueueMsLastFrame_ = 0.0;
+    ensureVolumeColumnsVisitedLastFrame_ = 0;
+    ensureVolumeCandidatesBuiltLastFrame_ = 0;
+    ensureVolumeExistingChunkSkipsLastFrame_ = 0;
+    ensureVolumeColumnCapSkipsLastFrame_ = 0;
 
     const auto missingScanStart = std::chrono::steady_clock::now();
-    const VisibleChunkCoverage visibleCoverage =
-        scanVisibleChunkCoverage(centerChunk, targetViewDistance_, verticalRadius);
-    VisibleChunkCoverage metricCoverage = visibleCoverage;
-    if (needsFullExactCoverageMetrics)
+    const int exactMetricRadius = needsFullExactCoverageMetrics ? renderSettings_.exactChunks : targetViewDistance_;
+    const int frontierVerticalRadius = needsFullExactCoverageMetrics
+        ? std::max(verticalRadius, computeVerticalRadius(centerChunk, exactMetricRadius, clampedWorldY))
+        : verticalRadius;
+    const int frontierRadius = std::max(preloadTargetViewDistance, exactMetricRadius);
+    const auto frontierRefreshStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    refreshStreamingFrontier(centerChunk,
+                             targetViewDistance_,
+                             frontierRadius,
+                             frontierVerticalRadius,
+                             exactMetricRadius);
+    if (benchmarkEnabled)
     {
-        const int metricVerticalRadius =
-            computeVerticalRadius(centerChunk, renderSettings_.exactChunks, clampedWorldY);
-        metricCoverage = scanVisibleChunkCoverage(centerChunk, renderSettings_.exactChunks, metricVerticalRadius);
+        ensureVolumeMsLastFrame_ +=
+            std::chrono::duration<double, std::milli>(SteadyClock::now() - frontierRefreshStart).count();
     }
+    const FrontierCoverage frontierCoverage = streamingFrontierCoverageSnapshot();
+    VisibleChunkCoverage visibleCoverage{};
+    visibleCoverage.ready = frontierCoverage.visibleReady;
+    visibleCoverage.required = frontierCoverage.visibleRequired;
+    visibleCoverage.missing = std::max(0, visibleCoverage.required - visibleCoverage.ready);
+    visibleCoverage.protectedReady = visibleCoverage.ready;
+    visibleCoverage.protectedRequired = visibleCoverage.required;
+    visibleCoverage.protectedMissing = visibleCoverage.missing;
+    VisibleChunkCoverage metricCoverage{};
+    metricCoverage.ready = frontierCoverage.exactReady;
+    metricCoverage.required = frontierCoverage.exactRequired;
+    metricCoverage.missing = std::max(0, metricCoverage.required - metricCoverage.ready);
     const int missingChunks = visibleCoverage.missing;
+    stationaryExactFillModeActive_ =
+        exactOnly &&
+        movementEnvelopeIdleMode_ &&
+        !movementEnvelopeTurnActive_ &&
+        lastHorizontalMovementShift_ == 0 &&
+        lastVerticalMovementShift_ == 0 &&
+        metricCoverage.missing > 0;
     missingScanMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - missingScanStart).count();
     lastProtectedMissingChunks_ = visibleCoverage.protectedMissing;
@@ -4727,6 +5018,12 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
          (lastHorizontalMovementShift_ > 0 && visibleCoverage.protectedMissing >= 8));
     refinementBackpressureActive_.store(protectedPressureActive_ || missingChunks > 0,
                                         std::memory_order_release);
+    if (needsFullExactCoverageMetrics)
+    {
+        requestFullRadiusColumnDiscovery(centerChunk, renderSettings_.exactChunks);
+    }
+    refillColumnHeightPrefetchJobs();
+    refillBulkShellOracleJobs();
 
     const auto uploadBudgetStart = std::chrono::steady_clock::now();
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
@@ -4749,6 +5046,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         if (severeProtectedPressureActive_)
         {
             extraColumnLimit += 4;
+        }
+        if (stationaryExactFillModeActive_)
+        {
+            extraColumnLimit += 6;
+            uploadChunkLimitThisFrame_ = std::min(uploadChunkLimitThisFrame_ + 1, 8);
         }
         uploadColumnLimitThisFrame_ = std::min(uploadColumnLimitThisFrame_ + extraColumnLimit,
                                                kVerticalStreamingConfig.uploadMaxPerColumn);
@@ -4804,49 +5106,31 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             columnCap += 4;
         }
     }
+    if (stationaryExactFillModeActive_)
+    {
+        generationBudgetTarget += 48;
+        ringBudget += 4;
+        if (columnCap < std::numeric_limits<int>::max())
+        {
+            columnCap = std::max(columnCap + 8, 24);
+        }
+    }
     generationColumnCapThisFrame_ = columnCap;
 
     const std::size_t workerSlots = std::max<std::size_t>(workerThreadCount_, 1);
     const std::size_t outstandingGenerateCap = std::clamp<std::size_t>(
-        (exactOnly ? 160u : 96u) +
-            workerSlots * (exactOnly ? 48u : 32u) +
-            static_cast<std::size_t>(std::max(verticalRadius, 0)) * (exactOnly ? 8u : 6u) +
-            (protectedPressureActive_ ? 64u : 0u) +
-            (severeProtectedPressureActive_ ? 96u : 0u) +
-            (movementEnvelopeIdleMode_ && exactOnly ? 128u : 0u),
-        exactOnly ? 160u : 96u,
-        exactOnly ? 1024u : 512u);
+        workerSlots * 4u +
+            (exactOnly ? 12u : 8u) +
+            (protectedPressureActive_ ? 8u : 0u) +
+            (severeProtectedPressureActive_ ? 8u : 0u),
+        exactOnly ? 24u : 16u,
+        exactOnly ? 80u : 56u);
     const std::size_t outstandingGenerateJobs = jobQueue_.outstanding(JobType::Generate);
     const int generationHeadroom = (outstandingGenerateJobs >= outstandingGenerateCap)
         ? 0
         : static_cast<int>(std::min<std::size_t>(outstandingGenerateCap - outstandingGenerateJobs,
                                                  static_cast<std::size_t>(std::numeric_limits<int>::max())));
     const int effectiveGenerationBudgetTarget = std::min(generationBudgetTarget, generationHeadroom);
-    const int backgroundReserveJobs = [&]()
-    {
-        if (effectiveGenerationBudgetTarget <= 1)
-        {
-            return 0;
-        }
-
-        int reserve = 0;
-        if (exactOnly)
-        {
-            reserve = movementEnvelopeIdleMode_
-                ? std::max(24, effectiveGenerationBudgetTarget / 3)
-                : std::max(8, effectiveGenerationBudgetTarget / 10);
-            if (severeProtectedPressureActive_ && !movementEnvelopeIdleMode_)
-            {
-                reserve = std::max(6, reserve / 2);
-            }
-        }
-        else if (protectedPressureActive_)
-        {
-            reserve = 2;
-        }
-
-        return std::clamp(reserve, 0, effectiveGenerationBudgetTarget - 1);
-    }();
 
     lastGenerationBudget_ = effectiveGenerationBudgetTarget;
     lastRingBudget_ = ringBudget;
@@ -4854,105 +5138,33 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     lastBacklogSteps_ = backlogSteps;
 
     int jobBudget = effectiveGenerationBudgetTarget;
-    ensureVolumeMsLastFrame_ = 0.0;
-    const auto timedEnsureVolume = [&](int horizontalRadius, SchedulingBand band)
-    {
-        if (!benchmarkEnabled)
-        {
-            return ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget, band);
-        }
-
-        const auto ensureVolumeStart = std::chrono::steady_clock::now();
-        RingProgress progress = ensureVolume(centerChunk, horizontalRadius, verticalRadius, jobBudget, band);
-        ensureVolumeMsLastFrame_ +=
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ensureVolumeStart).count();
-        return progress;
-    };
-
     const auto schedulingStart = std::chrono::steady_clock::now();
-    for (int ring = 0; ring <= viewDistance_ && jobBudget > backgroundReserveJobs; ++ring)
-    {
-        RingProgress progress = timedEnsureVolume(ring, SchedulingBand::Protected);
-        if (progress.budgetExhausted)
-        {
-            break;
-        }
-    }
-
-    int ringsExpanded = 0;
-    while (jobBudget > backgroundReserveJobs &&
-           viewDistance_ < preloadTargetViewDistance &&
-           ringsExpanded < ringBudget)
-    {
-        const int nextRing = viewDistance_ + 1;
-        RingProgress progress = timedEnsureVolume(nextRing, SchedulingBand::Protected);
-
-        if (progress.budgetExhausted)
-        {
-            break;
-        }
-
-        if (progress.fullyLoaded)
-        {
-            ++viewDistance_;
-            ++ringsExpanded;
-            continue;
-        }
-
-        break;
-    }
-
-    if (exactOnly && jobBudget > backgroundReserveJobs)
-    {
-        const std::size_t lookaheadTrigger =
-            std::max<std::size_t>(64u, workerSlots * 16u);
-        const std::size_t outstandingGenerateJobsAfterExpansion = jobQueue_.outstanding(JobType::Generate);
-        if (outstandingGenerateJobsAfterExpansion <= lookaheadTrigger)
-        {
-            const int protectedLookaheadRings = severeProtectedPressureActive_ ? 10 :
-                                                (protectedPressureActive_ ? 8 : 5);
-            const int lookaheadEnd = std::min(preloadTargetViewDistance, viewDistance_ + protectedLookaheadRings);
-            for (int ring = viewDistance_ + 1; ring <= lookaheadEnd && jobBudget > backgroundReserveJobs; ++ring)
-            {
-                RingProgress progress = timedEnsureVolume(ring, SchedulingBand::Protected);
-                if (progress.budgetExhausted)
-                {
-                    break;
-                }
-            }
-        }
-    }
-
-    const bool shouldRunBackgroundPass =
-        jobBudget > 0 &&
-        (backgroundReserveJobs > 0 || !protectedPressureActive_ || movementEnvelopeIdleMode_);
-    if (shouldRunBackgroundPass)
-    {
-        for (int ring = 0; ring <= viewDistance_ && jobBudget > 0; ++ring)
-        {
-            RingProgress progress = timedEnsureVolume(ring, SchedulingBand::Background);
-            if (progress.budgetExhausted)
-            {
-                break;
-            }
-        }
-    }
+    const int dispatchedGenerationJobs = dispatchStreamingFrontierGenerateJobs(centerChunk, priorityForward, jobBudget);
     schedulingMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedulingStart).count();
 
-    lastGenerationJobsIssued_ =
-        std::clamp(effectiveGenerationBudgetTarget - jobBudget, 0, effectiveGenerationBudgetTarget);
-    lastRingExpansionsUsed_ = ringsExpanded;
-    lastMissingChunks_ = std::max(0, missingChunks - lastGenerationJobsIssued_);
+    lastGenerationJobsIssued_ = dispatchedGenerationJobs;
+    lastRingExpansionsUsed_ = 0;
+    lastMissingChunks_ = missingChunks;
     cachedExactReadyChunks_ = metricCoverage.ready;
     cachedExactRequiredChunks_ = metricCoverage.required;
 
-    const auto evictionStart = std::chrono::steady_clock::now();
-    removeDistantChunks(centerChunk,
-                        preloadTargetViewDistance + kVerticalStreamingConfig.horizontalEvictionSlack,
-                        verticalRadius);
-    evictionMsLastFrame_ =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evictionStart).count();
+    const bool runEvictionThisFrame =
+        !stationaryExactFillModeActive_ || (updateFrameIndex_ % 8u) == 0u;
+    if (runEvictionThisFrame)
+    {
+        const auto evictionStart = std::chrono::steady_clock::now();
+        removeDistantChunks(centerChunk,
+                            frontierRadius + kVerticalStreamingConfig.horizontalEvictionSlack +
+                                (stationaryExactFillModeActive_ ? 4 : 0),
+                            frontierVerticalRadius + (stationaryExactFillModeActive_ ? 1 : 0));
+        evictionMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evictionStart).count();
+    }
+    else
+    {
+        evictionMsLastFrame_ = 0.0;
+    }
 
     const std::size_t latencySensitiveBacklog =
         jobQueue_.outstanding(JobServiceClass::InitialVisible) +
@@ -4987,14 +5199,32 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
     }
     uploadReadyMeshes();
-    const auto denseResidencyStart = std::chrono::steady_clock::now();
-    updateDenseChunkResidency(centerChunk);
-    denseResidencyMsLastFrame_ =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - denseResidencyStart).count();
-    const auto poolTrimStart = std::chrono::steady_clock::now();
-    trimChunkPoolToBudget();
-    poolTrimMsLastFrame_ =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poolTrimStart).count();
+    const bool runDenseResidencyThisFrame =
+        !stationaryExactFillModeActive_ || (updateFrameIndex_ % 4u) == 0u;
+    if (runDenseResidencyThisFrame)
+    {
+        const auto denseResidencyStart = std::chrono::steady_clock::now();
+        updateDenseChunkResidency(centerChunk);
+        denseResidencyMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - denseResidencyStart).count();
+    }
+    else
+    {
+        denseResidencyMsLastFrame_ = 0.0;
+    }
+    const bool runPoolTrimThisFrame =
+        !stationaryExactFillModeActive_ || (updateFrameIndex_ % 16u) == 0u;
+    if (runPoolTrimThisFrame)
+    {
+        const auto poolTrimStart = std::chrono::steady_clock::now();
+        trimChunkPoolToBudget();
+        poolTrimMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poolTrimStart).count();
+    }
+    else
+    {
+        poolTrimMsLastFrame_ = 0.0;
+    }
 
     const auto farTerrainUpdateStart = std::chrono::steady_clock::now();
     if (renderSettings_.totalChunks > renderSettings_.exactChunks)
@@ -5189,6 +5419,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         benchmarkMetrics_.uploadContextBeginStage.recordMicros(toMicros(uploadContextBeginMsLastFrame_));
         benchmarkMetrics_.visibleScanStage.recordMicros(toMicros(missingScanMsLastFrame_));
         benchmarkMetrics_.ensureVolumeStage.recordMicros(toMicros(ensureVolumeMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeColumnPrepStage.recordMicros(toMicros(ensureVolumeColumnPrepMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeSortStage.recordMicros(toMicros(ensureVolumeSortMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeDispatchStage.recordMicros(toMicros(ensureVolumeDispatchMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeChunkLookupStage.recordMicros(toMicros(ensureVolumeChunkLookupMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeEnqueueStage.recordMicros(toMicros(ensureVolumeEnqueueMsLastFrame_));
         benchmarkMetrics_.schedulingStage.recordMicros(toMicros(schedulingMsLastFrame_));
         benchmarkMetrics_.evictionStage.recordMicros(toMicros(evictionMsLastFrame_));
         benchmarkMetrics_.mainThreadRelightStage.recordMicros(toMicros(relightMsLastFrame_));
@@ -5204,6 +5439,14 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         benchmarkMetrics_.commitMeshStateStage.recordMicros(toMicros(commitMeshStateMsLastFrame_));
         benchmarkMetrics_.commitPageStateStage.recordMicros(toMicros(commitPageStateMsLastFrame_));
         benchmarkMetrics_.commitReleaseStage.recordMicros(toMicros(commitReleaseMsLastFrame_));
+        benchmarkMetrics_.ensureVolumeColumnsVisited.record(
+            static_cast<std::uint64_t>(std::max(ensureVolumeColumnsVisitedLastFrame_, 0)));
+        benchmarkMetrics_.ensureVolumeCandidatesBuilt.record(
+            static_cast<std::uint64_t>(std::max(ensureVolumeCandidatesBuiltLastFrame_, 0)));
+        benchmarkMetrics_.ensureVolumeExistingChunkSkips.record(
+            static_cast<std::uint64_t>(std::max(ensureVolumeExistingChunkSkipsLastFrame_, 0)));
+        benchmarkMetrics_.ensureVolumeColumnCapSkips.record(
+            static_cast<std::uint64_t>(std::max(ensureVolumeColumnCapSkipsLastFrame_, 0)));
         benchmarkMetrics_.startupStateStage.recordMicros(toMicros(startupStateMsLastFrame_));
         benchmarkMetrics_.benchmarkBookkeepingStage.recordMicros(toMicros(benchmarkBookkeepingMsLastFrame_));
     }
@@ -5385,6 +5628,7 @@ void ChunkManager::Impl::clear()
             columnManager_.removeChunk(chunk->coord);
             invalidatePredictedColumn({chunk->coord.x, chunk->coord.z});
             markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
+            clearStreamingChunkLifecycleState(chunk->coord);
             recycleChunkGPU(*chunk);
             recycleChunkObject(std::move(chunk));
 
@@ -5448,7 +5692,15 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(metadataPageMutex_);
+        metadataPages_.clear();
+        pendingMetadataPageBuilds_.clear();
+        pinnedMetadataPageKeys_.clear();
+    }
     invalidateAllColumnSlabOccupancy();
+    resetStreamingFrontier();
+    clearStreamingChunkLifecycleStates();
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
         pendingColumnHeightPrefetchQueue_ = {};
@@ -5456,9 +5708,14 @@ void ChunkManager::Impl::clear()
         nextColumnHeightPrefetchToken_ = 1;
         nextColumnHeightPrefetchSequence_ = 1;
     }
+    fullRadiusColumnDiscovery_ = FullRadiusColumnDiscoveryState{};
     {
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
         pendingStructureEdits_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(deferredStructureMutex_);
+        deferredStructureChunkBuilds_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
@@ -6295,6 +6552,7 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     lastProtectedRequiredChunks_ = 0;
     protectedPressureActive_ = false;
     severeProtectedPressureActive_ = false;
+    stationaryExactFillModeActive_ = false;
     movementEnvelopeForwardXZ_ = normalizePriorityForwardXZ(lastCameraForward_);
     lastCameraForwardXZ_ = normalizePriorityForwardXZ(lastCameraForward_);
     lastHorizontalMovementShift_ = 0;
@@ -6310,6 +6568,7 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     {
         viewDistance_ = targetViewDistance_;
     }
+    resetStreamingFrontier();
     farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
     farTerrainManager_.clear();
     if (renderSettings_.totalChunks <= renderSettings_.exactChunks)
@@ -6509,6 +6768,11 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
     snapshot.missingScanMsLastFrame = missingScanMsLastFrame_;
     snapshot.ensureVolumeMsLastFrame = ensureVolumeMsLastFrame_;
+    snapshot.ensureVolumeColumnPrepMsLastFrame = ensureVolumeColumnPrepMsLastFrame_;
+    snapshot.ensureVolumeSortMsLastFrame = ensureVolumeSortMsLastFrame_;
+    snapshot.ensureVolumeDispatchMsLastFrame = ensureVolumeDispatchMsLastFrame_;
+    snapshot.ensureVolumeChunkLookupMsLastFrame = ensureVolumeChunkLookupMsLastFrame_;
+    snapshot.ensureVolumeEnqueueMsLastFrame = ensureVolumeEnqueueMsLastFrame_;
     snapshot.schedulingMsLastFrame = schedulingMsLastFrame_;
     snapshot.evictionMsLastFrame = evictionMsLastFrame_;
     snapshot.relightMsLastFrame = relightMsLastFrame_;
@@ -6546,6 +6810,10 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
             pendingColumnHeightPrefetchRequests_.size(),
             static_cast<std::size_t>(std::numeric_limits<int>::max())));
     }
+    snapshot.ensureVolumeColumnsVisitedLastFrame = ensureVolumeColumnsVisitedLastFrame_;
+    snapshot.ensureVolumeCandidatesBuiltLastFrame = ensureVolumeCandidatesBuiltLastFrame_;
+    snapshot.ensureVolumeExistingChunkSkipsLastFrame = ensureVolumeExistingChunkSkipsLastFrame_;
+    snapshot.ensureVolumeColumnCapSkipsLastFrame = ensureVolumeColumnCapSkipsLastFrame_;
     {
         std::lock_guard<std::mutex> lock(chunkPoolMutex_);
         snapshot.pooledChunkCount = chunkPool_.size();
@@ -6722,34 +6990,19 @@ void ChunkManager::Impl::startWorkerThreads()
     unsigned prefetchDesired = 1u;
     if (exactOnly)
     {
-        prefetchDesired = std::clamp(std::max(12u, concurrency), 12u, 24u);
+        prefetchDesired = (workerThreadCount_ >= 8) ? 2u : 1u;
     }
     else
     {
-        if (concurrency >= 8 && desired >= 4u)
-        {
-            prefetchDesired = 2u;
-        }
-        if (concurrency >= 12 && desired >= 5u)
-        {
-            prefetchDesired = 3u;
-        }
-        if (concurrency >= 16 && desired >= 6u)
-        {
-            prefetchDesired = 4u;
-        }
-        if (concurrency >= 20 && desired >= 7u)
-        {
-            prefetchDesired = 5u;
-        }
+        prefetchDesired = (workerThreadCount_ >= 6) ? 1u : 0u;
     }
 
     columnHeightPrefetchWorkerCount_ = static_cast<std::size_t>(prefetchDesired);
-    columnHeightPrefetchThreads_.reserve(columnHeightPrefetchWorkerCount_);
-    for (std::size_t i = 0; i < columnHeightPrefetchWorkerCount_; ++i)
-    {
-        columnHeightPrefetchThreads_.emplace_back(&ChunkManager::Impl::columnHeightPrefetchThreadFunction, this);
-    }
+    bulkShellOracleWorkerCount_ = exactOnly
+        ? ((workerThreadCount_ >= 10) ? 2u : ((workerThreadCount_ >= 6) ? 1u : 0u))
+        : 0u;
+    refillColumnHeightPrefetchJobs();
+    refillBulkShellOracleJobs();
 }
 
 void ChunkManager::Impl::startBulkShellOracle(const glm::ivec3& center, int horizontalRadius)
@@ -6809,19 +7062,7 @@ void ChunkManager::Impl::startBulkShellOracle(const glm::ivec3& center, int hori
 
     batch->remainingFragments.store(batch->fragmentCoords.size(), std::memory_order_release);
     bulkShellOracleBatch_ = batch;
-
-    unsigned concurrency = std::thread::hardware_concurrency();
-    if (concurrency == 0)
-    {
-        concurrency = 2;
-    }
-
-    const unsigned threadCount = std::clamp(std::max(4u, concurrency / 2u), 4u, 12u);
-    bulkShellOracleThreads_.reserve(threadCount);
-    for (unsigned i = 0; i < threadCount; ++i)
-    {
-        bulkShellOracleThreads_.emplace_back(&ChunkManager::Impl::bulkShellOracleThreadFunction, this, batch);
-    }
+    refillBulkShellOracleJobs();
 }
 
 void ChunkManager::Impl::stopBulkShellOracle()
@@ -6831,15 +7072,6 @@ void ChunkManager::Impl::stopBulkShellOracle()
         bulkShellOracleBatch_->nextFragmentIndex.store(bulkShellOracleBatch_->fragmentCoords.size(),
                                                        std::memory_order_release);
     }
-
-    for (auto& thread : bulkShellOracleThreads_)
-    {
-        if (thread.joinable())
-        {
-            thread.join();
-        }
-    }
-    bulkShellOracleThreads_.clear();
     bulkShellOracleBatch_.reset();
 }
 
@@ -6854,7 +7086,6 @@ void ChunkManager::Impl::stopWorkerThreads()
         nextColumnHeightPrefetchToken_ = 1;
         nextColumnHeightPrefetchSequence_ = 1;
     }
-    columnHeightPrefetchCondition_.notify_all();
     std::vector<Job> cancelledJobs = jobQueue_.stop();
     for (const Job& job : cancelledJobs)
     {
@@ -6872,16 +7103,9 @@ void ChunkManager::Impl::stopWorkerThreads()
         }
     }
     workerThreads_.clear();
-    for (auto& thread : columnHeightPrefetchThreads_)
-    {
-        if (thread.joinable())
-        {
-            thread.join();
-        }
-    }
-    columnHeightPrefetchThreads_.clear();
     workerThreadCount_ = 0;
     columnHeightPrefetchWorkerCount_ = 0;
+    bulkShellOracleWorkerCount_ = 0;
 }
 
 bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
@@ -6889,54 +7113,35 @@ bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
                                                          ColumnHeightPrefetchPriority& priority,
                                                          bool& buildOccupancy)
 {
-    std::unique_lock<std::mutex> lock(columnHeightPrefetchMutex_);
-    while (true)
+    std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+    while (!pendingColumnHeightPrefetchQueue_.empty())
     {
-        columnHeightPrefetchCondition_.wait(lock,
-                                            [this]
-                                            {
-                                                return shouldStop_.load(std::memory_order_acquire) ||
-                                                       !pendingColumnHeightPrefetchQueue_.empty();
-                                            });
+        const ColumnHeightPrefetchRequest request = pendingColumnHeightPrefetchQueue_.top();
+        pendingColumnHeightPrefetchQueue_.pop();
 
-        if (shouldStop_.load(std::memory_order_acquire) && pendingColumnHeightPrefetchQueue_.empty())
+        auto requestIt = pendingColumnHeightPrefetchRequests_.find(request.column);
+        if (requestIt == pendingColumnHeightPrefetchRequests_.end())
         {
-            return false;
+            continue;
         }
 
-        while (!pendingColumnHeightPrefetchQueue_.empty())
+        ColumnHeightPrefetchRequestState& state = requestIt->second;
+        if (state.inFlight ||
+            state.token != request.token ||
+            state.priority != request.priority ||
+            state.buildOccupancy != request.buildOccupancy)
         {
-            const ColumnHeightPrefetchRequest request = pendingColumnHeightPrefetchQueue_.top();
-            pendingColumnHeightPrefetchQueue_.pop();
-
-            auto requestIt = pendingColumnHeightPrefetchRequests_.find(request.column);
-            if (requestIt == pendingColumnHeightPrefetchRequests_.end())
-            {
-                continue;
-            }
-
-            ColumnHeightPrefetchRequestState& state = requestIt->second;
-            if (state.inFlight ||
-                state.token != request.token ||
-                state.priority != request.priority ||
-                state.buildOccupancy != request.buildOccupancy)
-            {
-                continue;
-            }
-
-            state.inFlight = true;
-            column = request.column;
-            token = request.token;
-            priority = request.priority;
-            buildOccupancy = request.buildOccupancy;
-            return true;
+            continue;
         }
 
-        if (shouldStop_.load(std::memory_order_acquire))
-        {
-            return false;
-        }
+        state.inFlight = true;
+        column = request.column;
+        token = request.token;
+        priority = request.priority;
+        buildOccupancy = request.buildOccupancy;
+        return true;
     }
+    return false;
 }
 
 void ChunkManager::Impl::finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const
@@ -7000,25 +7205,39 @@ void ChunkManager::Impl::enqueueJob(const std::shared_ptr<Chunk>& chunk,
                                     bool initialReadyPriority,
                                     JobServiceClass serviceClass)
 {
-    if (!chunk)
-    {
-        return;
-    }
-
     if (shouldStop_.load(std::memory_order_acquire))
     {
         return;
     }
 
-    chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
+    if (chunk)
+    {
+        chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
+    }
     if (!jobQueue_.push(Job(type, coord, chunk, generationEpoch, initialReadyPriority, serviceClass)))
     {
-        chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
+        if (chunk)
+        {
+            chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
+        }
     }
 }
 
 void ChunkManager::Impl::processJob(const Job& job)
 {
+    if (job.type == JobType::ColumnPrefetch)
+    {
+        (void)processColumnHeightPrefetchJob();
+        refillColumnHeightPrefetchJobs();
+        return;
+    }
+    if (job.type == JobType::BulkShellOracle)
+    {
+        (void)processBulkShellOracleJob();
+        refillBulkShellOracleJobs();
+        return;
+    }
+
     std::shared_ptr<Chunk> chunk = job.chunk;
     if (!chunk)
     {
@@ -7040,8 +7259,48 @@ void ChunkManager::Impl::processJob(const Job& job)
 
     if (job.type == JobType::Generate)
     {
-        if (benchmarkMetrics_.isEnabled())
+        setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Generating);
+        const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+        if (benchmarkEnabled)
         {
+            const JobQueueSnapshot queueSnapshot = jobQueue_.snapshot();
+            const auto recordCount = [&](AtomicCountHistogram& histogram, std::uint16_t value)
+            {
+                histogram.record(static_cast<std::uint64_t>(value));
+            };
+            recordCount(benchmarkMetrics_.chunkReadyRequestQueuedGenerateStage,
+                        chunk->requestQueuedByType[jobTypeIndex(JobType::Generate)]);
+            recordCount(benchmarkMetrics_.chunkReadyRequestQueuedMeshStage,
+                        chunk->requestQueuedByType[jobTypeIndex(JobType::Mesh)]);
+            recordCount(benchmarkMetrics_.chunkReadyRequestQueuedPrefetchStage,
+                        chunk->requestQueuedByType[jobTypeIndex(JobType::ColumnPrefetch)]);
+            recordCount(benchmarkMetrics_.chunkReadyRequestQueuedBulkStage,
+                        chunk->requestQueuedByType[jobTypeIndex(JobType::BulkShellOracle)]);
+            recordCount(benchmarkMetrics_.chunkReadyRequestLatencySensitiveOutstandingStage,
+                        chunk->requestLatencySensitiveOutstanding);
+            benchmarkMetrics_.chunkReadyStartQueuedGenerateStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::Generate)]));
+            benchmarkMetrics_.chunkReadyStartQueuedMeshStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::Mesh)]));
+            benchmarkMetrics_.chunkReadyStartQueuedPrefetchStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::ColumnPrefetch)]));
+            benchmarkMetrics_.chunkReadyStartQueuedBulkStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::BulkShellOracle)]));
+            benchmarkMetrics_.chunkReadyStartActiveGenerateStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::Generate)]));
+            benchmarkMetrics_.chunkReadyStartActiveMeshStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::Mesh)]));
+            benchmarkMetrics_.chunkReadyStartActivePrefetchStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::ColumnPrefetch)]));
+            benchmarkMetrics_.chunkReadyStartActiveBulkStage.record(
+                static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::BulkShellOracle)]));
+            const std::size_t latencySensitiveOutstanding =
+                queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+                queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+                queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)] +
+                queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)];
+            benchmarkMetrics_.chunkReadyStartLatencySensitiveOutstandingStage.record(
+                static_cast<std::uint64_t>(latencySensitiveOutstanding));
             storeFirstBenchmarkTimestamp(chunk->generateStartTimestampMicros, steadyMicrosNow());
         }
         const auto generateStart = SteadyClock::now();
@@ -7051,7 +7310,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             std::chrono::duration_cast<std::chrono::microseconds>(generateEnd - generateStart).count();
         profilingCounters_.generationMicros.fetch_add(generateMicros, std::memory_order_relaxed);
         profilingCounters_.generatedChunks.fetch_add(1, std::memory_order_relaxed);
-        if (benchmarkMetrics_.isEnabled())
+        if (benchmarkEnabled)
         {
             benchmarkMetrics_.generateStage.recordMicros(static_cast<std::uint64_t>(generateMicros));
             benchmarkMetrics_.generatedChunks.fetch_add(1, std::memory_order_relaxed);
@@ -7062,7 +7321,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             return;
         }
 
-        if (benchmarkMetrics_.isEnabled())
+        if (benchmarkEnabled)
         {
             storeFirstBenchmarkTimestamp(chunk->generateDoneTimestampMicros, steadyMicrosNow());
         }
@@ -7075,7 +7334,8 @@ void ChunkManager::Impl::processJob(const Job& job)
             }
             chunk->pendingMeshRefresh.store(false, std::memory_order_release);
             chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
-            if (benchmarkMetrics_.isEnabled())
+            setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Meshing);
+            if (benchmarkEnabled)
             {
                 storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
             }
@@ -7098,6 +7358,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
             chunk->meshReady.store(false, std::memory_order_release);
             chunk->indexCount.store(0, std::memory_order_release);
+            setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Ready);
             noteChunkReadyLatency(*chunk);
             if (shouldTrackRecentEditChunk(chunk->coord))
             {
@@ -7109,6 +7370,10 @@ void ChunkManager::Impl::processJob(const Job& job)
     }
     else if (job.type == JobType::Mesh)
     {
+        if (!chunk->meshReady.load(std::memory_order_acquire))
+        {
+            setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Meshing);
+        }
         if (benchmarkMetrics_.isEnabled())
         {
             storeFirstBenchmarkTimestamp(chunk->meshStartTimestampMicros, steadyMicrosNow());
@@ -7142,6 +7407,7 @@ void ChunkManager::Impl::processJob(const Job& job)
         {
             chunk->state.store(ChunkState::Ready, std::memory_order_release);
         }
+        setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Ready);
 
         if (shouldTrackRecentEditChunk(chunk->coord))
         {
@@ -7735,92 +8001,283 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
     }
 }
 
-void ChunkManager::Impl::columnHeightPrefetchThreadFunction()
+std::size_t ChunkManager::Impl::targetColumnHeightPrefetchJobs() const noexcept
 {
-#ifdef _WIN32
-    // Keep speculative background work below normal, but let visible discovery run at
-    // normal priority so exact-only streaming can feed generation continuously.
-    int currentThreadPriority = THREAD_PRIORITY_BELOW_NORMAL;
-    SetThreadPriority(GetCurrentThread(), currentThreadPriority);
-#endif
-
-    while (true)
+    if (shouldStop_.load(std::memory_order_acquire) || columnHeightPrefetchWorkerCount_ == 0)
     {
-        glm::ivec2 column{0};
-        std::uint64_t token = 0;
-        ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
-        bool buildOccupancy = false;
-        if (!acquireNextColumnHeightPrefetch(column, token, priority, buildOccupancy))
+        return 0;
+    }
+
+    const std::size_t latencySensitiveBacklog =
+        jobQueue_.outstanding(JobServiceClass::InitialVisible) +
+        jobQueue_.outstanding(JobServiceClass::LocalInteraction);
+    if (stationaryExactFillModeActive_)
+    {
+        return std::min<std::size_t>(columnHeightPrefetchWorkerCount_, 2u);
+    }
+    if (severeProtectedPressureActive_ || latencySensitiveBacklog > 0)
+    {
+        return 1;
+    }
+    if (protectedPressureActive_)
+    {
+        return std::min<std::size_t>(columnHeightPrefetchWorkerCount_, 1);
+    }
+    return columnHeightPrefetchWorkerCount_;
+}
+
+std::size_t ChunkManager::Impl::targetBulkShellOracleJobs() const noexcept
+{
+    if (shouldStop_.load(std::memory_order_acquire) || bulkShellOracleWorkerCount_ == 0 || !bulkShellOracleBatch_)
+    {
+        return 0;
+    }
+
+    if (bulkShellOracleBatch_->remainingFragments.load(std::memory_order_acquire) == 0)
+    {
+        return 0;
+    }
+
+    if (stationaryExactFillModeActive_)
+    {
+        return 0;
+    }
+
+    if (severeProtectedPressureActive_ || protectedPressureActive_)
+    {
+        return 0;
+    }
+
+    const std::size_t latencySensitiveBacklog =
+        jobQueue_.outstanding(JobServiceClass::InitialVisible) +
+        jobQueue_.outstanding(JobServiceClass::LocalInteraction);
+    if (latencySensitiveBacklog > 0)
+    {
+        return 0;
+    }
+
+    return bulkShellOracleWorkerCount_;
+}
+
+std::size_t ChunkManager::Impl::columnHeightPrefetchQueueLimit(ColumnHeightPrefetchPriority priority,
+                                                               bool buildOccupancy) const noexcept
+{
+    const std::size_t workerScale = std::clamp<std::size_t>(columnHeightPrefetchWorkerCount_, 1u, 4u);
+    if (stationaryExactFillModeActive_)
+    {
+        switch (priority)
         {
-            return;
+        case ColumnHeightPrefetchPriority::Critical:
+            return 256u * workerScale;
+        case ColumnHeightPrefetchPriority::Visible:
+            return (buildOccupancy ? 224u : 160u) * workerScale;
+        case ColumnHeightPrefetchPriority::Normal:
+            return (buildOccupancy ? 96u : 48u) * workerScale;
+        case ColumnHeightPrefetchPriority::Background:
+            return 24u * workerScale;
+        }
+    }
+
+    switch (priority)
+    {
+    case ColumnHeightPrefetchPriority::Critical:
+        return 512u * workerScale;
+    case ColumnHeightPrefetchPriority::Visible:
+        return (buildOccupancy ? 320u : 224u) * workerScale;
+    case ColumnHeightPrefetchPriority::Normal:
+        return (buildOccupancy ? 160u : 96u) * workerScale;
+    case ColumnHeightPrefetchPriority::Background:
+        return 48u * workerScale;
+    }
+
+    return 256u;
+}
+
+void ChunkManager::Impl::resetFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept
+{
+    fullRadiusColumnDiscovery_.center = center;
+    fullRadiusColumnDiscovery_.radius = std::max(horizontalRadius, 0);
+    fullRadiusColumnDiscovery_.nextRing = 0;
+    fullRadiusColumnDiscovery_.nextEdge = 0;
+    fullRadiusColumnDiscovery_.nextOffset = 0;
+    fullRadiusColumnDiscovery_.initialized = true;
+}
+
+bool ChunkManager::Impl::nextFullRadiusColumnDiscoveryColumn(glm::ivec2& outColumn,
+                                                             ColumnHeightPrefetchPriority& outPriority) noexcept
+{
+    if (!fullRadiusColumnDiscovery_.initialized)
+    {
+        return false;
+    }
+
+    const int radius = fullRadiusColumnDiscovery_.radius;
+    const int criticalRadius = std::clamp(std::max(8, startupState_.exactNearCurrentChunks + 2), 0, radius);
+    while (fullRadiusColumnDiscovery_.nextRing <= radius)
+    {
+        const int ring = fullRadiusColumnDiscovery_.nextRing;
+        outPriority = (ring <= criticalRadius)
+            ? ColumnHeightPrefetchPriority::Critical
+            : ColumnHeightPrefetchPriority::Visible;
+
+        if (ring == 0)
+        {
+            outColumn = {fullRadiusColumnDiscovery_.center.x, fullRadiusColumnDiscovery_.center.z};
+            ++fullRadiusColumnDiscovery_.nextRing;
+            fullRadiusColumnDiscovery_.nextEdge = 0;
+            fullRadiusColumnDiscovery_.nextOffset = 0;
+            return true;
         }
 
-#ifdef _WIN32
-        int desiredThreadPriority = THREAD_PRIORITY_BELOW_NORMAL;
-        if (priority == ColumnHeightPrefetchPriority::Critical)
+        if (fullRadiusColumnDiscovery_.nextEdge < 2)
         {
-            desiredThreadPriority = THREAD_PRIORITY_ABOVE_NORMAL;
-        }
-        else if (priority >= ColumnHeightPrefetchPriority::Visible)
-        {
-            desiredThreadPriority = THREAD_PRIORITY_NORMAL;
-        }
-        if (desiredThreadPriority != currentThreadPriority)
-        {
-            SetThreadPriority(GetCurrentThread(), desiredThreadPriority);
-            currentThreadPriority = desiredThreadPriority;
-        }
-#endif
+            if (fullRadiusColumnDiscovery_.nextOffset <= ring * 2)
+            {
+                const int dx = -ring + fullRadiusColumnDiscovery_.nextOffset;
+                const int z = (fullRadiusColumnDiscovery_.nextEdge == 0) ? -ring : ring;
+                outColumn = {fullRadiusColumnDiscovery_.center.x + dx, fullRadiusColumnDiscovery_.center.z + z};
+                ++fullRadiusColumnDiscovery_.nextOffset;
+                return true;
+            }
 
-        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-        int cachedHeight = ColumnManager::kNoHeight;
-        const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
-        ColumnSlabOccupancy occupancy{};
-        const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
-        if (haveHeight && haveOccupancy)
-        {
-            finishColumnHeightPrefetch(column, token);
+            ++fullRadiusColumnDiscovery_.nextEdge;
+            fullRadiusColumnDiscovery_.nextOffset = 1;
             continue;
         }
 
-        const bool shouldBuildOccupancy = buildOccupancy;
-        ColumnSlabOccupancy resolvedOccupancy = occupancy;
-        bool resolvedHaveOccupancy = haveOccupancy;
-        if (shouldBuildOccupancy && !haveOccupancy)
+        if (fullRadiusColumnDiscovery_.nextOffset <= ring * 2 - 1)
         {
-            resolvedOccupancy = cachedColumnSlabOccupancy(column);
-            resolvedHaveOccupancy = true;
+            const int dz = -ring + fullRadiusColumnDiscovery_.nextOffset;
+            const int x = (fullRadiusColumnDiscovery_.nextEdge == 2) ? -ring : ring;
+            outColumn = {fullRadiusColumnDiscovery_.center.x + x, fullRadiusColumnDiscovery_.center.z + dz};
+            ++fullRadiusColumnDiscovery_.nextOffset;
+            return true;
         }
-        if (!haveHeight)
-        {
-            if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
-            {
-                mergePredictedColumnHeight(column,
-                                           resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
-            }
-            else if (!shouldBuildOccupancy && surfaceMap_)
-            {
-                const terrain::SurfaceColumn surfaceColumn = surfaceMap_->columnValue(worldX, worldZ);
-                mergePredictedColumnHeight(column, surfaceColumn.surfaceY);
-            }
-            else
-            {
-                (void)cacheSampledColumnHeight(column, worldX, worldZ);
-            }
-        }
-        finishColumnHeightPrefetch(column, token);
+
+        ++fullRadiusColumnDiscovery_.nextRing;
+        fullRadiusColumnDiscovery_.nextEdge = 0;
+        fullRadiusColumnDiscovery_.nextOffset = 0;
+    }
+
+    return false;
+}
+
+void ChunkManager::Impl::refillColumnHeightPrefetchJobs()
+{
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const std::size_t targetJobs = targetColumnHeightPrefetchJobs();
+    const std::size_t outstandingJobs = jobQueue_.outstanding(JobType::ColumnPrefetch);
+    if (outstandingJobs >= targetJobs)
+    {
+        return;
+    }
+
+    for (std::size_t i = outstandingJobs; i < targetJobs; ++i)
+    {
+        enqueueJob(nullptr,
+                   JobType::ColumnPrefetch,
+                   schedulingPriorityOrigin_,
+                   0,
+                   false,
+                   JobServiceClass::Standard);
     }
 }
 
-void ChunkManager::Impl::bulkShellOracleThreadFunction(const std::shared_ptr<BulkShellOracleBatch>& batch)
+void ChunkManager::Impl::refillBulkShellOracleJobs()
 {
-#ifdef _WIN32
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-#endif
-    if (!batch || !surfaceMap_)
+    if (shouldStop_.load(std::memory_order_acquire) || !bulkShellOracleBatch_)
     {
         return;
+    }
+
+    const std::size_t targetJobs = targetBulkShellOracleJobs();
+    const std::size_t outstandingJobs = jobQueue_.outstanding(JobType::BulkShellOracle);
+    if (outstandingJobs >= targetJobs)
+    {
+        return;
+    }
+
+    for (std::size_t i = outstandingJobs; i < targetJobs; ++i)
+    {
+        enqueueJob(nullptr,
+                   JobType::BulkShellOracle,
+                   schedulingPriorityOrigin_,
+                   0,
+                   false,
+                   JobServiceClass::Refinement);
+    }
+}
+
+bool ChunkManager::Impl::processColumnHeightPrefetchJob()
+{
+    glm::ivec2 column{0};
+    std::uint64_t token = 0;
+    ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
+    bool buildOccupancy = false;
+    if (!acquireNextColumnHeightPrefetch(column, token, priority, buildOccupancy))
+    {
+        return false;
+    }
+
+    warmMetadataPagesForColumn(column);
+    if (buildOccupancy || priority >= ColumnHeightPrefetchPriority::Visible)
+    {
+        warmStructureRegionsForColumn(column);
+    }
+
+    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+    int cachedHeight = ColumnManager::kNoHeight;
+    const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
+    ColumnSlabOccupancy occupancy{};
+    const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+    if (haveHeight && haveOccupancy)
+    {
+        invalidateStreamingFrontierColumn(column);
+        finishColumnHeightPrefetch(column, token);
+        return true;
+    }
+
+    const bool shouldBuildOccupancy = buildOccupancy;
+    ColumnSlabOccupancy resolvedOccupancy = occupancy;
+    bool resolvedHaveOccupancy = haveOccupancy;
+    if (shouldBuildOccupancy && !haveOccupancy)
+    {
+        resolvedOccupancy = cachedColumnSlabOccupancy(column);
+        resolvedHaveOccupancy = true;
+    }
+    if (!haveHeight)
+    {
+        if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
+        {
+            mergePredictedColumnHeight(column,
+                                       resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
+        }
+        else if (!shouldBuildOccupancy && surfaceMap_)
+        {
+            const terrain::SurfaceColumn surfaceColumn = surfaceMap_->columnValue(worldX, worldZ);
+            mergePredictedColumnHeight(column, surfaceColumn.surfaceY);
+        }
+        else
+        {
+            (void)cacheSampledColumnHeight(column, worldX, worldZ);
+        }
+    }
+    invalidateStreamingFrontierColumn(column);
+    finishColumnHeightPrefetch(column, token);
+    return true;
+}
+
+bool ChunkManager::Impl::processBulkShellOracleJob()
+{
+    const std::shared_ptr<BulkShellOracleBatch> batch = bulkShellOracleBatch_;
+    if (!batch || !surfaceMap_)
+    {
+        return false;
     }
 
     const int fragmentWorldSpan = terrain::SurfaceFragment::kSize;
@@ -7829,7 +8286,7 @@ void ChunkManager::Impl::bulkShellOracleThreadFunction(const std::shared_ptr<Bul
         const std::size_t index = batch->nextFragmentIndex.fetch_add(1, std::memory_order_acq_rel);
         if (index >= batch->fragmentCoords.size())
         {
-            break;
+            return false;
         }
 
         const glm::ivec2 fragmentCoord = batch->fragmentCoords[index];
@@ -7874,7 +8331,9 @@ void ChunkManager::Impl::bulkShellOracleThreadFunction(const std::shared_ptr<Bul
         }
 
         batch->remainingFragments.fetch_sub(1, std::memory_order_acq_rel);
+        return true;
     }
+    return false;
 }
 
 void ChunkManager::Impl::collectReusableChunkBufferPages()
@@ -8522,114 +8981,751 @@ int ChunkManager::Impl::computeColumnJobCap(int backlogSteps, int backlogChunks)
     return std::max(baseCap, 0);
 }
 
-ChunkManager::Impl::VisibleChunkCoverage ChunkManager::Impl::scanVisibleChunkCoverage(const glm::ivec3& center,
-                                                                                      int horizontalRadius,
-                                                                                      int verticalRadius) const
+void ChunkManager::Impl::resetStreamingFrontier() noexcept
 {
-    VisibleChunkCoverage coverage{};
-    const glm::ivec2 cameraColumn{center.x, center.z};
-    const int cameraChunkY = center.y;
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    streamingFrontierDirtyColumns_.clear();
+    streamingFrontierDirtyAllColumns_ = false;
+    streamingFrontierColumns_.clear();
+    streamingFrontierDemands_.clear();
+    streamingFrontierDispatchQueue_ = {};
+    streamingFrontierCenter_ = glm::ivec3{0};
+    streamingFrontierVisibleRadius_ = 0;
+    streamingFrontierPreloadRadius_ = 0;
+    streamingFrontierVerticalRadius_ = 0;
+    streamingFrontierExactMetricRadius_ = 0;
+    streamingFrontierVisibleRequired_ = 0;
+    streamingFrontierVisibleReady_ = 0;
+    streamingFrontierExactRequired_ = 0;
+    streamingFrontierExactReady_ = 0;
+    nextStreamingFrontierSequence_ = 1;
+    streamingFrontierInitialized_ = false;
+    streamingFrontierDispatchOrigin_ = glm::ivec3{0};
+    streamingFrontierDispatchForwardXZ_ = glm::vec2{0.0f, -1.0f};
+    streamingFrontierDispatchPriorityEpoch_ = 1;
+}
 
-    std::unordered_map<glm::ivec3, ChunkState, ChunkHasher> chunkStates;
+void ChunkManager::Impl::clearStreamingChunkLifecycleStates() noexcept
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    streamingChunkLifecycleStates_.clear();
+}
+
+void ChunkManager::Impl::invalidateStreamingFrontierColumn(const glm::ivec2& column) const
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    streamingFrontierDirtyColumns_.insert(column);
+}
+
+void ChunkManager::Impl::invalidateAllStreamingFrontierColumns() const
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    streamingFrontierDirtyAllColumns_ = true;
+    streamingFrontierDirtyColumns_.clear();
+}
+
+ChunkManager::Impl::FrontierCoverage ChunkManager::Impl::streamingFrontierCoverageSnapshot() const noexcept
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    return FrontierCoverage{
+        streamingFrontierVisibleRequired_,
+        streamingFrontierVisibleReady_,
+        streamingFrontierExactRequired_,
+        streamingFrontierExactReady_};
+}
+
+void ChunkManager::Impl::setStreamingFrontierDemandState(const glm::ivec3& coord, FrontierDemandState state)
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    auto it = streamingFrontierDemands_.find(coord);
+    if (it == streamingFrontierDemands_.end())
     {
-        std::lock_guard<std::mutex> lock(chunksMutex);
-        chunkStates.reserve(chunks_.size());
-        for (const auto& [coord, chunkPtr] : chunks_)
-        {
-            if (!chunkPtr)
-            {
-                continue;
-            }
+        return;
+    }
 
-            chunkStates.emplace(coord, chunkPtr->state.load(std::memory_order_acquire));
+    FrontierChunkDemand& demand = it->second;
+    const bool oldReady = demand.state == FrontierDemandState::Ready;
+    const bool newReady = state == FrontierDemandState::Ready;
+    if (oldReady != newReady)
+    {
+        if (demand.countedVisible)
+        {
+            streamingFrontierVisibleReady_ += newReady ? 1 : -1;
+        }
+        if (demand.countedExact)
+        {
+            streamingFrontierExactReady_ += newReady ? 1 : -1;
         }
     }
 
-    for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
+    if (demand.state != state)
     {
-        for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
+        demand.state = state;
+        ++demand.version;
+        if (state == FrontierDemandState::Missing)
         {
-            if (std::max(std::abs(dx), std::abs(dz)) > horizontalRadius)
+            queueStreamingFrontierDispatchEntryLocked(coord, demand);
+        }
+    }
+}
+
+void ChunkManager::Impl::queueStreamingFrontierDispatchEntryLocked(const glm::ivec3& coord,
+                                                                   const FrontierChunkDemand& demand)
+{
+    if (demand.state != FrontierDemandState::Missing)
+    {
+        return;
+    }
+
+    const glm::vec3 priorityForward{
+        streamingFrontierDispatchForwardXZ_.x,
+        0.0f,
+        streamingFrontierDispatchForwardXZ_.y};
+    const bool localInteraction =
+        demand.forceResident || shouldKeepChunkInteractive(coord, streamingFrontierDispatchOrigin_);
+    streamingFrontierDispatchQueue_.push(FrontierDispatchEntry{
+        coord,
+        buildUploadPriorityKey(coord, streamingFrontierDispatchOrigin_, priorityForward),
+        localInteraction,
+        demand.version,
+        nextStreamingFrontierSequence_++,
+        streamingFrontierDispatchPriorityEpoch_});
+}
+
+void ChunkManager::Impl::refreshStreamingFrontierDispatchPriorityStateLocked(const glm::ivec3& center,
+                                                                             const glm::vec3& priorityForward)
+{
+    glm::vec2 desiredForwardXZ = normalizePriorityForwardXZ(priorityForward);
+    if (glm::dot(desiredForwardXZ, desiredForwardXZ) <= kEpsilon)
+    {
+        desiredForwardXZ = glm::vec2{0.0f, -1.0f};
+    }
+
+    const float facingDot =
+        (glm::dot(streamingFrontierDispatchForwardXZ_, streamingFrontierDispatchForwardXZ_) > kEpsilon &&
+         glm::dot(desiredForwardXZ, desiredForwardXZ) > kEpsilon)
+            ? glm::dot(streamingFrontierDispatchForwardXZ_, desiredForwardXZ)
+            : 1.0f;
+
+    if (center == streamingFrontierDispatchOrigin_ && facingDot > 0.995f)
+    {
+        return;
+    }
+
+    streamingFrontierDispatchOrigin_ = center;
+    streamingFrontierDispatchForwardXZ_ = desiredForwardXZ;
+    ++streamingFrontierDispatchPriorityEpoch_;
+}
+
+void ChunkManager::Impl::setStreamingChunkLifecycleState(const glm::ivec3& coord, FrontierDemandState state)
+{
+    {
+        std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+        streamingChunkLifecycleStates_[coord].state = state;
+    }
+    setStreamingFrontierDemandState(coord, state);
+}
+
+void ChunkManager::Impl::clearStreamingChunkLifecycleState(const glm::ivec3& coord)
+{
+    {
+        std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+        streamingChunkLifecycleStates_.erase(coord);
+    }
+    setStreamingFrontierDemandState(coord, FrontierDemandState::Missing);
+}
+
+bool ChunkManager::Impl::tryGetStreamingChunkLifecycleState(const glm::ivec3& coord,
+                                                            FrontierDemandState& outState) const noexcept
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    auto it = streamingChunkLifecycleStates_.find(coord);
+    if (it == streamingChunkLifecycleStates_.end())
+    {
+        return false;
+    }
+
+    outState = it->second.state;
+    return true;
+}
+
+void ChunkManager::Impl::syncStreamingFrontierDemandFromRegistry(const glm::ivec3& coord)
+{
+    FrontierDemandState state = FrontierDemandState::Missing;
+    (void)tryGetStreamingChunkLifecycleState(coord, state);
+    setStreamingFrontierDemandState(coord, state);
+}
+
+void ChunkManager::Impl::refreshStreamingFrontier(const glm::ivec3& center,
+                                                  int visibleRadius,
+                                                  int preloadRadius,
+                                                  int verticalRadius,
+                                                  int exactMetricRadius)
+{
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point refreshStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    const glm::ivec2 cameraColumn{center.x, center.z};
+
+    std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
+
+    auto adjustCounts = [&](bool countedVisible, bool countedExact, bool ready, int delta)
+    {
+        if (countedVisible)
+        {
+            streamingFrontierVisibleRequired_ += delta;
+            if (ready)
             {
-                continue;
+                streamingFrontierVisibleReady_ += delta;
             }
-
-            const int chunkX = center.x + dx;
-            const int chunkZ = center.z + dz;
-            const glm::ivec2 column{chunkX, chunkZ};
-            const bool protectedColumn =
-                movementEnvelopeBucketForColumn(column, center, horizontalRadius) != MovementEnvelopeBucket::Background;
-            const int worldX = chunkX * kChunkSizeX + kChunkSizeX / 2;
-            const int worldZ = chunkZ * kChunkSizeZ + kChunkSizeZ / 2;
-
-            int columnHeight = ColumnManager::kNoHeight;
-            (void)tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight);
-
-            ColumnSlabOccupancy occupancy{};
-            const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
-            const ColumnChunkIntervals playerBand =
-                playerBandIntervalsForColumn(column, cameraColumn, cameraChunkY, verticalRadius);
-            const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
-                                                                            cameraColumn,
-                                                                            cameraChunkY,
-                                                                            verticalRadius,
-                                                                            columnHeight);
-            for (std::uint8_t intervalIndex = 0; intervalIndex < intervals.count; ++intervalIndex)
+        }
+        if (countedExact)
+        {
+            streamingFrontierExactRequired_ += delta;
+            if (ready)
             {
-                const ChunkYInterval interval = intervals.intervals[intervalIndex];
-                for (int chunkY = interval.minChunkY; chunkY <= interval.maxChunkY; ++chunkY)
+                streamingFrontierExactReady_ += delta;
+            }
+        }
+    };
+
+    const auto applyColumnState = [&](const glm::ivec2& column,
+                                      const ColumnChunkIntervals& newIntervals,
+                                      const ColumnChunkIntervals& newPlayerBand,
+                                      bool countedVisible,
+                                      bool countedExact,
+                                      bool haveOccupancy,
+                                      const ColumnSlabOccupancy& occupancy)
+    {
+        const auto oldStateIt = streamingFrontierColumns_.find(column);
+        const FrontierColumnState oldState = (oldStateIt != streamingFrontierColumns_.end())
+            ? oldStateIt->second
+            : FrontierColumnState{};
+        const bool hadOldState = oldStateIt != streamingFrontierColumns_.end();
+
+        int minChunkY = std::numeric_limits<int>::max();
+        int maxChunkY = std::numeric_limits<int>::min();
+        if (hadOldState && !oldState.intervals.empty())
+        {
+            minChunkY = std::min(minChunkY, oldState.intervals.minChunkY());
+            maxChunkY = std::max(maxChunkY, oldState.intervals.maxChunkY());
+        }
+        if (!newIntervals.empty())
+        {
+            minChunkY = std::min(minChunkY, newIntervals.minChunkY());
+            maxChunkY = std::max(maxChunkY, newIntervals.maxChunkY());
+        }
+
+        if (minChunkY != std::numeric_limits<int>::max())
+        {
+            for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
+            {
+                const bool oldTracked = hadOldState && chunkYWithinIntervals(chunkY, oldState.intervals);
+                const bool newTracked = chunkYWithinIntervals(chunkY, newIntervals);
+                if (!oldTracked && !newTracked)
                 {
-                    ++coverage.required;
-                    if (protectedColumn)
-                    {
-                        ++coverage.protectedRequired;
-                    }
-                    const bool withinPlayerBand = chunkYWithinIntervals(chunkY, playerBand);
-                    if (haveOccupancy &&
-                        !withinPlayerBand &&
-                        classifyColumnSlab(occupancy, chunkY) == ColumnSlabOccupancyState::DefinitelyEmpty)
-                    {
-                        ++coverage.ready;
-                        if (protectedColumn)
-                        {
-                            ++coverage.protectedReady;
-                        }
-                        continue;
-                    }
+                    continue;
+                }
 
-                    const auto stateIt = chunkStates.find(glm::ivec3{chunkX, chunkY, chunkZ});
-                    if (stateIt == chunkStates.end())
-                    {
-                        ++coverage.missing;
-                        if (protectedColumn)
-                        {
-                            ++coverage.protectedMissing;
-                        }
-                        continue;
-                    }
+                const glm::ivec3 coord{column.x, chunkY, column.y};
+                auto demandIt = streamingFrontierDemands_.find(coord);
+                const bool oldHasDemand = oldTracked && demandIt != streamingFrontierDemands_.end();
+                const bool oldReady =
+                    oldTracked && (!oldHasDemand || demandIt->second.state == FrontierDemandState::Ready);
+                if (oldTracked)
+                {
+                    adjustCounts(oldState.countedVisible, oldState.countedExact, oldReady, -1);
+                }
 
-                    const ChunkState state = stateIt->second;
-                    if (state == ChunkState::Uploaded || state == ChunkState::Ready || state == ChunkState::Remeshing)
+                if (!newTracked)
+                {
+                    if (demandIt != streamingFrontierDemands_.end())
                     {
-                        ++coverage.ready;
-                        if (protectedColumn)
+                        streamingFrontierDemands_.erase(demandIt);
+                    }
+                    continue;
+                }
+
+                const bool forceResident = chunkYWithinIntervals(chunkY, newPlayerBand);
+                const bool definitelyEmpty =
+                    !forceResident &&
+                    haveOccupancy &&
+                    classifyColumnSlab(occupancy, chunkY) == ColumnSlabOccupancyState::DefinitelyEmpty;
+                if (definitelyEmpty)
+                {
+                    if (demandIt != streamingFrontierDemands_.end())
+                    {
+                        streamingFrontierDemands_.erase(demandIt);
+                    }
+                    adjustCounts(countedVisible, countedExact, true, 1);
+                    continue;
+                }
+
+                if (demandIt == streamingFrontierDemands_.end())
+                {
+                    FrontierChunkDemand demand{};
+                    demand.forceResident = forceResident;
+                    demand.countedVisible = countedVisible;
+                    demand.countedExact = countedExact;
+                    demand.version = 1;
+                    auto stateIt = streamingChunkLifecycleStates_.find(coord);
+                    if (stateIt != streamingChunkLifecycleStates_.end())
+                    {
+                        demand.state = stateIt->second.state;
+                    }
+                    auto [insertIt, inserted] = streamingFrontierDemands_.emplace(coord, demand);
+                    (void)inserted;
+                    demandIt = insertIt;
+                    queueStreamingFrontierDispatchEntryLocked(coord, demandIt->second);
+                }
+                else
+                {
+                    FrontierChunkDemand& demand = demandIt->second;
+                    const bool flagsChanged =
+                        demand.forceResident != forceResident ||
+                        demand.countedVisible != countedVisible ||
+                        demand.countedExact != countedExact;
+                    demand.forceResident = forceResident;
+                    demand.countedVisible = countedVisible;
+                    demand.countedExact = countedExact;
+                    if (flagsChanged)
+                    {
+                        ++demand.version;
+                        if (demand.state == FrontierDemandState::Missing)
                         {
-                            ++coverage.protectedReady;
+                            queueStreamingFrontierDispatchEntryLocked(coord, demand);
                         }
                     }
+                }
+
+                adjustCounts(countedVisible,
+                             countedExact,
+                             demandIt->second.state == FrontierDemandState::Ready,
+                             1);
+            }
+        }
+
+        if (newIntervals.empty())
+        {
+            if (hadOldState)
+            {
+                streamingFrontierColumns_.erase(oldStateIt);
+            }
+            return;
+        }
+
+        streamingFrontierColumns_[column] = FrontierColumnState{
+            newIntervals,
+            newPlayerBand,
+            countedVisible,
+            countedExact};
+    };
+
+    auto addColumnRect = [](std::unordered_set<glm::ivec2, ColumnHasher>& target,
+                            int minX,
+                            int maxX,
+                            int minZ,
+                            int maxZ)
+    {
+        if (minX > maxX || minZ > maxZ)
+        {
+            return;
+        }
+
+        for (int chunkX = minX; chunkX <= maxX; ++chunkX)
+        {
+            for (int chunkZ = minZ; chunkZ <= maxZ; ++chunkZ)
+            {
+                target.insert({chunkX, chunkZ});
+            }
+        }
+    };
+
+    auto addSquareOutsideOverlap = [&](const glm::ivec2& subjectCenter,
+                                       const glm::ivec2& otherCenter,
+                                       int radius,
+                                       std::unordered_set<glm::ivec2, ColumnHasher>& target)
+    {
+        if (radius < 0)
+        {
+            return;
+        }
+
+        const int subjectMinX = subjectCenter.x - radius;
+        const int subjectMaxX = subjectCenter.x + radius;
+        const int subjectMinZ = subjectCenter.y - radius;
+        const int subjectMaxZ = subjectCenter.y + radius;
+
+        const int otherMinX = otherCenter.x - radius;
+        const int otherMaxX = otherCenter.x + radius;
+        const int otherMinZ = otherCenter.y - radius;
+        const int otherMaxZ = otherCenter.y + radius;
+
+        const int overlapMinX = std::max(subjectMinX, otherMinX);
+        const int overlapMaxX = std::min(subjectMaxX, otherMaxX);
+        const int overlapMinZ = std::max(subjectMinZ, otherMinZ);
+        const int overlapMaxZ = std::min(subjectMaxZ, otherMaxZ);
+
+        if (overlapMinX > overlapMaxX || overlapMinZ > overlapMaxZ)
+        {
+            addColumnRect(target, subjectMinX, subjectMaxX, subjectMinZ, subjectMaxZ);
+            return;
+        }
+
+        addColumnRect(target, subjectMinX, overlapMinX - 1, subjectMinZ, subjectMaxZ);
+        addColumnRect(target, overlapMaxX + 1, subjectMaxX, subjectMinZ, subjectMaxZ);
+        addColumnRect(target, overlapMinX, overlapMaxX, subjectMinZ, overlapMinZ - 1);
+        addColumnRect(target, overlapMinX, overlapMaxX, overlapMaxZ + 1, subjectMaxZ);
+    };
+
+    auto addSquareDelta = [&](const glm::ivec2& oldCenter,
+                              const glm::ivec2& newCenter,
+                              int radius,
+                              std::unordered_set<glm::ivec2, ColumnHasher>& oldOnly,
+                              std::unordered_set<glm::ivec2, ColumnHasher>& newOnly)
+    {
+        if (radius < 0 || oldCenter == newCenter)
+        {
+            return;
+        }
+
+        addSquareOutsideOverlap(oldCenter, newCenter, radius, oldOnly);
+        addSquareOutsideOverlap(newCenter, oldCenter, radius, newOnly);
+    };
+
+    auto addSquareSymmetricDifference = [&](const glm::ivec2& oldCenter,
+                                            const glm::ivec2& newCenter,
+                                            int radius,
+                                            std::unordered_set<glm::ivec2, ColumnHasher>& target)
+    {
+        addSquareDelta(oldCenter, newCenter, radius, target, target);
+    };
+
+    auto addPlayerBandColumns = [&](const glm::ivec2& cameraColumn,
+                                    std::unordered_set<glm::ivec2, ColumnHasher>& target)
+    {
+        for (int dx = -kExactPlayerBandHorizontalRadius; dx <= kExactPlayerBandHorizontalRadius; ++dx)
+        {
+            for (int dz = -kExactPlayerBandHorizontalRadius; dz <= kExactPlayerBandHorizontalRadius; ++dz)
+            {
+                if (std::max(std::abs(dx), std::abs(dz)) > kExactPlayerBandHorizontalRadius)
+                {
+                    continue;
+                }
+                target.insert({cameraColumn.x + dx, cameraColumn.y + dz});
+            }
+        }
+    };
+
+    int columnsVisited = 0;
+    int candidateChunks = 0;
+    const glm::ivec2 oldCameraColumn{streamingFrontierCenter_.x, streamingFrontierCenter_.z};
+    const bool needsFullRebuild =
+        !streamingFrontierInitialized_ ||
+        streamingFrontierDirtyAllColumns_ ||
+        streamingFrontierPreloadRadius_ != preloadRadius ||
+        streamingFrontierVisibleRadius_ != visibleRadius ||
+        streamingFrontierExactMetricRadius_ != exactMetricRadius;
+
+    if (needsFullRebuild)
+    {
+        streamingFrontierColumns_.clear();
+        streamingFrontierDemands_.clear();
+        streamingFrontierDispatchQueue_ = {};
+        streamingFrontierVisibleRequired_ = 0;
+        streamingFrontierVisibleReady_ = 0;
+        streamingFrontierExactRequired_ = 0;
+        streamingFrontierExactReady_ = 0;
+
+        for (int dx = -preloadRadius; dx <= preloadRadius; ++dx)
+        {
+            for (int dz = -preloadRadius; dz <= preloadRadius; ++dz)
+            {
+                if (std::max(std::abs(dx), std::abs(dz)) > preloadRadius)
+                {
+                    continue;
+                }
+
+                const glm::ivec2 column{center.x + dx, center.z + dz};
+                const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
+                const bool countedVisible = horizontalDistance <= visibleRadius;
+                const bool countedExact = horizontalDistance <= exactMetricRadius;
+                const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+                const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+                int columnHeight = ColumnManager::kNoHeight;
+                if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+                {
+                    requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Visible, countedVisible);
+                }
+
+                ColumnSlabOccupancy occupancy{};
+                const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+                const ColumnChunkIntervals playerBand =
+                    playerBandIntervalsForColumn(column, cameraColumn, center.y, verticalRadius);
+                const ColumnChunkIntervals intervals =
+                    columnIntervalsForHeight(column, cameraColumn, center.y, verticalRadius, columnHeight);
+                applyColumnState(column,
+                                 intervals,
+                                 playerBand,
+                                 countedVisible,
+                                 countedExact,
+                                 haveOccupancy,
+                                 occupancy);
+                ++columnsVisited;
+                if (!intervals.empty())
+                {
+                    candidateChunks += std::max(0, intervals.maxChunkY() - intervals.minChunkY() + 1);
                 }
             }
         }
     }
+    else
+    {
+        std::unordered_set<glm::ivec2, ColumnHasher> columnsToRefresh{};
+        columnsToRefresh.reserve(512u);
+        std::unordered_set<glm::ivec2, ColumnHasher> columnsToRemove{};
+        columnsToRemove.reserve(256u);
 
-    return coverage;
+        if (oldCameraColumn != cameraColumn)
+        {
+            addSquareDelta(oldCameraColumn,
+                           cameraColumn,
+                           streamingFrontierPreloadRadius_,
+                           columnsToRemove,
+                           columnsToRefresh);
+            addSquareSymmetricDifference(oldCameraColumn, cameraColumn, streamingFrontierVisibleRadius_, columnsToRefresh);
+            addSquareSymmetricDifference(oldCameraColumn, cameraColumn, streamingFrontierExactMetricRadius_, columnsToRefresh);
+            addPlayerBandColumns(oldCameraColumn, columnsToRefresh);
+            addPlayerBandColumns(cameraColumn, columnsToRefresh);
+        }
+
+        if (streamingFrontierCenter_.y != center.y || streamingFrontierVerticalRadius_ != verticalRadius)
+        {
+            addPlayerBandColumns(oldCameraColumn, columnsToRefresh);
+            addPlayerBandColumns(cameraColumn, columnsToRefresh);
+        }
+
+        for (const glm::ivec2& column : streamingFrontierDirtyColumns_)
+        {
+            const int horizontalDistance = std::max(std::abs(column.x - center.x), std::abs(column.y - center.z));
+            if (horizontalDistance <= preloadRadius)
+            {
+                columnsToRefresh.insert(column);
+            }
+            else
+            {
+                columnsToRemove.insert(column);
+            }
+        }
+
+        for (const glm::ivec2& column : columnsToRemove)
+        {
+            applyColumnState(column,
+                             ColumnChunkIntervals{},
+                             ColumnChunkIntervals{},
+                             false,
+                             false,
+                             false,
+                             ColumnSlabOccupancy{});
+            ++columnsVisited;
+        }
+
+        for (const glm::ivec2& column : columnsToRefresh)
+        {
+            const int horizontalDistance = std::max(std::abs(column.x - center.x), std::abs(column.y - center.z));
+            if (horizontalDistance > preloadRadius)
+            {
+                applyColumnState(column,
+                                 ColumnChunkIntervals{},
+                                 ColumnChunkIntervals{},
+                                 false,
+                                 false,
+                                 false,
+                                 ColumnSlabOccupancy{});
+                ++columnsVisited;
+                continue;
+            }
+            const bool countedVisible = horizontalDistance <= visibleRadius;
+            const bool countedExact = horizontalDistance <= exactMetricRadius;
+            const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+            int columnHeight = ColumnManager::kNoHeight;
+            if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
+            {
+                requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Visible, countedVisible);
+            }
+
+            ColumnSlabOccupancy occupancy{};
+            const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+            const ColumnChunkIntervals playerBand =
+                playerBandIntervalsForColumn(column, cameraColumn, center.y, verticalRadius);
+            const ColumnChunkIntervals intervals =
+                columnIntervalsForHeight(column, cameraColumn, center.y, verticalRadius, columnHeight);
+            applyColumnState(column,
+                             intervals,
+                             playerBand,
+                             countedVisible,
+                             countedExact,
+                             haveOccupancy,
+                             occupancy);
+            ++columnsVisited;
+            if (!intervals.empty())
+            {
+                candidateChunks += std::max(0, intervals.maxChunkY() - intervals.minChunkY() + 1);
+            }
+        }
+    }
+
+    streamingFrontierDirtyColumns_.clear();
+    streamingFrontierDirtyAllColumns_ = false;
+    streamingFrontierCenter_ = center;
+    streamingFrontierVisibleRadius_ = visibleRadius;
+    streamingFrontierPreloadRadius_ = preloadRadius;
+    streamingFrontierVerticalRadius_ = verticalRadius;
+    streamingFrontierExactMetricRadius_ = exactMetricRadius;
+    streamingFrontierInitialized_ = true;
+
+    if (benchmarkEnabled)
+    {
+        ensureVolumeColumnsVisitedLastFrame_ += columnsVisited;
+        ensureVolumeCandidatesBuiltLastFrame_ += candidateChunks;
+        ensureVolumeColumnPrepMsLastFrame_ +=
+            std::chrono::duration<double, std::milli>(SteadyClock::now() - refreshStart).count();
+    }
 }
 
-int ChunkManager::Impl::estimateMissingChunks(const glm::ivec3& center,
-                                              int horizontalRadius,
-                                              int verticalRadius) const
+int ChunkManager::Impl::dispatchStreamingFrontierGenerateJobs(const glm::ivec3& center,
+                                                              const glm::vec3& priorityForward,
+                                                              int jobBudget)
 {
-    return scanVisibleChunkCoverage(center, horizontalRadius, verticalRadius).missing;
+    if (jobBudget <= 0)
+    {
+        return 0;
+    }
+
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point dispatchStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    {
+        std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+        refreshStreamingFrontierDispatchPriorityStateLocked(center, priorityForward);
+    }
+
+    std::vector<FrontierDispatchEntry> deferredEntries;
+    deferredEntries.reserve(64u);
+    const int maxRescoreAttempts = std::max(32, jobBudget * 8);
+    int rescoreAttempts = 0;
+    int issued = 0;
+    while (jobBudget > 0)
+    {
+        FrontierDispatchEntry entry{};
+        FrontierChunkDemand demandSnapshot{};
+        glm::ivec3 dispatchOrigin{0};
+        glm::vec2 dispatchForwardXZ{0.0f, -1.0f};
+        std::uint64_t dispatchPriorityEpoch = 0;
+        bool needsRescore = false;
+        bool foundEntry = false;
+        {
+            std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+            while (!streamingFrontierDispatchQueue_.empty())
+            {
+                entry = streamingFrontierDispatchQueue_.top();
+                streamingFrontierDispatchQueue_.pop();
+                auto it = streamingFrontierDemands_.find(entry.coord);
+                if (it == streamingFrontierDemands_.end() ||
+                    it->second.state != FrontierDemandState::Missing ||
+                    it->second.version != entry.version)
+                {
+                    continue;
+                }
+
+                demandSnapshot = it->second;
+                dispatchOrigin = streamingFrontierDispatchOrigin_;
+                dispatchForwardXZ = streamingFrontierDispatchForwardXZ_;
+                dispatchPriorityEpoch = streamingFrontierDispatchPriorityEpoch_;
+                needsRescore = entry.priorityEpoch != dispatchPriorityEpoch;
+                foundEntry = true;
+                break;
+            }
+        }
+
+        if (!foundEntry)
+        {
+            break;
+        }
+
+        if (needsRescore)
+        {
+            if (rescoreAttempts >= maxRescoreAttempts)
+            {
+                deferredEntries.push_back(entry);
+                break;
+            }
+
+            ++rescoreAttempts;
+            const glm::vec3 currentPriorityForward{dispatchForwardXZ.x, 0.0f, dispatchForwardXZ.y};
+            entry.priority = buildUploadPriorityKey(entry.coord, dispatchOrigin, currentPriorityForward);
+            entry.localInteraction =
+                demandSnapshot.forceResident || shouldKeepChunkInteractive(entry.coord, dispatchOrigin);
+            entry.priorityEpoch = dispatchPriorityEpoch;
+            {
+                std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+                entry.sequence = nextStreamingFrontierSequence_++;
+            }
+            deferredEntries.push_back(entry);
+            continue;
+        }
+
+        const glm::ivec2 column{entry.coord.x, entry.coord.z};
+        const auto scheduledIt = jobsScheduledThisFrame_.find(column);
+        const int scheduledForColumn = (scheduledIt != jobsScheduledThisFrame_.end()) ? scheduledIt->second : 0;
+        const bool columnLimited =
+            generationColumnCapThisFrame_ > 0 &&
+            generationColumnCapThisFrame_ < std::numeric_limits<int>::max() &&
+            scheduledForColumn >= generationColumnCapThisFrame_;
+        if (columnLimited)
+        {
+            deferredEntries.push_back(entry);
+            ++ensureVolumeColumnCapSkipsLastFrame_;
+            continue;
+        }
+
+        const bool localInteraction = demandSnapshot.forceResident || entry.localInteraction;
+        if (ensureChunkAsync(entry.coord, demandSnapshot.forceResident, localInteraction))
+        {
+            jobsScheduledThisFrame_[column] = scheduledForColumn + 1;
+            --jobBudget;
+            ++issued;
+        }
+        else
+        {
+            FrontierDemandState lifecycleState = FrontierDemandState::Missing;
+            if (tryGetStreamingChunkLifecycleState(entry.coord, lifecycleState))
+            {
+                syncStreamingFrontierDemandFromRegistry(entry.coord);
+            }
+            else
+            {
+                syncStreamingFrontierDemandFromRegistry(entry.coord);
+                invalidateStreamingFrontierColumn(column);
+            }
+        }
+    }
+
+    if (!deferredEntries.empty())
+    {
+        std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+        for (const FrontierDispatchEntry& entry : deferredEntries)
+        {
+            streamingFrontierDispatchQueue_.push(entry);
+        }
+    }
+
+    if (benchmarkEnabled)
+    {
+        ensureVolumeDispatchMsLastFrame_ +=
+            std::chrono::duration<double, std::milli>(SteadyClock::now() - dispatchStart).count();
+    }
+
+    return issued;
 }
 
 int ChunkManager::Impl::computeVerticalRadius(const glm::ivec3& center,
@@ -8772,17 +9868,22 @@ int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int w
     return height;
 }
 
-void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
+bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
                                                      ColumnHeightPrefetchPriority priority,
                                                      bool buildOccupancy) const
 {
     if (shouldStop_.load(std::memory_order_acquire))
     {
-        return;
+        return false;
     }
 
-    const std::size_t maxQueuedColumnHeightPrefetches =
-        (renderSettings_.totalChunks <= renderSettings_.exactChunks) ? 16384u : 4096u;
+    if (stationaryExactFillModeActive_ &&
+        priority <= ColumnHeightPrefetchPriority::Normal &&
+        !buildOccupancy)
+    {
+        return false;
+    }
+
     const glm::ivec3 centerChunk = lastCenterChunk_;
     const std::uint32_t distance = static_cast<std::uint32_t>(std::max(std::abs(column.x - centerChunk.x),
                                                                        std::abs(column.y - centerChunk.z)));
@@ -8793,13 +9894,15 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
         int resolvedHeight = ColumnManager::kNoHeight;
         if (tryGetCachedColumnHeight(column, worldX, worldZ, resolvedHeight))
         {
-            return;
+            return false;
         }
     }
 
     bool shouldNotify = false;
+    bool enqueued = false;
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        const std::size_t queueLimit = columnHeightPrefetchQueueLimit(priority, buildOccupancy);
         auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
         if (requestIt != pendingColumnHeightPrefetchRequests_.end())
         {
@@ -8808,7 +9911,7 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
             {
                 if (state.inFlight || state.priority >= priority)
                 {
-                    return;
+                    return false;
                 }
 
                 state.token = nextColumnHeightPrefetchToken_++;
@@ -8823,14 +9926,14 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
                         priority,
                         false});
                 shouldNotify = true;
-                return;
+                enqueued = true;
             }
 
             const bool coversRequest =
                 state.priority >= priority && (!buildOccupancy || state.buildOccupancy);
             if (state.inFlight || coversRequest)
             {
-                return;
+                return false;
             }
 
             state.token = nextColumnHeightPrefetchToken_++;
@@ -8846,13 +9949,14 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
                     priority,
                     state.buildOccupancy});
             shouldNotify = true;
+            enqueued = true;
         }
         else
         {
             const bool latencySensitive = priority >= ColumnHeightPrefetchPriority::Critical;
-            if (pendingColumnHeightPrefetchRequests_.size() >= maxQueuedColumnHeightPrefetches && !latencySensitive)
+            if (pendingColumnHeightPrefetchRequests_.size() >= queueLimit && !latencySensitive)
             {
-                return;
+                return false;
             }
 
             const std::uint64_t token = nextColumnHeightPrefetchToken_++;
@@ -8871,48 +9975,63 @@ void ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
                     priority,
                     buildOccupancy});
             shouldNotify = true;
+            enqueued = true;
         }
     }
 
     if (shouldNotify)
     {
-        columnHeightPrefetchCondition_.notify_one();
+        const_cast<ChunkManager::Impl*>(this)->refillColumnHeightPrefetchJobs();
     }
+
+    return enqueued;
 }
 
-void ChunkManager::Impl::requestFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius) const
+void ChunkManager::Impl::requestFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius)
 {
     if (horizontalRadius <= 0 || shouldStop_.load(std::memory_order_acquire))
     {
         return;
     }
 
-    const int criticalRadius = std::clamp(std::max(8, startupState_.exactNearCurrentChunks + 2),
-                                          0,
-                                          horizontalRadius);
-    for (int ring = 0; ring <= horizontalRadius; ++ring)
+    if (!fullRadiusColumnDiscovery_.initialized ||
+        fullRadiusColumnDiscovery_.center != center ||
+        fullRadiusColumnDiscovery_.radius != horizontalRadius)
     {
+        resetFullRadiusColumnDiscovery(center, horizontalRadius);
+    }
+
+    std::size_t queuedRequests = 0;
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        queuedRequests = pendingColumnHeightPrefetchRequests_.size();
+    }
+
+    const std::size_t supportHeadroomLimit =
+        columnHeightPrefetchQueueLimit(ColumnHeightPrefetchPriority::Visible, false);
+    if (queuedRequests >= supportHeadroomLimit)
+    {
+        return;
+    }
+
+    const int maxNewRequests =
+        std::clamp(static_cast<int>(supportHeadroomLimit - queuedRequests), 1, stationaryExactFillModeActive_ ? 48 : 96);
+    const int maxAttempts = maxNewRequests * 6;
+    int attempts = 0;
+    int requested = 0;
+    while (requested < maxNewRequests && attempts < maxAttempts)
+    {
+        glm::ivec2 column{0};
         ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Visible;
-        if (ring <= criticalRadius)
+        if (!nextFullRadiusColumnDiscoveryColumn(column, priority))
         {
-            priority = ColumnHeightPrefetchPriority::Critical;
+            break;
         }
 
-        if (ring == 0)
+        ++attempts;
+        if (requestColumnHeightPrefetch(column, priority, false))
         {
-            requestColumnHeightPrefetch({center.x, center.z}, priority, false);
-            continue;
-        }
-
-        for (int dx = -ring; dx <= ring; ++dx)
-        {
-            requestColumnHeightPrefetch({center.x + dx, center.z - ring}, priority, false);
-            requestColumnHeightPrefetch({center.x + dx, center.z + ring}, priority, false);
-        }
-        for (int dz = -ring + 1; dz <= ring - 1; ++dz)
-        {
-            requestColumnHeightPrefetch({center.x - ring, center.z + dz}, priority, false);
-            requestColumnHeightPrefetch({center.x + ring, center.z + dz}, priority, false);
+            ++requested;
         }
     }
 }
@@ -9156,21 +10275,27 @@ void ChunkManager::Impl::mergePredictedColumnHeight(const glm::ivec2& column, in
         return;
     }
 
-    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
-    auto [it, inserted] = predictedColumnHeights_.try_emplace(column, height);
-    if (!inserted)
     {
-        it->second = std::max(it->second, height);
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        auto [it, inserted] = predictedColumnHeights_.try_emplace(column, height);
+        if (!inserted)
+        {
+            it->second = std::max(it->second, height);
+        }
     }
 
-    std::lock_guard<std::mutex> prefetchLock(columnHeightPrefetchMutex_);
-    auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
-    if (requestIt != pendingColumnHeightPrefetchRequests_.end() &&
-        !requestIt->second.inFlight &&
-        !requestIt->second.buildOccupancy)
     {
-        pendingColumnHeightPrefetchRequests_.erase(requestIt);
+        std::lock_guard<std::mutex> prefetchLock(columnHeightPrefetchMutex_);
+        auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
+        if (requestIt != pendingColumnHeightPrefetchRequests_.end() &&
+            !requestIt->second.inFlight &&
+            !requestIt->second.buildOccupancy)
+        {
+            pendingColumnHeightPrefetchRequests_.erase(requestIt);
+        }
     }
+
+    invalidateStreamingFrontierColumn(column);
 }
 
 void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const
@@ -9179,21 +10304,28 @@ void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::i
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
     const int highest = columnManager_.highestSolidBlock(worldX, worldZ);
 
-    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
-    if (highest == ColumnManager::kNoHeight)
     {
-        predictedColumnHeights_.erase(column);
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        if (highest == ColumnManager::kNoHeight)
+        {
+            predictedColumnHeights_.erase(column);
+        }
+        else
+        {
+            predictedColumnHeights_[column] = highest;
+        }
     }
-    else
-    {
-        predictedColumnHeights_[column] = highest;
-    }
+
+    invalidateStreamingFrontierColumn(column);
 }
 
 void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) const
 {
-    std::lock_guard<std::mutex> lock(predictedColumnMutex_);
-    predictedColumnHeights_.erase(column);
+    {
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        predictedColumnHeights_.erase(column);
+    }
+    invalidateStreamingFrontierColumn(column);
 }
 
 void ChunkManager::Impl::noteRecentEdit(const char* kind,
@@ -9398,21 +10530,6 @@ RecentEditHoleDebugSnapshot ChunkManager::Impl::recentEditHoleDebugSnapshot(cons
     return snapshot;
 }
 
-int ChunkManager::Impl::columnRadiusFor(const glm::ivec2& column,
-                                        const glm::ivec2& cameraColumn,
-                                        int cameraChunkY,
-                                        int verticalRadius) const
-{
-    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    int columnHeight = ColumnManager::kNoHeight;
-    if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-    {
-        requestColumnHeightPrefetch(column);
-    }
-    return columnRadiusForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
-}
-
 int ChunkManager::Impl::columnRadiusForHeight(const glm::ivec2& column,
                                               const glm::ivec2& cameraColumn,
                                               int cameraChunkY,
@@ -9538,21 +10655,6 @@ ColumnChunkIntervals ChunkManager::Impl::playerBandIntervalsForColumn(const glm:
     return intervals;
 }
 
-std::pair<int, int> ChunkManager::Impl::columnSpanFor(const glm::ivec2& column,
-                                                       const glm::ivec2& cameraColumn,
-                                                       int cameraChunkY,
-                                                       int verticalRadius) const
-{
-    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    int columnHeight = ColumnManager::kNoHeight;
-    if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-    {
-        requestColumnHeightPrefetch(column);
-    }
-    return columnSpanForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
-}
-
 void ChunkManager::Impl::addColumnChunkInterval(ColumnChunkIntervals& intervals,
                                                 int minChunkY,
                                                 int maxChunkY) noexcept
@@ -9670,6 +10772,191 @@ int ChunkManager::Impl::chunkYDistanceToIntervals(int chunkY,
     }
 
     return bestDistance;
+}
+
+glm::ivec2 ChunkManager::Impl::metadataPageKeyForWorld(int worldX, int worldZ) noexcept
+{
+    constexpr int kPageSize = MetadataPage::kSize;
+    return {floorDiv(worldX, kPageSize), floorDiv(worldZ, kPageSize)};
+}
+
+std::shared_ptr<const ChunkManager::Impl::MetadataPage>
+ChunkManager::Impl::tryGetMetadataPage(const glm::ivec2& pageKey) const
+{
+    std::lock_guard<std::mutex> lock(metadataPageMutex_);
+    auto it = metadataPages_.find(pageKey);
+    if (it == metadataPages_.end())
+    {
+        return {};
+    }
+    return it->second;
+}
+
+std::shared_ptr<const ChunkManager::Impl::MetadataPage>
+ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
+{
+    std::shared_ptr<MetadataPage> page;
+    std::shared_ptr<PendingMetadataPageBuild> pendingBuild;
+    {
+        std::unique_lock<std::mutex> lock(metadataPageMutex_);
+        auto it = metadataPages_.find(pageKey);
+        if (it != metadataPages_.end())
+        {
+            return it->second;
+        }
+
+        auto pendingIt = pendingMetadataPageBuilds_.find(pageKey);
+        if (pendingIt != pendingMetadataPageBuilds_.end())
+        {
+            pendingBuild = pendingIt->second;
+            pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
+            if (pendingBuild->exception)
+            {
+                std::rethrow_exception(pendingBuild->exception);
+            }
+            return pendingBuild->page;
+        }
+
+        pendingBuild = std::make_shared<PendingMetadataPageBuild>();
+        pendingMetadataPageBuilds_.emplace(pageKey, pendingBuild);
+    }
+
+    std::exception_ptr buildException{};
+    try
+    {
+        if (!surfaceMap_ || !climateMap_)
+        {
+            throw std::runtime_error("Metadata page build requires initialized surface and climate maps");
+        }
+
+        page = std::make_shared<MetadataPage>();
+        page->key = pageKey;
+        page->baseWorld = pageKey * MetadataPage::kSize;
+
+        const terrain::SurfaceFragment& surfaceFragment = surfaceMap_->getFragment(pageKey);
+        for (int localZ = 0; localZ < MetadataPage::kSize; ++localZ)
+        {
+            for (int localX = 0; localX < MetadataPage::kSize; ++localX)
+            {
+                const std::size_t index =
+                    static_cast<std::size_t>(localZ) * MetadataPage::kSize + static_cast<std::size_t>(localX);
+                MetadataColumnValue& metadataColumn = page->columns[index];
+                metadataColumn.surface = surfaceFragment.column(localX, localZ);
+
+                const int worldX = page->baseWorld.x + localX;
+                const int worldZ = page->baseWorld.y + localZ;
+                const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
+                metadataColumn.distanceToCoast = climateSample.distanceToCoast;
+                metadataColumn.dominantIsOcean = climateSample.dominantIsOcean;
+            }
+        }
+    }
+    catch (...)
+    {
+        buildException = std::current_exception();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(metadataPageMutex_);
+        if (!buildException)
+        {
+            auto [it, inserted] = metadataPages_.emplace(pageKey, page);
+            if (!inserted)
+            {
+                page = it->second;
+            }
+            pendingBuild->page = page;
+        }
+        pendingBuild->exception = buildException;
+        pendingBuild->ready = true;
+        pendingMetadataPageBuilds_.erase(pageKey);
+    }
+    pendingBuild->readyCondition.notify_all();
+
+    if (buildException)
+    {
+        std::rethrow_exception(buildException);
+    }
+
+    return page;
+}
+
+void ChunkManager::Impl::pinMetadataWindow(const glm::ivec3& center, int horizontalRadius)
+{
+    const int marginChunks = std::clamp(horizontalRadius / 6, 1, 4);
+    const int minWorldX = (center.x - horizontalRadius - marginChunks) * kChunkSizeX;
+    const int maxWorldX = (center.x + horizontalRadius + marginChunks + 1) * kChunkSizeX - 1;
+    const int minWorldZ = (center.z - horizontalRadius - marginChunks) * kChunkSizeZ;
+    const int maxWorldZ = (center.z + horizontalRadius + marginChunks + 1) * kChunkSizeZ - 1;
+
+    std::unordered_set<glm::ivec2, ColumnHasher> desiredKeys{};
+    const glm::ivec2 minKey = metadataPageKeyForWorld(minWorldX, minWorldZ);
+    const glm::ivec2 maxKey = metadataPageKeyForWorld(maxWorldX, maxWorldZ);
+    desiredKeys.reserve(static_cast<std::size_t>(std::max(maxKey.x - minKey.x + 1, 0)) *
+                        static_cast<std::size_t>(std::max(maxKey.y - minKey.y + 1, 0)));
+    for (int pageZ = minKey.y; pageZ <= maxKey.y; ++pageZ)
+    {
+        for (int pageX = minKey.x; pageX <= maxKey.x; ++pageX)
+        {
+            desiredKeys.insert({pageX, pageZ});
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(metadataPageMutex_);
+        pinnedMetadataPageKeys_ = std::move(desiredKeys);
+    }
+
+    trimMetadataPages();
+}
+
+void ChunkManager::Impl::trimMetadataPages()
+{
+    std::lock_guard<std::mutex> lock(metadataPageMutex_);
+    const std::size_t keepSlack = 32;
+    if (metadataPages_.size() <= pinnedMetadataPageKeys_.size() + keepSlack)
+    {
+        return;
+    }
+
+    for (auto it = metadataPages_.begin(); it != metadataPages_.end();)
+    {
+        if (pinnedMetadataPageKeys_.contains(it->first))
+        {
+            ++it;
+            continue;
+        }
+
+        it = metadataPages_.erase(it);
+        if (metadataPages_.size() <= pinnedMetadataPageKeys_.size() + keepSlack)
+        {
+            break;
+        }
+    }
+}
+
+void ChunkManager::Impl::warmMetadataPagesForChunk(const glm::ivec3& chunkCoord) const
+{
+    const int minWorldX = chunkCoord.x * kChunkSizeX - 1;
+    const int maxWorldX = (chunkCoord.x + 1) * kChunkSizeX;
+    const int minWorldZ = chunkCoord.z * kChunkSizeZ - 1;
+    const int maxWorldZ = (chunkCoord.z + 1) * kChunkSizeZ;
+    const glm::ivec2 minKey = metadataPageKeyForWorld(minWorldX, minWorldZ);
+    const glm::ivec2 maxKey = metadataPageKeyForWorld(maxWorldX, maxWorldZ);
+    for (int pageZ = minKey.y; pageZ <= maxKey.y; ++pageZ)
+    {
+        for (int pageX = minKey.x; pageX <= maxKey.x; ++pageX)
+        {
+            (void)getOrBuildMetadataPage({pageX, pageZ});
+        }
+    }
+}
+
+void ChunkManager::Impl::warmMetadataPagesForColumn(const glm::ivec2& column) const
+{
+    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+    (void)getOrBuildMetadataPage(metadataPageKeyForWorld(worldX, worldZ));
 }
 
 int ChunkManager::Impl::adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
@@ -9807,7 +11094,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
         }
     }
 
-    const StructureChunkColumnSpan structureSpan = structureRegistry_.queryChunkColumnSpan(column);
+    const StructureChunkColumnSpan structureSpan = structureRegistry_.queryChunkColumnSpanReady(column);
     if (structureSpan.valid())
     {
         occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, structureSpan.maxChunkY);
@@ -9918,14 +11205,20 @@ ChunkManager::Impl::classifyColumnSlab(const ColumnSlabOccupancy& occupancy, int
 
 void ChunkManager::Impl::invalidateColumnSlabOccupancy(const glm::ivec2& column) const
 {
-    std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
-    columnSlabOccupancyCache_.erase(column);
+    {
+        std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+        columnSlabOccupancyCache_.erase(column);
+    }
+    invalidateStreamingFrontierColumn(column);
 }
 
 void ChunkManager::Impl::invalidateAllColumnSlabOccupancy() const
 {
-    std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
-    columnSlabOccupancyCache_.clear();
+    {
+        std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+        columnSlabOccupancyCache_.clear();
+    }
+    invalidateAllStreamingFrontierColumns();
 }
 
 void ChunkManager::Impl::updateMovementEnvelopeState(const glm::ivec3& center,
@@ -10093,21 +11386,6 @@ ChunkManager::Impl::MovementEnvelopeBucket ChunkManager::Impl::movementEnvelopeB
     return MovementEnvelopeBucket::Background;
 }
 
-ColumnChunkIntervals ChunkManager::Impl::columnIntervalsFor(const glm::ivec2& column,
-                                                            const glm::ivec2& cameraColumn,
-                                                            int cameraChunkY,
-                                                            int verticalRadius) const
-{
-    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    int columnHeight = ColumnManager::kNoHeight;
-    if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-    {
-        requestColumnHeightPrefetch(column);
-    }
-    return columnIntervalsForHeight(column, cameraColumn, cameraChunkY, verticalRadius, columnHeight);
-}
-
 ColumnChunkIntervals ChunkManager::Impl::columnIntervalsForHeight(const glm::ivec2& column,
                                                                   const glm::ivec2& cameraColumn,
                                                                   int cameraChunkY,
@@ -10161,216 +11439,6 @@ std::pair<int, int> ChunkManager::Impl::columnSpanForHeight(const glm::ivec2& co
     return {intervals.minChunkY(), intervals.maxChunkY()};
 }
 
-ChunkManager::Impl::RingProgress ChunkManager::Impl::ensureVolume(const glm::ivec3& center,
-                                                                  int horizontalRadius,
-                                                                  int verticalRadius,
-                                                                  int& jobBudget,
-                                                                  SchedulingBand band)
-{
-    bool missingFound = false;
-
-    const glm::ivec2 cameraColumn{center.x, center.z};
-    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
-    const bool idleRadialScheduling =
-        movementEnvelopeIdleMode_ &&
-        !movementEnvelopeTurnActive_ &&
-        lastHorizontalMovementShift_ == 0 &&
-        lastVerticalMovementShift_ == 0;
-    glm::vec2 forward = movementEnvelopeForwardXZ_;
-    if (glm::dot(forward, forward) <= kEpsilon)
-    {
-        forward = normalizePriorityForwardXZ(lastCameraForward_);
-    }
-    if (glm::dot(forward, forward) <= kEpsilon)
-    {
-        forward = glm::vec2{0.0f, -1.0f};
-    }
-    const glm::vec2 side{-forward.y, forward.x};
-
-    struct Candidate
-    {
-        glm::ivec3 coord;
-        int bucketRank{0};
-        float priority{0.0f};
-        bool forceResident{false};
-    };
-
-    std::vector<Candidate> candidates;
-    candidates.reserve(static_cast<std::size_t>((verticalRadius * 2 + 1) *
-                                                std::max(1, horizontalRadius * 8)));
-
-    std::unordered_set<glm::ivec2, ColumnHasher> visitedColumns;
-    visitedColumns.reserve(static_cast<std::size_t>(std::max(1, horizontalRadius * 8)));
-    const int maxJobsPerColumn = generationColumnCapThisFrame_;
-    const bool enforceColumnCap = maxJobsPerColumn > 0 &&
-                                  maxJobsPerColumn < std::numeric_limits<int>::max();
-
-    auto enqueueColumn = [&](int chunkX, int chunkZ) {
-        const glm::ivec2 column{chunkX, chunkZ};
-        if (!visitedColumns.insert(column).second)
-        {
-            return;
-        }
-
-        const MovementEnvelopeBucket bucket = movementEnvelopeBucketForColumn(column, center, horizontalRadius);
-        const bool protectedColumn = bucket != MovementEnvelopeBucket::Background;
-        const ColumnHeightPrefetchPriority occupancyPriority =
-            (protectedColumn || exactOnly) ? ColumnHeightPrefetchPriority::Visible
-                                           : ColumnHeightPrefetchPriority::Normal;
-        if (band == SchedulingBand::Protected && !protectedColumn)
-        {
-            return;
-        }
-        if (band == SchedulingBand::Background && protectedColumn)
-        {
-            return;
-        }
-
-        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-        int columnHeight = ColumnManager::kNoHeight;
-        if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-        {
-                requestColumnHeightPrefetch(column, occupancyPriority, false);
-        }
-        ColumnSlabOccupancy occupancy{};
-        const bool shouldPrefetchOccupancy = !columnUsesPlayerBand(column, cameraColumn);
-        if (shouldPrefetchOccupancy)
-        {
-            requestColumnHeightPrefetch(column, occupancyPriority, shouldPrefetchOccupancy);
-        }
-        const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
-        const ColumnChunkIntervals playerBand =
-            playerBandIntervalsForColumn(column, cameraColumn, center.y, verticalRadius);
-        const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
-                                                                        cameraColumn,
-                                                                        center.y,
-                                                                        verticalRadius,
-                                                                        columnHeight);
-        for (std::uint8_t intervalIndex = 0; intervalIndex < intervals.count; ++intervalIndex)
-        {
-            const ChunkYInterval interval = intervals.intervals[intervalIndex];
-            for (int chunkY = interval.minChunkY; chunkY <= interval.maxChunkY; ++chunkY)
-            {
-                const bool forceResident = chunkYWithinIntervals(chunkY, playerBand);
-                if (haveOccupancy &&
-                    !forceResident &&
-                    classifyColumnSlab(occupancy, chunkY) == ColumnSlabOccupancyState::DefinitelyEmpty)
-                {
-                    continue;
-                }
-
-                const glm::ivec3 coord{chunkX, chunkY, chunkZ};
-                const int dx = coord.x - center.x;
-                const int dy = coord.y - center.y;
-                const int dz = coord.z - center.z;
-                const glm::vec2 delta(static_cast<float>(dx), static_cast<float>(dz));
-                const float horizontal = std::sqrt(static_cast<float>(dx * dx + dz * dz));
-                const float forwardDistance = glm::dot(delta, forward);
-                const float sideDistance = std::abs(glm::dot(delta, side));
-                float priority = horizontal + 0.45f * static_cast<float>(std::abs(dy));
-                if (idleRadialScheduling)
-                {
-                    priority = horizontal +
-                               0.35f * static_cast<float>(std::abs(dy)) +
-                               0.02f * static_cast<float>(std::abs(dx) + std::abs(dz));
-                }
-                else if (bucket == MovementEnvelopeBucket::Core)
-                {
-                    priority += 0.10f * sideDistance;
-                }
-                else if (bucket == MovementEnvelopeBucket::Corridor)
-                {
-                    priority += 0.15f * sideDistance - 0.18f * std::max(forwardDistance, 0.0f);
-                }
-                else if (bucket == MovementEnvelopeBucket::TurnReserve)
-                {
-                    priority += 0.20f * sideDistance + 0.10f * std::max(-forwardDistance, 0.0f);
-                }
-                else
-                {
-                    priority += 0.10f * std::max(-forwardDistance, 0.0f);
-                }
-                candidates.push_back(Candidate{coord,
-                                               static_cast<int>(bucket),
-                                               priority,
-                                               forceResident});
-            }
-        }
-    };
-
-    if (horizontalRadius == 0)
-    {
-        enqueueColumn(center.x, center.z);
-    }
-    else
-    {
-        for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
-        {
-            enqueueColumn(center.x + dx, center.z - horizontalRadius);
-            enqueueColumn(center.x + dx, center.z + horizontalRadius);
-        }
-        for (int dz = -horizontalRadius + 1; dz <= horizontalRadius - 1; ++dz)
-        {
-            enqueueColumn(center.x - horizontalRadius, center.z + dz);
-            enqueueColumn(center.x + horizontalRadius, center.z + dz);
-        }
-    }
-
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
-        if (lhs.bucketRank != rhs.bucketRank)
-        {
-            return lhs.bucketRank < rhs.bucketRank;
-        }
-        if (lhs.priority == rhs.priority)
-        {
-            if (lhs.coord.y == rhs.coord.y)
-            {
-                if (lhs.coord.x == rhs.coord.x)
-                {
-                    return lhs.coord.z < rhs.coord.z;
-                }
-                return lhs.coord.x < rhs.coord.x;
-            }
-            return lhs.coord.y < rhs.coord.y;
-        }
-        return lhs.priority < rhs.priority;
-    });
-
-    for (const Candidate& candidate : candidates)
-    {
-        if (jobBudget <= 0)
-        {
-            break;
-        }
-
-        const glm::ivec2 columnKey{candidate.coord.x, candidate.coord.z};
-        int& columnJobs = jobsScheduledThisFrame_[columnKey];
-
-        if (auto existing = getChunkShared(candidate.coord))
-        {
-            continue;
-        }
-
-        missingFound = true;
-
-        if (enforceColumnCap && columnJobs >= maxJobsPerColumn)
-        {
-            continue;
-        }
-
-        const bool localInteractionPriority =
-            shouldKeepChunkInteractive(candidate.coord, center);
-        if (ensureChunkAsync(candidate.coord, candidate.forceResident, localInteractionPriority))
-        {
-            --jobBudget;
-            ++columnJobs;
-        }
-    }
-
-    return RingProgress{!missingFound, jobBudget <= 0};
-}
-
 void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                                              int horizontalThreshold,
                                              int verticalRadius)
@@ -10421,7 +11489,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             int columnHeight = ColumnManager::kNoHeight;
             if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
             {
-                requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Normal);
+                if (!stationaryExactFillModeActive_)
+                {
+                    requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Normal);
+                }
             }
             const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
                                                                             cameraColumn,
@@ -10507,7 +11578,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
                 int columnHeight = ColumnManager::kNoHeight;
                 if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
                 {
-                    requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Background);
+                    if (!stationaryExactFillModeActive_)
+                    {
+                        requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Background);
+                    }
                 }
 
                 const auto [minChunkY, maxChunkY] =
@@ -10529,6 +11603,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
 
             columnManager_.removeChunk(chunk->coord);
             recycleChunkGPU(*chunk);
+            clearStreamingChunkLifecycleState(coord);
             recycleChunkObject(std::move(chunk));
             ++evictedCount;
         }
@@ -10561,6 +11636,13 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord,
 
     try
     {
+        const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+        const JobQueueSnapshot queueSnapshot = benchmarkEnabled ? jobQueue_.snapshot() : JobQueueSnapshot{};
+        const auto clampQueueCount = [](std::size_t value) -> std::uint16_t
+        {
+            return static_cast<std::uint16_t>(
+                std::min<std::size_t>(value, static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max())));
+        };
         std::shared_ptr<Chunk> chunk;
         {
             std::lock_guard<std::mutex> lock(chunksMutex);
@@ -10574,8 +11656,23 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord,
             chunk->state.store(ChunkState::Generating, std::memory_order_release);
             chunk->requestTimestampMicros.store(static_cast<long long>(steadyMicrosNow()), std::memory_order_release);
             chunk->initialReadyRecorded.store(false, std::memory_order_release);
+            if (benchmarkEnabled)
+            {
+                for (std::size_t index = 0; index < kJobTypeCount; ++index)
+                {
+                    chunk->requestQueuedByType[index] = clampQueueCount(queueSnapshot.queuedByType[index]);
+                    chunk->requestActiveByType[index] = clampQueueCount(queueSnapshot.activeByType[index]);
+                }
+                const std::size_t latencySensitiveOutstanding =
+                    queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+                    queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+                    queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)] +
+                    queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)];
+                chunk->requestLatencySensitiveOutstanding = clampQueueCount(latencySensitiveOutstanding);
+            }
             chunks_.emplace(coord, chunk);
         }
+        setStreamingChunkLifecycleState(coord, FrontierDemandState::QueuedGenerate);
 
         const std::uint32_t generationEpoch =
             chunk->generationEpoch.fetch_add(1, std::memory_order_acq_rel) + 1u;
@@ -13814,8 +14911,31 @@ ColumnSample ChunkManager::Impl::sampleColumn(
     }
 
     ColumnSample sample{};
-    const terrain::SurfaceColumn surfaceColumn = surfaceMap_->columnValue(worldX, worldZ);
-    const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
+    const std::shared_ptr<const MetadataPage> cachedPage =
+        tryGetMetadataPage(metadataPageKeyForWorld(worldX, worldZ));
+    terrain::SurfaceColumn surfaceColumn{};
+    float distanceToCoast = std::numeric_limits<float>::infinity();
+    bool dominantIsOcean = false;
+    if (cachedPage)
+    {
+        const int localX = worldX - cachedPage->baseWorld.x;
+        const int localZ = worldZ - cachedPage->baseWorld.y;
+        const MetadataColumnValue& metadataColumn = cachedPage->column(localX, localZ);
+        surfaceColumn = metadataColumn.surface;
+        distanceToCoast = metadataColumn.distanceToCoast;
+        dominantIsOcean = metadataColumn.dominantIsOcean;
+    }
+    else
+    {
+        const std::shared_ptr<const MetadataPage> page =
+            getOrBuildMetadataPage(metadataPageKeyForWorld(worldX, worldZ));
+        const int localX = worldX - page->baseWorld.x;
+        const int localZ = worldZ - page->baseWorld.y;
+        const MetadataColumnValue& metadataColumn = page->column(localX, localZ);
+        surfaceColumn = metadataColumn.surface;
+        distanceToCoast = metadataColumn.distanceToCoast;
+        dominantIsOcean = metadataColumn.dominantIsOcean;
+    }
 
     sample.dominantBiome = surfaceColumn.dominantBiome;
     sample.dominantWeight = surfaceColumn.dominantWeight;
@@ -13833,26 +14953,30 @@ ColumnSample ChunkManager::Impl::sampleColumn(
     sample.roughAmplitude = surfaceColumn.roughAmplitude;
     sample.hillAmplitude = surfaceColumn.hillAmplitude;
     sample.mountainAmplitude = surfaceColumn.mountainAmplitude;
-    sample.dominantIsOcean = climateSample.dominantIsOcean;
-    sample.distanceToCoast = climateSample.distanceToCoast;
-    sample.distanceToShore = std::isfinite(climateSample.distanceToCoast)
-                                 ? climateSample.distanceToCoast
+    sample.dominantIsOcean = dominantIsOcean;
+    sample.distanceToCoast = distanceToCoast;
+    sample.distanceToShore = std::isfinite(distanceToCoast)
+                                 ? distanceToCoast
                                  : std::numeric_limits<float>::infinity();
     sample.soilCreepOffset = 0.0f;
 
-    sample.topBlendCount = includeBlendDebug ? std::min(climateSample.blendCount, sample.topBlendDebug.size()) : 0;
-    const glm::vec2 columnPos(static_cast<float>(worldX), static_cast<float>(worldZ));
-    for (std::size_t i = 0; i < sample.topBlendCount; ++i)
+    if (includeBlendDebug)
     {
-        const auto& srcBlend = climateSample.blends[i];
-        auto& dstBlend = sample.topBlendDebug[i];
-        dstBlend.biome = srcBlend.biome;
-        dstBlend.weight = srcBlend.weight;
-        dstBlend.aggregatedHeight = srcBlend.height;
-        dstBlend.normalizedDistance = srcBlend.normalizedDistance;
-        dstBlend.seedRadius = srcBlend.falloff;
-        dstBlend.worldDistance = glm::length(columnPos - srcBlend.sitePosition);
-        dstBlend.isOcean = srcBlend.biome && srcBlend.biome->isOcean();
+        const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
+        sample.topBlendCount = std::min(climateSample.blendCount, sample.topBlendDebug.size());
+        const glm::vec2 columnPos(static_cast<float>(worldX), static_cast<float>(worldZ));
+        for (std::size_t i = 0; i < sample.topBlendCount; ++i)
+        {
+            const auto& srcBlend = climateSample.blends[i];
+            auto& dstBlend = sample.topBlendDebug[i];
+            dstBlend.biome = srcBlend.biome;
+            dstBlend.weight = srcBlend.weight;
+            dstBlend.aggregatedHeight = srcBlend.height;
+            dstBlend.normalizedDistance = srcBlend.normalizedDistance;
+            dstBlend.seedRadius = srcBlend.falloff;
+            dstBlend.worldDistance = glm::length(columnPos - srcBlend.sitePosition);
+            dstBlend.isOcean = srcBlend.biome && srcBlend.biome->isOcean();
+        }
     }
 
     sample.slabHasSolid = surfaceColumn.surfaceY >= slabMinWorldY;
@@ -13885,11 +15009,14 @@ ColumnSample ChunkManager::Impl::sampleColumn(
 
 std::vector<StructureInstance> ChunkManager::Impl::queryStructureInstances(const glm::ivec3& minWorld,
                                                                            const glm::ivec3& maxWorld,
-                                                                           int lodLevel) const
+                                                                           int lodLevel,
+                                                                           bool* outAllRegionsReady,
+                                                                           std::vector<StructureRegionKey>* outMissingRegions) const
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const SteadyClock::time_point queryStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
-    std::vector<StructureInstance> instances = structureRegistry_.query(minWorld, maxWorld, lodLevel);
+    std::vector<StructureInstance> instances =
+        structureRegistry_.queryReady(minWorld, maxWorld, lodLevel, outAllRegionsReady, outMissingRegions);
     if (benchmarkEnabled)
     {
         const auto queryMicros =
@@ -13898,6 +15025,151 @@ std::vector<StructureInstance> ChunkManager::Impl::queryStructureInstances(const
             static_cast<std::uint64_t>(std::max<std::int64_t>(queryMicros, 0)));
     }
     return instances;
+}
+
+void ChunkManager::Impl::warmStructureRegionsForColumn(const glm::ivec2& column)
+{
+    const int minWorldX = column.x * kChunkSizeX;
+    const int maxWorldX = minWorldX + kChunkSizeX - 1;
+    const int minWorldZ = column.y * kChunkSizeZ;
+    const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+    const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+    bool warmedNewRegion = false;
+    for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+    {
+        for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+        {
+            const StructureRegionKey key{regionX, regionZ};
+            const bool wasReady = structureRegistry_.isRegionReady(key);
+            const std::shared_ptr<const StructureRegion> region = structureRegistry_.warmRegion(key);
+            if (wasReady || !region)
+            {
+                continue;
+            }
+
+            warmedNewRegion = true;
+            for (const auto& [affectedColumn, span] : region->chunkColumnSpans)
+            {
+                if (span.valid())
+                {
+                    invalidateColumnSlabOccupancy(affectedColumn);
+                }
+            }
+        }
+    }
+
+    if (warmedNewRegion)
+    {
+        flushReadyDeferredStructureChunks();
+    }
+}
+
+void ChunkManager::Impl::registerDeferredStructureChunkBuild(const glm::ivec3& coord,
+                                                             const glm::ivec3& queryMin,
+                                                             const glm::ivec3& queryMax,
+                                                             int lodLevel,
+                                                             const std::vector<StructureRegionKey>& missingRegions)
+{
+    if (missingRegions.empty())
+    {
+        clearDeferredStructureChunkBuild(coord);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(deferredStructureMutex_);
+    auto& deferred = deferredStructureChunkBuilds_[coord];
+    deferred.queryMin = queryMin;
+    deferred.queryMax = queryMax;
+    deferred.lodLevel = lodLevel;
+    deferred.missingRegions = missingRegions;
+}
+
+void ChunkManager::Impl::clearDeferredStructureChunkBuild(const glm::ivec3& coord)
+{
+    std::lock_guard<std::mutex> lock(deferredStructureMutex_);
+    deferredStructureChunkBuilds_.erase(coord);
+}
+
+std::vector<PendingStructureEdit> ChunkManager::Impl::buildDeferredStructureEditsForChunk(const glm::ivec3& coord,
+                                                                                          const glm::ivec3& queryMin,
+                                                                                          const glm::ivec3& queryMax,
+                                                                                          int lodLevel) const
+{
+    bool allRegionsReady = true;
+    std::vector<StructureInstance> structures =
+        queryStructureInstances(queryMin, queryMax, lodLevel, &allRegionsReady, nullptr);
+    if (!allRegionsReady || structures.empty())
+    {
+        return {};
+    }
+
+    std::vector<PendingStructureEdit> edits;
+    for (const StructureInstance& instance : structures)
+    {
+        stampStructureInstanceIntoTarget(instance,
+                                        [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid)
+                                        {
+                                            const glm::ivec3 worldPos{worldX, worldY, worldZ};
+                                            if (worldToChunkCoords(worldX, worldY, worldZ) != coord)
+                                            {
+                                                return;
+                                            }
+                                            edits.push_back(PendingStructureEdit{
+                                                coord,
+                                                worldPos,
+                                                block,
+                                                replaceSolid});
+                                        });
+    }
+    return edits;
+}
+
+void ChunkManager::Impl::flushReadyDeferredStructureChunks()
+{
+    struct ReadyDeferredChunk
+    {
+        glm::ivec3 coord{0};
+        glm::ivec3 queryMin{0};
+        glm::ivec3 queryMax{0};
+        int lodLevel{0};
+    };
+
+    std::vector<ReadyDeferredChunk> readyChunks;
+    {
+        std::lock_guard<std::mutex> lock(deferredStructureMutex_);
+        for (auto it = deferredStructureChunkBuilds_.begin(); it != deferredStructureChunkBuilds_.end();)
+        {
+            const bool allReady = std::all_of(it->second.missingRegions.begin(),
+                                              it->second.missingRegions.end(),
+                                              [this](const StructureRegionKey& key)
+                                              {
+                                                  return structureRegistry_.isRegionReady(key);
+                                              });
+            if (!allReady)
+            {
+                ++it;
+                continue;
+            }
+
+            readyChunks.push_back(ReadyDeferredChunk{
+                it->first,
+                it->second.queryMin,
+                it->second.queryMax,
+                it->second.lodLevel});
+            it = deferredStructureChunkBuilds_.erase(it);
+        }
+    }
+
+    for (const ReadyDeferredChunk& ready : readyChunks)
+    {
+        const std::vector<PendingStructureEdit> edits =
+            buildDeferredStructureEditsForChunk(ready.coord, ready.queryMin, ready.queryMax, ready.lodLevel);
+        dispatchStructureEdits(edits);
+    }
 }
 
 namespace
@@ -14290,9 +15562,17 @@ void ChunkManager::Impl::applyBlockEditOverlay(ChunkBuildScratch& scratch, const
 
 bool ChunkManager::Impl::chunkHasPendingStructureEdits(const glm::ivec3& coord) const
 {
-    std::lock_guard<std::mutex> lock(pendingStructureMutex_);
-    auto it = pendingStructureEdits_.find(coord);
-    return it != pendingStructureEdits_.end() && !it->second.empty();
+    {
+        std::lock_guard<std::mutex> lock(pendingStructureMutex_);
+        auto it = pendingStructureEdits_.find(coord);
+        if (it != pendingStructureEdits_.end() && !it->second.empty())
+        {
+            return true;
+        }
+    }
+
+    std::lock_guard<std::mutex> deferredLock(deferredStructureMutex_);
+    return deferredStructureChunkBuilds_.find(coord) != deferredStructureChunkBuilds_.end();
 }
 
 void ChunkManager::Impl::buildChunkCpuBlocks(
@@ -14304,24 +15584,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
 {
     const int baseWorldX = chunk.coord.x * kChunkSizeX;
     const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
-
-    if (surfaceMap_)
-    {
-        const int fragmentSize = terrain::SurfaceFragment::kSize;
-        const int minFragmentX = floorDiv(baseWorldX - 1, fragmentSize);
-        const int maxFragmentX = floorDiv(baseWorldX + kChunkSizeX, fragmentSize);
-        const int minFragmentZ = floorDiv(baseWorldZ - 1, fragmentSize);
-        const int maxFragmentZ = floorDiv(baseWorldZ + kChunkSizeZ, fragmentSize);
-
-        for (int fx = minFragmentX; fx <= maxFragmentX; ++fx)
-        {
-            for (int fz = minFragmentZ; fz <= maxFragmentZ; ++fz)
-            {
-                const auto& prefetchedFragment = surfaceMap_->getFragment({fx, fz});
-                (void)prefetchedFragment;
-            }
-        }
-    }
+    warmMetadataPagesForChunk(chunk.coord);
 
     auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
     {
@@ -14355,13 +15618,24 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
 
     const glm::ivec3 queryMin(baseWorldX, chunk.minWorldY, baseWorldZ);
     const glm::ivec3 queryMax(baseWorldX + kChunkSizeX - 1, chunk.maxWorldY, baseWorldZ + kChunkSizeZ - 1);
-    const std::vector<StructureInstance> structures = queryStructureInstances(queryMin, queryMax, 0);
+    bool allStructureRegionsReady = true;
+    std::vector<StructureRegionKey> missingStructureRegions;
+    const std::vector<StructureInstance> structures =
+        queryStructureInstances(queryMin, queryMax, 0, &allStructureRegionsReady, &missingStructureRegions);
     for (const StructureInstance& instance : structures)
     {
         stampStructureInstanceIntoTarget(instance,
                                         [&](int worldX, int worldY, int worldZ, BlockId block, bool replaceSolid) {
                                             scratch.setWorldBlock(worldX, worldY, worldZ, block, replaceSolid);
                                         });
+    }
+    if (!allStructureRegionsReady)
+    {
+        registerDeferredStructureChunkBuild(chunk.coord, queryMin, queryMax, 0, missingStructureRegions);
+    }
+    else
+    {
+        clearDeferredStructureChunkBuild(chunk.coord);
     }
 
     std::vector<PendingStructureEdit> pendingEdits = includePendingStructureEdits

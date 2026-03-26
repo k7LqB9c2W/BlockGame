@@ -273,9 +273,9 @@ ChunkGenerationSummary TerrainGenerator::generateChunkColumns(const glm::ivec3& 
         {
             const int worldX = baseWorldX + dx;
             const int worldZ = baseWorldZ + dz;
-            const SurfaceColumn surfaceColumn = surfaceMap_.columnValue(worldX, worldZ);
+            const ColumnSample neighborSample = sampler_(worldX, worldZ, minWorldY, maxWorldY);
             const std::size_t idx = columnIndex(dx + 1, dz + 1, neighborSizeX);
-            neighborHeights[idx] = surfaceColumn.surfaceY;
+            neighborHeights[idx] = neighborSample.surfaceY;
         }
     }
 

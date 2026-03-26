@@ -50,10 +50,12 @@ struct ColumnHasher
 enum class JobType : std::uint8_t
 {
     Generate = 0,
-    Mesh = 1
+    Mesh = 1,
+    ColumnPrefetch = 2,
+    BulkShellOracle = 3
 };
 
-inline constexpr std::size_t kJobTypeCount = 2;
+inline constexpr std::size_t kJobTypeCount = 4;
 
 enum class JobServiceClass : std::uint8_t
 {
@@ -100,6 +102,15 @@ struct Job
     }
 };
 
+struct JobQueueSnapshot
+{
+    std::array<std::size_t, kJobTypeCount> queuedByType{};
+    std::array<std::size_t, kJobTypeCount> activeByType{};
+    std::array<std::size_t, kJobServiceClassCount> queuedByService{};
+    std::array<std::size_t, kJobServiceClassCount> activeByService{};
+    std::size_t totalQueued{0};
+};
+
 struct ChunkPriorityKey
 {
     int supportBucket{3};
@@ -127,6 +138,7 @@ public:
     std::size_t size(JobType type) const;
     std::size_t outstanding(JobType type) const;
     std::size_t outstanding(JobServiceClass serviceClass) const;
+    JobQueueSnapshot snapshot() const;
     void updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     bool tryUpdatePriorityState(const glm::ivec3& origin, const glm::vec3& forward);
     void setWorkerConcurrency(std::size_t workerCount) noexcept;

@@ -776,6 +776,7 @@ enum class BenchmarkScenarioKind : std::uint8_t
     SpawnPreload = 0,
     FullExactPreload,
     PostReleaseExactFill,
+    StationaryExactFill,
     PostReleaseExactSweepFill,
     StraightLineSprint,
     TurnHeavyTraversal,
@@ -792,8 +793,12 @@ struct BenchmarkConfig
     int exactChunks{kDefaultNearRenderDistance};
     int totalChunks{kDefaultTotalRenderDistanceChunks};
     int fogStartBlocks{kDefaultFarFogStartBlocks};
+    int targetExactReadyChunks{30000};
     float altitudeOffsetBlocks{24.0f};
-    double maxDurationSeconds{600.0};
+    glm::vec3 stationaryPosition{0.0f, 107.5f, 5.0f};
+    float stationaryYawDegrees{0.0f};
+    float stationaryPitchDegrees{-10.0f};
+    double maxDurationSeconds{1800.0};
     double movementDurationSeconds{0.0};
     double cooldownDurationSeconds{0.0};
     double speedBlocksPerSecond{0.0};
@@ -940,6 +945,8 @@ struct BenchmarkFrameSummary
         return "full_exact_preload";
     case BenchmarkScenarioKind::PostReleaseExactFill:
         return "post_release_exact_fill";
+    case BenchmarkScenarioKind::StationaryExactFill:
+        return "stationary_exact_fill";
     case BenchmarkScenarioKind::PostReleaseExactSweepFill:
         return "post_release_exact_sweep_fill";
     case BenchmarkScenarioKind::StraightLineSprint:
@@ -986,6 +993,11 @@ struct BenchmarkFrameSummary
     if (text == "post_release_exact_fill" || text == "release_exact_fill" || text == "spawn_exact_fill")
     {
         outScenario = BenchmarkScenarioKind::PostReleaseExactFill;
+        return true;
+    }
+    if (text == "stationary_exact_fill" || text == "in_game_exact_fill" || text == "static_exact_fill")
+    {
+        outScenario = BenchmarkScenarioKind::StationaryExactFill;
         return true;
     }
     if (text == "post_release_exact_sweep_fill" || text == "release_exact_sweep_fill" ||
@@ -1079,8 +1091,19 @@ struct BenchmarkFrameSummary
         config.totalChunks = blocksToChunkRadiusCeil(legacyFarBlocks);
     }
     (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_FOG_START_BLOCKS", config.fogStartBlocks);
+    (void)tryGetEnvInt("BLOCKGAME_BENCHMARK_TARGET_CHUNKS", config.targetExactReadyChunks);
     config.altitudeOffsetBlocks =
         envFloatOrDefault("BLOCKGAME_BENCHMARK_ALTITUDE_OFFSET", config.altitudeOffsetBlocks);
+    config.stationaryPosition.x =
+        envFloatOrDefault("BLOCKGAME_BENCHMARK_STATIONARY_X", config.stationaryPosition.x);
+    config.stationaryPosition.y =
+        envFloatOrDefault("BLOCKGAME_BENCHMARK_STATIONARY_Y", config.stationaryPosition.y);
+    config.stationaryPosition.z =
+        envFloatOrDefault("BLOCKGAME_BENCHMARK_STATIONARY_Z", config.stationaryPosition.z);
+    config.stationaryYawDegrees =
+        envFloatOrDefault("BLOCKGAME_BENCHMARK_STATIONARY_YAW", config.stationaryYawDegrees);
+    config.stationaryPitchDegrees =
+        envFloatOrDefault("BLOCKGAME_BENCHMARK_STATIONARY_PITCH", config.stationaryPitchDegrees);
     config.maxDurationSeconds = std::max(
         1.0,
         static_cast<double>(
@@ -1091,6 +1114,7 @@ struct BenchmarkFrameSummary
     case BenchmarkScenarioKind::SpawnPreload:
     case BenchmarkScenarioKind::FullExactPreload:
     case BenchmarkScenarioKind::PostReleaseExactFill:
+    case BenchmarkScenarioKind::StationaryExactFill:
     case BenchmarkScenarioKind::PostReleaseExactSweepFill:
         config.movementDurationSeconds = 0.0;
         config.cooldownDurationSeconds = 0.0;
@@ -1111,6 +1135,12 @@ struct BenchmarkFrameSummary
         config.cooldownDurationSeconds = 2.0;
         config.speedBlocksPerSecond = 0.0;
         break;
+    }
+
+    if (config.scenario == BenchmarkScenarioKind::StationaryExactFill)
+    {
+        config.targetExactReadyChunks = std::min(config.targetExactReadyChunks, 30000);
+        config.maxDurationSeconds = std::min(config.maxDurationSeconds, 1800.0);
     }
 
     config.movementDurationSeconds =
@@ -1600,6 +1630,15 @@ void initializeBenchmarkCamera(Camera& camera,
                         runtimeState.scenarioStartYawDegrees,
                         runtimeState.scenarioStartPitchDegrees);
         break;
+    case BenchmarkScenarioKind::StationaryExactFill:
+        runtimeState.scenarioStartPosition = config.stationaryPosition;
+        runtimeState.scenarioStartYawDegrees = config.stationaryYawDegrees;
+        runtimeState.scenarioStartPitchDegrees = config.stationaryPitchDegrees;
+        applyCameraPose(camera,
+                        runtimeState.scenarioStartPosition,
+                        runtimeState.scenarioStartYawDegrees,
+                        runtimeState.scenarioStartPitchDegrees);
+        break;
     case BenchmarkScenarioKind::SpawnPreload:
     case BenchmarkScenarioKind::FullExactPreload:
     case BenchmarkScenarioKind::PostReleaseExactFill:
@@ -1676,6 +1715,12 @@ void applyBenchmarkCameraPose(Camera& camera,
         applyCameraPose(camera, runtimeState.spawnPosition, yaw, runtimeState.scenarioStartPitchDegrees);
         break;
     }
+    case BenchmarkScenarioKind::StationaryExactFill:
+        applyCameraPose(camera,
+                        config.stationaryPosition,
+                        config.stationaryYawDegrees,
+                        config.stationaryPitchDegrees);
+        break;
     case BenchmarkScenarioKind::SpawnPreload:
     case BenchmarkScenarioKind::FullExactPreload:
     case BenchmarkScenarioKind::PostReleaseExactFill:
@@ -1708,6 +1753,7 @@ bool resetBenchmarkProgressLog(const BenchmarkConfig& config)
         << " exact_chunks=" << config.exactChunks
         << " total_chunks=" << config.totalChunks
         << " fog_start_blocks=" << config.fogStartBlocks
+        << " target_exact_ready_chunks=" << config.targetExactReadyChunks
         << '\n';
     return true;
 }
@@ -1995,6 +2041,7 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"max_duration_seconds\":" << config.maxDurationSeconds;
     out << ",\"movement_seconds\":" << config.movementDurationSeconds;
     out << ",\"cooldown_seconds\":" << config.cooldownDurationSeconds;
+    out << ",\"target_exact_ready_chunks\":" << config.targetExactReadyChunks;
     out << ",\"render_settings\":{"
         << "\"exact_chunks\":" << renderSettings.exactChunks
         << ",\"total_chunks\":" << renderSettings.totalChunks
@@ -2063,6 +2110,16 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.visibleScanStage);
     out << ",\"ensure_volume\":";
     writeStageStatsJson(out, report.ensureVolumeStage);
+    out << ",\"ensure_volume_column_prep\":";
+    writeStageStatsJson(out, report.ensureVolumeColumnPrepStage);
+    out << ",\"ensure_volume_sort\":";
+    writeStageStatsJson(out, report.ensureVolumeSortStage);
+    out << ",\"ensure_volume_dispatch\":";
+    writeStageStatsJson(out, report.ensureVolumeDispatchStage);
+    out << ",\"ensure_volume_chunk_lookup\":";
+    writeStageStatsJson(out, report.ensureVolumeChunkLookupStage);
+    out << ",\"ensure_volume_enqueue\":";
+    writeStageStatsJson(out, report.ensureVolumeEnqueueStage);
     out << ",\"scheduling\":";
     writeStageStatsJson(out, report.schedulingStage);
     out << ",\"eviction\":";
@@ -2129,6 +2186,34 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.chunkReadyLatency);
     out << ",\"chunk_ready_wait_generate\":";
     writeStageStatsJson(out, report.chunkReadyWaitGenerateStage);
+    out << ",\"chunk_ready_request_queued_generate\":";
+    writeStageStatsJson(out, report.chunkReadyRequestQueuedGenerateStage);
+    out << ",\"chunk_ready_request_queued_mesh\":";
+    writeStageStatsJson(out, report.chunkReadyRequestQueuedMeshStage);
+    out << ",\"chunk_ready_request_queued_prefetch\":";
+    writeStageStatsJson(out, report.chunkReadyRequestQueuedPrefetchStage);
+    out << ",\"chunk_ready_request_queued_bulk\":";
+    writeStageStatsJson(out, report.chunkReadyRequestQueuedBulkStage);
+    out << ",\"chunk_ready_request_latency_sensitive_outstanding\":";
+    writeStageStatsJson(out, report.chunkReadyRequestLatencySensitiveOutstandingStage);
+    out << ",\"chunk_ready_start_queued_generate\":";
+    writeStageStatsJson(out, report.chunkReadyStartQueuedGenerateStage);
+    out << ",\"chunk_ready_start_queued_mesh\":";
+    writeStageStatsJson(out, report.chunkReadyStartQueuedMeshStage);
+    out << ",\"chunk_ready_start_queued_prefetch\":";
+    writeStageStatsJson(out, report.chunkReadyStartQueuedPrefetchStage);
+    out << ",\"chunk_ready_start_queued_bulk\":";
+    writeStageStatsJson(out, report.chunkReadyStartQueuedBulkStage);
+    out << ",\"chunk_ready_start_active_generate\":";
+    writeStageStatsJson(out, report.chunkReadyStartActiveGenerateStage);
+    out << ",\"chunk_ready_start_active_mesh\":";
+    writeStageStatsJson(out, report.chunkReadyStartActiveMeshStage);
+    out << ",\"chunk_ready_start_active_prefetch\":";
+    writeStageStatsJson(out, report.chunkReadyStartActivePrefetchStage);
+    out << ",\"chunk_ready_start_active_bulk\":";
+    writeStageStatsJson(out, report.chunkReadyStartActiveBulkStage);
+    out << ",\"chunk_ready_start_latency_sensitive_outstanding\":";
+    writeStageStatsJson(out, report.chunkReadyStartLatencySensitiveOutstandingStage);
     out << ",\"chunk_ready_generate\":";
     writeStageStatsJson(out, report.chunkReadyGenerateStage);
     out << ",\"chunk_ready_wait_mesh_enqueue\":";
@@ -2145,6 +2230,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.uploadQueueAgeStage);
     out << ",\"structure_query\":";
     writeStageStatsJson(out, report.structureQueryStage);
+    out << ",\"ensure_volume_columns_visited\":";
+    writeStageStatsJson(out, report.ensureVolumeColumnsVisited);
+    out << ",\"ensure_volume_candidates_built\":";
+    writeStageStatsJson(out, report.ensureVolumeCandidatesBuilt);
+    out << ",\"ensure_volume_existing_chunk_skips\":";
+    writeStageStatsJson(out, report.ensureVolumeExistingChunkSkips);
+    out << ",\"ensure_volume_column_cap_skips\":";
+    writeStageStatsJson(out, report.ensureVolumeColumnCapSkips);
     out << "}";
     out << ",\"upload_detail\":{"
         << "\"queue_scan_entries\":";
@@ -2229,6 +2322,11 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"update_residual_ms\":" << finalProfiling.updateResidualMsLastFrame
         << ",\"dense_residency_ms\":" << finalProfiling.denseResidencyMsLastFrame
         << ",\"ensure_volume_ms\":" << finalProfiling.ensureVolumeMsLastFrame
+        << ",\"ensure_volume_column_prep_ms\":" << finalProfiling.ensureVolumeColumnPrepMsLastFrame
+        << ",\"ensure_volume_sort_ms\":" << finalProfiling.ensureVolumeSortMsLastFrame
+        << ",\"ensure_volume_dispatch_ms\":" << finalProfiling.ensureVolumeDispatchMsLastFrame
+        << ",\"ensure_volume_chunk_lookup_ms\":" << finalProfiling.ensureVolumeChunkLookupMsLastFrame
+        << ",\"ensure_volume_enqueue_ms\":" << finalProfiling.ensureVolumeEnqueueMsLastFrame
         << ",\"scheduling_ms\":" << finalProfiling.schedulingMsLastFrame
         << ",\"eviction_ms\":" << finalProfiling.evictionMsLastFrame
         << ",\"upload_drain_ms\":" << finalProfiling.uploadMsLastFrame
@@ -2284,6 +2382,10 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs
         << ",\"structure_cache_hit_rate\":" << finalProfiling.structureCacheHitRate
         << ",\"structure_regions_built\":" << finalProfiling.structureRegionsBuilt
+        << ",\"ensure_volume_columns_visited_last_frame\":" << finalProfiling.ensureVolumeColumnsVisitedLastFrame
+        << ",\"ensure_volume_candidates_built_last_frame\":" << finalProfiling.ensureVolumeCandidatesBuiltLastFrame
+        << ",\"ensure_volume_existing_chunk_skips_last_frame\":" << finalProfiling.ensureVolumeExistingChunkSkipsLastFrame
+        << ",\"ensure_volume_column_cap_skips_last_frame\":" << finalProfiling.ensureVolumeColumnCapSkipsLastFrame
         << ",\"column_prefetch_queue_depth\":" << finalProfiling.columnPrefetchQueueDepth
         << "}";
     out << ",\"final_streaming\":{"
@@ -3348,7 +3450,7 @@ int runGame()
     if (benchmarkRequested && !benchmarkConfig.enabled)
     {
         std::cerr << "Invalid benchmark configuration. Set BLOCKGAME_BENCHMARK_SCENARIO to one of "
-                  << "spawn_preload, full_exact_preload, post_release_exact_fill, post_release_exact_sweep_fill, straight_line_sprint, "
+                  << "spawn_preload, full_exact_preload, post_release_exact_fill, stationary_exact_fill, post_release_exact_sweep_fill, straight_line_sprint, "
                   << "turn_heavy_traversal, or vertical_travel."
                   << std::endl;
         renderer.shutdown();
@@ -3889,9 +3991,12 @@ int runGame()
             inputContext.showTeleportGUI = false;
             inputContext.cameraMouseCaptured = true;
 
+            const bool benchmarkStartAllowed =
+                benchmarkConfig.scenario == BenchmarkScenarioKind::StationaryExactFill ||
+                playerReleased;
             if (benchmarkConfig.scenario != BenchmarkScenarioKind::SpawnPreload &&
                 benchmarkConfig.scenario != BenchmarkScenarioKind::FullExactPreload &&
-                playerReleased &&
+                benchmarkStartAllowed &&
                 !benchmarkState.started)
             {
                 chunkManager.resetBenchmarkMetrics();
@@ -3944,13 +4049,19 @@ int runGame()
                         benchmarkProfiling.exactChunksPending == 0 &&
                         benchmarkProfiling.uploadQueueDepth == 0 &&
                         completedRequiredSweep;
+                    const bool stationaryExactReady =
+                        benchmarkConfig.scenario == BenchmarkScenarioKind::StationaryExactFill &&
+                        streamingStatus.exactReadyChunks >= benchmarkConfig.targetExactReadyChunks &&
+                        streamingStatus.exactPendingUploads == 0 &&
+                        benchmarkProfiling.uploadQueueDepth == 0;
                     const bool fullExactReady =
+                        benchmarkConfig.scenario != BenchmarkScenarioKind::StationaryExactFill &&
                         streamingStatus.phase == StreamingPhase::SteadyState &&
                         streamingStatus.exactRequiredChunks > 0 &&
                         streamingStatus.exactReadyChunks >= streamingStatus.exactRequiredChunks &&
                         streamingStatus.exactPendingUploads == 0 &&
                         discoverySettled;
-                    if (fullExactReady)
+                    if (fullExactReady || stationaryExactReady)
                     {
                         benchmarkState.completionHoldSeconds += frameTime;
                     }
@@ -3976,6 +4087,7 @@ int runGame()
                 };
 
                 const bool usesAutomatedCamera =
+                    benchmarkConfig.scenario == BenchmarkScenarioKind::StationaryExactFill ||
                     benchmarkConfig.scenario == BenchmarkScenarioKind::StraightLineSprint ||
                     benchmarkConfig.scenario == BenchmarkScenarioKind::TurnHeavyTraversal ||
                     benchmarkConfig.scenario == BenchmarkScenarioKind::VerticalTravel ||
@@ -3983,7 +4095,8 @@ int runGame()
                 if (usesAutomatedCamera)
                 {
                     applyBenchmarkCameraPose(camera, benchmarkConfig, benchmarkState);
-                    if (benchmarkConfig.scenario != BenchmarkScenarioKind::PostReleaseExactSweepFill &&
+                    if (benchmarkConfig.scenario != BenchmarkScenarioKind::StationaryExactFill &&
+                        benchmarkConfig.scenario != BenchmarkScenarioKind::PostReleaseExactSweepFill &&
                         benchmarkState.elapsedSeconds >=
                         benchmarkConfig.movementDurationSeconds + benchmarkConfig.cooldownDurationSeconds)
                     {
@@ -3993,6 +4106,7 @@ int runGame()
                 }
                 if (benchmarkConfig.scenario == BenchmarkScenarioKind::FullExactPreload ||
                     benchmarkConfig.scenario == BenchmarkScenarioKind::PostReleaseExactFill ||
+                    benchmarkConfig.scenario == BenchmarkScenarioKind::StationaryExactFill ||
                     benchmarkConfig.scenario == BenchmarkScenarioKind::PostReleaseExactSweepFill)
                 {
                     (void)updateExactFillCompletion();

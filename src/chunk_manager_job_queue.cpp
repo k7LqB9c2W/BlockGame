@@ -243,6 +243,21 @@ std::size_t JobQueue::outstanding(JobServiceClass serviceClass) const
     return queuedServiceCounts_[index] + activeServiceCounts_[index];
 }
 
+JobQueueSnapshot JobQueue::snapshot() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    JobQueueSnapshot snapshot{};
+    snapshot.totalQueued = queuedJobCount_.load(std::memory_order_relaxed);
+    snapshot.queuedByService = queuedServiceCounts_;
+    snapshot.activeByService = activeServiceCounts_;
+    for (std::size_t index = 0; index < queues_.size(); ++index)
+    {
+        snapshot.queuedByType[index] = queues_[index].size();
+        snapshot.activeByType[index] = activeCounts_[index];
+    }
+    return snapshot;
+}
+
 void JobQueue::updatePriorityState(const glm::ivec3& origin, const glm::vec3& forward)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -371,7 +386,22 @@ JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
     const ChunkPriorityKey priority = buildChunkPriorityKey(job.chunkCoord, priorityOrigin_, priorityForwardXZ_);
     const int lifecycleBias = job.initialReadyPriority ? 0 : 1;
     const int serviceBias = static_cast<int>(job.serviceClass);
-    const int bias = (job.type == JobType::Mesh) ? 0 : 1;
+    int bias = 3;
+    switch (job.type)
+    {
+    case JobType::Mesh:
+        bias = 0;
+        break;
+    case JobType::Generate:
+        bias = 1;
+        break;
+    case JobType::ColumnPrefetch:
+        bias = 2;
+        break;
+    case JobType::BulkShellOracle:
+        bias = 3;
+        break;
+    }
     const std::uint64_t sequence = nextSequence_++;
     return PrioritizedJob{job, priority, lifecycleBias, serviceBias, bias, sequence};
 }
@@ -417,19 +447,105 @@ bool JobQueue::hasQueuedJobsLocked() const noexcept
 
 std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() const noexcept
 {
-    std::array<std::size_t, kJobTypeCount> targets{1, 1};
+    std::array<std::size_t, kJobTypeCount> targets{};
     const std::size_t totalWorkers = std::max<std::size_t>(workerConcurrency_, 1);
-    if (totalWorkers <= 1)
+    const std::size_t generateIndex = jobTypeIndex(JobType::Generate);
+    const std::size_t meshIndex = jobTypeIndex(JobType::Mesh);
+    const std::size_t prefetchIndex = jobTypeIndex(JobType::ColumnPrefetch);
+    const std::size_t bulkShellIndex = jobTypeIndex(JobType::BulkShellOracle);
+    const std::size_t generateBacklog = queues_[generateIndex].size();
+    const std::size_t meshBacklog = queues_[meshIndex].size();
+    const std::size_t prefetchBacklog = queues_[prefetchIndex].size();
+    const std::size_t bulkShellBacklog = queues_[bulkShellIndex].size();
+    const bool generateInitialReadyTop =
+        generateBacklog > 0 && queues_[generateIndex].top().lifecycleBias == 0;
+    const bool meshInitialReadyTop =
+        meshBacklog > 0 && queues_[meshIndex].top().lifecycleBias == 0;
+    const std::size_t latencySensitivePressure =
+        queuedServiceCounts_[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+        queuedServiceCounts_[jobServiceClassIndex(JobServiceClass::LocalInteraction)] +
+        activeServiceCounts_[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+        activeServiceCounts_[jobServiceClassIndex(JobServiceClass::LocalInteraction)];
+    const bool playableBacklog = generateBacklog > 0 || meshBacklog > 0;
+
+    std::size_t prefetchTarget = 0;
+    if (prefetchBacklog > 0)
+    {
+        prefetchTarget = 1;
+        if (!playableBacklog)
+        {
+            prefetchTarget = std::min<std::size_t>(prefetchBacklog, std::min<std::size_t>(totalWorkers, 2));
+        }
+        else if (latencySensitivePressure == 0 && totalWorkers >= 8 && prefetchBacklog > 1)
+        {
+            prefetchTarget = 2;
+        }
+    }
+
+    std::size_t bulkShellTarget = 0;
+    if (bulkShellBacklog > 0)
+    {
+        if (!playableBacklog)
+        {
+            const std::size_t remainingCapacity = (totalWorkers > prefetchTarget)
+                ? (totalWorkers - prefetchTarget)
+                : 0;
+            bulkShellTarget = std::min<std::size_t>(bulkShellBacklog, std::min<std::size_t>(remainingCapacity, 2));
+        }
+        else if (latencySensitivePressure == 0 && totalWorkers >= 10)
+        {
+            bulkShellTarget = 1;
+        }
+    }
+
+    std::size_t playableReserve = 0;
+    if (generateBacklog > 0)
+    {
+        ++playableReserve;
+    }
+    if (meshBacklog > 0)
+    {
+        ++playableReserve;
+    }
+    playableReserve = std::min(playableReserve, totalWorkers);
+
+    std::size_t supportTargetTotal = prefetchTarget + bulkShellTarget;
+    const std::size_t maxSupportWorkers = (totalWorkers > playableReserve)
+        ? (totalWorkers - playableReserve)
+        : 0;
+    if (supportTargetTotal > maxSupportWorkers)
+    {
+        std::size_t overflow = supportTargetTotal - maxSupportWorkers;
+        const std::size_t bulkTrim = std::min(bulkShellTarget, overflow);
+        bulkShellTarget -= bulkTrim;
+        overflow -= bulkTrim;
+        if (overflow > 0)
+        {
+            prefetchTarget -= std::min(prefetchTarget, overflow);
+        }
+        supportTargetTotal = prefetchTarget + bulkShellTarget;
+    }
+
+    targets[prefetchIndex] = prefetchTarget;
+    targets[bulkShellIndex] = bulkShellTarget;
+
+    const std::size_t playableWorkers = totalWorkers - supportTargetTotal;
+    if (playableWorkers == 0)
     {
         return targets;
     }
-
-    const std::size_t generateBacklog = queues_[jobTypeIndex(JobType::Generate)].size();
-    const std::size_t meshBacklog = queues_[jobTypeIndex(JobType::Mesh)].size();
-    const bool generateInitialReadyTop =
-        generateBacklog > 0 && queues_[jobTypeIndex(JobType::Generate)].top().lifecycleBias == 0;
-    const bool meshInitialReadyTop =
-        meshBacklog > 0 && queues_[jobTypeIndex(JobType::Mesh)].top().lifecycleBias == 0;
+    if (playableWorkers == 1)
+    {
+        if (generateBacklog > 0 && meshBacklog == 0)
+        {
+            targets[generateIndex] = 1;
+        }
+        else if (meshBacklog > 0 && generateBacklog == 0)
+        {
+            targets[meshIndex] = 1;
+        }
+        return targets;
+    }
 
     double meshShare = 0.5;
     if (generateInitialReadyTop && meshInitialReadyTop)
@@ -472,22 +588,22 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         meshShare = 0.35;
     }
 
-    std::size_t meshTarget = static_cast<std::size_t>(std::round(meshShare * static_cast<double>(totalWorkers)));
-    meshTarget = std::clamp<std::size_t>(meshTarget, 1, totalWorkers - 1);
-    std::size_t generateTarget = totalWorkers - meshTarget;
+    std::size_t meshTarget = static_cast<std::size_t>(std::round(meshShare * static_cast<double>(playableWorkers)));
+    meshTarget = std::clamp<std::size_t>(meshTarget, 1, playableWorkers - 1);
+    std::size_t generateTarget = playableWorkers - meshTarget;
     if (generateBacklog == 0)
     {
         generateTarget = 0;
-        meshTarget = totalWorkers;
+        meshTarget = playableWorkers;
     }
     else if (meshBacklog == 0)
     {
         meshTarget = 0;
-        generateTarget = totalWorkers;
+        generateTarget = playableWorkers;
     }
 
-    targets[jobTypeIndex(JobType::Generate)] = generateTarget;
-    targets[jobTypeIndex(JobType::Mesh)] = meshTarget;
+    targets[generateIndex] = generateTarget;
+    targets[meshIndex] = meshTarget;
     return targets;
 }
 
@@ -497,25 +613,14 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
     const std::size_t meshIndex = jobTypeIndex(JobType::Mesh);
     const bool generateReady = !queues_[generateIndex].empty();
     const bool meshReady = !queues_[meshIndex].empty();
-
-    if (!meshReady)
+    if (generateReady && meshReady && workerConcurrency_ > 1)
     {
-        return generateIndex;
-    }
-    if (!generateReady)
-    {
-        return meshIndex;
-    }
-
-    const PrioritizedJob& generateTop = queues_[generateIndex].top();
-    const PrioritizedJob& meshTop = queues_[meshIndex].top();
-    const bool generateLatencySensitive =
-        generateTop.serviceBias <= static_cast<int>(JobServiceClass::LocalInteraction);
-    const bool meshLatencySensitive =
-        meshTop.serviceBias <= static_cast<int>(JobServiceClass::LocalInteraction);
-
-    if (workerConcurrency_ > 1)
-    {
+        const PrioritizedJob& generateTop = queues_[generateIndex].top();
+        const PrioritizedJob& meshTop = queues_[meshIndex].top();
+        const bool generateLatencySensitive =
+            generateTop.serviceBias <= static_cast<int>(JobServiceClass::LocalInteraction);
+        const bool meshLatencySensitive =
+            meshTop.serviceBias <= static_cast<int>(JobServiceClass::LocalInteraction);
         const bool reserveGenerateLane = generateLatencySensitive && activeCounts_[generateIndex] == 0;
         const bool reserveMeshLane = meshLatencySensitive && activeCounts_[meshIndex] == 0;
         if (reserveGenerateLane != reserveMeshLane)
@@ -529,19 +634,43 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
     }
 
     const std::array<std::size_t, kJobTypeCount> targets = computeStageTargetsLocked();
-    const bool generateUnderTarget = activeCounts_[generateIndex] < targets[generateIndex];
-    const bool meshUnderTarget = activeCounts_[meshIndex] < targets[meshIndex];
-
-    if (meshUnderTarget != generateUnderTarget)
+    std::size_t bestUnderTarget = kJobTypeCount;
+    std::size_t bestReady = kJobTypeCount;
+    for (std::size_t queueIndex = 0; queueIndex < queues_.size(); ++queueIndex)
     {
-        return meshUnderTarget ? meshIndex : generateIndex;
+        if (queues_[queueIndex].empty())
+        {
+            continue;
+        }
+
+        const PrioritizedJob& candidate = queues_[queueIndex].top();
+        if (bestReady == kJobTypeCount ||
+            comparePrioritizedJobs(candidate, queues_[bestReady].top()) < 0)
+        {
+            bestReady = queueIndex;
+        }
+
+        if (activeCounts_[queueIndex] >= targets[queueIndex])
+        {
+            continue;
+        }
+
+        if (bestUnderTarget == kJobTypeCount ||
+            comparePrioritizedJobs(candidate, queues_[bestUnderTarget].top()) < 0)
+        {
+            bestUnderTarget = queueIndex;
+        }
     }
 
-    if (generateTop.lifecycleBias != meshTop.lifecycleBias)
+    if (bestUnderTarget != kJobTypeCount)
     {
-        return (generateTop.lifecycleBias < meshTop.lifecycleBias) ? generateIndex : meshIndex;
+        return bestUnderTarget;
     }
-    return comparePrioritizedJobs(meshTop, generateTop) <= 0 ? meshIndex : generateIndex;
+    if (bestReady != kJobTypeCount)
+    {
+        return bestReady;
+    }
+    return generateIndex;
 }
 
 void JobQueue::rebuildLocked()

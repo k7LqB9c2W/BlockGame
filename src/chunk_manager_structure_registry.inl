@@ -773,6 +773,70 @@ public:
         return result;
     }
 
+    [[nodiscard]] std::vector<StructureInstance> queryReady(const glm::ivec3& queryMin,
+                                                            const glm::ivec3& queryMax,
+                                                            int lodLevel = 0,
+                                                            bool* outAllRegionsReady = nullptr,
+                                                            std::vector<StructureRegionKey>* outMissingRegions = nullptr) const
+    {
+        const SteadyClock::time_point queryStart = SteadyClock::now();
+        bool allRegionsReady = true;
+        std::vector<StructureInstance> result;
+        const int minRegionX = floorDiv(queryMin.x - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(queryMax.x + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(queryMin.z - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(queryMax.z + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                const StructureRegionKey key{regionX, regionZ};
+                const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
+                if (!region)
+                {
+                    allRegionsReady = false;
+                    if (outMissingRegions != nullptr)
+                    {
+                        outMissingRegions->push_back(key);
+                    }
+                    continue;
+                }
+
+                std::vector<const StructureInstance*> candidates;
+                region->bvh.query(queryMin, queryMax, region->instances, candidates);
+                for (const StructureInstance* candidate : candidates)
+                {
+                    if (candidate == nullptr)
+                    {
+                        continue;
+                    }
+                    if (lodLevel > 0 && candidate->maxLodLevel < lodLevel)
+                    {
+                        continue;
+                    }
+                    result.push_back(*candidate);
+                }
+            }
+        }
+
+        if (outAllRegionsReady != nullptr)
+        {
+            *outAllRegionsReady = allRegionsReady;
+        }
+
+        if (profilingEnabled_.load(std::memory_order_acquire))
+        {
+            queryCount_.fetch_add(1, std::memory_order_relaxed);
+            const auto elapsedMicros =
+                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+            totalQueryMicros_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedMicros, 0)),
+                                        std::memory_order_relaxed);
+        }
+
+        return result;
+    }
+
     [[nodiscard]] std::vector<StructureInstance> copyRegionInstances(const StructureRegionKey& key) const
     {
         const std::shared_ptr<const StructureRegion> region = getOrBuildRegion(key);
@@ -827,7 +891,90 @@ public:
         return merged;
     }
 
+    [[nodiscard]] StructureChunkColumnSpan queryChunkColumnSpanReady(const glm::ivec2& chunkColumn,
+                                                                     bool* outAllRegionsReady = nullptr,
+                                                                     std::vector<StructureRegionKey>* outMissingRegions = nullptr) const
+    {
+        const SteadyClock::time_point queryStart = SteadyClock::now();
+        bool allRegionsReady = true;
+        StructureChunkColumnSpan merged{};
+        const int minWorldX = chunkColumn.x * kChunkSizeX;
+        const int maxWorldX = minWorldX + kChunkSizeX - 1;
+        const int minWorldZ = chunkColumn.y * kChunkSizeZ;
+        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        {
+            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            {
+                const StructureRegionKey key{regionX, regionZ};
+                const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
+                if (!region)
+                {
+                    allRegionsReady = false;
+                    if (outMissingRegions != nullptr)
+                    {
+                        outMissingRegions->push_back(key);
+                    }
+                    continue;
+                }
+
+                const auto it = region->chunkColumnSpans.find(chunkColumn);
+                if (it != region->chunkColumnSpans.end() && it->second.valid())
+                {
+                    merged.include(it->second.minChunkY, it->second.maxChunkY);
+                }
+            }
+        }
+
+        if (outAllRegionsReady != nullptr)
+        {
+            *outAllRegionsReady = allRegionsReady;
+        }
+
+        if (profilingEnabled_.load(std::memory_order_acquire))
+        {
+            queryCount_.fetch_add(1, std::memory_order_relaxed);
+            const auto elapsedMicros =
+                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
+            totalQueryMicros_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedMicros, 0)),
+                                        std::memory_order_relaxed);
+        }
+
+        return merged;
+    }
+
+    [[nodiscard]] std::shared_ptr<const StructureRegion> warmRegion(const StructureRegionKey& key) const
+    {
+        return getOrBuildRegion(key);
+    }
+
+    [[nodiscard]] bool isRegionReady(const StructureRegionKey& key) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return regions_.find(key) != regions_.end();
+    }
+
 private:
+    [[nodiscard]] std::shared_ptr<const StructureRegion> tryGetReadyRegion(const StructureRegionKey& key) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = regions_.find(key);
+        if (it == regions_.end())
+        {
+            return {};
+        }
+        if (profilingEnabled_.load(std::memory_order_acquire))
+        {
+            cacheHits_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return it->second;
+    }
+
     [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegion(const StructureRegionKey& key) const
     {
         std::shared_ptr<PendingStructureRegionBuild> pendingBuild;

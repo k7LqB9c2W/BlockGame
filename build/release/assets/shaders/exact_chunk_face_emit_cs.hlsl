@@ -10,6 +10,8 @@ cbuffer ExactChunkFaceEmitParams : register(b0)
     uint gIndexBase;
     uint gRecordIndex;
     uint gReservedFaceCapacity;
+    uint gResolvedNeighborMask;
+    uint gClosedNeighborMask;
 };
 
 StructuredBuffer<GpuExactColumnDescriptor> gColumns : register(t0);
@@ -48,31 +50,55 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
         return sampleVoxel(gCenterVoxels, x, y, z);
     }
 
+    uint seamBit = 0u;
     if (x == int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gNeighborPosX, 0, y, z);
+        seamBit = kExactNeighborPosXBit;
+        x = 0;
     }
-    if (x == -1 && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    else if (x == -1 && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gNeighborNegX, int(kExactChunkSize) - 1, y, z);
+        seamBit = kExactNeighborNegXBit;
+        x = int(kExactChunkSize) - 1;
     }
-    if (y == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    else if (y == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gNeighborPosY, x, 0, z);
+        seamBit = kExactNeighborPosYBit;
+        y = 0;
     }
-    if (y == -1 && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    else if (y == -1 && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gNeighborNegY, x, int(kExactChunkSize) - 1, z);
+        seamBit = kExactNeighborNegYBit;
+        y = int(kExactChunkSize) - 1;
     }
-    if (z == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
+    else if (z == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
     {
-        return sampleVoxel(gNeighborPosZ, x, y, 0);
+        seamBit = kExactNeighborPosZBit;
+        z = 0;
     }
-    if (z == -1 && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
+    else if (z == -1 && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
     {
-        return sampleVoxel(gNeighborNegZ, x, y, int(kExactChunkSize) - 1);
+        seamBit = kExactNeighborNegZBit;
+        z = int(kExactChunkSize) - 1;
     }
 
+    if (seamBit == 0u)
+    {
+        return encodeVoxel(kBlockAir, 0u, 0u);
+    }
+    if ((gResolvedNeighborMask & seamBit) != 0u)
+    {
+        if (seamBit == kExactNeighborPosXBit) return sampleVoxel(gNeighborPosX, x, y, z);
+        if (seamBit == kExactNeighborNegXBit) return sampleVoxel(gNeighborNegX, x, y, z);
+        if (seamBit == kExactNeighborPosYBit) return sampleVoxel(gNeighborPosY, x, y, z);
+        if (seamBit == kExactNeighborNegYBit) return sampleVoxel(gNeighborNegY, x, y, z);
+        if (seamBit == kExactNeighborPosZBit) return sampleVoxel(gNeighborPosZ, x, y, z);
+        if (seamBit == kExactNeighborNegZBit) return sampleVoxel(gNeighborNegZ, x, y, z);
+    }
+    if ((gClosedNeighborMask & seamBit) != 0u)
+    {
+        return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
+    }
     return encodeVoxel(kBlockAir, 0u, 0u);
 }
 

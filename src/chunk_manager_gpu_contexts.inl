@@ -329,8 +329,7 @@ public:
         faceEmitPipelineState_.Reset();
         exactSynthPipelineState_.Reset();
         exactStampPipelineState_.Reset();
-        exactLightSeedPipelineState_.Reset();
-        exactLightPropagatePipelineState_.Reset();
+        exactLightPipelineState_.Reset();
         exactFaceCountPipelineState_.Reset();
         exactFacePrefixPipelineState_.Reset();
         exactFaceEmitPipelineState_.Reset();
@@ -363,8 +362,7 @@ public:
         faceEmitShader_.Reset();
         exactSynthShader_.Reset();
         exactStampShader_.Reset();
-        exactLightSeedShader_.Reset();
-        exactLightPropagateShader_.Reset();
+        exactLightShader_.Reset();
         exactFaceCountShader_.Reset();
         exactFacePrefixShader_.Reset();
         exactFaceEmitShader_.Reset();
@@ -1621,21 +1619,20 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactLightPass(ID3D12PipelineState* pipelineState,
-                                UINT dispatchX,
-                                UINT dispatchY,
-                                UINT dispatchZ,
-                                ID3D12Resource* centerVoxelBuffer,
-                                ID3D12Resource* neighborPosXBuffer,
-                                ID3D12Resource* neighborNegXBuffer,
-                                ID3D12Resource* neighborPosYBuffer,
-                                ID3D12Resource* neighborNegYBuffer,
-                                ID3D12Resource* neighborPosZBuffer,
-                                ID3D12Resource* neighborNegZBuffer,
-                                ID3D12Resource* destinationVoxelBuffer)
+    void dispatchExactLight(ID3D12Resource* centerVoxelBuffer,
+                            ID3D12Resource* neighborPosXBuffer,
+                            ID3D12Resource* neighborNegXBuffer,
+                            ID3D12Resource* neighborPosYBuffer,
+                            ID3D12Resource* neighborNegYBuffer,
+                            ID3D12Resource* neighborPosZBuffer,
+                            ID3D12Resource* neighborNegZBuffer,
+                            ID3D12Resource* destinationVoxelBuffer,
+                            std::uint32_t resolvedNeighborMask,
+                            std::uint32_t closedNeighborMask,
+                            std::uint32_t propagationPassCount)
     {
         if (!open_ ||
-            pipelineState == nullptr ||
+            exactLightPipelineState_ == nullptr ||
             centerVoxelBuffer == nullptr ||
             neighborPosXBuffer == nullptr ||
             neighborNegXBuffer == nullptr ||
@@ -1650,9 +1647,9 @@ public:
 
         const std::array<std::uint32_t, 4> constants{
             kExactChunkVoxelCount,
-            0u,
-            0u,
-            0u};
+            resolvedNeighborMask,
+            closedNeighborMask,
+            propagationPassCount};
         const UINT descriptorIndex = allocateDescriptorRange(8);
         writeStructuredSrvDescriptor(descriptorIndex + 0u,
                                      centerVoxelBuffer,
@@ -1696,7 +1693,7 @@ public:
                                      kExactChunkPackedVoxelStrideBytes);
         ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
         commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
-        commandList_->SetPipelineState(pipelineState);
+        commandList_->SetPipelineState(exactLightPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactLightRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
         D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
@@ -1705,54 +1702,8 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
         uavHandle.ptr += static_cast<UINT64>(7u) * descriptorSize_;
         commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch(dispatchX, dispatchY, dispatchZ);
+        commandList_->Dispatch(1u, 1u, 1u);
         hasCommands_ = true;
-    }
-
-    void dispatchExactLightSeed(ID3D12Resource* centerVoxelBuffer,
-                                ID3D12Resource* neighborPosXBuffer,
-                                ID3D12Resource* neighborNegXBuffer,
-                                ID3D12Resource* neighborPosYBuffer,
-                                ID3D12Resource* neighborNegYBuffer,
-                                ID3D12Resource* neighborPosZBuffer,
-                                ID3D12Resource* neighborNegZBuffer,
-                                ID3D12Resource* destinationVoxelBuffer)
-    {
-        dispatchExactLightPass(exactLightSeedPipelineState_.Get(),
-                               (kExactChunkSize + 7u) / 8u,
-                               (kExactChunkSize + 7u) / 8u,
-                               1u,
-                               centerVoxelBuffer,
-                               neighborPosXBuffer,
-                               neighborNegXBuffer,
-                               neighborPosYBuffer,
-                               neighborNegYBuffer,
-                               neighborPosZBuffer,
-                               neighborNegZBuffer,
-                               destinationVoxelBuffer);
-    }
-
-    void dispatchExactLightPropagate(ID3D12Resource* centerVoxelBuffer,
-                                     ID3D12Resource* neighborPosXBuffer,
-                                     ID3D12Resource* neighborNegXBuffer,
-                                     ID3D12Resource* neighborPosYBuffer,
-                                     ID3D12Resource* neighborNegYBuffer,
-                                     ID3D12Resource* neighborPosZBuffer,
-                                     ID3D12Resource* neighborNegZBuffer,
-                                     ID3D12Resource* destinationVoxelBuffer)
-    {
-        dispatchExactLightPass(exactLightPropagatePipelineState_.Get(),
-                               (kExactChunkSize + 3u) / 4u,
-                               (kExactChunkSize + 3u) / 4u,
-                               (kExactChunkSize + 3u) / 4u,
-                               centerVoxelBuffer,
-                               neighborPosXBuffer,
-                               neighborNegXBuffer,
-                               neighborPosYBuffer,
-                               neighborNegYBuffer,
-                               neighborPosZBuffer,
-                               neighborNegZBuffer,
-                               destinationVoxelBuffer);
     }
 
     void dispatchExactFaceCount(ID3D12Resource* centerVoxelBuffer,
@@ -1761,7 +1712,9 @@ public:
                                 ID3D12Resource* neighborPosYBuffer,
                                 ID3D12Resource* neighborNegYBuffer,
                                 ID3D12Resource* neighborPosZBuffer,
-                                ID3D12Resource* neighborNegZBuffer)
+                                ID3D12Resource* neighborNegZBuffer,
+                                std::uint32_t resolvedNeighborMask,
+                                std::uint32_t closedNeighborMask)
     {
         if (!open_ ||
             centerVoxelBuffer == nullptr ||
@@ -1792,11 +1745,12 @@ public:
             exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
-        const std::array<std::uint32_t, 4> constants{
+        const std::array<std::uint32_t, 5> constants{
             kExactChunkPlaneCount,
             kExactChunkVoxelCount,
             kExactChunkFaceDescriptorCount,
-            0u};
+            resolvedNeighborMask,
+            closedNeighborMask};
         const UINT descriptorIndex = allocateDescriptorRange(9);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      centerVoxelBuffer,
@@ -1932,6 +1886,8 @@ public:
                                std::uint32_t indexBase,
                                std::uint32_t recordIndex,
                                std::uint32_t reservedFaceCapacity,
+                               std::uint32_t resolvedNeighborMask,
+                               std::uint32_t closedNeighborMask,
                                ID3D12Resource* columnBuffer,
                                ID3D12Resource* centerVoxelBuffer,
                                ID3D12Resource* neighborPosXBuffer,
@@ -2000,7 +1956,7 @@ public:
             exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
 
-        const std::array<std::uint32_t, 8> constants{
+        const std::array<std::uint32_t, 10> constants{
             static_cast<std::uint32_t>(worldMin.x),
             static_cast<std::uint32_t>(worldMin.y),
             static_cast<std::uint32_t>(worldMin.z),
@@ -2008,7 +1964,9 @@ public:
             vertexBase,
             indexBase,
             recordIndex,
-            reservedFaceCapacity};
+            reservedFaceCapacity,
+            resolvedNeighborMask,
+            closedNeighborMask};
         const UINT descriptorIndex = allocateDescriptorRange(16);
         writeStructuredSrvDescriptor(descriptorIndex,
                                      columnBuffer,
@@ -2197,8 +2155,7 @@ public:
                faceEmitPipelineState_ != nullptr &&
                exactSynthPipelineState_ != nullptr &&
                exactStampPipelineState_ != nullptr &&
-               exactLightSeedPipelineState_ != nullptr &&
-               exactLightPropagatePipelineState_ != nullptr &&
+               exactLightPipelineState_ != nullptr &&
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
@@ -2396,10 +2353,8 @@ private:
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_synth_cs.hlsl").string(), "ExactChunkSynthMain", "cs_5_0");
         exactStampShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_structure_stamp_cs.hlsl").string(), "ExactChunkStructureStampMain", "cs_5_0");
-        exactLightSeedShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_light_cs.hlsl").string(), "ExactChunkLightSeedMain", "cs_5_0");
-        exactLightPropagateShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_light_cs.hlsl").string(), "ExactChunkLightPropagateMain", "cs_5_0");
+        exactLightShader_ =
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_light_cs.hlsl").string(), "ExactChunkLightMain", "cs_5_0");
         exactFaceCountShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_count_cs.hlsl").string(), "ExactChunkFaceCountMain", "cs_5_0");
         exactFacePrefixShader_ =
@@ -2828,20 +2783,12 @@ private:
         exactLightDesc.pParameters = exactLightParams.data();
         createRootSignature(exactLightDesc, exactLightRootSignature_, "exact chunk light root signature");
 
-        D3D12_COMPUTE_PIPELINE_STATE_DESC exactLightSeedPso{};
-        exactLightSeedPso.pRootSignature = exactLightRootSignature_.Get();
-        exactLightSeedPso.CS = {exactLightSeedShader_->GetBufferPointer(), exactLightSeedShader_->GetBufferSize()};
-        throwIfFailedDx(device_->CreateComputePipelineState(&exactLightSeedPso,
-                                                            IID_PPV_ARGS(&exactLightSeedPipelineState_)),
-                        "failed to create exact chunk light seed pipeline");
-
-        D3D12_COMPUTE_PIPELINE_STATE_DESC exactLightPropagatePso{};
-        exactLightPropagatePso.pRootSignature = exactLightRootSignature_.Get();
-        exactLightPropagatePso.CS = {exactLightPropagateShader_->GetBufferPointer(),
-                                     exactLightPropagateShader_->GetBufferSize()};
-        throwIfFailedDx(device_->CreateComputePipelineState(&exactLightPropagatePso,
-                                                            IID_PPV_ARGS(&exactLightPropagatePipelineState_)),
-                        "failed to create exact chunk light propagate pipeline");
+        D3D12_COMPUTE_PIPELINE_STATE_DESC exactLightPso{};
+        exactLightPso.pRootSignature = exactLightRootSignature_.Get();
+        exactLightPso.CS = {exactLightShader_->GetBufferPointer(), exactLightShader_->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&exactLightPso,
+                                                            IID_PPV_ARGS(&exactLightPipelineState_)),
+                        "failed to create exact chunk light pipeline");
 
         D3D12_DESCRIPTOR_RANGE exactFaceCountSrvRange{};
         exactFaceCountSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -2857,7 +2804,7 @@ private:
         std::array<D3D12_ROOT_PARAMETER, 3> exactFaceCountParams{};
         exactFaceCountParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceCountParams[0].Constants.ShaderRegister = 0;
-        exactFaceCountParams[0].Constants.Num32BitValues = 4;
+        exactFaceCountParams[0].Constants.Num32BitValues = 5;
         exactFaceCountParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         exactFaceCountParams[1].DescriptorTable.NumDescriptorRanges = 1;
         exactFaceCountParams[1].DescriptorTable.pDescriptorRanges = &exactFaceCountSrvRange;
@@ -2913,7 +2860,7 @@ private:
         std::array<D3D12_ROOT_PARAMETER, 3> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceEmitParams[0].Constants.ShaderRegister = 0;
-        exactFaceEmitParams[0].Constants.Num32BitValues = 8;
+        exactFaceEmitParams[0].Constants.Num32BitValues = 10;
         exactFaceEmitParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         exactFaceEmitParams[1].DescriptorTable.NumDescriptorRanges = 1;
         exactFaceEmitParams[1].DescriptorTable.pDescriptorRanges = &exactFaceEmitSrvRange;
@@ -2955,8 +2902,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> faceEmitShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactSynthShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactStampShader_;
-    Microsoft::WRL::ComPtr<ID3DBlob> exactLightSeedShader_;
-    Microsoft::WRL::ComPtr<ID3DBlob> exactLightPropagateShader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> exactLightShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceCountShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFacePrefixShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceEmitShader_;
@@ -2988,8 +2934,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> faceEmitPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactSynthPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactStampPipelineState_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactLightSeedPipelineState_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactLightPropagatePipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactLightPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFacePrefixPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceEmitPipelineState_;

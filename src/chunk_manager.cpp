@@ -591,7 +591,6 @@ struct ChunkBenchmarkMetrics
         uploadScanLimitHitsPerFrame.reset();
         uploadBeginFailuresPerFrame.reset();
         uploadStalePendingMeshesPerFrame.reset();
-        nonlocalCpuUploadChunksPerFrame.reset();
         relightRegionChunks.reset();
         relightChangedChunks.reset();
         relightExternalSnapshotChunks.reset();
@@ -706,7 +705,6 @@ struct ChunkBenchmarkMetrics
         report.uploadScanLimitHitsPerFrame = uploadScanLimitHitsPerFrame.snapshot();
         report.uploadBeginFailuresPerFrame = uploadBeginFailuresPerFrame.snapshot();
         report.uploadStalePendingMeshesPerFrame = uploadStalePendingMeshesPerFrame.snapshot();
-        report.nonlocalCpuUploadChunksPerFrame = nonlocalCpuUploadChunksPerFrame.snapshot();
         report.relightRegionChunks = relightRegionChunks.snapshot();
         report.relightChangedChunks = relightChangedChunks.snapshot();
         report.relightExternalSnapshotChunks = relightExternalSnapshotChunks.snapshot();
@@ -819,7 +817,6 @@ struct ChunkBenchmarkMetrics
     AtomicCountHistogram uploadScanLimitHitsPerFrame{};
     AtomicCountHistogram uploadBeginFailuresPerFrame{};
     AtomicCountHistogram uploadStalePendingMeshesPerFrame{};
-    AtomicCountHistogram nonlocalCpuUploadChunksPerFrame{};
     AtomicCountHistogram relightRegionChunks{};
     AtomicCountHistogram relightChangedChunks{};
     AtomicCountHistogram relightExternalSnapshotChunks{};
@@ -4324,7 +4321,7 @@ private:
     bool ensureChunkAsync(const glm::ivec3& coord,
                           bool forceResident = false,
                           bool localInteractionPriority = false);
-    void uploadReadyMeshes();
+    void uploadLocalCpuMeshes();
     bool uploadChunkMesh(Chunk& chunk, UINT64 uploadBatchId);
     void buildChunkMeshAsync(Chunk& chunk);
     void updateDenseChunkResidency(const glm::ivec3& centerChunk);
@@ -4837,7 +4834,6 @@ private:
     int uploadScanLimitHitsLastFrame_{0};
     int uploadBeginFailuresLastFrame_{0};
     int uploadStalePendingMeshesLastFrame_{0};
-    int nonlocalCpuUploadChunksLastFrame_{0};
     int ensureVolumeColumnsVisitedLastFrame_{0};
     int ensureVolumeCandidatesBuiltLastFrame_{0};
     int ensureVolumeExistingChunkSkipsLastFrame_{0};
@@ -5897,7 +5893,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     flushReadyDeferredStructureChunks();
     commitPendingExactGpuBuilds();
     submitPendingExactGpuBuilds();
-    uploadReadyMeshes();
+    uploadLocalCpuMeshes();
     const bool runDenseResidencyThisFrame = !stationaryExactFillModeActive_;
     if (runDenseResidencyThisFrame)
     {
@@ -7455,7 +7451,6 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.uploadScanLimitHitsLastFrame = uploadScanLimitHitsLastFrame_;
     snapshot.uploadBeginFailuresLastFrame = uploadBeginFailuresLastFrame_;
     snapshot.uploadStalePendingMeshesLastFrame = uploadStalePendingMeshesLastFrame_;
-    snapshot.nonlocalCpuUploadChunksLastFrame = nonlocalCpuUploadChunksLastFrame_;
     snapshot.evictedChunks = profilingCounters_.evictedChunks.exchange(0, std::memory_order_relaxed);
     snapshot.verticalRadius = lastVerticalRadius_;
     snapshot.verticalRadiusDelta = lastVerticalRadiusDelta_;
@@ -12801,7 +12796,7 @@ bool ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord,
     }
 }
 
-void ChunkManager::Impl::uploadReadyMeshes()
+void ChunkManager::Impl::uploadLocalCpuMeshes()
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     uploadQueueAgeMsLastFrame_ = 0.0;
@@ -12816,7 +12811,6 @@ void ChunkManager::Impl::uploadReadyMeshes()
     uploadScanLimitHitsLastFrame_ = 0;
     uploadBeginFailuresLastFrame_ = 0;
     uploadStalePendingMeshesLastFrame_ = 0;
-    nonlocalCpuUploadChunksLastFrame_ = 0;
     uploadQueuePickMsLastFrame_ = 0.0;
     uploadPrepareMsLastFrame_ = 0.0;
     uploadContextBeginMsLastFrame_ = 0.0;
@@ -12870,7 +12864,6 @@ void ChunkManager::Impl::uploadReadyMeshes()
             benchmarkMetrics_.uploadScanLimitHitsPerFrame.record(0);
             benchmarkMetrics_.uploadStalePendingMeshesPerFrame.record(
                 static_cast<std::uint64_t>(std::max(uploadStalePendingMeshesLastFrame_, 0)));
-            benchmarkMetrics_.nonlocalCpuUploadChunksPerFrame.record(0);
         }
         return;
     }
@@ -12962,10 +12955,6 @@ void ChunkManager::Impl::uploadReadyMeshes()
                 break;
             }
             continue;
-        }
-        if (!shouldKeepChunkInteractive(chunk->coord, lastCenterChunk_))
-        {
-            ++nonlocalCpuUploadChunksLastFrame_;
         }
         chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
         chunk->meshReady.store(false, std::memory_order_release);
@@ -13074,8 +13063,6 @@ void ChunkManager::Impl::uploadReadyMeshes()
             static_cast<std::uint64_t>(std::max(uploadBeginFailuresLastFrame_, 0)));
         benchmarkMetrics_.uploadStalePendingMeshesPerFrame.record(
             static_cast<std::uint64_t>(std::max(uploadStalePendingMeshesLastFrame_, 0)));
-        benchmarkMetrics_.nonlocalCpuUploadChunksPerFrame.record(
-            static_cast<std::uint64_t>(std::max(nonlocalCpuUploadChunksLastFrame_, 0)));
     }
 }
 
@@ -18507,19 +18494,6 @@ ExactChunkResidencyMode ChunkManager::Impl::classifyExactChunkResidencyMode(cons
 
     if (chunk.exactGpuBuildQueued.load(std::memory_order_acquire) ||
         chunk.exactGpuBuildInFlight.load(std::memory_order_acquire))
-    {
-        return ExactChunkResidencyMode::CpuMaterializing;
-    }
-
-    const ChunkState state = chunk.state.load(std::memory_order_acquire);
-    const bool requiresLegacyCpuFallback =
-        state != ChunkState::Uploaded ||
-        chunk.inFlight.load(std::memory_order_acquire) > 0 ||
-        chunk.queuedForUpload.load(std::memory_order_acquire) ||
-        chunk.pendingMesh.valid() ||
-        chunk.pendingMeshRefresh.load(std::memory_order_acquire) ||
-        chunk.meshReady.load(std::memory_order_acquire);
-    if (requiresLegacyCpuFallback)
     {
         return ExactChunkResidencyMode::CpuMaterializing;
     }

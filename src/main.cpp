@@ -2277,8 +2277,6 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeCountStatsJson(out, report.uploadBeginFailuresPerFrame);
     out << ",\"stale_pending_meshes_per_frame\":";
     writeCountStatsJson(out, report.uploadStalePendingMeshesPerFrame);
-    out << ",\"nonlocal_cpu_upload_chunks_per_frame\":";
-    writeCountStatsJson(out, report.nonlocalCpuUploadChunksPerFrame);
     out << "}";
     out << ",\"relight_detail\":{"
         << "\"vertical_radius_delta\":";
@@ -2356,7 +2354,6 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"upload_scan_limit_hits_last_frame\":" << finalProfiling.uploadScanLimitHitsLastFrame
         << ",\"upload_begin_failures_last_frame\":" << finalProfiling.uploadBeginFailuresLastFrame
         << ",\"upload_stale_pending_meshes_last_frame\":" << finalProfiling.uploadStalePendingMeshesLastFrame
-        << ",\"nonlocal_cpu_upload_chunks_last_frame\":" << finalProfiling.nonlocalCpuUploadChunksLastFrame
         << ",\"uploaded_bytes_last_frame\":" << finalProfiling.uploadedBytesLastFrame
         << ",\"far_terrain_update_ms\":" << finalProfiling.farTerrainUpdateMsLastFrame
         << ",\"column_height_lookup_ms\":" << finalProfiling.columnHeightLookupMsLastFrame

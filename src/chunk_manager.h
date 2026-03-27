@@ -309,7 +309,6 @@ struct ChunkProfilingSnapshot
     int uploadScanLimitHitsLastFrame{0};
     int uploadBeginFailuresLastFrame{0};
     int uploadStalePendingMeshesLastFrame{0};
-    int nonlocalCpuUploadChunksLastFrame{0};
     int evictedChunks{0};
     int verticalRadius{0};
     int verticalRadiusDelta{0};
@@ -481,7 +480,6 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats uploadScanLimitHitsPerFrame{};
     BenchmarkStageStats uploadBeginFailuresPerFrame{};
     BenchmarkStageStats uploadStalePendingMeshesPerFrame{};
-    BenchmarkStageStats nonlocalCpuUploadChunksPerFrame{};
     BenchmarkStageStats relightRegionChunks{};
     BenchmarkStageStats relightChangedChunks{};
     BenchmarkStageStats relightExternalSnapshotChunks{};

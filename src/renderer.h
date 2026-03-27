@@ -140,7 +140,9 @@ public:
     void setUploadSynchronization(ID3D12Fence* primaryUploadFence,
                                   UINT64 primaryUploadFenceValue,
                                   ID3D12Fence* secondaryUploadFence = nullptr,
-                                  UINT64 secondaryUploadFenceValue = 0) noexcept;
+                                  UINT64 secondaryUploadFenceValue = 0,
+                                  ID3D12Fence* tertiaryUploadFence = nullptr,
+                                  UINT64 tertiaryUploadFenceValue = 0) noexcept;
 
     [[nodiscard]] ID3D12Device* device() const noexcept;
     [[nodiscard]] ID3D12Fence* frameFence() const noexcept;
@@ -306,13 +308,14 @@ private:
                               std::uint64_t indirectBytes);
     void writePendingScreenshot(const std::filesystem::path& path);
     void buildDepthPyramid();
-    void renderFarBatchGpuCull(const ChunkRenderBatch& batch,
-                               const glm::mat4& viewProj,
-                               D3D12_GPU_VIRTUAL_ADDRESS farConstantsGpuAddress,
-                               D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
-                               D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
-                               D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
-                               D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv);
+    void renderWorldBatchGpuCull(const ChunkRenderBatch& batch,
+                                 const glm::mat4& viewProj,
+                                 ID3D12PipelineState* pipelineState,
+                                 D3D12_GPU_VIRTUAL_ADDRESS worldConstantsGpuAddress,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv);
     void renderShadowMap(const WorldRenderData& renderData,
                          const LoadedTexture& atlasTexture,
                          const glm::mat4& view,
@@ -404,7 +407,7 @@ private:
     std::size_t currentFrameConstantOffset_{0};
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
-    std::array<UploadSyncPoint, 2> uploadSyncPoints_{};
+    std::array<UploadSyncPoint, 3> uploadSyncPoints_{};
     UINT currentBackBufferIndex_{0};
     UINT rtvDescriptorSize_{0};
     UINT dsvDescriptorSize_{0};

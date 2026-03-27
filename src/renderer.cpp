@@ -1121,12 +1121,16 @@ UINT64 Renderer::lastSubmittedFrameFenceValue() const noexcept
 void Renderer::setUploadSynchronization(ID3D12Fence* primaryUploadFence,
                                         UINT64 primaryUploadFenceValue,
                                         ID3D12Fence* secondaryUploadFence,
-                                        UINT64 secondaryUploadFenceValue) noexcept
+                                        UINT64 secondaryUploadFenceValue,
+                                        ID3D12Fence* tertiaryUploadFence,
+                                        UINT64 tertiaryUploadFenceValue) noexcept
 {
     uploadSyncPoints_[0].fence = primaryUploadFence;
     uploadSyncPoints_[0].value = primaryUploadFenceValue;
     uploadSyncPoints_[1].fence = secondaryUploadFence;
     uploadSyncPoints_[1].value = secondaryUploadFenceValue;
+    uploadSyncPoints_[2].fence = tertiaryUploadFence;
+    uploadSyncPoints_[2].value = tertiaryUploadFenceValue;
 }
 
 int Renderer::width() const noexcept
@@ -2929,17 +2933,19 @@ void Renderer::buildDepthPyramid()
     renderDebugLog("buildDepthPyramid: end");
 }
 
-void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
-                                     const glm::mat4& viewProj,
-                                     D3D12_GPU_VIRTUAL_ADDRESS farConstantsGpuAddress,
-                                     D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
-                                     D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
-                                     D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
-                                     D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv)
+void Renderer::renderWorldBatchGpuCull(const ChunkRenderBatch& batch,
+                                       const glm::mat4& viewProj,
+                                       ID3D12PipelineState* pipelineState,
+                                       D3D12_GPU_VIRTUAL_ADDRESS worldConstantsGpuAddress,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv)
 {
     if (batch.gpuCullRecordBuffer == nullptr ||
         batch.gpuCullRecordCount == 0 ||
         !depthPyramid_ ||
+        pipelineState == nullptr ||
         !lodCullRootSignature_ ||
         !lodCullPipelineState_ ||
         !lodIndirectRootSignature_ ||
@@ -2949,7 +2955,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     }
 
     FrameResource& frame = frameResources_[currentBackBufferIndex_];
-    renderDebugLog("renderFarBatchGpuCull: begin");
+    renderDebugLog("renderWorldBatchGpuCull: begin");
     const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
     const std::uint64_t recordBytes = recordCount * sizeof(ChunkRenderBatch::GpuCullRecord);
     const std::uint64_t visibleIndexBytes = std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u);
@@ -2957,7 +2963,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     const std::uint64_t indirectBytes = std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u);
     {
         std::ostringstream sizeLog;
-        sizeLog << "renderFarBatchGpuCull: frame=" << currentBackBufferIndex_
+        sizeLog << "renderWorldBatchGpuCull: frame=" << currentBackBufferIndex_
                 << " recordCount=" << recordCount
                 << " recordBytes=" << recordBytes
                 << " visibleIndexBytes=" << visibleIndexBytes
@@ -2987,7 +2993,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
         frame.farCullCountUploadMapped == nullptr)
     {
         std::ostringstream nullLog;
-        nullLog << "renderFarBatchGpuCull: invalid reusable far cull state"
+        nullLog << "renderWorldBatchGpuCull: invalid reusable cull state"
                 << " recordsBuffer=" << (recordsBuffer != nullptr)
                 << " visibleIndices=" << (visibleIndices != nullptr)
                 << " visibleCount=" << (visibleCount != nullptr)
@@ -3055,7 +3061,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
 
     const UINT dispatchGroups = static_cast<UINT>((recordCount + 63u) / 64u);
     const auto cullStart = std::chrono::steady_clock::now();
-    renderDebugLog("renderFarBatchGpuCull: dispatch cull");
+    renderDebugLog("renderWorldBatchGpuCull: dispatch cull");
     commandList_->SetComputeRootSignature(lodCullRootSignature_.Get());
     commandList_->SetPipelineState(lodCullPipelineState_.Get());
     commandList_->SetComputeRoot32BitConstants(0, 44, &constants, 0);
@@ -3066,7 +3072,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     commandList_->Dispatch(dispatchGroups, 1, 1);
     profilingSnapshot_.lodGpuCullMs +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cullStart).count();
-    renderDebugLog("renderFarBatchGpuCull: cull complete");
+    renderDebugLog("renderWorldBatchGpuCull: cull complete");
 
     std::array<D3D12_RESOURCE_BARRIER, 3> cullBarriers{};
     cullBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -3080,7 +3086,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     const auto indirectStart = std::chrono::steady_clock::now();
-    renderDebugLog("renderFarBatchGpuCull: dispatch indirect build");
+    renderDebugLog("renderWorldBatchGpuCull: dispatch indirect build");
     commandList_->SetComputeRootSignature(lodIndirectRootSignature_.Get());
     commandList_->SetPipelineState(lodIndirectPipelineState_.Get());
     commandList_->SetComputeRootShaderResourceView(0, recordsBuffer->GetGPUVirtualAddress());
@@ -3090,7 +3096,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     commandList_->Dispatch(dispatchGroups, 1, 1);
     profilingSnapshot_.lodIndirectBuildMs +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - indirectStart).count();
-    renderDebugLog("renderFarBatchGpuCull: indirect build complete");
+    renderDebugLog("renderWorldBatchGpuCull: indirect build complete");
 
     std::array<D3D12_RESOURCE_BARRIER, 4> indirectBarriers{};
     indirectBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -3108,8 +3114,8 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
 
     commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
-    commandList_->SetPipelineState(farPipelineState_.Get());
-    commandList_->SetGraphicsRootConstantBufferView(0, farConstantsGpuAddress);
+    commandList_->SetPipelineState(pipelineState);
+    commandList_->SetGraphicsRootConstantBufferView(0, worldConstantsGpuAddress);
     commandList_->SetGraphicsRootDescriptorTable(1, atlasSrv);
     commandList_->SetGraphicsRootDescriptorTable(2, aerialPerspectiveSrv);
     commandList_->SetGraphicsRootDescriptorTable(3, shadowSrv);
@@ -3117,7 +3123,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
     commandList_->IASetIndexBuffer(&batch.indexBufferView);
-    renderDebugLog("renderFarBatchGpuCull: execute indirect");
+    renderDebugLog("renderWorldBatchGpuCull: execute indirect");
     commandList_->ExecuteIndirect(drawIndexedCommandSignature_.Get(),
                                   static_cast<UINT>(recordCount),
                                   indirectArgs,
@@ -3145,7 +3151,7 @@ void Renderer::renderFarBatchGpuCull(const ChunkRenderBatch& batch,
                                            sizeof(std::uint32_t));
         }
     }
-    renderDebugLog("renderFarBatchGpuCull: end");
+    renderDebugLog("renderWorldBatchGpuCull: end");
     if (lodVisibilityDebugLoggingEnabled())
     {
         std::ostringstream stream;
@@ -3261,7 +3267,23 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
             continue;
         }
 
-        if (syncPoint.fence->GetCompletedValue() < syncPoint.value)
+        const UINT64 completedValue = syncPoint.fence->GetCompletedValue();
+        if (completedValue == std::numeric_limits<UINT64>::max() && device_ != nullptr)
+        {
+            std::ostringstream log;
+            log << "Renderer upload sync device_removed"
+                << " fence=" << syncPoint.fence
+                << " target=" << syncPoint.value
+                << " reason=0x" << std::hex
+                << static_cast<std::uint32_t>(device_->GetDeviceRemovedReason());
+            const std::string dredMessages = collectRendererDredMessages();
+            if (!dredMessages.empty())
+            {
+                log << " dred=" << dredMessages;
+            }
+            renderDebugLog(log.str());
+        }
+        if (completedValue < syncPoint.value)
         {
             throwIfFailed(commandQueue_->Wait(syncPoint.fence, syncPoint.value),
                           "failed to wait for upload fence");
@@ -3522,10 +3544,47 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
     if (environment.debug.worldPassEnabled)
     {
+        bool shouldUseGpuWorldCull = false;
+        std::uint64_t maxRecordBytes = 0;
+        std::uint64_t maxVisibleIndexBytes = 0;
+        std::uint64_t maxIndirectBytes = 0;
+        auto accumulateCullBuffers = [&](const ChunkRenderBatch& batch)
+        {
+            if (!batch.supportsGpuCull ||
+                batch.gpuCullRecordBuffer == nullptr ||
+                batch.gpuCullRecordCount == 0)
+            {
+                return;
+            }
+
+            shouldUseGpuWorldCull = true;
+            const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
+            maxRecordBytes = std::max(maxRecordBytes,
+                                      recordCount * sizeof(ChunkRenderBatch::GpuCullRecord));
+            maxVisibleIndexBytes = std::max(maxVisibleIndexBytes,
+                                            std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u));
+            maxIndirectBytes = std::max(maxIndirectBytes,
+                                        std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u));
+        };
+        for (const ChunkRenderBatch& batch : renderData.nearBatches)
+        {
+            accumulateCullBuffers(batch);
+        }
+        for (const ChunkRenderBatch& batch : renderData.farBatches)
+        {
+            accumulateCullBuffers(batch);
+        }
         commandList_->SetPipelineState(nearPipelineState_.Get());
         commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
         for (const ChunkRenderBatch& batch : renderData.nearBatches)
         {
+            if (batch.supportsGpuCull &&
+                batch.gpuCullRecordBuffer != nullptr &&
+                batch.gpuCullRecordCount > 0)
+            {
+                continue;
+            }
+
             if (batch.indexCounts.empty())
             {
                 continue;
@@ -3539,7 +3598,34 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             }
         }
 
-        bool shouldUseGpuFarCull = false;
+        if (shouldUseGpuWorldCull && maxRecordBytes > 0)
+        {
+            FrameResource& frame = frameResources_[currentBackBufferIndex_];
+            ensureFarCullBuffers(frame, maxRecordBytes, maxVisibleIndexBytes, maxIndirectBytes);
+            buildDepthPyramid();
+        }
+
+        commandList_->SetPipelineState(nearPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        for (const ChunkRenderBatch& batch : renderData.nearBatches)
+        {
+            if (!batch.supportsGpuCull ||
+                batch.gpuCullRecordBuffer == nullptr ||
+                batch.gpuCullRecordCount == 0)
+            {
+                continue;
+            }
+
+            renderWorldBatchGpuCull(batch,
+                                    viewProj,
+                                    nearPipelineState_.Get(),
+                                    worldCb,
+                                    atlasTexture.srvGpu,
+                                    atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                                    shadowMapSrvGpu_,
+                                    skyBackgroundSrvGpu_);
+        }
+
         std::size_t farBatchCount = 0;
         std::size_t farCullEligibleBatchCount = 0;
         std::size_t farCullEligibleRecordCount = 0;
@@ -3549,7 +3635,6 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             if (batch.supportsGpuCull &&
                 batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
-                shouldUseGpuFarCull = true;
                 ++farCullEligibleBatchCount;
                 farCullEligibleRecordCount += batch.gpuCullRecordCount;
             }
@@ -3558,47 +3643,10 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         {
             std::ostringstream stream;
             stream << "lodvis render_world far_batches=" << farBatchCount
-                   << " gpu_cull_enabled=" << (shouldUseGpuFarCull ? "y" : "n")
+                   << " gpu_cull_enabled=" << (shouldUseGpuWorldCull ? "y" : "n")
                    << " cull_eligible_batches=" << farCullEligibleBatchCount
                    << " cull_eligible_records=" << farCullEligibleRecordCount;
             lodVisibilityDebugLog(stream.str());
-        }
-        if (shouldUseGpuFarCull)
-        {
-            std::uint64_t maxRecordBytes = 0;
-            std::uint64_t maxVisibleIndexBytes = 0;
-            std::uint64_t maxIndirectBytes = 0;
-            for (const ChunkRenderBatch& batch : renderData.farBatches)
-            {
-                if (!batch.supportsGpuCull ||
-                    batch.gpuCullRecordBuffer == nullptr || batch.gpuCullRecordCount == 0)
-                {
-                    continue;
-                }
-
-                const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
-                maxRecordBytes = std::max(maxRecordBytes,
-                                          recordCount * sizeof(ChunkRenderBatch::GpuCullRecord));
-                maxVisibleIndexBytes = std::max(maxVisibleIndexBytes,
-                                                std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u));
-                maxIndirectBytes = std::max(maxIndirectBytes,
-                                            std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u));
-            }
-
-            if (maxRecordBytes > 0)
-            {
-                FrameResource& frame = frameResources_[currentBackBufferIndex_];
-                std::ostringstream log;
-                log << "renderWorld: ensure far cull buffers once per frame"
-                    << " backBuffer=" << currentBackBufferIndex_
-                    << " maxRecordBytes=" << maxRecordBytes
-                    << " maxVisibleIndexBytes=" << maxVisibleIndexBytes
-                    << " maxIndirectBytes=" << maxIndirectBytes;
-                renderDebugLog(log.str());
-                ensureFarCullBuffers(frame, maxRecordBytes, maxVisibleIndexBytes, maxIndirectBytes);
-            }
-
-            buildDepthPyramid();
         }
 
         void* farCpu = nullptr;
@@ -3613,13 +3661,14 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             if (batch.supportsGpuCull &&
                 batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
-                renderFarBatchGpuCull(batch,
-                                      viewProj,
-                                      farCb,
-                                      atlasTexture.srvGpu,
-                                      atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
-                                      shadowMapSrvGpu_,
-                                      skyBackgroundSrvGpu_);
+                renderWorldBatchGpuCull(batch,
+                                        viewProj,
+                                        farPipelineState_.Get(),
+                                        farCb,
+                                        atlasTexture.srvGpu,
+                                        atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                                        shadowMapSrvGpu_,
+                                        skyBackgroundSrvGpu_);
                 continue;
             }
 

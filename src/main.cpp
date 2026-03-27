@@ -1789,6 +1789,17 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
         << " exact_pct=" << exactPercent
         << " pending_uploads=" << streamingStatus.exactPendingUploads
         << " exact_pending=" << profiling.exactChunksPending
+        << " exact_pages=" << profiling.exactGpuPageCount
+        << " exact_page_mib=" << (static_cast<double>(profiling.exactGpuPageBytes) / (1024.0 * 1024.0))
+        << " exact_oflow=" << profiling.exactGpuBuildOverflows
+        << " exact_rb_fail=" << profiling.exactGpuBuildReadbackFailures
+        << " exact_res_fail=" << profiling.exactGpuBuildResourceFailures
+        << " exact_stale=" << profiling.exactGpuBuildStaleCancels
+        << " exact_submit=" << profiling.exactGpuBuildsSubmitted
+        << " exact_commit=" << profiling.exactGpuBuildsCommitted
+        << " exact_replace=" << profiling.exactGpuMeshReplacements
+        << " exact_qbuild=" << profiling.exactGpuQueuedBuilds
+        << " exact_pbuild=" << profiling.exactGpuPendingBuilds
         << " upload_q=" << profiling.uploadQueueDepth
         << " prefetch_q=" << profiling.columnPrefetchQueueDepth
         << " yaw=" << camera.yaw
@@ -3746,7 +3757,9 @@ int runGame()
         renderer.setUploadSynchronization(chunkManager.uploadFence(),
                                           chunkManager.lastSubmittedUploadFenceValue(),
                                           chunkManager.farUploadFence(),
-                                          chunkManager.lastSubmittedFarUploadFenceValue());
+                                          chunkManager.lastSubmittedFarUploadFenceValue(),
+                                          chunkManager.exactGpuFence(),
+                                          chunkManager.lastSubmittedExactGpuFenceValue());
     }
 
     constexpr double kFixedTimeStep = 1.0 / 60.0;
@@ -4426,7 +4439,9 @@ int runGame()
         renderer.setUploadSynchronization(chunkManager.uploadFence(),
                                           chunkManager.lastSubmittedUploadFenceValue(),
                                           chunkManager.farUploadFence(),
-                                          chunkManager.lastSubmittedFarUploadFenceValue());
+                                          chunkManager.lastSubmittedFarUploadFenceValue(),
+                                          chunkManager.exactGpuFence(),
+                                          chunkManager.lastSubmittedExactGpuFenceValue());
 
         int framebufferWidth = 0;
         int framebufferHeight = 0;

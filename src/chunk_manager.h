@@ -338,6 +338,17 @@ struct ChunkProfilingSnapshot
     int exactGpuResidentNonlocalChunks{0};
     int exactCpuMaterializingChunks{0};
     int exactGpuPendingRetireChunks{0};
+    int exactGpuPageCount{0};
+    std::size_t exactGpuPageBytes{0};
+    int exactGpuBuildOverflows{0};
+    int exactGpuBuildReadbackFailures{0};
+    int exactGpuBuildResourceFailures{0};
+    int exactGpuBuildStaleCancels{0};
+    int exactGpuQueuedBuilds{0};
+    int exactGpuPendingBuilds{0};
+    std::uint64_t exactGpuBuildsSubmitted{0};
+    std::uint64_t exactGpuBuildsCommitted{0};
+    std::uint64_t exactGpuMeshReplacements{0};
     std::size_t pooledChunkCount{0};
     std::size_t pooledChunkBytes{0};
     std::size_t pooledChunkBudgetBytes{0};
@@ -594,6 +605,8 @@ public:
     [[nodiscard]] std::uint64_t lastSubmittedUploadFenceValue() const noexcept;
     [[nodiscard]] ID3D12Fence* farUploadFence() const noexcept;
     [[nodiscard]] std::uint64_t lastSubmittedFarUploadFenceValue() const noexcept;
+    [[nodiscard]] ID3D12Fence* exactGpuFence() const noexcept;
+    [[nodiscard]] std::uint64_t lastSubmittedExactGpuFenceValue() const noexcept;
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);

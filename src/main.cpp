@@ -921,6 +921,15 @@ struct BenchmarkRuntimeState
     std::vector<double> frameTimesMs;
     std::vector<double> lodGpuCullMs;
     std::vector<double> lodIndirectBuildMs;
+    std::vector<double> exactGpuSynthMs;
+    std::vector<double> exactGpuStampMs;
+    std::vector<double> exactGpuLightMs;
+    std::vector<double> exactGpuFaceCountMs;
+    std::vector<double> exactGpuFacePrefixMs;
+    std::vector<double> exactGpuFaceEmitMs;
+    std::vector<double> exactGpuTotalMs;
+    std::vector<double> gpuLocalUsageMiB;
+    std::vector<double> exactGpuTotalMiB;
     std::size_t currentSpikeStreakOver33_3Ms{0};
     BenchmarkSpikeSummary spikeSummary{};
 };
@@ -1800,6 +1809,16 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
         << " exact_replace=" << profiling.exactGpuMeshReplacements
         << " exact_qbuild=" << profiling.exactGpuQueuedBuilds
         << " exact_pbuild=" << profiling.exactGpuPendingBuilds
+        << " exact_gpu_ms={synth:" << profiling.exactGpuSynthMs
+        << ",stamp:" << profiling.exactGpuStampMs
+        << ",light:" << profiling.exactGpuLightMs
+        << ",count:" << profiling.exactGpuFaceCountMs
+        << ",prefix:" << profiling.exactGpuFacePrefixMs
+        << ",emit:" << profiling.exactGpuFaceEmitMs
+        << ",total:" << profiling.exactGpuTotalMs << "}"
+        << " exact_mem_mib=" << (static_cast<double>(profiling.exactGpuTotalBytes) / (1024.0 * 1024.0))
+        << " vram_local_mib=" << (static_cast<double>(profiling.gpuLocalUsageBytes) / (1024.0 * 1024.0))
+        << "/" << (static_cast<double>(profiling.gpuLocalBudgetBytes) / (1024.0 * 1024.0))
         << " upload_q=" << profiling.uploadQueueDepth
         << " prefetch_q=" << profiling.columnPrefetchQueueDepth
         << " yaw=" << camera.yaw
@@ -2037,6 +2056,13 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
 
     const BenchmarkStageStats lodGpuCullStats = summarizeStageSamples(runtimeState.lodGpuCullMs);
     const BenchmarkStageStats lodIndirectBuildStats = summarizeStageSamples(runtimeState.lodIndirectBuildMs);
+    const BenchmarkStageStats exactGpuSynthStats = summarizeStageSamples(runtimeState.exactGpuSynthMs);
+    const BenchmarkStageStats exactGpuStampStats = summarizeStageSamples(runtimeState.exactGpuStampMs);
+    const BenchmarkStageStats exactGpuLightStats = summarizeStageSamples(runtimeState.exactGpuLightMs);
+    const BenchmarkStageStats exactGpuFaceCountStats = summarizeStageSamples(runtimeState.exactGpuFaceCountMs);
+    const BenchmarkStageStats exactGpuFacePrefixStats = summarizeStageSamples(runtimeState.exactGpuFacePrefixMs);
+    const BenchmarkStageStats exactGpuFaceEmitStats = summarizeStageSamples(runtimeState.exactGpuFaceEmitMs);
+    const BenchmarkStageStats exactGpuTotalStats = summarizeStageSamples(runtimeState.exactGpuTotalMs);
 
     out << "{";
     out << "\"schema_version\":2";
@@ -2193,6 +2219,20 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, lodGpuCullStats);
     out << ",\"lod_indirect_build\":";
     writeStageStatsJson(out, lodIndirectBuildStats);
+    out << ",\"exact_gpu_synth\":";
+    writeStageStatsJson(out, exactGpuSynthStats);
+    out << ",\"exact_gpu_stamp\":";
+    writeStageStatsJson(out, exactGpuStampStats);
+    out << ",\"exact_gpu_light\":";
+    writeStageStatsJson(out, exactGpuLightStats);
+    out << ",\"exact_gpu_face_count\":";
+    writeStageStatsJson(out, exactGpuFaceCountStats);
+    out << ",\"exact_gpu_face_prefix\":";
+    writeStageStatsJson(out, exactGpuFacePrefixStats);
+    out << ",\"exact_gpu_face_emit\":";
+    writeStageStatsJson(out, exactGpuFaceEmitStats);
+    out << ",\"exact_gpu_total\":";
+    writeStageStatsJson(out, exactGpuTotalStats);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
     out << ",\"chunk_ready_wait_generate\":";
@@ -2388,6 +2428,13 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"lod_gpu_face_build_ms\":" << finalProfiling.lodGpuFaceBuildMs
         << ",\"lod_gpu_cull_ms\":" << finalProfiling.lodGpuCullMs
         << ",\"lod_indirect_build_ms\":" << finalProfiling.lodIndirectBuildMs
+        << ",\"exact_gpu_synth_ms\":" << finalProfiling.exactGpuSynthMs
+        << ",\"exact_gpu_stamp_ms\":" << finalProfiling.exactGpuStampMs
+        << ",\"exact_gpu_light_ms\":" << finalProfiling.exactGpuLightMs
+        << ",\"exact_gpu_face_count_ms\":" << finalProfiling.exactGpuFaceCountMs
+        << ",\"exact_gpu_face_prefix_ms\":" << finalProfiling.exactGpuFacePrefixMs
+        << ",\"exact_gpu_face_emit_ms\":" << finalProfiling.exactGpuFaceEmitMs
+        << ",\"exact_gpu_total_ms\":" << finalProfiling.exactGpuTotalMs
         << ",\"lod_collect_ms\":" << finalProfiling.farCollectMsLastFrame
         << ",\"lod_upload_ms\":" << finalProfiling.farUploadMsLastFrame
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs
@@ -2397,6 +2444,20 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_gpu_resident_nonlocal_chunks\":" << finalProfiling.exactGpuResidentNonlocalChunks
         << ",\"exact_cpu_materializing_chunks\":" << finalProfiling.exactCpuMaterializingChunks
         << ",\"exact_gpu_pending_retire_chunks\":" << finalProfiling.exactGpuPendingRetireChunks
+        << ",\"exact_gpu_page_bytes\":" << finalProfiling.exactGpuPageBytes
+        << ",\"exact_gpu_column_bytes\":" << finalProfiling.exactGpuColumnBytes
+        << ",\"exact_gpu_sparse_voxel_bytes\":" << finalProfiling.exactGpuSparseVoxelBytes
+        << ",\"exact_gpu_voxel_bytes\":" << finalProfiling.exactGpuVoxelBytes
+        << ",\"exact_gpu_light_scratch_bytes\":" << finalProfiling.exactGpuLightScratchBytes
+        << ",\"exact_gpu_scratch_bytes\":" << finalProfiling.exactGpuScratchBytes
+        << ",\"exact_gpu_upload_scratch_bytes\":" << finalProfiling.exactGpuUploadScratchBytes
+        << ",\"exact_gpu_readback_bytes\":" << finalProfiling.exactGpuReadbackBytes
+        << ",\"exact_gpu_total_bytes\":" << finalProfiling.exactGpuTotalBytes
+        << ",\"gpu_local_usage_bytes\":" << finalProfiling.gpuLocalUsageBytes
+        << ",\"gpu_local_budget_bytes\":" << finalProfiling.gpuLocalBudgetBytes
+        << ",\"gpu_local_available_for_reservation_bytes\":" << finalProfiling.gpuLocalAvailableForReservationBytes
+        << ",\"gpu_non_local_usage_bytes\":" << finalProfiling.gpuNonLocalUsageBytes
+        << ",\"gpu_non_local_budget_bytes\":" << finalProfiling.gpuNonLocalBudgetBytes
         << ",\"ensure_volume_columns_visited_last_frame\":" << finalProfiling.ensureVolumeColumnsVisitedLastFrame
         << ",\"ensure_volume_candidates_built_last_frame\":" << finalProfiling.ensureVolumeCandidatesBuiltLastFrame
         << ",\"ensure_volume_existing_chunk_skips_last_frame\":" << finalProfiling.ensureVolumeExistingChunkSkipsLastFrame
@@ -4038,6 +4099,15 @@ int runGame()
                     benchmarkState.frameTimesMs.clear();
                     benchmarkState.currentSpikeStreakOver33_3Ms = 0;
                     benchmarkState.spikeSummary = BenchmarkSpikeSummary{};
+                    benchmarkState.exactGpuSynthMs.clear();
+                    benchmarkState.exactGpuStampMs.clear();
+                    benchmarkState.exactGpuLightMs.clear();
+                    benchmarkState.exactGpuFaceCountMs.clear();
+                    benchmarkState.exactGpuFacePrefixMs.clear();
+                    benchmarkState.exactGpuFaceEmitMs.clear();
+                    benchmarkState.exactGpuTotalMs.clear();
+                    benchmarkState.gpuLocalUsageMiB.clear();
+                    benchmarkState.exactGpuTotalMiB.clear();
                     initializeBenchmarkCamera(camera, benchmarkConfig, benchmarkState);
                 }
             }
@@ -5354,6 +5424,17 @@ int runGame()
             const RendererProfilingSnapshot frameRendererSnapshot = renderer.profilingSnapshot();
             benchmarkState.lodGpuCullMs.push_back(frameRendererSnapshot.lodGpuCullMs);
             benchmarkState.lodIndirectBuildMs.push_back(frameRendererSnapshot.lodIndirectBuildMs);
+            benchmarkState.exactGpuSynthMs.push_back(frameChunkSnapshot.exactGpuSynthMs);
+            benchmarkState.exactGpuStampMs.push_back(frameChunkSnapshot.exactGpuStampMs);
+            benchmarkState.exactGpuLightMs.push_back(frameChunkSnapshot.exactGpuLightMs);
+            benchmarkState.exactGpuFaceCountMs.push_back(frameChunkSnapshot.exactGpuFaceCountMs);
+            benchmarkState.exactGpuFacePrefixMs.push_back(frameChunkSnapshot.exactGpuFacePrefixMs);
+            benchmarkState.exactGpuFaceEmitMs.push_back(frameChunkSnapshot.exactGpuFaceEmitMs);
+            benchmarkState.exactGpuTotalMs.push_back(frameChunkSnapshot.exactGpuTotalMs);
+            benchmarkState.gpuLocalUsageMiB.push_back(
+                static_cast<double>(frameChunkSnapshot.gpuLocalUsageBytes) / (1024.0 * 1024.0));
+            benchmarkState.exactGpuTotalMiB.push_back(
+                static_cast<double>(frameChunkSnapshot.exactGpuTotalBytes) / (1024.0 * 1024.0));
             const StreamingStatusSnapshot frameStreamingStatus = chunkManager.streamingStatusSnapshot();
             recordBenchmarkSpike(benchmarkState,
                                  frameCpuMs,

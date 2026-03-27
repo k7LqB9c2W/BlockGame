@@ -389,6 +389,17 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.stages.relight.avg_ms,
         $scenario.queues.upload_backlog.avg_depth,
         $scenario.queues.upload_backlog.p95_depth))
+    if ($scenario.stages.exact_gpu_total) {
+        $summaryLines.Add(("  exact_gpu_avg_ms synth={0:F2} stamp={1:F2} light={2:F2} face_count={3:F2}" -f `
+            $scenario.stages.exact_gpu_synth.avg_ms,
+            $scenario.stages.exact_gpu_stamp.avg_ms,
+            $scenario.stages.exact_gpu_light.avg_ms,
+            $scenario.stages.exact_gpu_face_count.avg_ms))
+        $summaryLines.Add(("  exact_gpu_avg_ms face_prefix={0:F2} face_emit={1:F2} total={2:F2}" -f `
+            $scenario.stages.exact_gpu_face_prefix.avg_ms,
+            $scenario.stages.exact_gpu_face_emit.avg_ms,
+            $scenario.stages.exact_gpu_total.avg_ms))
+    }
     if ($scenario.queues.column_prefetch_backlog) {
         $summaryLines.Add(("  column_prefetch_backlog avg={0:F2} p95={1:F2}" -f `
             $scenario.queues.column_prefetch_backlog.avg_depth,
@@ -482,6 +493,24 @@ foreach ($scenario in $scenarioObjects) {
             $scenario.final_profiling.pooled_chunks,
             ($scenario.final_profiling.pooled_chunk_bytes / 1MB),
             ($scenario.final_profiling.pooled_chunk_budget_bytes / 1MB)))
+        if ($scenario.final_profiling.PSObject.Properties.Name -contains "exact_gpu_total_bytes") {
+            $summaryLines.Add(("  exact_gpu_mem_mib total={0:F2} pages={1:F2} voxels={2:F2} light={3:F2}" -f `
+                ($scenario.final_profiling.exact_gpu_total_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_page_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_voxel_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_light_scratch_bytes / 1MB)))
+            $summaryLines.Add(("  exact_gpu_mem_mib columns={0:F2} sparse={1:F2} scratch={2:F2} upload={3:F2} readback={4:F2}" -f `
+                ($scenario.final_profiling.exact_gpu_column_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_sparse_voxel_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_scratch_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_upload_scratch_bytes / 1MB),
+                ($scenario.final_profiling.exact_gpu_readback_bytes / 1MB)))
+            $summaryLines.Add(("  vram_local_mib usage={0:F2} budget={1:F2} non_local_usage={2:F2} non_local_budget={3:F2}" -f `
+                ($scenario.final_profiling.gpu_local_usage_bytes / 1MB),
+                ($scenario.final_profiling.gpu_local_budget_bytes / 1MB),
+                ($scenario.final_profiling.gpu_non_local_usage_bytes / 1MB),
+                ($scenario.final_profiling.gpu_non_local_budget_bytes / 1MB)))
+        }
     }
     $summaryLines.Add(("  frame_avg_ms={0:F2} frame_p95_ms={1:F2} avg_fps={2:F2}" -f `
         $scenario.frame.avg_ms,

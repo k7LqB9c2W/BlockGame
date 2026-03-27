@@ -3973,7 +3973,7 @@ int runGame()
                 loadingStream << phaseName << '\n';
                 loadingStream << "Exact bubble: " << streamingStatus.exactReadyChunks
                               << " / " << streamingStatus.exactRequiredChunks << '\n';
-                loadingStream << "Pending uploads: " << streamingStatus.exactPendingUploads << '\n';
+                loadingStream << "Pending exact GPU builds: " << streamingStatus.exactPendingUploads << '\n';
                 if (chunkManager.totalRenderDistanceChunks() > chunkManager.exactRenderDistanceChunks())
                 {
                     loadingStream << "LOD tiles: " << streamingStatus.farReadyTiles

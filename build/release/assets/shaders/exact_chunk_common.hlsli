@@ -35,7 +35,6 @@ struct GpuExactColumnDescriptor
     uint flags;
     uint stripePeriod;
     uint stripeThickness;
-    uint incomingSky;
     uint grassTintIndex;
     uint surfaceBlock;
     uint fillerBlock;
@@ -43,6 +42,7 @@ struct GpuExactColumnDescriptor
     uint stripeBlock;
     uint reserved0;
     uint reserved1;
+    uint reserved2;
 };
 
 struct GpuExactSparseVoxel
@@ -198,6 +198,28 @@ uint skyAttenuationForBlock(uint blockId)
         return 2u;
     }
     return 15u;
+}
+
+uint propagationLossForBlock(uint blockId)
+{
+    if (blockId == kBlockAir)
+    {
+        return 1u;
+    }
+    if (isLeafBlock(blockId))
+    {
+        return 1u;
+    }
+    if (blockId == kBlockWater)
+    {
+        return 2u;
+    }
+    return 15u;
+}
+
+uint attenuateLight(uint light, uint loss)
+{
+    return (light > loss) ? (light - loss) : 0u;
 }
 
 uint blockEmissionForBlock(uint blockId)

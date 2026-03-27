@@ -51,6 +51,7 @@ inline constexpr int kMaxUserRenderDistance = kMaxExactRenderDistanceChunks;
 inline constexpr int kDefaultTotalRenderDistanceChunks = kDefaultNearRenderDistance;
 inline constexpr int kMaxTotalRenderDistanceChunks = 500;
 inline constexpr int kHiddenExactPreloadBufferChunks = 3;
+inline constexpr int kDefaultStartupExactPreloadChunks = 12;
 inline constexpr int kExtendedViewDistance = 320;
 inline constexpr int kDefaultFarFogStartBlocks = 1400;
 
@@ -682,6 +683,7 @@ public:
     bool isSpawnPreloadReady() const noexcept;
     bool playerReleaseReady() const noexcept;
     StreamingPhase streamingPhase() const noexcept;
+    void setStartupExactPreloadChunks(int chunks) noexcept;
     void setStartupEnabled(bool enabled) noexcept;
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;

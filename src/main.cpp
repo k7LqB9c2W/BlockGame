@@ -3820,6 +3820,8 @@ int runGame()
         benchmarkState.currentSpikeStreakOver33_3Ms = 0;
         benchmarkState.spikeSummary = BenchmarkSpikeSummary{};
     }
+    chunkManager.setStartupExactPreloadChunks(
+        benchmarkConfig.enabled ? benchmarkConfig.exactChunks : kDefaultStartupExactPreloadChunks);
     chunkManager.beginSpawnPreload(camera.position);
 
     if (std::getenv("BLOCKGAME_STREAMING_TEST"))

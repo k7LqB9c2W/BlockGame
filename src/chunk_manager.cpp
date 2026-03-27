@@ -67,7 +67,24 @@ constexpr std::uint64_t kRelightMaxBudgetUnits = 16'000'000ull;
 constexpr std::uint64_t kRelightMinBudgetUnits = 2'500'000ull;
 constexpr int kRelightMinBatchBudget = 4;
 constexpr int kRelightMaxBatchBudget = 24;
+constexpr int kStartupInteractiveExactChunks = 8;
+constexpr int kStartupExactRampStepChunks = 4;
 using SteadyClock = std::chrono::steady_clock;
+
+[[nodiscard]] int nextStartupExactRampChunks(int currentChunks, int maxChunks) noexcept
+{
+    if (maxChunks <= 0)
+    {
+        return 0;
+    }
+
+    if (currentChunks >= maxChunks)
+    {
+        return maxChunks;
+    }
+
+    return std::min(maxChunks, currentChunks + kStartupExactRampStepChunks);
+}
 
 [[nodiscard]] std::uint64_t steadyMicrosNow() noexcept
 {
@@ -3693,6 +3710,7 @@ struct ChunkManager::Impl
     bool isSpawnPreloadReady() const noexcept;
     bool playerReleaseReady() const noexcept;
     StreamingPhase streamingPhase() const noexcept;
+    void setStartupExactPreloadChunks(int chunks) noexcept;
     void setStartupEnabled(bool enabled) noexcept;
     bool startupEnabled() const noexcept;
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
@@ -4561,6 +4579,7 @@ private:
     std::array<BlockUVSet, toIndex(BlockId::Count)> blockUVTable_{};
     bool blockAtlasConfigured_{false};
     RenderDistanceSettings renderSettings_{};
+    int startupExactPreloadChunks_{kDefaultStartupExactPreloadChunks};
     FarTerrainManager farTerrainManager_{};
 
     struct StartupStreamingState
@@ -5870,7 +5889,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             static_cast<std::int64_t>(metricCoverage.ready) * 100 >=
                 static_cast<std::int64_t>(metricCoverage.required) * 95;
         const bool exactReleaseReady =
-            uploadReady && (exactOnlyMode ? exactCoverageMostlyReady : nearReleaseReady);
+            uploadReady &&
+            (exactOnlyMode
+                 ? ((targetViewDistance_ < renderSettings_.exactChunks) ? nearReleaseReady : exactCoverageMostlyReady)
+                 : nearReleaseReady);
         switch (startupState_.phase)
         {
         case StreamingPhase::ExactPreload:
@@ -5878,13 +5900,15 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             startupState_.playerReleaseReady = exactReleaseReady;
             if (exactOnlyMode)
             {
-                startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
                 if (exactReleaseReady)
                 {
                     startupState_.phaseTimeSeconds = 0.0;
                     startupState_.healthyTimeSeconds = 0.0;
                     startupState_.playerReleaseReady = true;
-                    startupState_.phase = StreamingPhase::SteadyState;
+                    startupState_.phase =
+                        (startupState_.exactNearCurrentChunks < renderSettings_.exactChunks)
+                            ? StreamingPhase::FarRamp
+                            : StreamingPhase::SteadyState;
                 }
             }
             else if (exactReady)
@@ -5916,33 +5940,50 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             if (startupState_.healthyTimeSeconds >= 0.75)
             {
                 startupState_.healthyTimeSeconds = 0.0;
-                if (startupState_.exactNearCurrentChunks < std::min(renderSettings_.exactChunks, 8))
+                if (startupState_.exactNearCurrentChunks < std::min(renderSettings_.exactChunks,
+                                                                    kStartupInteractiveExactChunks))
                 {
-                    startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks, 8);
+                    startupState_.exactNearCurrentChunks = std::min(renderSettings_.exactChunks,
+                                                                    kStartupInteractiveExactChunks);
                 }
                 else
                 {
-                    startupState_.phase = StreamingPhase::SteadyState;
+                    startupState_.phase = StreamingPhase::FarRamp;
                     startupState_.phaseTimeSeconds = 0.0;
+                    startupState_.healthyTimeSeconds = 0.0;
                     startupState_.farCurrentBlocks = 0;
                 }
             }
             break;
         case StreamingPhase::FarRamp:
             startupState_.playerReleaseReady = true;
-            if (startupState_.exactNearCurrentChunks < renderSettings_.exactChunks && exactReady)
+            if (startupState_.exactNearCurrentChunks >= renderSettings_.exactChunks)
+            {
+                if (exactReady)
+                {
+                    startupState_.phase = StreamingPhase::SteadyState;
+                    startupState_.phaseTimeSeconds = 0.0;
+                    startupState_.healthyTimeSeconds = 0.0;
+                }
+                else
+                {
+                    startupState_.healthyTimeSeconds = 0.0;
+                }
+            }
+            else if (exactReady)
             {
                 startupState_.healthyTimeSeconds += frameSeconds;
                 if (startupState_.healthyTimeSeconds >= 0.75)
                 {
-                    startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+                    startupState_.exactNearCurrentChunks =
+                        nextStartupExactRampChunks(startupState_.exactNearCurrentChunks, renderSettings_.exactChunks);
+                    startupState_.phaseTimeSeconds = 0.0;
                     startupState_.healthyTimeSeconds = 0.0;
                 }
             }
             else
             {
-                startupState_.phase = StreamingPhase::SteadyState;
-                startupState_.phaseTimeSeconds = 0.0;
+                startupState_.healthyTimeSeconds = 0.0;
             }
             break;
         case StreamingPhase::SteadyState:
@@ -6688,6 +6729,7 @@ void ChunkManager::Impl::setExactRenderDistanceChunks(int chunks) noexcept
     {
         const int clampedDistance = std::clamp(chunks, 1, kMaxExactRenderDistanceChunks);
         renderSettings_.exactChunks = clampedDistance;
+        startupExactPreloadChunks_ = std::min(startupExactPreloadChunks_, renderSettings_.exactChunks);
         if (renderSettings_.totalChunks < renderSettings_.exactChunks)
         {
             renderSettings_.totalChunks = renderSettings_.exactChunks;
@@ -7164,7 +7206,7 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     startupState_.spawnChunk = worldToChunkCoords(static_cast<int>(std::floor(spawnPos.x)),
                                                   std::max(static_cast<int>(std::floor(spawnPos.y)), 0),
                                                   static_cast<int>(std::floor(spawnPos.z)));
-    startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+    startupState_.exactNearCurrentChunks = std::clamp(startupExactPreloadChunks_, 1, renderSettings_.exactChunks);
     startupState_.farCurrentBlocks = 0;
     lastMissingChunks_ = 0;
     cachedExactReadyChunks_ = 0;
@@ -7232,6 +7274,11 @@ void ChunkManager::Impl::setStartupEnabled(bool enabled) noexcept
         targetViewDistance_ = renderSettings_.exactChunks;
         farTerrainManager_.setDistanceBlocks(0);
     }
+}
+
+void ChunkManager::Impl::setStartupExactPreloadChunks(int chunks) noexcept
+{
+    startupExactPreloadChunks_ = std::clamp(chunks, 1, std::max(renderSettings_.exactChunks, 1));
 }
 
 bool ChunkManager::Impl::startupEnabled() const noexcept
@@ -14219,6 +14266,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
+        const std::uint32_t lightClosedNeighborMask =
+            stabilizePreloadSeams ? (pending.pendingNeighborMask & ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit))
+                                  : 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactLight(chunk.exactGpu.voxelBuffer.Get(),
                                             neighborBuffers[0],
@@ -14229,7 +14279,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                             neighborBuffers[5],
                                             chunk.exactGpu.lightScratchBuffer.Get(),
                                             resolvedNeighborMask,
-                                            pending.pendingNeighborMask,
+                                            lightClosedNeighborMask,
                                             kExactGpuLightPropagationPassCount);
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.uavBarrier(chunk.exactGpu.lightScratchBuffer.Get());
@@ -14243,7 +14293,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         std::swap(chunk.exactGpu.voxelBuffer, chunk.exactGpu.lightScratchBuffer);
         std::swap(chunk.exactGpu.voxelState, chunk.exactGpu.lightScratchState);
 
-        const std::uint32_t closedNeighborMask = stabilizePreloadSeams ? pending.pendingNeighborMask : 0u;
+        const std::uint32_t closedNeighborMask =
+            stabilizePreloadSeams ? (pending.pendingNeighborMask & ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit))
+                                  : 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactFaceCount(chunk.exactGpu.voxelBuffer.Get(),
                                                 neighborBuffers[0],
@@ -14381,7 +14433,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-        const std::uint32_t closedNeighborMask = stabilizePreloadSeams ? pending.pendingNeighborMask : 0u;
+        const std::uint32_t closedNeighborMask =
+            stabilizePreloadSeams ? (pending.pendingNeighborMask & ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit))
+                                  : 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.markExactTimingBegin();
@@ -19292,6 +19346,11 @@ bool ChunkManager::playerReleaseReady() const noexcept
 StreamingPhase ChunkManager::streamingPhase() const noexcept
 {
     return impl_->streamingPhase();
+}
+
+void ChunkManager::setStartupExactPreloadChunks(int chunks) noexcept
+{
+    impl_->setStartupExactPreloadChunks(chunks);
 }
 
 void ChunkManager::setStartupEnabled(bool enabled) noexcept

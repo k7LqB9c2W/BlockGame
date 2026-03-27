@@ -103,6 +103,10 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
     }
+    if (seamBit == kExactNeighborPosYBit)
+    {
+        return encodeVoxel(kBlockAir, 15u, 0u);
+    }
     return encodeVoxel(kBlockAir, 0u, 0u);
 }
 
@@ -261,9 +265,9 @@ void faceVertices(uint3 localPos, uint faceId, out float3 p0, out float3 p1, out
     if (faceId == 0u)
     {
         p0 = base + float3(0.0f, 1.0f, 0.0f);
-        p1 = base + float3(1.0f, 1.0f, 0.0f);
+        p1 = base + float3(0.0f, 1.0f, 1.0f);
         p2 = base + float3(1.0f, 1.0f, 1.0f);
-        p3 = base + float3(0.0f, 1.0f, 1.0f);
+        p3 = base + float3(1.0f, 1.0f, 0.0f);
         normal = float3(0.0f, 1.0f, 0.0f);
         return;
     }
@@ -281,35 +285,35 @@ void faceVertices(uint3 localPos, uint faceId, out float3 p0, out float3 p1, out
     if (faceId == 2u)
     {
         p0 = base + float3(0.0f, 0.0f, 0.0f);
-        p1 = base + float3(1.0f, 0.0f, 0.0f);
+        p1 = base + float3(0.0f, 1.0f, 0.0f);
         p2 = base + float3(1.0f, 1.0f, 0.0f);
-        p3 = base + float3(0.0f, 1.0f, 0.0f);
+        p3 = base + float3(1.0f, 0.0f, 0.0f);
         normal = float3(0.0f, 0.0f, -1.0f);
         return;
     }
     if (faceId == 3u)
     {
-        p0 = base + float3(1.0f, 0.0f, 1.0f);
-        p1 = base + float3(0.0f, 0.0f, 1.0f);
-        p2 = base + float3(0.0f, 1.0f, 1.0f);
-        p3 = base + float3(1.0f, 1.0f, 1.0f);
+        p0 = base + float3(0.0f, 0.0f, 1.0f);
+        p1 = base + float3(1.0f, 0.0f, 1.0f);
+        p2 = base + float3(1.0f, 1.0f, 1.0f);
+        p3 = base + float3(0.0f, 1.0f, 1.0f);
         normal = float3(0.0f, 0.0f, 1.0f);
         return;
     }
     if (faceId == 4u)
     {
         p0 = base + float3(1.0f, 0.0f, 0.0f);
-        p1 = base + float3(1.0f, 0.0f, 1.0f);
+        p1 = base + float3(1.0f, 1.0f, 0.0f);
         p2 = base + float3(1.0f, 1.0f, 1.0f);
-        p3 = base + float3(1.0f, 1.0f, 0.0f);
+        p3 = base + float3(1.0f, 0.0f, 1.0f);
         normal = float3(1.0f, 0.0f, 0.0f);
         return;
     }
 
-    p0 = base + float3(0.0f, 0.0f, 1.0f);
-    p1 = base + float3(0.0f, 0.0f, 0.0f);
-    p2 = base + float3(0.0f, 1.0f, 0.0f);
-    p3 = base + float3(0.0f, 1.0f, 1.0f);
+    p0 = base + float3(0.0f, 0.0f, 0.0f);
+    p1 = base + float3(0.0f, 0.0f, 1.0f);
+    p2 = base + float3(0.0f, 1.0f, 1.0f);
+    p3 = base + float3(0.0f, 1.0f, 0.0f);
     normal = float3(-1.0f, 0.0f, 0.0f);
 }
 
@@ -371,7 +375,8 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         const GpuExactColumnDescriptor column = gColumns[columnIndex(localX, localZ)];
         const uint materialFlags = materialFlagsForFace(blockId, faceId, column);
         const uint faceIndex = faceBase + localIndex;
-        const uint vertexIndex = gVertexBase + faceIndex * 4u;
+        const uint localVertexOffset = faceIndex * 4u;
+        const uint vertexIndex = gVertexBase + localVertexOffset;
         const uint indexIndex = gIndexBase + faceIndex * 6u;
 
         float3 p0;
@@ -419,11 +424,11 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         gVertices[vertexIndex + 2u] = v2;
         gVertices[vertexIndex + 3u] = v3;
 
-        gIndices[indexIndex + 0u] = vertexIndex + 0u;
-        gIndices[indexIndex + 1u] = vertexIndex + 1u;
-        gIndices[indexIndex + 2u] = vertexIndex + 2u;
-        gIndices[indexIndex + 3u] = vertexIndex + 2u;
-        gIndices[indexIndex + 4u] = vertexIndex + 3u;
-        gIndices[indexIndex + 5u] = vertexIndex + 0u;
+        gIndices[indexIndex + 0u] = localVertexOffset + 0u;
+        gIndices[indexIndex + 1u] = localVertexOffset + 1u;
+        gIndices[indexIndex + 2u] = localVertexOffset + 2u;
+        gIndices[indexIndex + 3u] = localVertexOffset + 0u;
+        gIndices[indexIndex + 4u] = localVertexOffset + 2u;
+        gIndices[indexIndex + 5u] = localVertexOffset + 3u;
     }
 }

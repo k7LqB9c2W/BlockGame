@@ -63,13 +63,13 @@ uint sampleResolvedNeighbor(uint seamBit, int x, int y, int z)
 
 uint sampleLightingFallback(uint seamBit)
 {
-    if ((gClosedNeighborMask & seamBit) != 0u)
-    {
-        return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
-    }
     if (seamBit == kExactNeighborPosYBit)
     {
         return encodeVoxel(kBlockAir, 15u, 0u);
+    }
+    if ((gClosedNeighborMask & seamBit) != 0u)
+    {
+        return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
     }
     return encodeVoxel(kBlockAir, 0u, 0u);
 }

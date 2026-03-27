@@ -2111,6 +2111,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << "\"generated_chunks\":" << report.generatedChunks
         << ",\"meshed_chunks\":" << report.meshedChunks
         << ",\"uploaded_chunks\":" << report.uploadedChunks
+        << ",\"exact_gpu_builds_submitted\":" << finalProfiling.exactGpuBuildsSubmitted
+        << ",\"exact_gpu_builds_committed\":" << finalProfiling.exactGpuBuildsCommitted
         << ",\"far_built_tiles\":" << report.farBuiltTiles
         << ",\"uploaded_bytes\":" << report.uploadedBytes
         << ",\"generated_chunks_per_sec\":"
@@ -2119,6 +2121,10 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(report.meshedChunks) / runtimeState.elapsedSeconds : 0.0)
         << ",\"uploaded_chunks_per_sec\":"
         << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(report.uploadedChunks) / runtimeState.elapsedSeconds : 0.0)
+        << ",\"exact_gpu_builds_submitted_per_sec\":"
+        << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(finalProfiling.exactGpuBuildsSubmitted) / runtimeState.elapsedSeconds : 0.0)
+        << ",\"exact_gpu_builds_committed_per_sec\":"
+        << (runtimeState.elapsedSeconds > 0.0 ? static_cast<double>(finalProfiling.exactGpuBuildsCommitted) / runtimeState.elapsedSeconds : 0.0)
         << "}";
     out << ",\"stages\":{"
         << "\"sample\":";
@@ -2233,6 +2239,12 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, exactGpuFaceEmitStats);
     out << ",\"exact_gpu_total\":";
     writeStageStatsJson(out, exactGpuTotalStats);
+    out << ",\"exact_gpu_prepare_cpu\":";
+    writeStageStatsJson(out, report.exactGpuPrepareCpuStage);
+    out << ",\"exact_gpu_submit_cpu\":";
+    writeStageStatsJson(out, report.exactGpuSubmitCpuStage);
+    out << ",\"exact_gpu_commit_cpu\":";
+    writeStageStatsJson(out, report.exactGpuCommitCpuStage);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
     out << ",\"chunk_ready_wait_generate\":";
@@ -2435,6 +2447,9 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_gpu_face_prefix_ms\":" << finalProfiling.exactGpuFacePrefixMs
         << ",\"exact_gpu_face_emit_ms\":" << finalProfiling.exactGpuFaceEmitMs
         << ",\"exact_gpu_total_ms\":" << finalProfiling.exactGpuTotalMs
+        << ",\"exact_gpu_prepare_cpu_ms\":" << finalProfiling.exactGpuPrepareCpuMs
+        << ",\"exact_gpu_submit_cpu_ms\":" << finalProfiling.exactGpuSubmitCpuMs
+        << ",\"exact_gpu_commit_cpu_ms\":" << finalProfiling.exactGpuCommitCpuMs
         << ",\"lod_collect_ms\":" << finalProfiling.farCollectMsLastFrame
         << ",\"lod_upload_ms\":" << finalProfiling.farUploadMsLastFrame
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs

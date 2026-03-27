@@ -286,6 +286,9 @@ struct ChunkProfilingSnapshot
     double exactGpuFacePrefixMs{0.0};
     double exactGpuFaceEmitMs{0.0};
     double exactGpuTotalMs{0.0};
+    double exactGpuPrepareCpuMs{0.0};
+    double exactGpuSubmitCpuMs{0.0};
+    double exactGpuCommitCpuMs{0.0};
     double structureQueryMs{0.0};
     double structureCacheHitRate{0.0};
     std::uint64_t structureRegionsBuilt{0};
@@ -465,6 +468,9 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats exactGpuFacePrefixStage{};
     BenchmarkStageStats exactGpuFaceEmitStage{};
     BenchmarkStageStats exactGpuTotalStage{};
+    BenchmarkStageStats exactGpuPrepareCpuStage{};
+    BenchmarkStageStats exactGpuSubmitCpuStage{};
+    BenchmarkStageStats exactGpuCommitCpuStage{};
     BenchmarkStageStats chunkReadyLatency{};
     BenchmarkStageStats chunkReadyWaitGenerateStage{};
     BenchmarkStageStats chunkReadyRequestQueuedGenerateStage{};

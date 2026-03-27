@@ -371,6 +371,11 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.duration_seconds,
         $scenario.throughput.generated_chunks_per_sec,
         $scenario.throughput.uploaded_chunks_per_sec))
+    if ($scenario.throughput.exact_gpu_builds_committed_per_sec) {
+        $summaryLines.Add(("  exact_gpu_cps submitted={0:F2} committed={1:F2}" -f `
+            $scenario.throughput.exact_gpu_builds_submitted_per_sec,
+            $scenario.throughput.exact_gpu_builds_committed_per_sec))
+    }
     $summaryLines.Add(("  chunk_ready_ms median={0:F2} p95={1:F2}" -f `
         $scenario.stages.chunk_ready_latency.median_ms,
         $scenario.stages.chunk_ready_latency.p95_ms))
@@ -399,6 +404,12 @@ foreach ($scenario in $scenarioObjects) {
             $scenario.stages.exact_gpu_face_prefix.avg_ms,
             $scenario.stages.exact_gpu_face_emit.avg_ms,
             $scenario.stages.exact_gpu_total.avg_ms))
+        if ($scenario.stages.exact_gpu_prepare_cpu -and $scenario.stages.exact_gpu_submit_cpu -and $scenario.stages.exact_gpu_commit_cpu) {
+            $summaryLines.Add(("  exact_gpu_cpu_avg_ms prepare={0:F2} submit={1:F2} commit={2:F2}" -f `
+                $scenario.stages.exact_gpu_prepare_cpu.avg_ms,
+                $scenario.stages.exact_gpu_submit_cpu.avg_ms,
+                $scenario.stages.exact_gpu_commit_cpu.avg_ms))
+        }
     }
     if ($scenario.queues.column_prefetch_backlog) {
         $summaryLines.Add(("  column_prefetch_backlog avg={0:F2} p95={1:F2}" -f `

@@ -263,6 +263,13 @@ public:
         std::uint64_t entryOffset{0};
     };
 
+    struct ExactFaceTotalsReadback
+    {
+        ScratchAllocation allocation{};
+        std::uint64_t strideBytes{0};
+        std::uint32_t buildCount{0};
+    };
+
     struct ExactOverflowEntry
     {
         std::uint32_t buildIndex{0};
@@ -421,7 +428,7 @@ public:
         exactTimestampSubmittedCount_ = 0;
         exactTimestampPendingFenceValue_ = 0;
         exactTimingPending_ = false;
-        exactTimingsAvailable_ = false;
+        exactTimingCaptureActive_ = false;
         exactLastCompletedTimings_ = {};
     }
 
@@ -547,11 +554,13 @@ public:
     void beginExactTimingBatch()
     {
         exactTimestampCursor_ = 0;
+        exactTimingCaptureActive_ = !exactTimingPending_;
     }
 
     void markExactTimingBegin()
     {
-        if (!open_ || exactTimestampQueryHeap_ == nullptr || exactTimestampCursor_ >= kExactTimestampQueryCount)
+        if (!open_ || !exactTimingCaptureActive_ || exactTimestampQueryHeap_ == nullptr ||
+            exactTimestampCursor_ >= kExactTimestampQueryCount)
         {
             return;
         }
@@ -562,7 +571,8 @@ public:
 
     void markExactTimingEnd()
     {
-        if (!open_ || exactTimestampQueryHeap_ == nullptr || exactTimestampCursor_ >= kExactTimestampQueryCount)
+        if (!open_ || !exactTimingCaptureActive_ || exactTimestampQueryHeap_ == nullptr ||
+            exactTimestampCursor_ >= kExactTimestampQueryCount)
         {
             return;
         }
@@ -1742,6 +1752,40 @@ public:
         return readback;
     }
 
+    [[nodiscard]] ExactFaceTotalsReadback queueExactFaceTotalsReadback(std::uint32_t buildCount)
+    {
+        ExactFaceTotalsReadback readback{};
+        if (!open_ || buildCount == 0u || exactFaceTotalScratchBuffer_ == nullptr)
+        {
+            return readback;
+        }
+
+        const std::uint64_t totalSize =
+            static_cast<std::uint64_t>(buildCount) * static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
+        readback.allocation = allocateReadback(totalSize, alignof(std::uint32_t));
+        readback.strideBytes = static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
+        readback.buildCount = buildCount;
+        if (readback.allocation.resource == nullptr)
+        {
+            return readback;
+        }
+
+        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        {
+            transition(exactFaceTotalScratchBuffer_.Get(),
+                       exactFaceTotalScratchState_,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+
+        copyBuffer(readback.allocation.resource,
+                   readback.allocation.offset,
+                   exactFaceTotalScratchBuffer_.Get(),
+                   0,
+                   totalSize);
+        return readback;
+    }
+
     void dispatchExactSynth(int chunkMinWorldY,
                             ID3D12Resource* columnBuffer,
                             ID3D12Resource* voxelBuffer)
@@ -2085,10 +2129,12 @@ public:
             return result;
         }
 
-        throwIfFailedDx(commandList_->Close(), "failed to close far lod compute command list");
         if (hasCommands_)
         {
-            if (exactTimestampQueryHeap_ != nullptr && exactTimestampReadbackBuffer_ != nullptr && exactTimestampCursor_ > 1)
+            if (exactTimingCaptureActive_ &&
+                exactTimestampQueryHeap_ != nullptr &&
+                exactTimestampReadbackBuffer_ != nullptr &&
+                exactTimestampCursor_ > 1)
             {
                 commandList_->ResolveQueryData(exactTimestampQueryHeap_.Get(),
                                                D3D12_QUERY_TYPE_TIMESTAMP,
@@ -2097,15 +2143,23 @@ public:
                                                exactTimestampReadbackBuffer_.Get(),
                                                0);
             }
+        }
+
+        throwIfFailedDx(commandList_->Close(), "failed to close far lod compute command list");
+        if (hasCommands_)
+        {
             ID3D12CommandList* lists[] = {commandList_.Get()};
             queue_->ExecuteCommandLists(static_cast<UINT>(std::size(lists)), lists);
             ++fenceValue_;
             throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal far lod compute fence");
             lastSubmittedFenceValue_ = fenceValue_;
             result.fenceValue = fenceValue_;
-            exactTimestampPendingFenceValue_ = fenceValue_;
-            exactTimestampSubmittedCount_ = exactTimestampCursor_;
-            exactTimingPending_ = exactTimestampCursor_ > 1;
+            if (exactTimingCaptureActive_ && exactTimestampCursor_ > 1)
+            {
+                exactTimestampPendingFenceValue_ = fenceValue_;
+                exactTimestampSubmittedCount_ = exactTimestampCursor_;
+                exactTimingPending_ = true;
+            }
             if (chunkManagerDebugLoggingEnabled())
             {
                 std::ostringstream stream;
@@ -2120,6 +2174,7 @@ public:
 
         open_ = false;
         hasCommands_ = false;
+        exactTimingCaptureActive_ = false;
         return result;
     }
 
@@ -2208,7 +2263,7 @@ public:
         return fence_.Get();
     }
 
-    [[nodiscard]] ExactPassTimings consumeExactPassTimings()
+    [[nodiscard]] ExactPassTimings latestExactPassTimings()
     {
         if (exactTimingPending_ &&
             exactTimestampReadbackBuffer_ != nullptr &&
@@ -2221,7 +2276,9 @@ public:
                 0, static_cast<SIZE_T>(exactTimestampSubmittedCount_ * sizeof(std::uint64_t))};
             throwIfFailedDx(exactTimestampReadbackBuffer_->Map(0, &timestampRange, &mappedTimestamps),
                             "failed to map exact compute timestamp readback");
-            std::memcpy(timestamps.data(), mappedTimestamps, exactTimestampSubmittedCount_ * sizeof(std::uint64_t));
+            std::memcpy(timestamps.data(),
+                        mappedTimestamps,
+                        exactTimestampSubmittedCount_ * sizeof(std::uint64_t));
             exactTimestampReadbackBuffer_->Unmap(0, nullptr);
 
             const auto timestampMs = [this](std::uint64_t begin, std::uint64_t end) -> double
@@ -2247,16 +2304,9 @@ public:
                               timings.faceCountMs + timings.facePrefixMs + timings.faceEmitMs;
 
             exactLastCompletedTimings_ = timings;
-            exactTimingsAvailable_ = true;
             exactTimingPending_ = false;
         }
 
-        if (!exactTimingsAvailable_)
-        {
-            return {};
-        }
-
-        exactTimingsAvailable_ = false;
         return exactLastCompletedTimings_;
     }
 
@@ -2279,6 +2329,11 @@ public:
                     static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes)) +
                sizeof(std::uint32_t) +
                static_cast<std::size_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry);
+    }
+
+    [[nodiscard]] std::size_t maxExactGpuBuildBatches() const noexcept
+    {
+        return static_cast<std::size_t>(kMaxExactGpuBuildBatches);
     }
 
     [[nodiscard]] const std::byte* readbackMappedData() const noexcept
@@ -2349,8 +2404,9 @@ private:
         ((kExactChunkPackedVoxelStrideBytes + kExactIndirectRootBufferAlignment - 1u) /
          kExactIndirectRootBufferAlignment) *
         kExactIndirectRootBufferAlignment;
-    static constexpr std::uint32_t kMaxExactGpuBuildBatches = 16u;
-    static constexpr UINT kExactTimestampQueryCount = 192u;
+    static constexpr std::uint32_t kMaxExactGpuBuildBatches = 64u;
+    static constexpr UINT kExactTimestampQueriesPerBuild = 12u;
+    static constexpr UINT kExactTimestampQueryCount = kExactTimestampQueriesPerBuild * kMaxExactGpuBuildBatches;
     static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
 
     void createExactResources()
@@ -2406,11 +2462,30 @@ private:
         queryHeapDesc.Count = kExactTimestampQueryCount;
         throwIfFailedDx(device_->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&exactTimestampQueryHeap_)),
                         "failed to create exact chunk timestamp query heap");
-        std::byte* unusedMappedPtr = nullptr;
-        exactTimestampReadbackBuffer_ =
-            createReadbackBuffer(device_.Get(),
-                                 static_cast<std::uint64_t>(kExactTimestampQueryCount) * sizeof(std::uint64_t),
-                                 unusedMappedPtr);
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        heapProps.CreationNodeMask = 1;
+        heapProps.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = static_cast<std::uint64_t>(kExactTimestampQueryCount) * sizeof(std::uint64_t);
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_UNKNOWN;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        throwIfFailedDx(device_->CreateCommittedResource(&heapProps,
+                                                         D3D12_HEAP_FLAG_NONE,
+                                                         &desc,
+                                                         D3D12_RESOURCE_STATE_COPY_DEST,
+                                                         nullptr,
+                                                         IID_PPV_ARGS(&exactTimestampReadbackBuffer_)),
+                        "failed to create exact chunk timestamp readback buffer");
         throwIfFailedDx(queue_->GetTimestampFrequency(&exactTimestampFrequency_),
                         "failed to query exact chunk compute timestamp frequency");
         setDebugObjectName(exactTimestampQueryHeap_.Get(), L"ExactChunkTimestampQueryHeap");
@@ -3076,7 +3151,7 @@ private:
     UINT64 exactTimestampFrequency_{0};
     UINT64 exactTimestampPendingFenceValue_{0};
     bool exactTimingPending_{false};
-    bool exactTimingsAvailable_{false};
+    bool exactTimingCaptureActive_{false};
     ExactPassTimings exactLastCompletedTimings_{};
     bool open_{false};
     bool hasCommands_{false};

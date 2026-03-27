@@ -260,84 +260,6 @@ public:
         std::uint32_t reserved1{0};
     };
 
-    struct ExactSynthIndirectArgs
-    {
-        std::array<std::uint32_t, 4> constants{};
-        D3D12_GPU_VIRTUAL_ADDRESS columnBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS voxelBuffer{0};
-        D3D12_DISPATCH_ARGUMENTS dispatch{};
-    };
-
-    struct ExactStampIndirectArgs
-    {
-        std::array<std::uint32_t, 4> constants{};
-        D3D12_GPU_VIRTUAL_ADDRESS sparseVoxelBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS voxelBuffer{0};
-        D3D12_DISPATCH_ARGUMENTS dispatch{};
-    };
-
-    struct ExactLightIndirectArgs
-    {
-        std::array<std::uint32_t, 4> constants{};
-        D3D12_GPU_VIRTUAL_ADDRESS centerVoxelBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosXBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegXBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosYBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegYBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosZBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegZBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS destinationVoxelBuffer{0};
-        D3D12_DISPATCH_ARGUMENTS dispatch{};
-    };
-
-    struct ExactFaceCountIndirectArgs
-    {
-        std::array<std::uint32_t, 6> constants{};
-        D3D12_GPU_VIRTUAL_ADDRESS centerVoxelBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosXBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegXBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosYBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegYBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosZBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegZBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS faceCountBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS faceDescriptorBuffer{0};
-        D3D12_DISPATCH_ARGUMENTS dispatch{};
-    };
-
-    struct ExactFacePrefixIndirectArgs
-    {
-        std::array<std::uint32_t, 4> constants{};
-        D3D12_GPU_VIRTUAL_ADDRESS faceCountBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS facePrefixBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS faceTotalBuffer{0};
-        D3D12_DISPATCH_ARGUMENTS dispatch{};
-    };
-
-    struct ExactFaceEmitIndirectArgs
-    {
-        std::array<std::uint32_t, 12> constants{};
-        D3D12_GPU_VIRTUAL_ADDRESS columnBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS centerVoxelBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosXBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegXBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosYBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegYBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborPosZBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS neighborNegZBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS faceCountBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS faceDescriptorBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS facePrefixBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS faceTotalBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS blockUvBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS vertexBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS indexBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS drawRecordBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS overflowCountBuffer{0};
-        D3D12_GPU_VIRTUAL_ADDRESS overflowEntryBuffer{0};
-        D3D12_DISPATCH_ARGUMENTS dispatch{};
-    };
-
     struct FlushResult
     {
         UINT64 fenceValue{0};
@@ -425,12 +347,6 @@ public:
         exactFaceCountPipelineState_.Reset();
         exactFacePrefixPipelineState_.Reset();
         exactFaceEmitPipelineState_.Reset();
-        exactSynthCommandSignature_.Reset();
-        exactStampCommandSignature_.Reset();
-        exactLightCommandSignature_.Reset();
-        exactFaceCountCommandSignature_.Reset();
-        exactFacePrefixCommandSignature_.Reset();
-        exactFaceEmitCommandSignature_.Reset();
         atlasSeedRootSignature_.Reset();
         atlasSampleRootSignature_.Reset();
         atlasFinalizeRootSignature_.Reset();
@@ -1639,7 +1555,7 @@ public:
 
     [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFaceCountScratchAddress(std::uint32_t buildIndex) const noexcept
     {
-        if (exactFaceCountScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        if (exactFaceCountScratchBuffer_ == nullptr || buildIndex >= kMaxExactGpuBuildBatches)
         {
             return 0;
         }
@@ -1651,7 +1567,7 @@ public:
 
     [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFaceDescriptorScratchAddress(std::uint32_t buildIndex) const noexcept
     {
-        if (exactFaceDescriptorScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        if (exactFaceDescriptorScratchBuffer_ == nullptr || buildIndex >= kMaxExactGpuBuildBatches)
         {
             return 0;
         }
@@ -1663,7 +1579,7 @@ public:
 
     [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFacePrefixScratchAddress(std::uint32_t buildIndex) const noexcept
     {
-        if (exactFacePrefixScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        if (exactFacePrefixScratchBuffer_ == nullptr || buildIndex >= kMaxExactGpuBuildBatches)
         {
             return 0;
         }
@@ -1675,7 +1591,7 @@ public:
 
     [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFaceTotalScratchAddress(std::uint32_t buildIndex) const noexcept
     {
-        if (exactFaceTotalScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        if (exactFaceTotalScratchBuffer_ == nullptr || buildIndex >= kMaxExactGpuBuildBatches)
         {
             return 0;
         }
@@ -2112,226 +2028,6 @@ public:
         hasCommands_ = true;
     }
 
-    void executeExactSynthIndirect(ID3D12Resource* argumentBuffer,
-                                   std::uint64_t argumentOffset,
-                                   std::uint32_t commandCount)
-    {
-        if (!open_ || exactSynthCommandSignature_ == nullptr || argumentBuffer == nullptr || commandCount == 0u)
-        {
-            return;
-        }
-
-        commandList_->SetPipelineState(exactSynthPipelineState_.Get());
-        commandList_->SetComputeRootSignature(exactSynthRootSignature_.Get());
-        commandList_->ExecuteIndirect(exactSynthCommandSignature_.Get(),
-                                      commandCount,
-                                      argumentBuffer,
-                                      argumentOffset,
-                                      nullptr,
-                                      0);
-        hasCommands_ = true;
-    }
-
-    void executeExactStampIndirect(ID3D12Resource* argumentBuffer,
-                                   std::uint64_t argumentOffset,
-                                   std::uint32_t commandCount)
-    {
-        if (!open_ || exactStampCommandSignature_ == nullptr || argumentBuffer == nullptr || commandCount == 0u)
-        {
-            return;
-        }
-
-        commandList_->SetPipelineState(exactStampPipelineState_.Get());
-        commandList_->SetComputeRootSignature(exactStampRootSignature_.Get());
-        commandList_->ExecuteIndirect(exactStampCommandSignature_.Get(),
-                                      commandCount,
-                                      argumentBuffer,
-                                      argumentOffset,
-                                      nullptr,
-                                      0);
-        hasCommands_ = true;
-    }
-
-    void executeExactLightIndirect(ID3D12Resource* argumentBuffer,
-                                   std::uint64_t argumentOffset,
-                                   std::uint32_t commandCount)
-    {
-        if (!open_ || exactLightCommandSignature_ == nullptr || argumentBuffer == nullptr || commandCount == 0u)
-        {
-            return;
-        }
-
-        commandList_->SetPipelineState(exactLightPipelineState_.Get());
-        commandList_->SetComputeRootSignature(exactLightRootSignature_.Get());
-        commandList_->ExecuteIndirect(exactLightCommandSignature_.Get(),
-                                      commandCount,
-                                      argumentBuffer,
-                                      argumentOffset,
-                                      nullptr,
-                                      0);
-        hasCommands_ = true;
-    }
-
-    void executeExactFaceCountIndirect(ID3D12Resource* argumentBuffer,
-                                       std::uint64_t argumentOffset,
-                                       std::uint32_t commandCount)
-    {
-        if (!open_ ||
-            exactFaceCountCommandSignature_ == nullptr ||
-            argumentBuffer == nullptr ||
-            commandCount == 0u ||
-            exactFaceCountScratchBuffer_ == nullptr ||
-            exactFaceDescriptorScratchBuffer_ == nullptr)
-        {
-            return;
-        }
-
-        if (exactFaceCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactFaceCountScratchBuffer_.Get(),
-                       exactFaceCountScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-        if (exactFaceDescriptorScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactFaceDescriptorScratchBuffer_.Get(),
-                       exactFaceDescriptorScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-
-        commandList_->SetPipelineState(exactFaceCountPipelineState_.Get());
-        commandList_->SetComputeRootSignature(exactFaceCountRootSignature_.Get());
-        commandList_->ExecuteIndirect(exactFaceCountCommandSignature_.Get(),
-                                      commandCount,
-                                      argumentBuffer,
-                                      argumentOffset,
-                                      nullptr,
-                                      0);
-        hasCommands_ = true;
-    }
-
-    void executeExactFacePrefixIndirect(ID3D12Resource* argumentBuffer,
-                                        std::uint64_t argumentOffset,
-                                        std::uint32_t commandCount)
-    {
-        if (!open_ ||
-            exactFacePrefixCommandSignature_ == nullptr ||
-            argumentBuffer == nullptr ||
-            commandCount == 0u ||
-            exactFaceCountScratchBuffer_ == nullptr ||
-            exactFacePrefixScratchBuffer_ == nullptr ||
-            exactFaceTotalScratchBuffer_ == nullptr)
-        {
-            return;
-        }
-
-        if (exactFaceCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactFaceCountScratchBuffer_.Get(),
-                       exactFaceCountScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-        if (exactFacePrefixScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactFacePrefixScratchBuffer_.Get(),
-                       exactFacePrefixScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactFaceTotalScratchBuffer_.Get(),
-                       exactFaceTotalScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-
-        commandList_->SetPipelineState(exactFacePrefixPipelineState_.Get());
-        commandList_->SetComputeRootSignature(exactFacePrefixRootSignature_.Get());
-        commandList_->ExecuteIndirect(exactFacePrefixCommandSignature_.Get(),
-                                      commandCount,
-                                      argumentBuffer,
-                                      argumentOffset,
-                                      nullptr,
-                                      0);
-        hasCommands_ = true;
-    }
-
-    void executeExactFaceEmitIndirect(ID3D12Resource* argumentBuffer,
-                                      std::uint64_t argumentOffset,
-                                      std::uint32_t commandCount)
-    {
-        if (!open_ ||
-            exactFaceEmitCommandSignature_ == nullptr ||
-            argumentBuffer == nullptr ||
-            commandCount == 0u ||
-            exactFaceCountScratchBuffer_ == nullptr ||
-            exactFaceDescriptorScratchBuffer_ == nullptr ||
-            exactFacePrefixScratchBuffer_ == nullptr ||
-            exactFaceTotalScratchBuffer_ == nullptr ||
-            exactOverflowCountScratchBuffer_ == nullptr ||
-            exactOverflowEntryScratchBuffer_ == nullptr)
-        {
-            return;
-        }
-
-        if (exactFaceCountScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-        {
-            transition(exactFaceCountScratchBuffer_.Get(),
-                       exactFaceCountScratchState_,
-                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
-        if (exactFaceDescriptorScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-        {
-            transition(exactFaceDescriptorScratchBuffer_.Get(),
-                       exactFaceDescriptorScratchState_,
-                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
-        if (exactFacePrefixScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-        {
-            transition(exactFacePrefixScratchBuffer_.Get(),
-                       exactFacePrefixScratchState_,
-                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
-        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-        {
-            transition(exactFaceTotalScratchBuffer_.Get(),
-                       exactFaceTotalScratchState_,
-                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
-        if (exactOverflowCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactOverflowCountScratchBuffer_.Get(),
-                       exactOverflowCountScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-        if (exactOverflowEntryScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            transition(exactOverflowEntryScratchBuffer_.Get(),
-                       exactOverflowEntryScratchState_,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        }
-
-        commandList_->SetPipelineState(exactFaceEmitPipelineState_.Get());
-        commandList_->SetComputeRootSignature(exactFaceEmitRootSignature_.Get());
-        commandList_->ExecuteIndirect(exactFaceEmitCommandSignature_.Get(),
-                                      commandCount,
-                                      argumentBuffer,
-                                      argumentOffset,
-                                      nullptr,
-                                      0);
-        hasCommands_ = true;
-    }
-
     [[nodiscard]] FlushResult flush()
     {
         FlushResult result{};
@@ -2428,12 +2124,6 @@ public:
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
-               exactSynthCommandSignature_ != nullptr &&
-               exactStampCommandSignature_ != nullptr &&
-               exactLightCommandSignature_ != nullptr &&
-               exactFaceCountCommandSignature_ != nullptr &&
-               exactFacePrefixCommandSignature_ != nullptr &&
-               exactFaceEmitCommandSignature_ != nullptr &&
                exactFaceCountScratchBuffer_ != nullptr &&
                exactFaceDescriptorScratchBuffer_ != nullptr &&
                exactFacePrefixScratchBuffer_ != nullptr &&
@@ -2525,29 +2215,29 @@ private:
         ((kExactChunkPackedVoxelStrideBytes + kExactIndirectRootBufferAlignment - 1u) /
          kExactIndirectRootBufferAlignment) *
         kExactIndirectRootBufferAlignment;
-    static constexpr std::uint32_t kMaxExactIndirectBatchBuilds = 16u;
+    static constexpr std::uint32_t kMaxExactGpuBuildBatches = 16u;
     static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
 
     void createExactResources()
     {
         exactFaceCountScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                           static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                                                           static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
                                                                kExactFaceCountScratchSliceBytes,
                                                            D3D12_RESOURCE_STATE_COMMON,
                                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFaceDescriptorScratchBuffer_ = createDefaultBuffer(
             device_.Get(),
-            static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
                 kExactFaceDescriptorScratchSliceBytes,
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFacePrefixScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                            static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                                                            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
                                                                 kExactFacePrefixScratchSliceBytes,
                                                             D3D12_RESOURCE_STATE_COMMON,
                                                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFaceTotalScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                           static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                                                           static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
                                                                kExactFaceTotalScratchSliceBytes,
                                                            D3D12_RESOURCE_STATE_COMMON,
                                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -2557,7 +2247,7 @@ private:
                                                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactOverflowEntryScratchBuffer_ = createDefaultBuffer(
             device_.Get(),
-            static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) * sizeof(ExactOverflowEntry),
+            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry),
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         setDebugObjectName(exactFaceCountScratchBuffer_.Get(), L"ExactChunkFaceCountScratch");
@@ -3013,17 +2703,6 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&faceEmitPso, IID_PPV_ARGS(&faceEmitPipelineState_)),
                         "failed to create far lod face emit pipeline");
 
-        D3D12_DESCRIPTOR_RANGE exactSingleSrvRange{};
-        exactSingleSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        exactSingleSrvRange.NumDescriptors = 1;
-        exactSingleSrvRange.BaseShaderRegister = 0;
-        exactSingleSrvRange.OffsetInDescriptorsFromTableStart = 0;
-        D3D12_DESCRIPTOR_RANGE exactSingleUavRange{};
-        exactSingleUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        exactSingleUavRange.NumDescriptors = 1;
-        exactSingleUavRange.BaseShaderRegister = 0;
-        exactSingleUavRange.OffsetInDescriptorsFromTableStart = 0;
-
         std::array<D3D12_ROOT_PARAMETER, 3> exactSynthParams{};
         exactSynthParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactSynthParams[0].Constants.ShaderRegister = 0;
@@ -3043,25 +2722,6 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactSynthPso, IID_PPV_ARGS(&exactSynthPipelineState_)),
                         "failed to create exact chunk synth pipeline");
 
-        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 4> exactSynthIndirectArgs{};
-        exactSynthIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        exactSynthIndirectArgs[0].Constant.RootParameterIndex = 0;
-        exactSynthIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
-        exactSynthIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
-        exactSynthIndirectArgs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
-        exactSynthIndirectArgs[1].ShaderResourceView.RootParameterIndex = 1;
-        exactSynthIndirectArgs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactSynthIndirectArgs[2].UnorderedAccessView.RootParameterIndex = 2;
-        exactSynthIndirectArgs[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC exactSynthCommandSignatureDesc{};
-        exactSynthCommandSignatureDesc.ByteStride = sizeof(ExactSynthIndirectArgs);
-        exactSynthCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactSynthIndirectArgs.size());
-        exactSynthCommandSignatureDesc.pArgumentDescs = exactSynthIndirectArgs.data();
-        throwIfFailedDx(device_->CreateCommandSignature(&exactSynthCommandSignatureDesc,
-                                                        exactSynthRootSignature_.Get(),
-                                                        IID_PPV_ARGS(&exactSynthCommandSignature_)),
-                        "failed to create exact chunk synth command signature");
-
         std::array<D3D12_ROOT_PARAMETER, 3> exactStampParams{};
         exactStampParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactStampParams[0].Constants.ShaderRegister = 0;
@@ -3080,25 +2740,6 @@ private:
         exactStampPso.CS = {exactStampShader_->GetBufferPointer(), exactStampShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&exactStampPso, IID_PPV_ARGS(&exactStampPipelineState_)),
                         "failed to create exact chunk stamp pipeline");
-
-        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 4> exactStampIndirectArgs{};
-        exactStampIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        exactStampIndirectArgs[0].Constant.RootParameterIndex = 0;
-        exactStampIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
-        exactStampIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
-        exactStampIndirectArgs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
-        exactStampIndirectArgs[1].ShaderResourceView.RootParameterIndex = 1;
-        exactStampIndirectArgs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactStampIndirectArgs[2].UnorderedAccessView.RootParameterIndex = 2;
-        exactStampIndirectArgs[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC exactStampCommandSignatureDesc{};
-        exactStampCommandSignatureDesc.ByteStride = sizeof(ExactStampIndirectArgs);
-        exactStampCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactStampIndirectArgs.size());
-        exactStampCommandSignatureDesc.pArgumentDescs = exactStampIndirectArgs.data();
-        throwIfFailedDx(device_->CreateCommandSignature(&exactStampCommandSignatureDesc,
-                                                        exactStampRootSignature_.Get(),
-                                                        IID_PPV_ARGS(&exactStampCommandSignature_)),
-                        "failed to create exact chunk stamp command signature");
 
         std::array<D3D12_ROOT_PARAMETER, 9> exactLightParams{};
         exactLightParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -3122,28 +2763,6 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactLightPso,
                                                             IID_PPV_ARGS(&exactLightPipelineState_)),
                         "failed to create exact chunk light pipeline");
-
-        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 10> exactLightIndirectArgs{};
-        exactLightIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        exactLightIndirectArgs[0].Constant.RootParameterIndex = 0;
-        exactLightIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
-        exactLightIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
-        for (UINT argumentIndex = 1; argumentIndex <= 7; ++argumentIndex)
-        {
-            exactLightIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
-            exactLightIndirectArgs[argumentIndex].ShaderResourceView.RootParameterIndex = argumentIndex;
-        }
-        exactLightIndirectArgs[8].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactLightIndirectArgs[8].UnorderedAccessView.RootParameterIndex = 8;
-        exactLightIndirectArgs[9].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC exactLightCommandSignatureDesc{};
-        exactLightCommandSignatureDesc.ByteStride = sizeof(ExactLightIndirectArgs);
-        exactLightCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactLightIndirectArgs.size());
-        exactLightCommandSignatureDesc.pArgumentDescs = exactLightIndirectArgs.data();
-        throwIfFailedDx(device_->CreateCommandSignature(&exactLightCommandSignatureDesc,
-                                                        exactLightRootSignature_.Get(),
-                                                        IID_PPV_ARGS(&exactLightCommandSignature_)),
-                        "failed to create exact chunk light command signature");
 
         std::array<D3D12_ROOT_PARAMETER, 10> exactFaceCountParams{};
         exactFaceCountParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -3169,30 +2788,6 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactFaceCountPso, IID_PPV_ARGS(&exactFaceCountPipelineState_)),
                         "failed to create exact chunk face count pipeline");
 
-        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 11> exactFaceCountIndirectArgs{};
-        exactFaceCountIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        exactFaceCountIndirectArgs[0].Constant.RootParameterIndex = 0;
-        exactFaceCountIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
-        exactFaceCountIndirectArgs[0].Constant.Num32BitValuesToSet = 6;
-        for (UINT argumentIndex = 1; argumentIndex <= 7; ++argumentIndex)
-        {
-            exactFaceCountIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
-            exactFaceCountIndirectArgs[argumentIndex].ShaderResourceView.RootParameterIndex = argumentIndex;
-        }
-        exactFaceCountIndirectArgs[8].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactFaceCountIndirectArgs[8].UnorderedAccessView.RootParameterIndex = 8;
-        exactFaceCountIndirectArgs[9].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactFaceCountIndirectArgs[9].UnorderedAccessView.RootParameterIndex = 9;
-        exactFaceCountIndirectArgs[10].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC exactFaceCountCommandSignatureDesc{};
-        exactFaceCountCommandSignatureDesc.ByteStride = sizeof(ExactFaceCountIndirectArgs);
-        exactFaceCountCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactFaceCountIndirectArgs.size());
-        exactFaceCountCommandSignatureDesc.pArgumentDescs = exactFaceCountIndirectArgs.data();
-        throwIfFailedDx(device_->CreateCommandSignature(&exactFaceCountCommandSignatureDesc,
-                                                        exactFaceCountRootSignature_.Get(),
-                                                        IID_PPV_ARGS(&exactFaceCountCommandSignature_)),
-                        "failed to create exact chunk face count command signature");
-
         std::array<D3D12_ROOT_PARAMETER, 4> exactPrefixParams{};
         exactPrefixParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactPrefixParams[0].Constants.ShaderRegister = 0;
@@ -3213,27 +2808,6 @@ private:
         exactPrefixPso.CS = {exactFacePrefixShader_->GetBufferPointer(), exactFacePrefixShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&exactPrefixPso, IID_PPV_ARGS(&exactFacePrefixPipelineState_)),
                         "failed to create exact chunk face prefix pipeline");
-
-        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 5> exactPrefixIndirectArgs{};
-        exactPrefixIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        exactPrefixIndirectArgs[0].Constant.RootParameterIndex = 0;
-        exactPrefixIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
-        exactPrefixIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
-        exactPrefixIndirectArgs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactPrefixIndirectArgs[1].UnorderedAccessView.RootParameterIndex = 1;
-        exactPrefixIndirectArgs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactPrefixIndirectArgs[2].UnorderedAccessView.RootParameterIndex = 2;
-        exactPrefixIndirectArgs[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-        exactPrefixIndirectArgs[3].UnorderedAccessView.RootParameterIndex = 3;
-        exactPrefixIndirectArgs[4].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC exactPrefixCommandSignatureDesc{};
-        exactPrefixCommandSignatureDesc.ByteStride = sizeof(ExactFacePrefixIndirectArgs);
-        exactPrefixCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactPrefixIndirectArgs.size());
-        exactPrefixCommandSignatureDesc.pArgumentDescs = exactPrefixIndirectArgs.data();
-        throwIfFailedDx(device_->CreateCommandSignature(&exactPrefixCommandSignatureDesc,
-                                                        exactFacePrefixRootSignature_.Get(),
-                                                        IID_PPV_ARGS(&exactFacePrefixCommandSignature_)),
-                        "failed to create exact chunk face prefix command signature");
 
         std::array<D3D12_ROOT_PARAMETER, 19> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -3260,30 +2834,6 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactFaceEmitPso, IID_PPV_ARGS(&exactFaceEmitPipelineState_)),
                         "failed to create exact chunk face emit pipeline");
 
-        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 20> exactFaceEmitIndirectArgs{};
-        exactFaceEmitIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        exactFaceEmitIndirectArgs[0].Constant.RootParameterIndex = 0;
-        exactFaceEmitIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
-        exactFaceEmitIndirectArgs[0].Constant.Num32BitValuesToSet = 12;
-        for (UINT argumentIndex = 1; argumentIndex <= 13; ++argumentIndex)
-        {
-            exactFaceEmitIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
-            exactFaceEmitIndirectArgs[argumentIndex].ShaderResourceView.RootParameterIndex = argumentIndex;
-        }
-        for (UINT argumentIndex = 14; argumentIndex <= 18; ++argumentIndex)
-        {
-            exactFaceEmitIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
-            exactFaceEmitIndirectArgs[argumentIndex].UnorderedAccessView.RootParameterIndex = argumentIndex;
-        }
-        exactFaceEmitIndirectArgs[19].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC exactFaceEmitCommandSignatureDesc{};
-        exactFaceEmitCommandSignatureDesc.ByteStride = sizeof(ExactFaceEmitIndirectArgs);
-        exactFaceEmitCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactFaceEmitIndirectArgs.size());
-        exactFaceEmitCommandSignatureDesc.pArgumentDescs = exactFaceEmitIndirectArgs.data();
-        throwIfFailedDx(device_->CreateCommandSignature(&exactFaceEmitCommandSignatureDesc,
-                                                        exactFaceEmitRootSignature_.Get(),
-                                                        IID_PPV_ARGS(&exactFaceEmitCommandSignature_)),
-                        "failed to create exact chunk face emit command signature");
     }
 
     static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
@@ -3345,12 +2895,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFacePrefixPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceEmitPipelineState_;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactSynthCommandSignature_;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactStampCommandSignature_;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactLightCommandSignature_;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactFaceCountCommandSignature_;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactFacePrefixCommandSignature_;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactFaceEmitCommandSignature_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptorHeap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> uploadScratch_;
     std::byte* uploadScratchMapped_{nullptr};

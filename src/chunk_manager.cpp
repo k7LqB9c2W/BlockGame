@@ -3466,7 +3466,7 @@ inline constexpr std::uint32_t kExactGpuMinFaceCapacity = 256u;
 inline constexpr std::uint32_t kExactGpuInitialFaceCapacity = 256u;
 inline constexpr std::uint32_t kExactGpuEstimatedFaceCapacityCap = 384u;
 inline constexpr std::size_t kMaxOutstandingExactGpuBuilds = 1024u;
-inline constexpr std::size_t kExactGpuIndirectBatchBuildCapacity = 16u;
+inline constexpr std::size_t kExactGpuBuildBatchCapacity = 16u;
 inline constexpr std::uint32_t kExactGpuLightPropagationPassCount = 15u;
 inline constexpr std::uint8_t kExactGpuSeamPosXBit = 1u << 0u;
 inline constexpr std::uint8_t kExactGpuSeamNegXBit = 1u << 1u;
@@ -3921,8 +3921,8 @@ private:
                     JobServiceClass serviceClass = JobServiceClass::Standard);
     void processJob(const Job& job);
     std::shared_ptr<Chunk> popNextChunkForUpload();
-    void queueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket = false);
-    void requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket);
+    void queueChunkForLocalCpuUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket = false);
+    void requeueChunkForLocalCpuUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket);
     [[nodiscard]] ChunkPriorityKey buildUploadPriorityKey(const glm::ivec3& coord,
                                                           const glm::ivec3& origin,
                                                           const glm::vec3& forward) const noexcept;
@@ -8095,27 +8095,37 @@ void ChunkManager::Impl::processJob(const Job& job)
 
         if (chunk->hasBlocks.load(std::memory_order_acquire))
         {
+            const bool localCpuMeshPath = shouldKeepChunkInteractive(job.chunkCoord, lastCenterChunk_);
             chunk->pendingMeshRefresh.store(false, std::memory_order_release);
-            chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
             setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Meshing);
             if (benchmarkEnabled)
             {
                 storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
             }
-            enqueueJob(chunk,
-                       JobType::Mesh,
-                       job.chunkCoord,
-                       0,
-                       true,
-                       JobServiceClass::InitialVisible);
-            if (chunk->cpuDataResident && shouldKeepChunkInteractive(job.chunkCoord, lastCenterChunk_))
+            if (!localCpuMeshPath)
+            {
+                chunk->state.store(ChunkState::Meshing, std::memory_order_release);
+                queueChunkForExactGpuRefresh(chunk);
+            }
+            else
+            {
+                chunk->state.store(ChunkState::Remeshing, std::memory_order_release);
+                enqueueJob(chunk,
+                           JobType::Mesh,
+                           job.chunkCoord,
+                           0,
+                           true,
+                           JobServiceClass::InitialVisible);
+            }
+            if (chunk->cpuDataResident && localCpuMeshPath)
             {
                 queueRelightRequest(job.chunkCoord, false);
             }
             if (shouldTrackRecentEditChunk(chunk->coord))
             {
                 std::ostringstream stream;
-                stream << "generate -> first mesh chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z << ")";
+                stream << (localCpuMeshPath ? "generate -> first mesh chunk=(" : "generate -> exact gpu refresh chunk=(")
+                       << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z << ")";
                 appendRecentEditDebugEvent(stream.str());
             }
         }
@@ -8136,22 +8146,6 @@ void ChunkManager::Impl::processJob(const Job& job)
     }
     else if (job.type == JobType::Mesh)
     {
-        const bool useExactGpuPath =
-            device_ != nullptr &&
-            exactGpuContext_.ready() &&
-            !shouldKeepChunkInteractive(job.chunkCoord, lastCenterChunk_);
-        if (useExactGpuPath)
-        {
-            chunk->pendingMeshRefresh.store(false, std::memory_order_release);
-            queueChunkForExactGpuRefresh(chunk);
-
-            if (chunk->pendingMeshRefresh.exchange(false, std::memory_order_acq_rel))
-            {
-                queueChunkForExactGpuRefresh(chunk);
-            }
-            return;
-        }
-
         if (!chunk->meshReady.load(std::memory_order_acquire))
         {
             setStreamingChunkLifecycleState(job.chunkCoord, FrontierDemandState::Meshing);
@@ -8241,7 +8235,7 @@ void ChunkManager::Impl::processJob(const Job& job)
 
         if (chunk->state.load(std::memory_order_acquire) == ChunkState::Ready)
         {
-            queueChunkForUpload(chunk);
+            queueChunkForLocalCpuUpload(chunk);
         }
     }
 }
@@ -8394,17 +8388,14 @@ std::shared_ptr<Chunk> ChunkManager::Impl::popNextChunkForUpload()
     return nullptr;
 }
 
-void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket)
+void ChunkManager::Impl::queueChunkForLocalCpuUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket)
 {
     if (!chunk)
     {
         return;
     }
-    if (!shouldKeepChunkInteractive(chunk->coord, lastCenterChunk_) &&
-        device_ != nullptr &&
-        exactGpuContext_.ready())
+    if (!shouldKeepChunkInteractive(chunk->coord, lastCenterChunk_))
     {
-        queueChunkForExactGpuRefresh(chunk);
         return;
     }
 
@@ -8464,9 +8455,9 @@ void ChunkManager::Impl::queueChunkForUpload(const std::shared_ptr<Chunk>& chunk
     }
 }
 
-void ChunkManager::Impl::requeueChunkForUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket)
+void ChunkManager::Impl::requeueChunkForLocalCpuUpload(const std::shared_ptr<Chunk>& chunk, bool retryBucket)
 {
-    queueChunkForUpload(chunk, retryBucket);
+    queueChunkForLocalCpuUpload(chunk, retryBucket);
 }
 
 void ChunkManager::Impl::queueChunkForCommit(const std::shared_ptr<Chunk>& chunk, UINT64 uploadFenceValue)
@@ -12875,7 +12866,7 @@ void ChunkManager::Impl::uploadLocalCpuMeshes()
             if (chunk->pendingMesh.valid())
             {
                 ++uploadSkippedPendingMeshLastFrame_;
-                requeueChunkForUpload(chunk, false);
+                requeueChunkForLocalCpuUpload(chunk, false);
                 continue;
             }
         }
@@ -12885,7 +12876,7 @@ void ChunkManager::Impl::uploadLocalCpuMeshes()
         if (columnUploads >= columnUploadLimit)
         {
             ++uploadColumnLimitedLastFrame_;
-            requeueChunkForUpload(chunk, false);
+            requeueChunkForLocalCpuUpload(chunk, false);
             profilingCounters_.throttledUploads.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
@@ -12903,7 +12894,7 @@ void ChunkManager::Impl::uploadLocalCpuMeshes()
         if (totalBytes > remainingBudget && totalBytes > 0 && !allowOversizeUpload)
         {
             ++uploadBudgetDeferredLastFrame_;
-            requeueChunkForUpload(chunk, false);
+            requeueChunkForLocalCpuUpload(chunk, false);
             profilingCounters_.deferredUploads.fetch_add(1, std::memory_order_relaxed);
             if (uploadedAnything)
             {
@@ -12916,7 +12907,7 @@ void ChunkManager::Impl::uploadLocalCpuMeshes()
         if (!uploadChunkMesh(*chunk, uploadBatchId))
         {
             ++uploadRetryFailuresLastFrame_;
-            requeueChunkForUpload(chunk, true);
+            requeueChunkForLocalCpuUpload(chunk, true);
             if (uploadedAnything)
             {
                 break;
@@ -13225,7 +13216,7 @@ void ChunkManager::Impl::commitPendingChunkUploads()
             if (chunk->meshReady.load(std::memory_order_acquire) &&
                 chunk->state.load(std::memory_order_acquire) == ChunkState::Ready)
             {
-                queueChunkForUpload(chunk, true);
+                queueChunkForLocalCpuUpload(chunk, true);
             }
             if (benchmarkEnabled)
             {
@@ -13870,9 +13861,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         {glm::ivec3(0, 0, 1), kExactGpuSeamPosZBit},
         {glm::ivec3(0, 0, -1), kExactGpuSeamNegZBit},
     }};
-    if (stagedBuilds.size() > kExactGpuIndirectBatchBuildCapacity)
+    if (stagedBuilds.size() > kExactGpuBuildBatchCapacity)
     {
-        requeueRemainingStagedBuilds(kExactGpuIndirectBatchBuildCapacity);
+        requeueRemainingStagedBuilds(kExactGpuBuildBatchCapacity);
     }
     if (!exactGpuContext_.clearExactOverflowCounter())
     {
@@ -15479,6 +15470,16 @@ void ChunkManager::Impl::requestChunkRemesh(const std::shared_ptr<Chunk>& chunk,
         refinementBackpressureActive_.store(true, std::memory_order_release);
     }
 
+    if (!shouldKeepChunkInteractive(chunk->coord, lastCenterChunk_))
+    {
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
+        }
+        queueChunkForExactGpuRefresh(chunk);
+        return;
+    }
+
     if (!chunk->hasBlocks.load(std::memory_order_acquire) &&
         chunk->indexCount.load(std::memory_order_acquire) == 0)
     {
@@ -15546,6 +15547,16 @@ void ChunkManager::Impl::requestChunkRemeshFromRelight(const std::shared_ptr<Chu
 {
     if (!chunk)
     {
+        return;
+    }
+
+    if (!shouldKeepChunkInteractive(chunk->coord, lastCenterChunk_))
+    {
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
+        }
+        queueChunkForExactGpuRefresh(chunk);
         return;
     }
 

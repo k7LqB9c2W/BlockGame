@@ -68,6 +68,14 @@ struct GpuExactFaceDescriptor
     uint reserved2;
 };
 
+struct GpuExactOverflowEntry
+{
+    uint buildIndex;
+    uint requiredFaces;
+    uint reserved0;
+    uint reserved1;
+};
+
 struct GpuBlockFaceUv
 {
     float2 base;

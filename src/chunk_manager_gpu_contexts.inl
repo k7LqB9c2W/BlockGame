@@ -246,6 +246,98 @@ public:
         std::uint64_t size{0};
     };
 
+    struct ExactOverflowReadback
+    {
+        ScratchAllocation allocation{};
+        std::uint64_t entryOffset{0};
+    };
+
+    struct ExactOverflowEntry
+    {
+        std::uint32_t buildIndex{0};
+        std::uint32_t requiredFaces{0};
+        std::uint32_t reserved0{0};
+        std::uint32_t reserved1{0};
+    };
+
+    struct ExactSynthIndirectArgs
+    {
+        std::array<std::uint32_t, 4> constants{};
+        D3D12_GPU_VIRTUAL_ADDRESS columnBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS voxelBuffer{0};
+        D3D12_DISPATCH_ARGUMENTS dispatch{};
+    };
+
+    struct ExactStampIndirectArgs
+    {
+        std::array<std::uint32_t, 4> constants{};
+        D3D12_GPU_VIRTUAL_ADDRESS sparseVoxelBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS voxelBuffer{0};
+        D3D12_DISPATCH_ARGUMENTS dispatch{};
+    };
+
+    struct ExactLightIndirectArgs
+    {
+        std::array<std::uint32_t, 4> constants{};
+        D3D12_GPU_VIRTUAL_ADDRESS centerVoxelBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosXBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegXBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosYBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegYBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosZBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegZBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS destinationVoxelBuffer{0};
+        D3D12_DISPATCH_ARGUMENTS dispatch{};
+    };
+
+    struct ExactFaceCountIndirectArgs
+    {
+        std::array<std::uint32_t, 5> constants{};
+        D3D12_GPU_VIRTUAL_ADDRESS centerVoxelBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosXBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegXBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosYBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegYBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosZBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegZBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS faceCountBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS faceDescriptorBuffer{0};
+        D3D12_DISPATCH_ARGUMENTS dispatch{};
+    };
+
+    struct ExactFacePrefixIndirectArgs
+    {
+        std::array<std::uint32_t, 4> constants{};
+        D3D12_GPU_VIRTUAL_ADDRESS faceCountBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS facePrefixBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS faceTotalBuffer{0};
+        D3D12_DISPATCH_ARGUMENTS dispatch{};
+    };
+
+    struct ExactFaceEmitIndirectArgs
+    {
+        std::array<std::uint32_t, 11> constants{};
+        D3D12_GPU_VIRTUAL_ADDRESS columnBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS centerVoxelBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosXBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegXBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosYBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegYBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborPosZBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS neighborNegZBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS faceCountBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS faceDescriptorBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS facePrefixBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS faceTotalBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS blockUvBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS vertexBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS indexBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS drawRecordBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS overflowCountBuffer{0};
+        D3D12_GPU_VIRTUAL_ADDRESS overflowEntryBuffer{0};
+        D3D12_DISPATCH_ARGUMENTS dispatch{};
+    };
+
     struct FlushResult
     {
         UINT64 fenceValue{0};
@@ -333,6 +425,12 @@ public:
         exactFaceCountPipelineState_.Reset();
         exactFacePrefixPipelineState_.Reset();
         exactFaceEmitPipelineState_.Reset();
+        exactSynthCommandSignature_.Reset();
+        exactStampCommandSignature_.Reset();
+        exactLightCommandSignature_.Reset();
+        exactFaceCountCommandSignature_.Reset();
+        exactFacePrefixCommandSignature_.Reset();
+        exactFaceEmitCommandSignature_.Reset();
         atlasSeedRootSignature_.Reset();
         atlasSampleRootSignature_.Reset();
         atlasFinalizeRootSignature_.Reset();
@@ -370,6 +468,8 @@ public:
         exactFaceDescriptorScratchBuffer_.Reset();
         exactFacePrefixScratchBuffer_.Reset();
         exactFaceTotalScratchBuffer_.Reset();
+        exactOverflowCountScratchBuffer_.Reset();
+        exactOverflowEntryScratchBuffer_.Reset();
         readbackScratch_.Reset();
         uploadScratch_.Reset();
         commandList_.Reset();
@@ -522,7 +622,7 @@ public:
 
     void uavBarrier(ID3D12Resource* resource)
     {
-        if (!open_ || resource == nullptr)
+        if (!open_)
         {
             return;
         }
@@ -1537,193 +1637,216 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactSynth(int chunkMinWorldY,
-                            ID3D12Resource* columnBuffer,
-                            ID3D12Resource* voxelBuffer)
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFaceCountScratchAddress(std::uint32_t buildIndex) const noexcept
     {
-        if (!open_ || columnBuffer == nullptr || voxelBuffer == nullptr)
+        if (exactFaceCountScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        {
+            return 0;
+        }
+
+        return exactFaceCountScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(buildIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(kExactChunkPlaneCount) *
+                   kExactChunkPackedVoxelStrideBytes;
+    }
+
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFaceDescriptorScratchAddress(std::uint32_t buildIndex) const noexcept
+    {
+        if (exactFaceDescriptorScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        {
+            return 0;
+        }
+
+        return exactFaceDescriptorScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(buildIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(kExactChunkFaceDescriptorCount) *
+                   kExactChunkFaceDescriptorStrideBytes;
+    }
+
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFacePrefixScratchAddress(std::uint32_t buildIndex) const noexcept
+    {
+        if (exactFacePrefixScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        {
+            return 0;
+        }
+
+        return exactFacePrefixScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(buildIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(kExactChunkPlaneCount) *
+                   kExactChunkPackedVoxelStrideBytes;
+    }
+
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactFaceTotalScratchAddress(std::uint32_t buildIndex) const noexcept
+    {
+        if (exactFaceTotalScratchBuffer_ == nullptr || buildIndex >= kMaxExactIndirectBatchBuilds)
+        {
+            return 0;
+        }
+
+        return exactFaceTotalScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(buildIndex) * kExactChunkPackedVoxelStrideBytes;
+    }
+
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactOverflowCountScratchAddress() const noexcept
+    {
+        return (exactOverflowCountScratchBuffer_ != nullptr) ? exactOverflowCountScratchBuffer_->GetGPUVirtualAddress()
+                                                             : 0;
+    }
+
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactOverflowEntryScratchAddress() const noexcept
+    {
+        return (exactOverflowEntryScratchBuffer_ != nullptr) ? exactOverflowEntryScratchBuffer_->GetGPUVirtualAddress()
+                                                             : 0;
+    }
+
+    bool clearExactOverflowCounter()
+    {
+        if (!open_ || exactOverflowCountScratchBuffer_ == nullptr)
+        {
+            return false;
+        }
+
+        const ScratchAllocation zeroUpload = allocateUpload(sizeof(std::uint32_t), alignof(std::uint32_t));
+        if (zeroUpload.resource == nullptr || zeroUpload.cpuPtr == nullptr)
+        {
+            return false;
+        }
+
+        *reinterpret_cast<std::uint32_t*>(zeroUpload.cpuPtr) = 0u;
+        if (exactOverflowCountScratchState_ != D3D12_RESOURCE_STATE_COPY_DEST)
+        {
+            transition(exactOverflowCountScratchBuffer_.Get(),
+                       exactOverflowCountScratchState_,
+                       D3D12_RESOURCE_STATE_COPY_DEST);
+            exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+
+        copyBuffer(exactOverflowCountScratchBuffer_.Get(),
+                   0,
+                   zeroUpload.resource,
+                   zeroUpload.offset,
+                   sizeof(std::uint32_t));
+        return true;
+    }
+
+    [[nodiscard]] ExactOverflowReadback queueExactOverflowReadback(std::uint32_t maxEntryCount)
+    {
+        ExactOverflowReadback readback{};
+        if (!open_ || exactOverflowCountScratchBuffer_ == nullptr || exactOverflowEntryScratchBuffer_ == nullptr)
+        {
+            return readback;
+        }
+
+        const std::uint64_t entryOffset = (sizeof(std::uint32_t) + alignof(ExactOverflowEntry) - 1u) /
+                                          alignof(ExactOverflowEntry) * alignof(ExactOverflowEntry);
+        const std::uint64_t totalSize =
+            entryOffset + static_cast<std::uint64_t>(maxEntryCount) * sizeof(ExactOverflowEntry);
+        readback.allocation = allocateReadback(totalSize, alignof(ExactOverflowEntry));
+        readback.entryOffset = entryOffset;
+        if (readback.allocation.resource == nullptr)
+        {
+            return readback;
+        }
+
+        if (exactOverflowCountScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        {
+            transition(exactOverflowCountScratchBuffer_.Get(),
+                       exactOverflowCountScratchState_,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+        if (exactOverflowEntryScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        {
+            transition(exactOverflowEntryScratchBuffer_.Get(),
+                       exactOverflowEntryScratchState_,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+
+        copyBuffer(readback.allocation.resource,
+                   readback.allocation.offset,
+                   exactOverflowCountScratchBuffer_.Get(),
+                   0,
+                   sizeof(std::uint32_t));
+        if (maxEntryCount > 0u)
+        {
+            copyBuffer(readback.allocation.resource,
+                       readback.allocation.offset + entryOffset,
+                       exactOverflowEntryScratchBuffer_.Get(),
+                       0,
+                       static_cast<std::uint64_t>(maxEntryCount) * sizeof(ExactOverflowEntry));
+        }
+        return readback;
+    }
+
+    void executeExactSynthIndirect(ID3D12Resource* argumentBuffer,
+                                   std::uint64_t argumentOffset,
+                                   std::uint32_t commandCount)
+    {
+        if (!open_ || exactSynthCommandSignature_ == nullptr || argumentBuffer == nullptr || commandCount == 0u)
         {
             return;
         }
 
-        const std::array<std::uint32_t, 4> constants{
-            static_cast<std::uint32_t>(chunkMinWorldY),
-            kExactChunkColumnCount,
-            kExactChunkVoxelCount,
-            0u};
-        const UINT descriptorIndex = allocateDescriptorRange(2);
-        writeStructuredSrvDescriptor(descriptorIndex,
-                                     columnBuffer,
-                                     0,
-                                     kExactChunkColumnCount,
-                                     kExactChunkColumnDescriptorStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 1u,
-                                     voxelBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactSynthPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactSynthRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch((kExactChunkSize + 7u) / 8u,
-                               (kExactChunkSize + 7u) / 8u,
-                               1);
+        commandList_->ExecuteIndirect(exactSynthCommandSignature_.Get(),
+                                      commandCount,
+                                      argumentBuffer,
+                                      argumentOffset,
+                                      nullptr,
+                                      0);
         hasCommands_ = true;
     }
 
-    void dispatchExactStamp(std::uint32_t sparseVoxelCount,
-                            ID3D12Resource* sparseVoxelBuffer,
-                            ID3D12Resource* voxelBuffer)
+    void executeExactStampIndirect(ID3D12Resource* argumentBuffer,
+                                   std::uint64_t argumentOffset,
+                                   std::uint32_t commandCount)
     {
-        if (!open_ || sparseVoxelBuffer == nullptr || voxelBuffer == nullptr || sparseVoxelCount == 0u)
+        if (!open_ || exactStampCommandSignature_ == nullptr || argumentBuffer == nullptr || commandCount == 0u)
         {
             return;
         }
 
-        const std::array<std::uint32_t, 4> constants{
-            sparseVoxelCount,
-            kExactChunkVoxelCount,
-            0u,
-            0u};
-        const UINT descriptorIndex = allocateDescriptorRange(2);
-        writeStructuredSrvDescriptor(descriptorIndex,
-                                     sparseVoxelBuffer,
-                                     0,
-                                     sparseVoxelCount,
-                                     kExactChunkSparseVoxelStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 1u,
-                                     voxelBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactStampPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactStampRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch((sparseVoxelCount + 63u) / 64u, 1, 1);
+        commandList_->ExecuteIndirect(exactStampCommandSignature_.Get(),
+                                      commandCount,
+                                      argumentBuffer,
+                                      argumentOffset,
+                                      nullptr,
+                                      0);
         hasCommands_ = true;
     }
 
-    void dispatchExactLight(ID3D12Resource* centerVoxelBuffer,
-                            ID3D12Resource* neighborPosXBuffer,
-                            ID3D12Resource* neighborNegXBuffer,
-                            ID3D12Resource* neighborPosYBuffer,
-                            ID3D12Resource* neighborNegYBuffer,
-                            ID3D12Resource* neighborPosZBuffer,
-                            ID3D12Resource* neighborNegZBuffer,
-                            ID3D12Resource* destinationVoxelBuffer,
-                            std::uint32_t resolvedNeighborMask,
-                            std::uint32_t closedNeighborMask,
-                            std::uint32_t propagationPassCount)
+    void executeExactLightIndirect(ID3D12Resource* argumentBuffer,
+                                   std::uint64_t argumentOffset,
+                                   std::uint32_t commandCount)
     {
-        if (!open_ ||
-            exactLightPipelineState_ == nullptr ||
-            centerVoxelBuffer == nullptr ||
-            neighborPosXBuffer == nullptr ||
-            neighborNegXBuffer == nullptr ||
-            neighborPosYBuffer == nullptr ||
-            neighborNegYBuffer == nullptr ||
-            neighborPosZBuffer == nullptr ||
-            neighborNegZBuffer == nullptr ||
-            destinationVoxelBuffer == nullptr)
+        if (!open_ || exactLightCommandSignature_ == nullptr || argumentBuffer == nullptr || commandCount == 0u)
         {
             return;
         }
 
-        const std::array<std::uint32_t, 4> constants{
-            kExactChunkVoxelCount,
-            resolvedNeighborMask,
-            closedNeighborMask,
-            propagationPassCount};
-        const UINT descriptorIndex = allocateDescriptorRange(8);
-        writeStructuredSrvDescriptor(descriptorIndex + 0u,
-                                     centerVoxelBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 1u,
-                                     neighborPosXBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 2u,
-                                     neighborNegXBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 3u,
-                                     neighborPosYBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 4u,
-                                     neighborNegYBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 5u,
-                                     neighborPosZBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 6u,
-                                     neighborNegZBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 7u,
-                                     destinationVoxelBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactLightPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactLightRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += static_cast<UINT64>(7u) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch(1u, 1u, 1u);
+        commandList_->ExecuteIndirect(exactLightCommandSignature_.Get(),
+                                      commandCount,
+                                      argumentBuffer,
+                                      argumentOffset,
+                                      nullptr,
+                                      0);
         hasCommands_ = true;
     }
 
-    void dispatchExactFaceCount(ID3D12Resource* centerVoxelBuffer,
-                                ID3D12Resource* neighborPosXBuffer,
-                                ID3D12Resource* neighborNegXBuffer,
-                                ID3D12Resource* neighborPosYBuffer,
-                                ID3D12Resource* neighborNegYBuffer,
-                                ID3D12Resource* neighborPosZBuffer,
-                                ID3D12Resource* neighborNegZBuffer,
-                                std::uint32_t resolvedNeighborMask,
-                                std::uint32_t closedNeighborMask)
+    void executeExactFaceCountIndirect(ID3D12Resource* argumentBuffer,
+                                       std::uint64_t argumentOffset,
+                                       std::uint32_t commandCount)
     {
         if (!open_ ||
-            centerVoxelBuffer == nullptr ||
-            neighborPosXBuffer == nullptr ||
-            neighborNegXBuffer == nullptr ||
-            neighborPosYBuffer == nullptr ||
-            neighborNegYBuffer == nullptr ||
-            neighborPosZBuffer == nullptr ||
-            neighborNegZBuffer == nullptr ||
+            exactFaceCountCommandSignature_ == nullptr ||
+            argumentBuffer == nullptr ||
+            commandCount == 0u ||
             exactFaceCountScratchBuffer_ == nullptr ||
             exactFaceDescriptorScratchBuffer_ == nullptr)
         {
@@ -1745,86 +1868,31 @@ public:
             exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
-        const std::array<std::uint32_t, 5> constants{
-            kExactChunkPlaneCount,
-            kExactChunkVoxelCount,
-            kExactChunkFaceDescriptorCount,
-            resolvedNeighborMask,
-            closedNeighborMask};
-        const UINT descriptorIndex = allocateDescriptorRange(9);
-        writeStructuredSrvDescriptor(descriptorIndex,
-                                     centerVoxelBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 1u,
-                                     neighborPosXBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 2u,
-                                     neighborNegXBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 3u,
-                                     neighborPosYBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 4u,
-                                     neighborNegYBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 5u,
-                                     neighborPosZBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 6u,
-                                     neighborNegZBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 7u,
-                                     exactFaceCountScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkPlaneCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 8u,
-                                     exactFaceDescriptorScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkFaceDescriptorCount,
-                                     kExactChunkFaceDescriptorStrideBytes);
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactFaceCountPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactFaceCountRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 7u;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch(kExactChunkPlaneDispatchGroupCount, 1, 1);
+        commandList_->ExecuteIndirect(exactFaceCountCommandSignature_.Get(),
+                                      commandCount,
+                                      argumentBuffer,
+                                      argumentOffset,
+                                      nullptr,
+                                      0);
         hasCommands_ = true;
     }
 
-    void dispatchExactFacePrefix()
+    void executeExactFacePrefixIndirect(ID3D12Resource* argumentBuffer,
+                                        std::uint64_t argumentOffset,
+                                        std::uint32_t commandCount)
     {
         if (!open_ ||
+            exactFacePrefixCommandSignature_ == nullptr ||
+            argumentBuffer == nullptr ||
+            commandCount == 0u ||
             exactFaceCountScratchBuffer_ == nullptr ||
             exactFacePrefixScratchBuffer_ == nullptr ||
             exactFaceTotalScratchBuffer_ == nullptr)
         {
             return;
         }
-
-        // Face count writes the per-plane counts on the same UAV immediately before this pass.
-        // Keep the exact face build ordered so prefix never scans stale values.
-        uavBarrier(exactFaceCountScratchBuffer_.Get());
 
         if (exactFaceCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         {
@@ -1848,81 +1916,31 @@ public:
             exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
-        const std::array<std::uint32_t, 4> constants{
-            kExactChunkPlaneCount,
-            0u,
-            0u,
-            0u};
-        const UINT descriptorIndex = allocateDescriptorRange(3);
-        writeStructuredUavDescriptor(descriptorIndex,
-                                     exactFaceCountScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkPlaneCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 1u,
-                                     exactFacePrefixScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkPlaneCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 2u,
-                                     exactFaceTotalScratchBuffer_.Get(),
-                                     0,
-                                     1u,
-                                     kExactChunkPackedVoxelStrideBytes);
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactFacePrefixPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactFacePrefixRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        uavHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, uavHandle);
-        commandList_->Dispatch(1, 1, 1);
+        commandList_->ExecuteIndirect(exactFacePrefixCommandSignature_.Get(),
+                                      commandCount,
+                                      argumentBuffer,
+                                      argumentOffset,
+                                      nullptr,
+                                      0);
         hasCommands_ = true;
     }
 
-    void dispatchExactFaceEmit(const glm::ivec3& worldMin,
-                               std::uint32_t vertexBase,
-                               std::uint32_t indexBase,
-                               std::uint32_t recordIndex,
-                               std::uint32_t reservedFaceCapacity,
-                               std::uint32_t resolvedNeighborMask,
-                               std::uint32_t closedNeighborMask,
-                               ID3D12Resource* columnBuffer,
-                               ID3D12Resource* centerVoxelBuffer,
-                               ID3D12Resource* neighborPosXBuffer,
-                               ID3D12Resource* neighborNegXBuffer,
-                               ID3D12Resource* neighborPosYBuffer,
-                               ID3D12Resource* neighborNegYBuffer,
-                               ID3D12Resource* neighborPosZBuffer,
-                               ID3D12Resource* neighborNegZBuffer,
-                               ID3D12Resource* blockUvBuffer,
-                               std::uint32_t blockUvCount,
-                               std::uint32_t blockUvStrideBytes,
-                               ID3D12Resource* vertexBuffer,
-                               std::uint32_t vertexBufferCount,
-                               ID3D12Resource* indexBuffer,
-                               std::uint32_t indexBufferCount,
-                               ID3D12Resource* drawRecordBuffer,
-                               std::uint32_t drawRecordCount)
+    void executeExactFaceEmitIndirect(ID3D12Resource* argumentBuffer,
+                                      std::uint64_t argumentOffset,
+                                      std::uint32_t commandCount)
     {
         if (!open_ ||
-            columnBuffer == nullptr ||
-            centerVoxelBuffer == nullptr ||
-            neighborPosXBuffer == nullptr ||
-            neighborNegXBuffer == nullptr ||
-            neighborPosYBuffer == nullptr ||
-            neighborNegYBuffer == nullptr ||
-            neighborPosZBuffer == nullptr ||
-            neighborNegZBuffer == nullptr ||
-            blockUvBuffer == nullptr ||
-            vertexBuffer == nullptr ||
-            indexBuffer == nullptr ||
-            drawRecordBuffer == nullptr ||
+            exactFaceEmitCommandSignature_ == nullptr ||
+            argumentBuffer == nullptr ||
+            commandCount == 0u ||
             exactFaceCountScratchBuffer_ == nullptr ||
             exactFaceDescriptorScratchBuffer_ == nullptr ||
             exactFacePrefixScratchBuffer_ == nullptr ||
-            exactFaceTotalScratchBuffer_ == nullptr)
+            exactFaceTotalScratchBuffer_ == nullptr ||
+            exactOverflowCountScratchBuffer_ == nullptr ||
+            exactOverflowEntryScratchBuffer_ == nullptr)
         {
             return;
         }
@@ -1955,111 +1973,29 @@ public:
                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
+        if (exactOverflowCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(exactOverflowCountScratchBuffer_.Get(),
+                       exactOverflowCountScratchState_,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        if (exactOverflowEntryScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(exactOverflowEntryScratchBuffer_.Get(),
+                       exactOverflowEntryScratchState_,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
 
-        const std::array<std::uint32_t, 10> constants{
-            static_cast<std::uint32_t>(worldMin.x),
-            static_cast<std::uint32_t>(worldMin.y),
-            static_cast<std::uint32_t>(worldMin.z),
-            kExactChunkPlaneCount,
-            vertexBase,
-            indexBase,
-            recordIndex,
-            reservedFaceCapacity,
-            resolvedNeighborMask,
-            closedNeighborMask};
-        const UINT descriptorIndex = allocateDescriptorRange(16);
-        writeStructuredSrvDescriptor(descriptorIndex,
-                                     columnBuffer,
-                                     0,
-                                     kExactChunkColumnCount,
-                                     kExactChunkColumnDescriptorStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 1u,
-                                     centerVoxelBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 2u,
-                                     neighborPosXBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 3u,
-                                     neighborNegXBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 4u,
-                                     neighborPosYBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 5u,
-                                     neighborNegYBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 6u,
-                                     neighborPosZBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 7u,
-                                     neighborNegZBuffer,
-                                     0,
-                                     kExactChunkVoxelCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 8u,
-                                     exactFaceCountScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkPlaneCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 9u,
-                                     exactFaceDescriptorScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkFaceDescriptorCount,
-                                     kExactChunkFaceDescriptorStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 10u,
-                                     exactFacePrefixScratchBuffer_.Get(),
-                                     0,
-                                     kExactChunkPlaneCount,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 11u,
-                                     exactFaceTotalScratchBuffer_.Get(),
-                                     0,
-                                     1u,
-                                     kExactChunkPackedVoxelStrideBytes);
-        writeStructuredSrvDescriptor(descriptorIndex + 12u,
-                                     blockUvBuffer,
-                                     0,
-                                     blockUvCount,
-                                     blockUvStrideBytes);
-        writeStructuredUavDescriptor(descriptorIndex + 13u,
-                                     vertexBuffer,
-                                     0,
-                                     vertexBufferCount,
-                                     static_cast<std::uint32_t>(sizeof(Vertex)));
-        writeStructuredUavDescriptor(descriptorIndex + 14u,
-                                     indexBuffer,
-                                     0,
-                                     indexBufferCount,
-                                     static_cast<std::uint32_t>(sizeof(std::uint32_t)));
-        writeStructuredUavDescriptor(descriptorIndex + 15u,
-                                     drawRecordBuffer,
-                                     0,
-                                     drawRecordCount,
-                                     static_cast<std::uint32_t>(sizeof(ChunkRenderBatch::GpuCullRecord)));
-        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
-        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactFaceEmitPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactFaceEmitRootSignature_.Get());
-        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = descriptorHeap_->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<UINT64>(descriptorIndex) * descriptorSize_;
-        commandList_->SetComputeRootDescriptorTable(1, srvHandle);
-        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = srvHandle;
-        uavHandle.ptr += descriptorSize_ * 13u;
-        commandList_->SetComputeRootDescriptorTable(2, uavHandle);
-        commandList_->Dispatch(kExactChunkPlaneCount, 1, 1);
+        commandList_->ExecuteIndirect(exactFaceEmitCommandSignature_.Get(),
+                                      commandCount,
+                                      argumentBuffer,
+                                      argumentOffset,
+                                      nullptr,
+                                      0);
         hasCommands_ = true;
     }
 
@@ -2159,10 +2095,18 @@ public:
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
+               exactSynthCommandSignature_ != nullptr &&
+               exactStampCommandSignature_ != nullptr &&
+               exactLightCommandSignature_ != nullptr &&
+               exactFaceCountCommandSignature_ != nullptr &&
+               exactFacePrefixCommandSignature_ != nullptr &&
+               exactFaceEmitCommandSignature_ != nullptr &&
                exactFaceCountScratchBuffer_ != nullptr &&
                exactFaceDescriptorScratchBuffer_ != nullptr &&
                exactFacePrefixScratchBuffer_ != nullptr &&
-               exactFaceTotalScratchBuffer_ != nullptr;
+               exactFaceTotalScratchBuffer_ != nullptr &&
+               exactOverflowCountScratchBuffer_ != nullptr &&
+               exactOverflowEntryScratchBuffer_ != nullptr;
     }
 
     [[nodiscard]] UINT64 completedFenceValue() const noexcept
@@ -2231,38 +2175,56 @@ private:
     static constexpr std::uint32_t kExactChunkSparseVoxelStrideBytes = 16u;
     static constexpr std::uint32_t kExactChunkPackedVoxelStrideBytes = 4u;
     static constexpr std::uint32_t kExactChunkFaceDescriptorStrideBytes = 16u;
+    static constexpr std::uint32_t kMaxExactIndirectBatchBuilds = 16u;
     static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
 
     void createExactResources()
     {
         exactFaceCountScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                           static_cast<std::uint64_t>(kExactChunkPlaneCount) *
+                                                           static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                                                               static_cast<std::uint64_t>(kExactChunkPlaneCount) *
                                                                kExactChunkPackedVoxelStrideBytes,
                                                            D3D12_RESOURCE_STATE_COMMON,
                                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFaceDescriptorScratchBuffer_ = createDefaultBuffer(
             device_.Get(),
-            static_cast<std::uint64_t>(kExactChunkFaceDescriptorCount) *
+            static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                static_cast<std::uint64_t>(kExactChunkFaceDescriptorCount) *
                 kExactChunkFaceDescriptorStrideBytes,
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFacePrefixScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                            static_cast<std::uint64_t>(kExactChunkPlaneCount) *
+                                                            static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                                                                static_cast<std::uint64_t>(kExactChunkPlaneCount) *
                                                                 kExactChunkPackedVoxelStrideBytes,
                                                             D3D12_RESOURCE_STATE_COMMON,
                                                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFaceTotalScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                           kExactChunkPackedVoxelStrideBytes,
+                                                           static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) *
+                                                               kExactChunkPackedVoxelStrideBytes,
                                                            D3D12_RESOURCE_STATE_COMMON,
                                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        exactOverflowCountScratchBuffer_ = createDefaultBuffer(device_.Get(),
+                                                               kExactChunkPackedVoxelStrideBytes,
+                                                               D3D12_RESOURCE_STATE_COMMON,
+                                                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        exactOverflowEntryScratchBuffer_ = createDefaultBuffer(
+            device_.Get(),
+            static_cast<std::uint64_t>(kMaxExactIndirectBatchBuilds) * sizeof(ExactOverflowEntry),
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         setDebugObjectName(exactFaceCountScratchBuffer_.Get(), L"ExactChunkFaceCountScratch");
         setDebugObjectName(exactFaceDescriptorScratchBuffer_.Get(), L"ExactChunkFaceDescriptorScratch");
         setDebugObjectName(exactFacePrefixScratchBuffer_.Get(), L"ExactChunkFacePrefixScratch");
         setDebugObjectName(exactFaceTotalScratchBuffer_.Get(), L"ExactChunkFaceTotalScratch");
+        setDebugObjectName(exactOverflowCountScratchBuffer_.Get(), L"ExactChunkOverflowCountScratch");
+        setDebugObjectName(exactOverflowEntryScratchBuffer_.Get(), L"ExactChunkOverflowEntryScratch");
         exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COMMON;
+        exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
+        exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_COMMON;
     }
 
     void createDescriptorHeap()
@@ -2719,12 +2681,10 @@ private:
         exactSynthParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactSynthParams[0].Constants.ShaderRegister = 0;
         exactSynthParams[0].Constants.Num32BitValues = 4;
-        exactSynthParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactSynthParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        exactSynthParams[1].DescriptorTable.pDescriptorRanges = &exactSingleSrvRange;
-        exactSynthParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactSynthParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        exactSynthParams[2].DescriptorTable.pDescriptorRanges = &exactSingleUavRange;
+        exactSynthParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        exactSynthParams[1].Descriptor.ShaderRegister = 0;
+        exactSynthParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactSynthParams[2].Descriptor.ShaderRegister = 0;
         D3D12_ROOT_SIGNATURE_DESC exactSynthDesc{};
         exactSynthDesc.NumParameters = static_cast<UINT>(exactSynthParams.size());
         exactSynthDesc.pParameters = exactSynthParams.data();
@@ -2736,16 +2696,33 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactSynthPso, IID_PPV_ARGS(&exactSynthPipelineState_)),
                         "failed to create exact chunk synth pipeline");
 
+        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 4> exactSynthIndirectArgs{};
+        exactSynthIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        exactSynthIndirectArgs[0].Constant.RootParameterIndex = 0;
+        exactSynthIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
+        exactSynthIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
+        exactSynthIndirectArgs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+        exactSynthIndirectArgs[1].ShaderResourceView.RootParameterIndex = 1;
+        exactSynthIndirectArgs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactSynthIndirectArgs[2].UnorderedAccessView.RootParameterIndex = 2;
+        exactSynthIndirectArgs[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC exactSynthCommandSignatureDesc{};
+        exactSynthCommandSignatureDesc.ByteStride = sizeof(ExactSynthIndirectArgs);
+        exactSynthCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactSynthIndirectArgs.size());
+        exactSynthCommandSignatureDesc.pArgumentDescs = exactSynthIndirectArgs.data();
+        throwIfFailedDx(device_->CreateCommandSignature(&exactSynthCommandSignatureDesc,
+                                                        exactSynthRootSignature_.Get(),
+                                                        IID_PPV_ARGS(&exactSynthCommandSignature_)),
+                        "failed to create exact chunk synth command signature");
+
         std::array<D3D12_ROOT_PARAMETER, 3> exactStampParams{};
         exactStampParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactStampParams[0].Constants.ShaderRegister = 0;
         exactStampParams[0].Constants.Num32BitValues = 4;
-        exactStampParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactStampParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        exactStampParams[1].DescriptorTable.pDescriptorRanges = &exactSingleSrvRange;
-        exactStampParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactStampParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        exactStampParams[2].DescriptorTable.pDescriptorRanges = &exactSingleUavRange;
+        exactStampParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        exactStampParams[1].Descriptor.ShaderRegister = 0;
+        exactStampParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactStampParams[2].Descriptor.ShaderRegister = 0;
         D3D12_ROOT_SIGNATURE_DESC exactStampDesc{};
         exactStampDesc.NumParameters = static_cast<UINT>(exactStampParams.size());
         exactStampDesc.pParameters = exactStampParams.data();
@@ -2757,27 +2734,36 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactStampPso, IID_PPV_ARGS(&exactStampPipelineState_)),
                         "failed to create exact chunk stamp pipeline");
 
-        D3D12_DESCRIPTOR_RANGE exactLightSrvRange{};
-        exactLightSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        exactLightSrvRange.NumDescriptors = 7;
-        exactLightSrvRange.BaseShaderRegister = 0;
-        exactLightSrvRange.OffsetInDescriptorsFromTableStart = 0;
-        D3D12_DESCRIPTOR_RANGE exactLightUavRange{};
-        exactLightUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        exactLightUavRange.NumDescriptors = 1;
-        exactLightUavRange.BaseShaderRegister = 0;
-        exactLightUavRange.OffsetInDescriptorsFromTableStart = 0;
+        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 4> exactStampIndirectArgs{};
+        exactStampIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        exactStampIndirectArgs[0].Constant.RootParameterIndex = 0;
+        exactStampIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
+        exactStampIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
+        exactStampIndirectArgs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+        exactStampIndirectArgs[1].ShaderResourceView.RootParameterIndex = 1;
+        exactStampIndirectArgs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactStampIndirectArgs[2].UnorderedAccessView.RootParameterIndex = 2;
+        exactStampIndirectArgs[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC exactStampCommandSignatureDesc{};
+        exactStampCommandSignatureDesc.ByteStride = sizeof(ExactStampIndirectArgs);
+        exactStampCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactStampIndirectArgs.size());
+        exactStampCommandSignatureDesc.pArgumentDescs = exactStampIndirectArgs.data();
+        throwIfFailedDx(device_->CreateCommandSignature(&exactStampCommandSignatureDesc,
+                                                        exactStampRootSignature_.Get(),
+                                                        IID_PPV_ARGS(&exactStampCommandSignature_)),
+                        "failed to create exact chunk stamp command signature");
 
-        std::array<D3D12_ROOT_PARAMETER, 3> exactLightParams{};
+        std::array<D3D12_ROOT_PARAMETER, 9> exactLightParams{};
         exactLightParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactLightParams[0].Constants.ShaderRegister = 0;
         exactLightParams[0].Constants.Num32BitValues = 4;
-        exactLightParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactLightParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        exactLightParams[1].DescriptorTable.pDescriptorRanges = &exactLightSrvRange;
-        exactLightParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactLightParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        exactLightParams[2].DescriptorTable.pDescriptorRanges = &exactLightUavRange;
+        for (UINT parameterIndex = 1; parameterIndex <= 7; ++parameterIndex)
+        {
+            exactLightParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            exactLightParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
+        }
+        exactLightParams[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactLightParams[8].Descriptor.ShaderRegister = 0;
         D3D12_ROOT_SIGNATURE_DESC exactLightDesc{};
         exactLightDesc.NumParameters = static_cast<UINT>(exactLightParams.size());
         exactLightDesc.pParameters = exactLightParams.data();
@@ -2790,27 +2776,41 @@ private:
                                                             IID_PPV_ARGS(&exactLightPipelineState_)),
                         "failed to create exact chunk light pipeline");
 
-        D3D12_DESCRIPTOR_RANGE exactFaceCountSrvRange{};
-        exactFaceCountSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        exactFaceCountSrvRange.NumDescriptors = 7;
-        exactFaceCountSrvRange.BaseShaderRegister = 0;
-        exactFaceCountSrvRange.OffsetInDescriptorsFromTableStart = 0;
-        D3D12_DESCRIPTOR_RANGE exactFaceCountUavRange{};
-        exactFaceCountUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        exactFaceCountUavRange.NumDescriptors = 2;
-        exactFaceCountUavRange.BaseShaderRegister = 0;
-        exactFaceCountUavRange.OffsetInDescriptorsFromTableStart = 0;
+        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 10> exactLightIndirectArgs{};
+        exactLightIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        exactLightIndirectArgs[0].Constant.RootParameterIndex = 0;
+        exactLightIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
+        exactLightIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
+        for (UINT argumentIndex = 1; argumentIndex <= 7; ++argumentIndex)
+        {
+            exactLightIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+            exactLightIndirectArgs[argumentIndex].ShaderResourceView.RootParameterIndex = argumentIndex;
+        }
+        exactLightIndirectArgs[8].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactLightIndirectArgs[8].UnorderedAccessView.RootParameterIndex = 8;
+        exactLightIndirectArgs[9].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC exactLightCommandSignatureDesc{};
+        exactLightCommandSignatureDesc.ByteStride = sizeof(ExactLightIndirectArgs);
+        exactLightCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactLightIndirectArgs.size());
+        exactLightCommandSignatureDesc.pArgumentDescs = exactLightIndirectArgs.data();
+        throwIfFailedDx(device_->CreateCommandSignature(&exactLightCommandSignatureDesc,
+                                                        exactLightRootSignature_.Get(),
+                                                        IID_PPV_ARGS(&exactLightCommandSignature_)),
+                        "failed to create exact chunk light command signature");
 
-        std::array<D3D12_ROOT_PARAMETER, 3> exactFaceCountParams{};
+        std::array<D3D12_ROOT_PARAMETER, 10> exactFaceCountParams{};
         exactFaceCountParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceCountParams[0].Constants.ShaderRegister = 0;
         exactFaceCountParams[0].Constants.Num32BitValues = 5;
-        exactFaceCountParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactFaceCountParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        exactFaceCountParams[1].DescriptorTable.pDescriptorRanges = &exactFaceCountSrvRange;
-        exactFaceCountParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactFaceCountParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        exactFaceCountParams[2].DescriptorTable.pDescriptorRanges = &exactFaceCountUavRange;
+        for (UINT parameterIndex = 1; parameterIndex <= 7; ++parameterIndex)
+        {
+            exactFaceCountParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            exactFaceCountParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
+        }
+        exactFaceCountParams[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactFaceCountParams[8].Descriptor.ShaderRegister = 0;
+        exactFaceCountParams[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactFaceCountParams[9].Descriptor.ShaderRegister = 1;
         D3D12_ROOT_SIGNATURE_DESC exactFaceCountDesc{};
         exactFaceCountDesc.NumParameters = static_cast<UINT>(exactFaceCountParams.size());
         exactFaceCountDesc.pParameters = exactFaceCountParams.data();
@@ -2822,19 +2822,40 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactFaceCountPso, IID_PPV_ARGS(&exactFaceCountPipelineState_)),
                         "failed to create exact chunk face count pipeline");
 
-        D3D12_DESCRIPTOR_RANGE exactPrefixUavRange{};
-        exactPrefixUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        exactPrefixUavRange.NumDescriptors = 3;
-        exactPrefixUavRange.BaseShaderRegister = 0;
-        exactPrefixUavRange.OffsetInDescriptorsFromTableStart = 0;
+        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 11> exactFaceCountIndirectArgs{};
+        exactFaceCountIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        exactFaceCountIndirectArgs[0].Constant.RootParameterIndex = 0;
+        exactFaceCountIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
+        exactFaceCountIndirectArgs[0].Constant.Num32BitValuesToSet = 5;
+        for (UINT argumentIndex = 1; argumentIndex <= 7; ++argumentIndex)
+        {
+            exactFaceCountIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+            exactFaceCountIndirectArgs[argumentIndex].ShaderResourceView.RootParameterIndex = argumentIndex;
+        }
+        exactFaceCountIndirectArgs[8].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactFaceCountIndirectArgs[8].UnorderedAccessView.RootParameterIndex = 8;
+        exactFaceCountIndirectArgs[9].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactFaceCountIndirectArgs[9].UnorderedAccessView.RootParameterIndex = 9;
+        exactFaceCountIndirectArgs[10].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC exactFaceCountCommandSignatureDesc{};
+        exactFaceCountCommandSignatureDesc.ByteStride = sizeof(ExactFaceCountIndirectArgs);
+        exactFaceCountCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactFaceCountIndirectArgs.size());
+        exactFaceCountCommandSignatureDesc.pArgumentDescs = exactFaceCountIndirectArgs.data();
+        throwIfFailedDx(device_->CreateCommandSignature(&exactFaceCountCommandSignatureDesc,
+                                                        exactFaceCountRootSignature_.Get(),
+                                                        IID_PPV_ARGS(&exactFaceCountCommandSignature_)),
+                        "failed to create exact chunk face count command signature");
 
-        std::array<D3D12_ROOT_PARAMETER, 2> exactPrefixParams{};
+        std::array<D3D12_ROOT_PARAMETER, 4> exactPrefixParams{};
         exactPrefixParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactPrefixParams[0].Constants.ShaderRegister = 0;
         exactPrefixParams[0].Constants.Num32BitValues = 4;
-        exactPrefixParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactPrefixParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        exactPrefixParams[1].DescriptorTable.pDescriptorRanges = &exactPrefixUavRange;
+        exactPrefixParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactPrefixParams[1].Descriptor.ShaderRegister = 0;
+        exactPrefixParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactPrefixParams[2].Descriptor.ShaderRegister = 1;
+        exactPrefixParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactPrefixParams[3].Descriptor.ShaderRegister = 2;
         D3D12_ROOT_SIGNATURE_DESC exactPrefixDesc{};
         exactPrefixDesc.NumParameters = static_cast<UINT>(exactPrefixParams.size());
         exactPrefixDesc.pParameters = exactPrefixParams.data();
@@ -2846,27 +2867,41 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactPrefixPso, IID_PPV_ARGS(&exactFacePrefixPipelineState_)),
                         "failed to create exact chunk face prefix pipeline");
 
-        D3D12_DESCRIPTOR_RANGE exactFaceEmitSrvRange{};
-        exactFaceEmitSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        exactFaceEmitSrvRange.NumDescriptors = 13;
-        exactFaceEmitSrvRange.BaseShaderRegister = 0;
-        exactFaceEmitSrvRange.OffsetInDescriptorsFromTableStart = 0;
-        D3D12_DESCRIPTOR_RANGE exactFaceEmitUavRange{};
-        exactFaceEmitUavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        exactFaceEmitUavRange.NumDescriptors = 3;
-        exactFaceEmitUavRange.BaseShaderRegister = 0;
-        exactFaceEmitUavRange.OffsetInDescriptorsFromTableStart = 0;
+        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 5> exactPrefixIndirectArgs{};
+        exactPrefixIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        exactPrefixIndirectArgs[0].Constant.RootParameterIndex = 0;
+        exactPrefixIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
+        exactPrefixIndirectArgs[0].Constant.Num32BitValuesToSet = 4;
+        exactPrefixIndirectArgs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactPrefixIndirectArgs[1].UnorderedAccessView.RootParameterIndex = 1;
+        exactPrefixIndirectArgs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactPrefixIndirectArgs[2].UnorderedAccessView.RootParameterIndex = 2;
+        exactPrefixIndirectArgs[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        exactPrefixIndirectArgs[3].UnorderedAccessView.RootParameterIndex = 3;
+        exactPrefixIndirectArgs[4].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC exactPrefixCommandSignatureDesc{};
+        exactPrefixCommandSignatureDesc.ByteStride = sizeof(ExactFacePrefixIndirectArgs);
+        exactPrefixCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactPrefixIndirectArgs.size());
+        exactPrefixCommandSignatureDesc.pArgumentDescs = exactPrefixIndirectArgs.data();
+        throwIfFailedDx(device_->CreateCommandSignature(&exactPrefixCommandSignatureDesc,
+                                                        exactFacePrefixRootSignature_.Get(),
+                                                        IID_PPV_ARGS(&exactFacePrefixCommandSignature_)),
+                        "failed to create exact chunk face prefix command signature");
 
-        std::array<D3D12_ROOT_PARAMETER, 3> exactFaceEmitParams{};
+        std::array<D3D12_ROOT_PARAMETER, 19> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceEmitParams[0].Constants.ShaderRegister = 0;
-        exactFaceEmitParams[0].Constants.Num32BitValues = 10;
-        exactFaceEmitParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactFaceEmitParams[1].DescriptorTable.NumDescriptorRanges = 1;
-        exactFaceEmitParams[1].DescriptorTable.pDescriptorRanges = &exactFaceEmitSrvRange;
-        exactFaceEmitParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        exactFaceEmitParams[2].DescriptorTable.NumDescriptorRanges = 1;
-        exactFaceEmitParams[2].DescriptorTable.pDescriptorRanges = &exactFaceEmitUavRange;
+        exactFaceEmitParams[0].Constants.Num32BitValues = 11;
+        for (UINT parameterIndex = 1; parameterIndex <= 13; ++parameterIndex)
+        {
+            exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
+        }
+        for (UINT parameterIndex = 14; parameterIndex <= 18; ++parameterIndex)
+        {
+            exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 14;
+        }
         D3D12_ROOT_SIGNATURE_DESC exactFaceEmitDesc{};
         exactFaceEmitDesc.NumParameters = static_cast<UINT>(exactFaceEmitParams.size());
         exactFaceEmitDesc.pParameters = exactFaceEmitParams.data();
@@ -2877,6 +2912,31 @@ private:
         exactFaceEmitPso.CS = {exactFaceEmitShader_->GetBufferPointer(), exactFaceEmitShader_->GetBufferSize()};
         throwIfFailedDx(device_->CreateComputePipelineState(&exactFaceEmitPso, IID_PPV_ARGS(&exactFaceEmitPipelineState_)),
                         "failed to create exact chunk face emit pipeline");
+
+        std::array<D3D12_INDIRECT_ARGUMENT_DESC, 20> exactFaceEmitIndirectArgs{};
+        exactFaceEmitIndirectArgs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        exactFaceEmitIndirectArgs[0].Constant.RootParameterIndex = 0;
+        exactFaceEmitIndirectArgs[0].Constant.DestOffsetIn32BitValues = 0;
+        exactFaceEmitIndirectArgs[0].Constant.Num32BitValuesToSet = 11;
+        for (UINT argumentIndex = 1; argumentIndex <= 13; ++argumentIndex)
+        {
+            exactFaceEmitIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+            exactFaceEmitIndirectArgs[argumentIndex].ShaderResourceView.RootParameterIndex = argumentIndex;
+        }
+        for (UINT argumentIndex = 14; argumentIndex <= 18; ++argumentIndex)
+        {
+            exactFaceEmitIndirectArgs[argumentIndex].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+            exactFaceEmitIndirectArgs[argumentIndex].UnorderedAccessView.RootParameterIndex = argumentIndex;
+        }
+        exactFaceEmitIndirectArgs[19].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC exactFaceEmitCommandSignatureDesc{};
+        exactFaceEmitCommandSignatureDesc.ByteStride = sizeof(ExactFaceEmitIndirectArgs);
+        exactFaceEmitCommandSignatureDesc.NumArgumentDescs = static_cast<UINT>(exactFaceEmitIndirectArgs.size());
+        exactFaceEmitCommandSignatureDesc.pArgumentDescs = exactFaceEmitIndirectArgs.data();
+        throwIfFailedDx(device_->CreateCommandSignature(&exactFaceEmitCommandSignatureDesc,
+                                                        exactFaceEmitRootSignature_.Get(),
+                                                        IID_PPV_ARGS(&exactFaceEmitCommandSignature_)),
+                        "failed to create exact chunk face emit command signature");
     }
 
     static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
@@ -2938,6 +2998,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFacePrefixPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceEmitPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactSynthCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactStampCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactLightCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactFaceCountCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactFacePrefixCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactFaceEmitCommandSignature_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptorHeap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> uploadScratch_;
     std::byte* uploadScratchMapped_{nullptr};
@@ -2947,6 +3013,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceDescriptorScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFacePrefixScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceTotalScratchBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> exactOverflowCountScratchBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> exactOverflowEntryScratchBuffer_;
     std::uint64_t uploadCursor_{0};
     std::uint64_t readbackCursor_{0};
     UINT descriptorSize_{0};
@@ -2955,6 +3023,8 @@ private:
     D3D12_RESOURCE_STATES exactFaceDescriptorScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFacePrefixScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFaceTotalScratchState_{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES exactOverflowCountScratchState_{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES exactOverflowEntryScratchState_{D3D12_RESOURCE_STATE_COMMON};
     bool open_{false};
     bool hasCommands_{false};
     bool readbackEnabled_{false};

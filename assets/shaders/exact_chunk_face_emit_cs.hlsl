@@ -12,6 +12,7 @@ cbuffer ExactChunkFaceEmitParams : register(b0)
     uint gReservedFaceCapacity;
     uint gResolvedNeighborMask;
     uint gClosedNeighborMask;
+    uint gBuildIndex;
 };
 
 StructuredBuffer<GpuExactColumnDescriptor> gColumns : register(t0);
@@ -30,6 +31,8 @@ StructuredBuffer<GpuBlockFaceUv> gBlockFaceUvs : register(t12);
 RWStructuredBuffer<WorldVertex> gVertices : register(u0);
 RWStructuredBuffer<uint> gIndices : register(u1);
 RWStructuredBuffer<GpuCullRecord> gDrawRecords : register(u2);
+RWStructuredBuffer<uint> gOverflowCount : register(u3);
+RWStructuredBuffer<GpuExactOverflowEntry> gOverflowEntries : register(u4);
 
 uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
 {
@@ -333,6 +336,17 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         record.reserved = min(totalFaces, kExactDrawRecordFaceCountMask) |
                           ((totalFaces > gReservedFaceCapacity) ? kExactDrawRecordOverflowFlag : 0u);
         gDrawRecords[gRecordIndex] = record;
+        if (totalFaces > gReservedFaceCapacity)
+        {
+            uint overflowIndex = 0u;
+            InterlockedAdd(gOverflowCount[0], 1u, overflowIndex);
+            GpuExactOverflowEntry entry;
+            entry.buildIndex = gBuildIndex;
+            entry.requiredFaces = totalFaces;
+            entry.reserved0 = 0u;
+            entry.reserved1 = 0u;
+            gOverflowEntries[overflowIndex] = entry;
+        }
     }
 
     if (totalFaces == 0u || totalFaces > gReservedFaceCapacity)

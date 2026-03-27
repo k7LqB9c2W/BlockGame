@@ -7,6 +7,7 @@ cbuffer ExactChunkFaceCountParams : register(b0)
     uint gDescriptorCount;
     uint gResolvedNeighborMask;
     uint gClosedNeighborMask;
+    uint gReserved0;
 };
 
 StructuredBuffer<uint> gCenterVoxels : register(t0);

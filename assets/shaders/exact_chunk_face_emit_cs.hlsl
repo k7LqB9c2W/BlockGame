@@ -13,6 +13,7 @@ cbuffer ExactChunkFaceEmitParams : register(b0)
     uint gResolvedNeighborMask;
     uint gClosedNeighborMask;
     uint gBuildIndex;
+    uint gReserved0;
 };
 
 StructuredBuffer<GpuExactColumnDescriptor> gColumns : register(t0);

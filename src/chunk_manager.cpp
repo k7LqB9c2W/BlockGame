@@ -14293,9 +14293,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         std::swap(chunk.exactGpu.voxelBuffer, chunk.exactGpu.lightScratchBuffer);
         std::swap(chunk.exactGpu.voxelState, chunk.exactGpu.lightScratchState);
 
-        const std::uint32_t closedNeighborMask =
-            stabilizePreloadSeams ? (pending.pendingNeighborMask & ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit))
-                                  : 0u;
+        const std::uint32_t closedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactFaceCount(chunk.exactGpu.voxelBuffer.Get(),
                                                 neighborBuffers[0],
@@ -14433,9 +14431,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-        const std::uint32_t closedNeighborMask =
-            stabilizePreloadSeams ? (pending.pendingNeighborMask & ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit))
-                                  : 0u;
+        const std::uint32_t closedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.markExactTimingBegin();

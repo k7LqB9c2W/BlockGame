@@ -7,6 +7,7 @@ struct DecodedVertexLighting
     float ao;
     float aoDebug;
     uint flags;
+    uint alphaCutout;
     float farVoxelScale;
 };
 
@@ -55,6 +56,7 @@ DecodedVertexLighting decodeVertexLighting(uint packedLighting)
     decoded.ao = decodeAoFactor(aoLevel);
     decoded.aoDebug = decoded.ao;
     decoded.flags = (packedLighting >> 10) & 0x3Fu;
+    decoded.alphaCutout = (packedLighting >> 24) & 0x1u;
     const uint scale = (packedLighting >> 16) & 0xFFu;
     decoded.farVoxelScale = (scale > 0u) ? (float)scale : 1.0f;
     return decoded;

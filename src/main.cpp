@@ -4770,6 +4770,9 @@ int runGame()
             debugOverlayText = debugStream.str();
 
             const RenderDistanceSettings renderSettings = chunkManager.renderDistanceSettings();
+            const glm::ivec3 lightingDebugWorldPos(static_cast<int>(std::floor(samplePosition.x)),
+                                                   static_cast<int>(std::floor(samplePosition.y)),
+                                                   static_cast<int>(std::floor(samplePosition.z)));
             std::ostringstream snapshotStream;
             snapshotStream.setf(std::ios::fixed, std::ios::floatfield);
             snapshotStream << std::setprecision(1);
@@ -4820,6 +4823,8 @@ int runGame()
                     snapshotStream << " pendingUpload=" << streamingStatus.farPendingUploadTiles;
                 }
             }
+            snapshotStream << '\n';
+            snapshotStream << chunkManager.exactLightingDebugSnapshot(lightingDebugWorldPos);
             lightingSnapshotText = snapshotStream.str();
 
             const RecentEditHoleDebugSnapshot holeDebugSnapshot =
@@ -5242,7 +5247,7 @@ int runGame()
             {
                 ImGui::SetClipboardText(lightingSnapshotText.c_str());
             }
-            ImGui::BeginChild("LightingSnapshot", ImVec2(430.0f, 145.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::BeginChild("LightingSnapshot", ImVec2(430.0f, 220.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::TextUnformatted(lightingSnapshotText.c_str());
             ImGui::EndChild();
             if (ImGui::Button("Copy Hole Snapshot"))

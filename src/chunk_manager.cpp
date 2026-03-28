@@ -1451,6 +1451,7 @@ inline std::uint8_t vertexFlagsFromPackedLighting(std::uint32_t packed) noexcept
 constexpr std::uint8_t kMaterialFlagGrassTintShiftCpu = 2u;
 constexpr std::uint8_t kMaterialFlagGrassTintMaskCpu = 0x1Cu;
 constexpr std::uint8_t kMaterialFlagGrassSideTintCpu = 0x20u;
+constexpr std::uint32_t kLightingFlagAlphaCutoutBitCpu = 1u << 24u;
 
 enum class GrassTintIndex : std::uint8_t
 {
@@ -3115,6 +3116,67 @@ const char* chunkStateLabel(ChunkState state) noexcept
     return "Unknown";
 }
 
+const char* exactChunkResidencyModeLabel(ExactChunkResidencyMode mode) noexcept
+{
+    switch (mode)
+    {
+    case ExactChunkResidencyMode::CpuAuthoritative:
+        return "CpuAuthoritative";
+    case ExactChunkResidencyMode::GpuResidentNonlocal:
+        return "GpuResidentNonlocal";
+    case ExactChunkResidencyMode::CpuMaterializing:
+        return "CpuMaterializing";
+    case ExactChunkResidencyMode::GpuPendingRetire:
+        return "GpuPendingRetire";
+    }
+    return "Unknown";
+}
+
+std::string exactGpuSeamMaskLabel(std::uint8_t mask)
+{
+    if (mask == 0u)
+    {
+        return "none";
+    }
+
+    std::string label;
+    auto append = [&label](const char* name)
+    {
+        if (!label.empty())
+        {
+            label += '|';
+        }
+        label += name;
+    };
+
+    if ((mask & (1u << 0u)) != 0u)
+    {
+        append("+X");
+    }
+    if ((mask & (1u << 1u)) != 0u)
+    {
+        append("-X");
+    }
+    if ((mask & (1u << 2u)) != 0u)
+    {
+        append("+Y");
+    }
+    if ((mask & (1u << 3u)) != 0u)
+    {
+        append("-Y");
+    }
+    if ((mask & (1u << 4u)) != 0u)
+    {
+        append("+Z");
+    }
+    if ((mask & (1u << 5u)) != 0u)
+    {
+        append("-Z");
+    }
+
+    return label;
+}
+
 } // namespace
 
 constexpr std::uint32_t kInvalidChunkBufferPage = std::numeric_limits<std::uint32_t>::max();
@@ -3716,6 +3778,7 @@ struct ChunkManager::Impl
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
     LodDiagnosticsSnapshot lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const;
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
+    std::string exactLightingDebugSnapshot(const glm::ivec3& worldPos) const;
     void writeLodDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const;
     ChunkProfilingSnapshot sampleProfilingSnapshot();
     void setBenchmarkMetricsEnabled(bool enabled) noexcept;
@@ -4610,6 +4673,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> dxgiAdapter_;
     UploadContext uploadContext_{};
+    UploadContext chunkDrawRecordUploadContext_{};
     Microsoft::WRL::ComPtr<ID3D12Resource> chunkDrawRecordClearUploadBuffer_{};
     std::byte* chunkDrawRecordClearUploadMapped_{nullptr};
     FarLodGpuContext exactGpuContext_{};
@@ -5026,6 +5090,7 @@ ChunkManager::Impl::~Impl()
     exactGpuContext_.shutdown();
     exactGpuBlockUvBuffer_.Reset();
     exactGpuEmptyVoxelBuffer_.Reset();
+    chunkDrawRecordUploadContext_.shutdown();
     uploadContext_.shutdown();
 }
 
@@ -5047,6 +5112,7 @@ void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
         }
     }
     uploadContext_.initialize(device_.Get());
+    chunkDrawRecordUploadContext_.initialize(device_.Get());
     exactGpuContext_.initialize(device_.Get());
     exactGpuContext_.setReadbackEnabled(true);
     farTerrainManager_.setDevice(device_.Get());
@@ -8886,7 +8952,7 @@ void ChunkManager::Impl::clearChunkDrawRecord(ChunkBufferPage& page, std::uint32
     if (recordIndex == kInvalidExactGpuDrawRecordIndex ||
         page.drawRecordBuffer == nullptr ||
         device_ == nullptr ||
-        !uploadContext_.ready())
+        !chunkDrawRecordUploadContext_.ready())
     {
         return;
     }
@@ -8897,31 +8963,31 @@ void ChunkManager::Impl::clearChunkDrawRecord(ChunkBufferPage& page, std::uint32
     }
 
     std::memset(chunkDrawRecordClearUploadMapped_, 0, sizeof(ChunkRenderBatch::GpuCullRecord));
-    if (!uploadContext_.begin())
+    if (!chunkDrawRecordUploadContext_.begin())
     {
         return;
     }
 
     if (renderFence_ != nullptr && renderFenceValue_ > 0)
     {
-        uploadContext_.waitForFence(renderFence_, renderFenceValue_);
+        chunkDrawRecordUploadContext_.waitForFence(renderFence_, renderFenceValue_);
     }
-    uploadContext_.transition(page.drawRecordBuffer.Get(),
-                              page.drawRecordState,
-                              D3D12_RESOURCE_STATE_COPY_DEST);
+    chunkDrawRecordUploadContext_.transition(page.drawRecordBuffer.Get(),
+                                             page.drawRecordState,
+                                             D3D12_RESOURCE_STATE_COPY_DEST);
     page.drawRecordState = D3D12_RESOURCE_STATE_COPY_DEST;
-    uploadContext_.copyBuffer(page.drawRecordBuffer.Get(),
-                              static_cast<std::uint64_t>(recordIndex) *
-                                  sizeof(ChunkRenderBatch::GpuCullRecord),
-                              chunkDrawRecordClearUploadBuffer_.Get(),
-                              0,
-                              static_cast<std::uint64_t>(sizeof(ChunkRenderBatch::GpuCullRecord)));
-    uploadContext_.transition(page.drawRecordBuffer.Get(),
-                              page.drawRecordState,
-                              D3D12_RESOURCE_STATE_COMMON);
+    chunkDrawRecordUploadContext_.copyBuffer(page.drawRecordBuffer.Get(),
+                                             static_cast<std::uint64_t>(recordIndex) *
+                                                 sizeof(ChunkRenderBatch::GpuCullRecord),
+                                             chunkDrawRecordClearUploadBuffer_.Get(),
+                                             0,
+                                             static_cast<std::uint64_t>(sizeof(ChunkRenderBatch::GpuCullRecord)));
+    chunkDrawRecordUploadContext_.transition(page.drawRecordBuffer.Get(),
+                                             page.drawRecordState,
+                                             D3D12_RESOURCE_STATE_COMMON);
     page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
-    uploadContext_.flush(nullptr);
-    uploadContext_.waitForIdle();
+    chunkDrawRecordUploadContext_.flush(nullptr);
+    chunkDrawRecordUploadContext_.waitForIdle();
 }
 
 ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::size_t vertexCount,
@@ -11781,6 +11847,109 @@ RecentEditHoleDebugSnapshot ChunkManager::Impl::recentEditHoleDebugSnapshot(cons
     return snapshot;
 }
 
+std::string ChunkManager::Impl::exactLightingDebugSnapshot(const glm::ivec3& worldPos) const
+{
+    std::ostringstream stream;
+    const glm::ivec3 sampleChunkCoord = worldToChunkCoords(worldPos.x, worldPos.y, worldPos.z);
+    const glm::ivec3 local = localBlockCoords(worldPos, sampleChunkCoord);
+    const glm::ivec3 centerChunk = lastCenterChunk_;
+    const glm::ivec3 delta = sampleChunkCoord - centerChunk;
+    const std::uint8_t packedLight = packedLightAtWorld(worldPos);
+
+    const std::array<std::pair<const char*, glm::ivec3>, 7> chunkCoords{{
+        {"Sample", sampleChunkCoord},
+        {"+X", sampleChunkCoord + glm::ivec3(1, 0, 0)},
+        {"-X", sampleChunkCoord + glm::ivec3(-1, 0, 0)},
+        {"+Y", sampleChunkCoord + glm::ivec3(0, 1, 0)},
+        {"-Y", sampleChunkCoord + glm::ivec3(0, -1, 0)},
+        {"+Z", sampleChunkCoord + glm::ivec3(0, 0, 1)},
+        {"-Z", sampleChunkCoord + glm::ivec3(0, 0, -1)},
+    }};
+
+    std::unordered_map<glm::ivec3, std::shared_ptr<const Chunk>, ChunkHasher> localChunks;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        for (const auto& [_, coord] : chunkCoords)
+        {
+            auto it = chunks_.find(coord);
+            if (it != chunks_.end())
+            {
+                localChunks.emplace(coord, it->second);
+            }
+        }
+    }
+
+    auto appendChunkState = [&](const char* label, const glm::ivec3& coord)
+    {
+        stream << label << " Chunk: " << coord.x << ", " << coord.y << ", " << coord.z;
+        const glm::ivec3 chunkDelta = coord - centerChunk;
+        stream << " delta=" << chunkDelta.x << ", " << chunkDelta.y << ", " << chunkDelta.z;
+        stream << " interactive=" << (shouldKeepChunkInteractive(coord, centerChunk) ? "yes" : "no");
+
+        const auto it = localChunks.find(coord);
+        if (it == localChunks.end() || !it->second)
+        {
+            stream << " present=no\n";
+            return;
+        }
+
+        const Chunk& chunk = *it->second;
+        stream << " present=yes"
+               << " state=" << chunkStateLabel(chunk.state.load(std::memory_order_acquire))
+               << " residency="
+               << exactChunkResidencyModeLabel(chunk.residencyMode.load(std::memory_order_acquire))
+               << " cpuResident=" << (chunk.cpuDataResident ? "yes" : "no")
+               << " hasBlocks=" << (chunk.hasBlocks.load(std::memory_order_acquire) ? "yes" : "no")
+               << " meshReady=" << (chunk.meshReady.load(std::memory_order_acquire) ? "yes" : "no")
+               << " uploadQueued=" << (chunk.queuedForUpload.load(std::memory_order_acquire) ? "yes" : "no")
+               << " commitQueued=" << (chunk.queuedForCommit.load(std::memory_order_acquire) ? "yes" : "no")
+               << " pendingMeshRefresh=" << (chunk.pendingMeshRefresh.load(std::memory_order_acquire) ? "yes" : "no")
+               << " inFlight=" << chunk.inFlight.load(std::memory_order_acquire)
+               << '\n';
+        stream << "  geom: page=" << chunk.bufferPageIndex.load(std::memory_order_acquire)
+               << " idx=" << chunk.indexCount.load(std::memory_order_acquire)
+               << " verts=" << chunk.vertexCount.load(std::memory_order_acquire)
+               << " meshVer=" << chunk.meshVersion.load(std::memory_order_acquire)
+               << " genEpoch=" << chunk.generationEpoch.load(std::memory_order_acquire)
+               << '\n';
+        stream << "  light: revision=" << chunk.lightingRevision.load(std::memory_order_acquire)
+               << " applied=" << chunk.appliedLightingRevision.load(std::memory_order_acquire)
+               << " skyCacheGen=" << chunk.skyLightCacheGeneration.load(std::memory_order_acquire)
+               << '\n';
+        const std::uint8_t pendingMask = chunk.exactGpuPendingNeighborMask.load(std::memory_order_acquire);
+        stream << "  exact: resident=" << (chunk.exactGpuResident.load(std::memory_order_acquire) ? "yes" : "no")
+               << " queued=" << (chunk.exactGpuBuildQueued.load(std::memory_order_acquire) ? "yes" : "no")
+               << " inFlight=" << (chunk.exactGpuBuildInFlight.load(std::memory_order_acquire) ? "yes" : "no")
+               << " inputsDirty=" << (chunk.exactGpuInputsDirty.load(std::memory_order_acquire) ? "yes" : "no")
+               << " buildVer=" << chunk.exactGpuBuildVersion.load(std::memory_order_acquire)
+               << " inputs=" << chunk.exactGpuInputsVersion.load(std::memory_order_acquire)
+               << " requested=" << chunk.exactGpuRequestedInputVersion.load(std::memory_order_acquire)
+               << " ready=" << chunk.exactGpuReadyVersion.load(std::memory_order_acquire)
+               << " pendingMask=" << exactGpuSeamMaskLabel(pendingMask)
+               << " (" << hexU32(pendingMask) << ")"
+               << " record=" << chunk.exactGpuRecordIndex.load(std::memory_order_acquire)
+               << '\n';
+    };
+
+    stream << "Exact Sample: world=" << worldPos.x << ", " << worldPos.y << ", " << worldPos.z
+           << " chunk=" << sampleChunkCoord.x << ", " << sampleChunkCoord.y << ", " << sampleChunkCoord.z
+           << " local=" << local.x << ", " << local.y << ", " << local.z
+           << " centerDelta=" << delta.x << ", " << delta.y << ", " << delta.z
+           << " interactive=" << (shouldKeepChunkInteractive(sampleChunkCoord, centerChunk) ? "yes" : "no")
+           << '\n';
+    stream << "Exact Sample Light: sky=" << static_cast<int>(skyLightFromPacked(packedLight))
+           << " block=" << static_cast<int>(blockLightFromPacked(packedLight))
+           << " packed=" << static_cast<int>(packedLight)
+           << '\n';
+
+    for (const auto& [label, coord] : chunkCoords)
+    {
+        appendChunkState(label, coord);
+    }
+
+    return stream.str();
+}
+
 int ChunkManager::Impl::columnRadiusForHeight(const glm::ivec2& column,
                                               const glm::ivec2& cameraColumn,
                                               int cameraChunkY,
@@ -14262,12 +14431,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
-        // Keep unresolved horizontal/bottom seams visually stable in geometry, but let the
-        // lighting shader smooth those seams with GPU-local fallback samples instead of
-        // forcing a black/solid boundary.
-        const std::uint32_t seamClosedNeighborMask =
-            static_cast<std::uint32_t>(pending.pendingNeighborMask) &
-            ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit);
+        // Do not close unresolved seams in geometry generation. Treating pending neighbors as
+        // solid skips border faces entirely and creates visible holes until adjacent chunks land.
+        const std::uint32_t lightClosedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactLight(chunk.exactGpu.voxelBuffer.Get(),
                                             neighborBuffers[0],
@@ -14278,7 +14444,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                             neighborBuffers[5],
                                             chunk.exactGpu.lightScratchBuffer.Get(),
                                             resolvedNeighborMask,
-                                            0u,
+                                            lightClosedNeighborMask,
                                             kExactGpuLightPropagationPassCount);
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.uavBarrier(chunk.exactGpu.lightScratchBuffer.Get());
@@ -14292,7 +14458,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         std::swap(chunk.exactGpu.voxelBuffer, chunk.exactGpu.lightScratchBuffer);
         std::swap(chunk.exactGpu.voxelState, chunk.exactGpu.lightScratchState);
 
-        const std::uint32_t closedNeighborMask = seamClosedNeighborMask;
+        const std::uint32_t closedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactFaceCount(chunk.exactGpu.voxelBuffer.Get(),
                                                 neighborBuffers[0],
@@ -14430,9 +14596,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-        const std::uint32_t closedNeighborMask =
-            static_cast<std::uint32_t>(pending.pendingNeighborMask) &
-            ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit);
+        const std::uint32_t closedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.markExactTimingBegin();
@@ -15275,6 +15439,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         BlockFace face{BlockFace::Top};
         std::array<std::uint32_t, 4> lightingData{};
         std::uint8_t flags{0};
+        bool alphaCutout{false};
         bool mergeable{true};
 
         bool operator==(const FaceMaterial& other) const noexcept
@@ -15286,6 +15451,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                    face == other.face &&
                    lightingData == other.lightingData &&
                    flags == other.flags &&
+                   alphaCutout == other.alphaCutout &&
                    mergeable == other.mergeable;
         }
     };
@@ -15424,6 +15590,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 
 	        material.face = face;
             material.lightingData = buildCornerLighting(face, owningLocal);
+            material.alphaCutout = isAlphaCutoutBlock(block);
 	        material.mergeable =
 	            !isAlphaCutoutBlock(block) && hasUniformCornerLighting(material.lightingData);
 
@@ -15540,6 +15707,8 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                 lightingMetricFromPackedVertex(vertexLighting[1]) +
                 lightingMetricFromPackedVertex(vertexLighting[3]);
             const bool flipDiagonal = diagonal13 > diagonal02;
+            const std::uint32_t alphaCutoutLightingFlag =
+                material.alphaCutout ? kLightingFlagAlphaCutoutBitCpu : 0u;
 
 	        const std::size_t vertexStart = meshData.vertices.size();
         for (int i = 0; i < 4; ++i)
@@ -15552,7 +15721,8 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	            vertex.tileCoord = glm::vec2(glm::dot(pos, uAxisVec), glm::dot(pos, vAxisVec));
 	            vertex.atlasBase = material.uvBase;
 	            vertex.atlasSize = material.uvSize;
-	            vertex.lightingData = applyVertexFlags(vertexLighting[i], material.flags);
+	            vertex.lightingData =
+                    applyVertexFlags(vertexLighting[i], material.flags) | alphaCutoutLightingFlag;
 	            meshData.vertices.push_back(vertex);
 	        }
 
@@ -19373,6 +19543,11 @@ LodDiagnosticsSnapshot ChunkManager::lodDiagnosticsSnapshot(const glm::vec3& cam
 RecentEditHoleDebugSnapshot ChunkManager::recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const
 {
     return impl_->recentEditHoleDebugSnapshot(cameraPos);
+}
+
+std::string ChunkManager::exactLightingDebugSnapshot(const glm::ivec3& worldPos) const
+{
+    return impl_->exactLightingDebugSnapshot(worldPos);
 }
 
 void ChunkManager::writeLodDebugSnapshot(const std::filesystem::path& outputPath,

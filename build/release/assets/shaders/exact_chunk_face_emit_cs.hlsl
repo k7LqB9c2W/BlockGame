@@ -35,6 +35,8 @@ RWStructuredBuffer<GpuCullRecord> gDrawRecords : register(u2);
 RWStructuredBuffer<uint> gOverflowCount : register(u3);
 RWStructuredBuffer<GpuExactOverflowEntry> gOverflowEntries : register(u4);
 
+static const uint kLightingFlagAlphaCutoutBit = 1u << 24u;
+
 uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
 {
     if (x < 0 || y < 0 || z < 0 ||
@@ -448,6 +450,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         const uint blockId = voxelBlock(packedVoxel);
         const GpuExactColumnDescriptor column = gColumns[columnIndex(localX, localZ)];
         const uint materialFlags = materialFlagsForFace(blockId, faceId, column);
+        const uint alphaCutoutLightingFlag = isAlphaCutoutBlock(blockId) ? kLightingFlagAlphaCutoutBit : 0u;
         const uint faceIndex = faceBase + localIndex;
         const uint localVertexOffset = faceIndex * 4u;
         const uint vertexIndex = gVertexBase + localVertexOffset;
@@ -501,22 +504,30 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         v0.tileCoord = projectTileCoord(faceId, p0);
         v0.atlasBase = uv.base;
         v0.atlasSize = uv.size;
-        v0.lightingData = (vertexLighting[0] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v0.lightingData =
+            ((vertexLighting[0] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
+            alphaCutoutLightingFlag;
 
         WorldVertex v1 = v0;
         v1.position = p1;
         v1.tileCoord = projectTileCoord(faceId, p1);
-        v1.lightingData = (vertexLighting[1] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v1.lightingData =
+            ((vertexLighting[1] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
+            alphaCutoutLightingFlag;
 
         WorldVertex v2 = v0;
         v2.position = p2;
         v2.tileCoord = projectTileCoord(faceId, p2);
-        v2.lightingData = (vertexLighting[2] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v2.lightingData =
+            ((vertexLighting[2] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
+            alphaCutoutLightingFlag;
 
         WorldVertex v3 = v0;
         v3.position = p3;
         v3.tileCoord = projectTileCoord(faceId, p3);
-        v3.lightingData = (vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v3.lightingData =
+            ((vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
+            alphaCutoutLightingFlag;
 
         gVertices[vertexIndex + 0u] = v0;
         gVertices[vertexIndex + 1u] = v1;

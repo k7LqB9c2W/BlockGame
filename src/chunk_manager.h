@@ -689,6 +689,7 @@ public:
     StreamingStatusSnapshot streamingStatusSnapshot() const noexcept;
     LodDiagnosticsSnapshot lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const;
     RecentEditHoleDebugSnapshot recentEditHoleDebugSnapshot(const glm::vec3& cameraPos) const;
+    std::string exactLightingDebugSnapshot(const glm::ivec3& worldPos) const;
     void writeLodDebugSnapshot(const std::filesystem::path& outputPath, const glm::vec3& cameraPos) const;
 
     ChunkProfilingSnapshot sampleProfilingSnapshot();

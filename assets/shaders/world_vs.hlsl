@@ -40,6 +40,7 @@ struct VSOutput
     float ao : TEXCOORD4;
     uint materialFlags : TEXCOORD5;
     float farVoxelScale : TEXCOORD6;
+    uint alphaCutout : TEXCOORD7;
 };
 
 VSOutput main(VSInput input)
@@ -56,6 +57,7 @@ VSOutput main(VSInput input)
     output.ao = decodedLighting.ao;
     output.materialFlags = decodedLighting.flags;
     output.farVoxelScale = decodedLighting.farVoxelScale;
+    output.alphaCutout = decodedLighting.alphaCutout;
     output.position = mul(uViewProj, float4(input.position, 1.0f));
     return output;
 }

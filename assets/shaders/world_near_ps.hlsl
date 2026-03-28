@@ -38,6 +38,7 @@ struct PSInput
     float2 lightChannels : TEXCOORD3;
     float ao : TEXCOORD4;
     uint materialFlags : TEXCOORD5;
+    uint alphaCutout : TEXCOORD7;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
@@ -125,7 +126,10 @@ float4 main(PSInput input) : SV_TARGET
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
-    clip(textureSample.a - 0.5f);
+    if (input.alphaCutout != 0u)
+    {
+        clip(textureSample.a - 0.5f);
+    }
     const uint grassTintIndex = decodeGrassTintIndex(input.materialFlags);
 
     float3 albedo = textureSample.rgb;

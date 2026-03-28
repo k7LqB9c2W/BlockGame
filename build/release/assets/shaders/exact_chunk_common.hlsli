@@ -47,7 +47,7 @@ struct GpuExactColumnDescriptor
     uint fillerBlock;
     uint waterBlock;
     uint stripeBlock;
-    uint reserved0;
+    uint skyLightFromAbove;
     uint reserved1;
     uint reserved2;
 };

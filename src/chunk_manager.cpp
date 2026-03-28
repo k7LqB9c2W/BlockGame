@@ -3008,7 +3008,7 @@ struct GpuExactColumnDescriptor
     std::uint32_t fillerBlock{0};
     std::uint32_t waterBlock{0};
     std::uint32_t stripeBlock{0};
-    std::uint32_t reserved0{0};
+    std::uint32_t skyLightFromAbove{0};
     std::uint32_t reserved1{0};
     std::uint32_t reserved2{0};
 };
@@ -3453,7 +3453,8 @@ namespace
 }
 
 [[nodiscard]] GpuExactColumnDescriptor packGpuExactColumnDescriptor(
-    const terrain::ExactChunkColumnDescriptor& descriptor) noexcept
+    const terrain::ExactChunkColumnDescriptor& descriptor,
+    std::uint8_t skyLightFromAbove) noexcept
 {
     GpuExactColumnDescriptor packed{};
     packed.surfaceY = descriptor.surfaceY;
@@ -3469,6 +3470,7 @@ namespace
     packed.fillerBlock = static_cast<std::uint32_t>(descriptor.fillerBlock);
     packed.waterBlock = static_cast<std::uint32_t>(descriptor.waterBlock);
     packed.stripeBlock = static_cast<std::uint32_t>(descriptor.stripeBlock);
+    packed.skyLightFromAbove = static_cast<std::uint32_t>(skyLightFromAbove);
     return packed;
 }
 
@@ -13657,7 +13659,8 @@ bool ChunkManager::Impl::rebuildChunkGpuExactInputsLocked(
     for (std::size_t i = 0; i < chunk.gpuExactColumnDescriptors.size(); ++i)
     {
         chunk.gpuExactColumnDescriptors[i] =
-            packGpuExactColumnDescriptor(chunk.exactColumnDescriptors[i]);
+            packGpuExactColumnDescriptor(chunk.exactColumnDescriptors[i],
+                                         chunk.skyLightFromAboveCache[i]);
     }
     chunk.gpuExactColumnDescriptorsReady = true;
 
@@ -14435,7 +14438,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         // solid skips border faces entirely and creates visible holes until adjacent chunks land.
         const std::uint32_t lightClosedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactLight(chunk.exactGpu.voxelBuffer.Get(),
+        exactGpuContext_.dispatchExactLight(chunk.exactGpu.columnBuffer.Get(),
+                                            chunk.exactGpu.voxelBuffer.Get(),
                                             neighborBuffers[0],
                                             neighborBuffers[1],
                                             neighborBuffers[2],
@@ -18386,7 +18390,8 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     for (std::size_t i = 0; i < gpuColumnDescriptors.size(); ++i)
     {
         gpuColumnDescriptors[i] =
-            packGpuExactColumnDescriptor(columnDescriptors[i]);
+            packGpuExactColumnDescriptor(columnDescriptors[i],
+                                         chunk.skyLightFromAboveCache[i]);
     }
     std::vector<GpuExactSparseVoxel> gpuSparseVoxels;
     gpuSparseVoxels.reserve(structureVoxelEdits.size() +

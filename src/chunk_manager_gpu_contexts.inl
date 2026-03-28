@@ -1841,7 +1841,8 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactLight(ID3D12Resource* centerVoxelBuffer,
+    void dispatchExactLight(ID3D12Resource* columnBuffer,
+                            ID3D12Resource* centerVoxelBuffer,
                             ID3D12Resource* neighborPosXBuffer,
                             ID3D12Resource* neighborNegXBuffer,
                             ID3D12Resource* neighborPosYBuffer,
@@ -1855,6 +1856,7 @@ public:
     {
         if (!open_ ||
             exactLightPipelineState_ == nullptr ||
+            columnBuffer == nullptr ||
             centerVoxelBuffer == nullptr ||
             neighborPosXBuffer == nullptr ||
             neighborNegXBuffer == nullptr ||
@@ -1875,14 +1877,15 @@ public:
         commandList_->SetPipelineState(exactLightPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactLightRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        commandList_->SetComputeRootShaderResourceView(1, centerVoxelBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(2, neighborPosXBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(3, neighborNegXBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(4, neighborPosYBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(5, neighborNegYBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(6, neighborPosZBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(7, neighborNegZBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(8, destinationVoxelBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(1, columnBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(2, centerVoxelBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(3, neighborPosXBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(4, neighborNegXBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(5, neighborPosYBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(6, neighborNegYBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(7, neighborPosZBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(8, neighborNegZBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(9, destinationVoxelBuffer->GetGPUVirtualAddress());
         commandList_->Dispatch(1u, 1u, 1u);
         hasCommands_ = true;
     }
@@ -2969,17 +2972,17 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactStampPso, IID_PPV_ARGS(&exactStampPipelineState_)),
                         "failed to create exact chunk stamp pipeline");
 
-        std::array<D3D12_ROOT_PARAMETER, 9> exactLightParams{};
+        std::array<D3D12_ROOT_PARAMETER, 10> exactLightParams{};
         exactLightParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactLightParams[0].Constants.ShaderRegister = 0;
         exactLightParams[0].Constants.Num32BitValues = 4;
-        for (UINT parameterIndex = 1; parameterIndex <= 7; ++parameterIndex)
+        for (UINT parameterIndex = 1; parameterIndex <= 8; ++parameterIndex)
         {
             exactLightParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
             exactLightParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
         }
-        exactLightParams[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        exactLightParams[8].Descriptor.ShaderRegister = 0;
+        exactLightParams[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactLightParams[9].Descriptor.ShaderRegister = 0;
         D3D12_ROOT_SIGNATURE_DESC exactLightDesc{};
         exactLightDesc.NumParameters = static_cast<UINT>(exactLightParams.size());
         exactLightDesc.pParameters = exactLightParams.data();

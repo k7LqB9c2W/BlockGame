@@ -324,7 +324,7 @@ void ExactChunkLightMain(uint3 groupThreadId : SV_GroupThreadID)
         }
         else
         {
-            incomingSky = attenuateLight(incomingSky, propagationLossForBlock(blockId));
+            incomingSky = attenuateLight(incomingSky, skyAttenuationForBlock(blockId));
             seededVoxel = encodeVoxel(blockId, incomingSky, emission);
             seededVoxel = seedBoundaryLight(uint3(localX, uint(localY), localZ), seededVoxel);
         }

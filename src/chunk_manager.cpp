@@ -3336,6 +3336,7 @@ struct Chunk
         exactGpuInputsVersion.store(0, std::memory_order_relaxed);
         exactGpuRequestedInputVersion.store(0, std::memory_order_relaxed);
         exactGpuReadyVersion.store(0, std::memory_order_relaxed);
+        exactGpuHaloDirty.store(false, std::memory_order_relaxed);
         exactGpuRecordIndex.store(std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident = false;
@@ -3434,6 +3435,7 @@ struct Chunk
     std::atomic<std::uint64_t> exactGpuInputsVersion{0};
     std::atomic<std::uint64_t> exactGpuRequestedInputVersion{0};
     std::atomic<std::uint64_t> exactGpuReadyVersion{0};
+    std::atomic<bool> exactGpuHaloDirty{false};
     std::atomic<std::uint32_t> exactGpuRecordIndex{std::numeric_limits<std::uint32_t>::max()};
     std::atomic<std::uint8_t> exactGpuPendingNeighborMask{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
@@ -13772,11 +13774,12 @@ bool ChunkManager::Impl::queuePreparedExactGpuBuildLocked(const std::shared_ptr<
         chunk->exactGpuRequestedInputVersion.load(std::memory_order_acquire);
     const bool buildQueued = chunk->exactGpuBuildQueued.load(std::memory_order_acquire);
     const bool buildInFlight = chunk->exactGpuBuildInFlight.load(std::memory_order_acquire);
+    const bool haloDirty = chunk->exactGpuHaloDirty.load(std::memory_order_acquire);
     const bool residentCurrent =
         chunk->exactGpuResident.load(std::memory_order_acquire) &&
         !chunk->exactGpuInputsDirty.load(std::memory_order_acquire) &&
         chunk->exactGpuReadyVersion.load(std::memory_order_acquire) == currentInputVersion;
-    if (residentCurrent ||
+    if ((residentCurrent && !haloDirty) ||
         ((buildQueued || buildInFlight) && requestedInputVersion == currentInputVersion))
     {
         return true;
@@ -13847,11 +13850,12 @@ void ChunkManager::Impl::queueChunkForExactGpuRefresh(const std::shared_ptr<Chun
         chunk->exactGpuRequestedInputVersion.load(std::memory_order_acquire);
     const bool buildQueued = chunk->exactGpuBuildQueued.load(std::memory_order_acquire);
     const bool buildInFlight = chunk->exactGpuBuildInFlight.load(std::memory_order_acquire);
+    const bool haloDirty = chunk->exactGpuHaloDirty.load(std::memory_order_acquire);
     const bool residentCurrent =
         chunk->exactGpuResident.load(std::memory_order_acquire) &&
         !chunk->exactGpuInputsDirty.load(std::memory_order_acquire) &&
         chunk->exactGpuReadyVersion.load(std::memory_order_acquire) == currentInputVersion;
-    if (residentCurrent ||
+    if ((residentCurrent && !haloDirty) ||
         ((buildQueued || buildInFlight) && requestedInputVersion == currentInputVersion))
     {
         return;
@@ -13899,7 +13903,14 @@ void ChunkManager::Impl::queueChunkForExactGpuBorderRefresh(const std::shared_pt
         return;
     }
 
-    chunk->exactGpuInputsVersion.fetch_add(1, std::memory_order_acq_rel);
+    const bool alreadyDirty = chunk->exactGpuHaloDirty.exchange(true, std::memory_order_acq_rel);
+    if (alreadyDirty &&
+        (chunk->exactGpuBuildQueued.load(std::memory_order_acquire) ||
+         chunk->exactGpuBuildInFlight.load(std::memory_order_acquire)))
+    {
+        return;
+    }
+
     queueChunkForExactGpuRefresh(chunk);
 }
 
@@ -14869,7 +14880,35 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
         {glm::ivec3(0, 0, 1), kExactGpuSeamPosZBit},
         {glm::ivec3(0, 0, -1), kExactGpuSeamNegZBit},
     }};
-    auto queuePendingNeighborRefreshes = [&](const Chunk& committedChunk, bool builtFromInputs)
+    auto computeCurrentPendingNeighborMask = [&](const Chunk& targetChunk) -> std::uint8_t
+    {
+        std::uint8_t pendingMask = 0u;
+        for (const auto& [offset, seamBit] : seamNeighbors)
+        {
+            const glm::ivec3 neighborCoord = targetChunk.coord + offset;
+            bool ready = false;
+            {
+                std::lock_guard<std::mutex> lock(chunksMutex);
+                const auto it = chunks_.find(neighborCoord);
+                if (it != chunks_.end() && it->second)
+                {
+                    const Chunk& neighbor = *it->second;
+                    ready = neighbor.exactGpu.voxelBuffer != nullptr &&
+                            neighbor.exactGpu.readyFenceValue != 0 &&
+                            completedGpuFenceValue >= neighbor.exactGpu.readyFenceValue &&
+                            !neighbor.exactGpuBuildInFlight.load(std::memory_order_acquire);
+                }
+            }
+
+            if (!ready)
+            {
+                pendingMask |= seamBit;
+            }
+        }
+
+        return pendingMask;
+    };
+    auto queuePendingNeighborRefreshes = [&](const Chunk& committedChunk)
     {
         for (const auto& [offset, seamBit] : seamNeighbors)
         {
@@ -14882,11 +14921,11 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             const std::uint8_t requiredPendingBit = oppositeExactGpuSeamBit(seamBit);
             const bool waitingOnCommittedFace =
                 (neighbor->exactGpuPendingNeighborMask.load(std::memory_order_acquire) & requiredPendingBit) != 0u;
-            const bool residentOrQueued =
-                neighbor->exactGpuResident.load(std::memory_order_acquire) ||
-                neighbor->exactGpuBuildQueued.load(std::memory_order_acquire) ||
-                neighbor->exactGpuBuildInFlight.load(std::memory_order_acquire);
-            if (!waitingOnCommittedFace && (!builtFromInputs || !residentOrQueued))
+            if (!waitingOnCommittedFace)
+            {
+                continue;
+            }
+            if (computeCurrentPendingNeighborMask(*neighbor) != 0u)
             {
                 continue;
             }
@@ -14997,6 +15036,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
         chunk.exactGpuResident.store(true, std::memory_order_release);
         chunk.exactGpuPendingNeighborMask.store(pending.pendingNeighborMask, std::memory_order_release);
         chunk.exactGpuReadyVersion.store(pending.inputVersion, std::memory_order_release);
+        chunk.exactGpuHaloDirty.store(false, std::memory_order_release);
         if (chunk.exactGpuInputsVersion.load(std::memory_order_acquire) == pending.inputVersion)
         {
             chunk.exactGpuInputsDirty.store(false, std::memory_order_release);
@@ -15065,7 +15105,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             std::vector<GpuExactSparseVoxel>().swap(chunk.gpuExactSparseVoxels);
             chunk.gpuExactSparseVoxelsReady = false;
         }
-        queuePendingNeighborRefreshes(chunk, pending.rebuildVoxelInputs);
+        queuePendingNeighborRefreshes(chunk);
         finalizeBuild(pending, chunk.exactGpuBuildQueued.load(std::memory_order_acquire));
     }
 

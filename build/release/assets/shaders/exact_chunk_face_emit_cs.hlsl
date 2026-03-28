@@ -143,9 +143,24 @@ uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
+
     if (sampleCount == 1u)
     {
         return packedSamples[0];
+    }
+
+    uint maxSky = voxelSkyLight(packedSamples[0]);
+    uint maxBlock = voxelBlockLight(packedSamples[0]);
+    [unroll]
+    for (uint i = 0u; i < 3u; ++i)
+    {
+        if (i >= sampleCount)
+        {
+            break;
+        }
+
+        maxSky = max(maxSky, voxelSkyLight(packedSamples[i]));
+        maxBlock = max(maxBlock, voxelBlockLight(packedSamples[i]));
     }
 
     uint skySum = 0u;
@@ -163,8 +178,8 @@ uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
     }
 
     return encodeVoxel(kBlockAir,
-                       (skySum + sampleCount / 2u) / sampleCount,
-                       (blockSum + sampleCount / 2u) / sampleCount);
+                       max(maxSky, (skySum + sampleCount / 2u) / sampleCount),
+                       max(maxBlock, (blockSum + sampleCount / 2u) / sampleCount));
 }
 
 void faceVectors(uint faceId, out int3 outward, out int3 sideU, out int3 sideV, out float3 normal)

@@ -14527,7 +14527,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                                 neighborBuffers[5],
                                                 chunk.exactGpu.haloBuffer.Get(),
                                                 resolvedNeighborMask,
-                                                closedNeighborMask);
+                                                closedNeighborMask,
+                                                chunk.minWorldY);
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.uavBarrier(chunk.exactGpu.haloBuffer.Get());
         if (chunk.exactGpu.haloState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)

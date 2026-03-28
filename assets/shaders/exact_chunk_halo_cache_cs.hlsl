@@ -4,7 +4,7 @@ cbuffer ExactChunkHaloCacheParams : register(b0)
 {
     uint gResolvedNeighborMask;
     uint gClosedNeighborMask;
-    uint gReserved0;
+    int gChunkMinWorldY;
     uint gReserved1;
 }
 
@@ -21,14 +21,26 @@ uint sampleVoxel(StructuredBuffer<uint> bufferRef, uint x, uint y, uint z)
     return bufferRef[voxelIndex(x, y, z)];
 }
 
-uint defaultHaloVoxel(uint faceIndex)
+uint defaultHaloVoxel(uint faceIndex, uint u, uint v)
 {
+    int localY = 0;
     if (faceIndex == kExactHaloFacePosY)
     {
-        return encodeVoxel(kBlockAir, 15u, 0u);
+        localY = int(kExactChunkSize);
+    }
+    else if (faceIndex == kExactHaloFaceNegY)
+    {
+        localY = -1;
+    }
+    else
+    {
+        (void)u;
+        localY = int(v);
     }
 
-    return encodeVoxel(kBlockAir, 0u, 0u);
+    const int worldY = gChunkMinWorldY + localY;
+    const uint defaultSky = (worldY < 0) ? 0u : 15u;
+    return encodeVoxel(kBlockAir, defaultSky, 0u);
 }
 
 [numthreads(8, 8, 1)]
@@ -45,7 +57,7 @@ void ExactChunkHaloCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint u = dispatchThreadId.x;
     const uint v = dispatchThreadId.y;
     uint seamBit = 0u;
-    uint packedVoxel = defaultHaloVoxel(faceIndex);
+    uint packedVoxel = defaultHaloVoxel(faceIndex, u, v);
 
     if (faceIndex == kExactHaloFacePosX)
     {

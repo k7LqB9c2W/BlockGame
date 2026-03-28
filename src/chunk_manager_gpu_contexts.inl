@@ -1852,7 +1852,8 @@ public:
                                 ID3D12Resource* neighborNegZBuffer,
                                 ID3D12Resource* haloBuffer,
                                 std::uint32_t resolvedNeighborMask,
-                                std::uint32_t closedNeighborMask)
+                                std::uint32_t closedNeighborMask,
+                                std::int32_t chunkMinWorldY)
     {
         if (!open_ ||
             exactHaloCachePipelineState_ == nullptr ||
@@ -1870,7 +1871,7 @@ public:
         const std::array<std::uint32_t, 4> constants{
             resolvedNeighborMask,
             closedNeighborMask,
-            kExactChunkSize * kExactChunkSize * 6u,
+            static_cast<std::uint32_t>(chunkMinWorldY),
             0u};
         commandList_->SetPipelineState(exactHaloCachePipelineState_.Get());
         commandList_->SetComputeRootSignature(exactHaloCacheRootSignature_.Get());

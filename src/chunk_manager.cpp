@@ -14182,10 +14182,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         exactGpuEmptyVoxelBufferState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
-    const bool stabilizePreloadSeams =
-        ((startupEnabled_ && startupState_.phase == StreamingPhase::ExactPreload) ||
-         stationaryExactFillModeActive_);
-
     exactGpuContext_.beginExactTimingBatch();
 
     for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
@@ -14266,9 +14262,12 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
-        const std::uint32_t lightClosedNeighborMask =
-            stabilizePreloadSeams ? (pending.pendingNeighborMask & ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit))
-                                  : 0u;
+        // Keep unresolved horizontal/bottom seams visually stable in geometry, but let the
+        // lighting shader smooth those seams with GPU-local fallback samples instead of
+        // forcing a black/solid boundary.
+        const std::uint32_t seamClosedNeighborMask =
+            static_cast<std::uint32_t>(pending.pendingNeighborMask) &
+            ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit);
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactLight(chunk.exactGpu.voxelBuffer.Get(),
                                             neighborBuffers[0],
@@ -14279,7 +14278,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                             neighborBuffers[5],
                                             chunk.exactGpu.lightScratchBuffer.Get(),
                                             resolvedNeighborMask,
-                                            lightClosedNeighborMask,
+                                            0u,
                                             kExactGpuLightPropagationPassCount);
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.uavBarrier(chunk.exactGpu.lightScratchBuffer.Get());
@@ -14293,7 +14292,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         std::swap(chunk.exactGpu.voxelBuffer, chunk.exactGpu.lightScratchBuffer);
         std::swap(chunk.exactGpu.voxelState, chunk.exactGpu.lightScratchState);
 
-        const std::uint32_t closedNeighborMask = 0u;
+        const std::uint32_t closedNeighborMask = seamClosedNeighborMask;
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.dispatchExactFaceCount(chunk.exactGpu.voxelBuffer.Get(),
                                                 neighborBuffers[0],
@@ -14431,7 +14430,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-        const std::uint32_t closedNeighborMask = 0u;
+        const std::uint32_t closedNeighborMask =
+            static_cast<std::uint32_t>(pending.pendingNeighborMask) &
+            ~static_cast<std::uint32_t>(kExactGpuSeamPosYBit);
         exactGpuContext_.markExactTimingBegin();
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.markExactTimingBegin();

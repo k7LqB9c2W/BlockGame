@@ -61,17 +61,17 @@ uint sampleResolvedNeighbor(uint seamBit, int x, int y, int z)
     return encodeVoxel(kBlockAir, 0u, 0u);
 }
 
-uint sampleLightingFallback(uint seamBit)
+uint sampleLightingFallback(bool readPropagated, uint seamBit, int x, int y, int z)
 {
     if (seamBit == kExactNeighborPosYBit)
     {
         return encodeVoxel(kBlockAir, 15u, 0u);
     }
-    if ((gClosedNeighborMask & seamBit) != 0u)
-    {
-        return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
-    }
-    return encodeVoxel(kBlockAir, 0u, 0u);
+
+    // Mirror the chunk-edge lighting sample until the real neighbor is ready.
+    // This keeps border lighting stable without pushing seam handling back to CPU.
+    const uint index = voxelIndex(uint(x), uint(y), uint(z));
+    return readPropagated ? sPropagatedVoxels[index] : sSeededVoxels[index];
 }
 
 uint sampleSeededOrNeighbor(bool readPropagated, int x, int y, int z)
@@ -123,7 +123,7 @@ uint sampleSeededOrNeighbor(bool readPropagated, int x, int y, int z)
     {
         return sampleResolvedNeighbor(seamBit, x, y, z);
     }
-    return sampleLightingFallback(seamBit);
+    return sampleLightingFallback(readPropagated, seamBit, x, y, z);
 }
 
 [numthreads(16, 16, 1)]

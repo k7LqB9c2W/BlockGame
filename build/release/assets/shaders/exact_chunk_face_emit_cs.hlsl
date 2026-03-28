@@ -110,6 +110,68 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
     return encodeVoxel(kBlockAir, 0u, 0u);
 }
 
+uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
+{
+    if (x >= 0 && y >= 0 && z >= 0 &&
+        x < int(kExactChunkSize) && y < int(kExactChunkSize) && z < int(kExactChunkSize))
+    {
+        return sampleVoxel(gCenterVoxels, x, y, z);
+    }
+
+    uint seamBit = 0u;
+    if (x == int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    {
+        seamBit = kExactNeighborPosXBit;
+        x = 0;
+    }
+    else if (x == -1 && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    {
+        seamBit = kExactNeighborNegXBit;
+        x = int(kExactChunkSize) - 1;
+    }
+    else if (y == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    {
+        seamBit = kExactNeighborPosYBit;
+        y = 0;
+    }
+    else if (y == -1 && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    {
+        seamBit = kExactNeighborNegYBit;
+        y = int(kExactChunkSize) - 1;
+    }
+    else if (z == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
+    {
+        seamBit = kExactNeighborPosZBit;
+        z = 0;
+    }
+    else if (z == -1 && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
+    {
+        seamBit = kExactNeighborNegZBit;
+        z = int(kExactChunkSize) - 1;
+    }
+
+    if (seamBit == 0u)
+    {
+        return encodeVoxel(kBlockAir, 0u, 0u);
+    }
+    if ((gResolvedNeighborMask & seamBit) != 0u)
+    {
+        if (seamBit == kExactNeighborPosXBit) return sampleVoxel(gNeighborPosX, x, y, z);
+        if (seamBit == kExactNeighborNegXBit) return sampleVoxel(gNeighborNegX, x, y, z);
+        if (seamBit == kExactNeighborPosYBit) return sampleVoxel(gNeighborPosY, x, y, z);
+        if (seamBit == kExactNeighborNegYBit) return sampleVoxel(gNeighborNegY, x, y, z);
+        if (seamBit == kExactNeighborPosZBit) return sampleVoxel(gNeighborPosZ, x, y, z);
+        if (seamBit == kExactNeighborNegZBit) return sampleVoxel(gNeighborNegZ, x, y, z);
+    }
+    if (seamBit == kExactNeighborPosYBit)
+    {
+        return encodeVoxel(kBlockAir, 15u, 0u);
+    }
+
+    // Mirror the border sample for lighting/AO until GPU neighbor data is ready.
+    return sampleVoxel(gCenterVoxels, x, y, z);
+}
+
 void faceVectors(uint faceId, out int3 outward, out int3 sideU, out int3 sideV, out float3 normal)
 {
     if (faceId == 0u)
@@ -197,6 +259,15 @@ uint cornerIndexForSigns(int uSign, int vSign)
     return vSign > 0 ? 3u : 0u;
 }
 
+int lightingMetricFromPackedVertex(uint packedLighting)
+{
+    const uint packedLight = packedLighting & 0xFFu;
+    const int sky = int((packedLight >> 4u) & 0x0Fu);
+    const int block = int(packedLight & 0x0Fu);
+    const int ao = int((packedLighting >> 8u) & 0x03u);
+    return sky * 24 + block * 18 + (3 - ao) * 20;
+}
+
 uint buildCornerLighting(int3 owningLocal, uint faceId, int uSign, int vSign)
 {
     int3 outward;
@@ -215,10 +286,10 @@ uint buildCornerLighting(int3 owningLocal, uint faceId, int uSign, int vSign)
     uint blockSum = 0u;
     uint validSamples = 0u;
     const uint packedSamples[4] = {
-        sampleVoxelWithNeighbors(sample0.x, sample0.y, sample0.z),
-        sampleVoxelWithNeighbors(sample1.x, sample1.y, sample1.z),
-        sampleVoxelWithNeighbors(sample2.x, sample2.y, sample2.z),
-        sampleVoxelWithNeighbors(sample3.x, sample3.y, sample3.z)
+        sampleLightingVoxelWithNeighbors(sample0.x, sample0.y, sample0.z),
+        sampleLightingVoxelWithNeighbors(sample1.x, sample1.y, sample1.z),
+        sampleLightingVoxelWithNeighbors(sample2.x, sample2.y, sample2.z),
+        sampleLightingVoxelWithNeighbors(sample3.x, sample3.y, sample3.z)
     };
 
     [unroll]
@@ -244,14 +315,17 @@ uint buildCornerLighting(int3 owningLocal, uint faceId, int uSign, int vSign)
     }
     else
     {
-        const uint fallbackPacked = sampleVoxelWithNeighbors(fallbackSample.x, fallbackSample.y, fallbackSample.z);
+        const uint fallbackPacked = sampleLightingVoxelWithNeighbors(fallbackSample.x, fallbackSample.y, fallbackSample.z);
         skyLight = voxelSkyLight(fallbackPacked);
         blockLight = voxelBlockLight(fallbackPacked);
     }
 
-    const uint side1Solid = isAoSolid(voxelBlock(sampleVoxelWithNeighbors(sample1.x, sample1.y, sample1.z))) ? 1u : 0u;
-    const uint side2Solid = isAoSolid(voxelBlock(sampleVoxelWithNeighbors(sample2.x, sample2.y, sample2.z))) ? 1u : 0u;
-    const uint cornerSolid = isAoSolid(voxelBlock(sampleVoxelWithNeighbors(sample3.x, sample3.y, sample3.z))) ? 1u : 0u;
+    const uint side1Solid =
+        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(sample1.x, sample1.y, sample1.z))) ? 1u : 0u;
+    const uint side2Solid =
+        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(sample2.x, sample2.y, sample2.z))) ? 1u : 0u;
+    const uint cornerSolid =
+        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(sample3.x, sample3.y, sample3.z))) ? 1u : 0u;
     const uint aoLevel = (side1Solid != 0u && side2Solid != 0u) ? 3u : (side1Solid + side2Solid + cornerSolid);
     return packLightingData(skyLight, blockLight, aoLevel, 0u);
 }
@@ -395,6 +469,31 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         {
             cornerLighting[i] = buildCornerLighting(int3(localX, localY, localZ), faceId, cornerUSigns[i], cornerVSigns[i]);
         }
+        int3 outwardUnused;
+        int3 sideU;
+        int3 sideV;
+        float3 normalUnused;
+        faceVectors(faceId, outwardUnused, sideU, sideV, normalUnused);
+        const float3 quadCenter = 0.25f * (p0 + p1 + p2 + p3);
+        const float3 uAxis = float3(sideU);
+        const float3 vAxis = float3(sideV);
+        const float3 positions[4] = {p0, p1, p2, p3};
+        uint vertexLighting[4];
+        [unroll]
+        for (uint i = 0u; i < 4u; ++i)
+        {
+            const float3 offset = positions[i] - quadCenter;
+            const int uSign = dot(offset, uAxis) >= 0.0f ? 1 : -1;
+            const int vSign = dot(offset, vAxis) >= 0.0f ? 1 : -1;
+            vertexLighting[i] = cornerLighting[cornerIndexForSigns(uSign, vSign)];
+        }
+        const int diagonal02 =
+            lightingMetricFromPackedVertex(vertexLighting[0]) +
+            lightingMetricFromPackedVertex(vertexLighting[2]);
+        const int diagonal13 =
+            lightingMetricFromPackedVertex(vertexLighting[1]) +
+            lightingMetricFromPackedVertex(vertexLighting[3]);
+        const bool flipDiagonal = diagonal13 > diagonal02;
 
         WorldVertex v0;
         v0.position = p0;
@@ -402,33 +501,45 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         v0.tileCoord = projectTileCoord(faceId, p0);
         v0.atlasBase = uv.base;
         v0.atlasSize = uv.size;
-        v0.lightingData = (cornerLighting[0] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v0.lightingData = (vertexLighting[0] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
 
         WorldVertex v1 = v0;
         v1.position = p1;
         v1.tileCoord = projectTileCoord(faceId, p1);
-        v1.lightingData = (cornerLighting[1] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v1.lightingData = (vertexLighting[1] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
 
         WorldVertex v2 = v0;
         v2.position = p2;
         v2.tileCoord = projectTileCoord(faceId, p2);
-        v2.lightingData = (cornerLighting[2] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v2.lightingData = (vertexLighting[2] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
 
         WorldVertex v3 = v0;
         v3.position = p3;
         v3.tileCoord = projectTileCoord(faceId, p3);
-        v3.lightingData = (cornerLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
+        v3.lightingData = (vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u);
 
         gVertices[vertexIndex + 0u] = v0;
         gVertices[vertexIndex + 1u] = v1;
         gVertices[vertexIndex + 2u] = v2;
         gVertices[vertexIndex + 3u] = v3;
 
-        gIndices[indexIndex + 0u] = localVertexOffset + 0u;
-        gIndices[indexIndex + 1u] = localVertexOffset + 1u;
-        gIndices[indexIndex + 2u] = localVertexOffset + 2u;
-        gIndices[indexIndex + 3u] = localVertexOffset + 0u;
-        gIndices[indexIndex + 4u] = localVertexOffset + 2u;
-        gIndices[indexIndex + 5u] = localVertexOffset + 3u;
+        if (flipDiagonal)
+        {
+            gIndices[indexIndex + 0u] = localVertexOffset + 0u;
+            gIndices[indexIndex + 1u] = localVertexOffset + 1u;
+            gIndices[indexIndex + 2u] = localVertexOffset + 3u;
+            gIndices[indexIndex + 3u] = localVertexOffset + 1u;
+            gIndices[indexIndex + 4u] = localVertexOffset + 2u;
+            gIndices[indexIndex + 5u] = localVertexOffset + 3u;
+        }
+        else
+        {
+            gIndices[indexIndex + 0u] = localVertexOffset + 0u;
+            gIndices[indexIndex + 1u] = localVertexOffset + 1u;
+            gIndices[indexIndex + 2u] = localVertexOffset + 2u;
+            gIndices[indexIndex + 3u] = localVertexOffset + 0u;
+            gIndices[indexIndex + 4u] = localVertexOffset + 2u;
+            gIndices[indexIndex + 5u] = localVertexOffset + 3u;
+        }
     }
 }

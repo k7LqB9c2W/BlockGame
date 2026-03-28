@@ -11,12 +11,7 @@ cbuffer ExactChunkFaceCountParams : register(b0)
 };
 
 StructuredBuffer<uint> gCenterVoxels : register(t0);
-StructuredBuffer<uint> gNeighborPosX : register(t1);
-StructuredBuffer<uint> gNeighborNegX : register(t2);
-StructuredBuffer<uint> gNeighborPosY : register(t3);
-StructuredBuffer<uint> gNeighborNegY : register(t4);
-StructuredBuffer<uint> gNeighborPosZ : register(t5);
-StructuredBuffer<uint> gNeighborNegZ : register(t6);
+StructuredBuffer<uint> gHaloVoxels : register(t1);
 RWStructuredBuffer<uint> gFaceCounts : register(u0);
 RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(u1);
 
@@ -75,20 +70,7 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
-    if ((gResolvedNeighborMask & seamBit) != 0u)
-    {
-        if (seamBit == kExactNeighborPosXBit) return sampleVoxel(gNeighborPosX, x, y, z);
-        if (seamBit == kExactNeighborNegXBit) return sampleVoxel(gNeighborNegX, x, y, z);
-        if (seamBit == kExactNeighborPosYBit) return sampleVoxel(gNeighborPosY, x, y, z);
-        if (seamBit == kExactNeighborNegYBit) return sampleVoxel(gNeighborNegY, x, y, z);
-        if (seamBit == kExactNeighborPosZBit) return sampleVoxel(gNeighborPosZ, x, y, z);
-        if (seamBit == kExactNeighborNegZBit) return sampleVoxel(gNeighborNegZ, x, y, z);
-    }
-    if ((gClosedNeighborMask & seamBit) != 0u)
-    {
-        return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
-    }
-    return encodeVoxel(kBlockAir, 0u, 0u);
+    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
 }
 
 void decodePlane(uint planeIndex, out uint axis, out bool positiveFace, out uint slice)

@@ -18,17 +18,12 @@ cbuffer ExactChunkFaceEmitParams : register(b0)
 
 StructuredBuffer<GpuExactColumnDescriptor> gColumns : register(t0);
 StructuredBuffer<uint> gCenterVoxels : register(t1);
-StructuredBuffer<uint> gNeighborPosX : register(t2);
-StructuredBuffer<uint> gNeighborNegX : register(t3);
-StructuredBuffer<uint> gNeighborPosY : register(t4);
-StructuredBuffer<uint> gNeighborNegY : register(t5);
-StructuredBuffer<uint> gNeighborPosZ : register(t6);
-StructuredBuffer<uint> gNeighborNegZ : register(t7);
-StructuredBuffer<uint> gFaceCounts : register(t8);
-StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(t9);
-StructuredBuffer<uint> gFacePrefixes : register(t10);
-StructuredBuffer<uint> gFaceTotals : register(t11);
-StructuredBuffer<GpuBlockFaceUv> gBlockFaceUvs : register(t12);
+StructuredBuffer<uint> gHaloVoxels : register(t2);
+StructuredBuffer<uint> gFaceCounts : register(t3);
+StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(t4);
+StructuredBuffer<uint> gFacePrefixes : register(t5);
+StructuredBuffer<uint> gFaceTotals : register(t6);
+StructuredBuffer<GpuBlockFaceUv> gBlockFaceUvs : register(t7);
 RWStructuredBuffer<WorldVertex> gVertices : register(u0);
 RWStructuredBuffer<uint> gIndices : register(u1);
 RWStructuredBuffer<GpuCullRecord> gDrawRecords : register(u2);
@@ -92,24 +87,7 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
-    if ((gResolvedNeighborMask & seamBit) != 0u)
-    {
-        if (seamBit == kExactNeighborPosXBit) return sampleVoxel(gNeighborPosX, x, y, z);
-        if (seamBit == kExactNeighborNegXBit) return sampleVoxel(gNeighborNegX, x, y, z);
-        if (seamBit == kExactNeighborPosYBit) return sampleVoxel(gNeighborPosY, x, y, z);
-        if (seamBit == kExactNeighborNegYBit) return sampleVoxel(gNeighborNegY, x, y, z);
-        if (seamBit == kExactNeighborPosZBit) return sampleVoxel(gNeighborPosZ, x, y, z);
-        if (seamBit == kExactNeighborNegZBit) return sampleVoxel(gNeighborNegZ, x, y, z);
-    }
-    if ((gClosedNeighborMask & seamBit) != 0u)
-    {
-        return encodeVoxel(kBlockNeighborSolidSentinel, 0u, 0u);
-    }
-    if (seamBit == kExactNeighborPosYBit)
-    {
-        return encodeVoxel(kBlockAir, 15u, 0u);
-    }
-    return encodeVoxel(kBlockAir, 0u, 0u);
+    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
 }
 
 uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
@@ -156,22 +134,7 @@ uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
-    if ((gResolvedNeighborMask & seamBit) != 0u)
-    {
-        if (seamBit == kExactNeighborPosXBit) return sampleVoxel(gNeighborPosX, x, y, z);
-        if (seamBit == kExactNeighborNegXBit) return sampleVoxel(gNeighborNegX, x, y, z);
-        if (seamBit == kExactNeighborPosYBit) return sampleVoxel(gNeighborPosY, x, y, z);
-        if (seamBit == kExactNeighborNegYBit) return sampleVoxel(gNeighborNegY, x, y, z);
-        if (seamBit == kExactNeighborPosZBit) return sampleVoxel(gNeighborPosZ, x, y, z);
-        if (seamBit == kExactNeighborNegZBit) return sampleVoxel(gNeighborNegZ, x, y, z);
-    }
-    if (seamBit == kExactNeighborPosYBit)
-    {
-        return encodeVoxel(kBlockAir, 15u, 0u);
-    }
-
-    // Mirror the border sample for lighting/AO until GPU neighbor data is ready.
-    return sampleVoxel(gCenterVoxels, x, y, z);
+    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
 }
 
 void faceVectors(uint faceId, out int3 outward, out int3 sideU, out int3 sideV, out float3 normal)

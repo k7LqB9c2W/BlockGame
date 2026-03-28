@@ -4,12 +4,21 @@ static const uint kExactChunkVoxelCount = kExactChunkSize * kExactChunkSize * kE
 static const uint kExactChunkPlaneCount = 102u;
 static const uint kExactChunkMaxDescriptorsPerPlane = kExactChunkSize * kExactChunkSize;
 static const uint kExactChunkFaceDescriptorCount = kExactChunkPlaneCount * kExactChunkMaxDescriptorsPerPlane;
+static const uint kExactChunkHaloFaceVoxelCount = kExactChunkSize * kExactChunkSize;
+static const uint kExactChunkHaloFaceCount = 6u;
+static const uint kExactChunkHaloVoxelCount = kExactChunkHaloFaceCount * kExactChunkHaloFaceVoxelCount;
 static const uint kExactNeighborPosXBit = 1u << 0u;
 static const uint kExactNeighborNegXBit = 1u << 1u;
 static const uint kExactNeighborPosYBit = 1u << 2u;
 static const uint kExactNeighborNegYBit = 1u << 3u;
 static const uint kExactNeighborPosZBit = 1u << 4u;
 static const uint kExactNeighborNegZBit = 1u << 5u;
+static const uint kExactHaloFacePosX = 0u;
+static const uint kExactHaloFaceNegX = 1u;
+static const uint kExactHaloFacePosY = 2u;
+static const uint kExactHaloFaceNegY = 3u;
+static const uint kExactHaloFacePosZ = 4u;
+static const uint kExactHaloFaceNegZ = 5u;
 static const uint kMaterialFlagWater = 0x01u;
 static const uint kMaterialFlagGrassTintShift = 2u;
 static const uint kMaterialFlagGrassSideTint = 0x20u;
@@ -110,6 +119,11 @@ uint voxelIndex(uint x, uint y, uint z)
 uint columnIndex(uint x, uint z)
 {
     return z * kExactChunkSize + x;
+}
+
+uint haloFaceVoxelIndex(uint faceIndex, uint u, uint v)
+{
+    return faceIndex * kExactChunkHaloFaceVoxelCount + v * kExactChunkSize + u;
 }
 
 uint encodeVoxel(uint blockId, uint skyLight, uint blockLight)
@@ -275,6 +289,61 @@ bool shouldRenderBlockFace(uint owningBlock, uint neighborBlock)
     }
 
     return neighborBlock == kBlockWater || isAlphaCutoutBlock(neighborBlock);
+}
+
+uint sampleHaloVoxel(StructuredBuffer<uint> haloBuffer, uint seamBit, int x, int y, int z)
+{
+    uint faceIndex = 0u;
+    uint u = 0u;
+    uint v = 0u;
+
+    if (seamBit == kExactNeighborPosXBit)
+    {
+        faceIndex = kExactHaloFacePosX;
+        u = uint(z);
+        v = uint(y);
+    }
+    else if (seamBit == kExactNeighborNegXBit)
+    {
+        faceIndex = kExactHaloFaceNegX;
+        u = uint(z);
+        v = uint(y);
+    }
+    else if (seamBit == kExactNeighborPosYBit)
+    {
+        faceIndex = kExactHaloFacePosY;
+        u = uint(x);
+        v = uint(z);
+    }
+    else if (seamBit == kExactNeighborNegYBit)
+    {
+        faceIndex = kExactHaloFaceNegY;
+        u = uint(x);
+        v = uint(z);
+    }
+    else if (seamBit == kExactNeighborPosZBit)
+    {
+        faceIndex = kExactHaloFacePosZ;
+        u = uint(x);
+        v = uint(y);
+    }
+    else if (seamBit == kExactNeighborNegZBit)
+    {
+        faceIndex = kExactHaloFaceNegZ;
+        u = uint(x);
+        v = uint(y);
+    }
+    else
+    {
+        return encodeVoxel(kBlockAir, 0u, 0u);
+    }
+
+    if (u >= kExactChunkSize || v >= kExactChunkSize)
+    {
+        return encodeVoxel(kBlockAir, 0u, 0u);
+    }
+
+    return haloBuffer[haloFaceVoxelIndex(faceIndex, u, v)];
 }
 
 float2 projectTileCoord(uint faceId, float3 position)

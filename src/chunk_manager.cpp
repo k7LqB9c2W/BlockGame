@@ -14925,7 +14925,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             {
                 continue;
             }
-            if (computeCurrentPendingNeighborMask(*neighbor) != 0u)
+            const std::uint8_t currentPendingMask = computeCurrentPendingNeighborMask(*neighbor);
+            if ((currentPendingMask & requiredPendingBit) != 0u)
             {
                 continue;
             }

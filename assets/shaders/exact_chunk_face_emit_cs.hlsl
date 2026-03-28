@@ -98,43 +98,73 @@ uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
         return sampleVoxel(gCenterVoxels, x, y, z);
     }
 
-    uint seamBit = 0u;
-    if (x == int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    const bool posX = x >= int(kExactChunkSize);
+    const bool negX = x < 0;
+    const bool posY = y >= int(kExactChunkSize);
+    const bool negY = y < 0;
+    const bool posZ = z >= int(kExactChunkSize);
+    const bool negZ = z < 0;
+
+    const int clampedX = min(max(x, 0), int(kExactChunkSize) - 1);
+    const int clampedY = min(max(y, 0), int(kExactChunkSize) - 1);
+    const int clampedZ = min(max(z, 0), int(kExactChunkSize) - 1);
+
+    uint packedSamples[3];
+    uint sampleCount = 0u;
+
+    if (posX)
     {
-        seamBit = kExactNeighborPosXBit;
-        x = 0;
+        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborPosXBit, 0, clampedY, clampedZ);
     }
-    else if (x == -1 && y >= 0 && y < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
+    else if (negX)
     {
-        seamBit = kExactNeighborNegXBit;
-        x = int(kExactChunkSize) - 1;
-    }
-    else if (y == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
-    {
-        seamBit = kExactNeighborPosYBit;
-        y = 0;
-    }
-    else if (y == -1 && x >= 0 && x < int(kExactChunkSize) && z >= 0 && z < int(kExactChunkSize))
-    {
-        seamBit = kExactNeighborNegYBit;
-        y = int(kExactChunkSize) - 1;
-    }
-    else if (z == int(kExactChunkSize) && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
-    {
-        seamBit = kExactNeighborPosZBit;
-        z = 0;
-    }
-    else if (z == -1 && x >= 0 && x < int(kExactChunkSize) && y >= 0 && y < int(kExactChunkSize))
-    {
-        seamBit = kExactNeighborNegZBit;
-        z = int(kExactChunkSize) - 1;
+        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborNegXBit, int(kExactChunkSize) - 1, clampedY, clampedZ);
     }
 
-    if (seamBit == 0u)
+    if (posY)
+    {
+        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborPosYBit, clampedX, 0, clampedZ);
+    }
+    else if (negY)
+    {
+        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborNegYBit, clampedX, int(kExactChunkSize) - 1, clampedZ);
+    }
+
+    if (posZ)
+    {
+        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborPosZBit, clampedX, clampedY, 0);
+    }
+    else if (negZ)
+    {
+        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborNegZBit, clampedX, clampedY, int(kExactChunkSize) - 1);
+    }
+
+    if (sampleCount == 0u)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
-    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
+    if (sampleCount == 1u)
+    {
+        return packedSamples[0];
+    }
+
+    uint skySum = 0u;
+    uint blockSum = 0u;
+    [unroll]
+    for (uint i = 0u; i < 3u; ++i)
+    {
+        if (i >= sampleCount)
+        {
+            break;
+        }
+
+        skySum += voxelSkyLight(packedSamples[i]);
+        blockSum += voxelBlockLight(packedSamples[i]);
+    }
+
+    return encodeVoxel(kBlockAir,
+                       (skySum + sampleCount / 2u) / sampleCount,
+                       (blockSum + sampleCount / 2u) / sampleCount);
 }
 
 void faceVectors(uint faceId, out int3 outward, out int3 sideU, out int3 sideV, out float3 normal)

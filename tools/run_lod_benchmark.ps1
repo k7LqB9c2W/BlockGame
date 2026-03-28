@@ -6,6 +6,14 @@ param(
     [int]$ExactChunks = 48,
     [int]$TotalChunks = 128,
     [int]$MaxScenarioSeconds = 600,
+    [string[]]$Scenarios = @(
+        "spawn_preload",
+        "full_exact_preload",
+        "post_release_exact_fill",
+        "straight_line_sprint",
+        "turn_heavy_traversal",
+        "vertical_travel"
+    ),
     [int]$FogStartBlocks = 1400,
     [int]$NotRespondingSeconds = 4,
     [int]$PostWriteGraceSeconds = 5,
@@ -36,6 +44,10 @@ $arguments = @(
 )
 if ($SkipBuild) {
     $arguments += "-SkipBuild"
+}
+if ($Scenarios.Count -gt 0) {
+    $arguments += "-Scenarios"
+    $arguments += $Scenarios
 }
 
 powershell @arguments

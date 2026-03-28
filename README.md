@@ -250,12 +250,13 @@ The debug/config panels intentionally capture input while they are open. Close t
 
 ## Benchmarking
 
-BlockGame now includes an automated chunk-streaming benchmark pass with fixed scenarios for:
+BlockGame now includes a canonical chunk-streaming benchmark for exact-chunk performance:
 
-- `spawn_preload`
-- `straight_line_sprint`
-- `turn_heavy_traversal`
-- `vertical_travel`
+- `player_idle_exact_fill`
+
+This scenario is the benchmark to optimize against going forward. It starts from normal game startup, keeps the normal `12`-chunk startup exact preload, waits for player release, then leaves the player standing still while the rest of the exact `48`-chunk ring fills. It runs for up to `5` minutes or exits early once the full exact ring is ready.
+
+Older scenarios such as `spawn_preload`, `full_exact_preload`, `post_release_exact_fill`, `straight_line_sprint`, `turn_heavy_traversal`, and `vertical_travel` are still available for specialized diagnostics, but they are not the primary benchmark for real in-game exact streaming anymore.
 
 Run it with:
 
@@ -268,6 +269,8 @@ If the current `build\Release\blockgame.exe` is already up to date, skip the bui
 ```bat
 powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release -SkipBuild
 ```
+
+To run a non-default benchmark scenario explicitly, pass `-Scenarios <name>`.
 
 The script creates a timestamped output folder under:
 
@@ -286,6 +289,10 @@ The script creates a timestamped output folder under:
 - `queues.job_backlog`, `queues.upload_backlog`, `queues.far_build_backlog`, `queues.far_upload_backlog`: backlog depths sampled once per streaming update.
 - `cache.climate.hit_rate` and `cache.surface.hit_rate`: effectiveness of the climate and surface fragment caches.
 - `frame.avg_ms`, `frame.p95_ms`, `frame.avg_fps`: frame pacing context for the same run.
+- `milestones.player_release_seconds`: time to get into the game.
+- `milestones.steady_state_seconds`: when the streamer reached steady-state operation.
+- `milestones.full_exact_ready_seconds`: when the full exact target became ready, if it completed before timeout.
+- `milestones.player_release_exact_ready_chunks` / `player_release_exact_required_chunks`: how much of the exact ring was ready at player release.
 
 Important note: percentile values are collected with low-overhead histograms, so they should be treated as approximate profiling bands rather than exact microsecond-precise measurements.
 

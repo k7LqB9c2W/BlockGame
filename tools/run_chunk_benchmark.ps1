@@ -6,7 +6,7 @@ param(
     [int]$ExactChunks = 48,
     [int]$TotalChunks = 0,
     [string[]]$Scenarios = @(),
-    [int]$MaxScenarioSeconds = 600,
+    [int]$MaxScenarioSeconds = 300,
     [int]$FogStartBlocks = 1400,
     [int]$NotRespondingSeconds = 4,
     [int]$PostWriteGraceSeconds = 5,
@@ -204,12 +204,7 @@ if (-not (Test-Path $exePath)) {
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 
 $defaultScenarios = @(
-    "spawn_preload",
-    "full_exact_preload",
-    "post_release_exact_fill",
-    "straight_line_sprint",
-    "turn_heavy_traversal",
-    "vertical_travel"
+    "player_idle_exact_fill"
 )
 $scenarios = if ($Scenarios.Count -gt 0) { $Scenarios } else { $defaultScenarios }
 
@@ -371,6 +366,15 @@ foreach ($scenario in $scenarioObjects) {
         $scenario.duration_seconds,
         $scenario.throughput.generated_chunks_per_sec,
         $scenario.throughput.uploaded_chunks_per_sec))
+    if ($scenario.milestones) {
+        $summaryLines.Add(("  milestones release_s={0:F2} steady_state_s={1:F2} full_ready_s={2:F2}" -f `
+            $scenario.milestones.player_release_seconds,
+            $scenario.milestones.steady_state_seconds,
+            $scenario.milestones.full_exact_ready_seconds))
+        $summaryLines.Add(("  release_exact ready={0} required={1}" -f `
+            $scenario.milestones.player_release_exact_ready_chunks,
+            $scenario.milestones.player_release_exact_required_chunks))
+    }
     if ($scenario.throughput.exact_gpu_builds_committed_per_sec) {
         $summaryLines.Add(("  exact_gpu_cps submitted={0:F2} committed={1:F2}" -f `
             $scenario.throughput.exact_gpu_builds_submitted_per_sec,

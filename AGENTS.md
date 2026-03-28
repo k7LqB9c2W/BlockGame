@@ -44,7 +44,7 @@
 - Single-view repro captures: run `powershell -ExecutionPolicy Bypass -File tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -Yaw <yaw> -Pitch <pitch>` to teleport to an exact camera pose, capture one screenshot, and delete old repro screenshots in `artifacts/repro_capture`.
 - Single-view repro also supports a look target instead of yaw/pitch: `tools\capture_repro.ps1 -X <x> -Y <y> -Z <z> -LookX <x> -LookY <y> -LookZ <z>`.
 - The in-game debug overlay now includes `Yaw/Pitch`, `Front`, and `Hit Block` so a screenshot contains enough information to recreate the exact view later.
-- Chunk benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release` to execute `spawn_preload`, `straight_line_sprint`, `turn_heavy_traversal`, and `vertical_travel` in sequence. Add `-SkipBuild` if `build\Release\blockgame.exe` is already current.
+- Chunk benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_chunk_benchmark.ps1 -BuildDir build -Config Release` to execute the canonical `player_idle_exact_fill` benchmark. This is the benchmark to optimize exact-chunk loading against going forward: it uses the normal `12`-chunk startup preload, releases the player, then leaves the player standing still while the exact `48` ring fills for up to 5 minutes or until completion. Add `-SkipBuild` if `build\Release\blockgame.exe` is already current. Use `-Scenarios <name>` only when you explicitly want a non-default diagnostic scenario such as `full_exact_preload` or movement stress tests.
 - LOD benchmark automation: run `powershell -ExecutionPolicy Bypass -File tools\run_lod_benchmark.ps1 -BuildDir build -Config Release -ExactChunks 48 -TotalChunks 128` to execute the same scenarios with distant visual terrain active. Change `-TotalChunks` up to `500` for long-range LOD stress.
 - Chunk benchmarks must be killed quickly when the game window becomes `Not Responding`; use the watchdog in `tools\run_chunk_benchmark.ps1` so hung runs are terminated early, a watchdog reason file is written, and CPU/GPU time plus RAM are not wasted during unattended benchmarking.
 - Legacy far terrain mode is obsolete. The replacement path is the Exact/Total chunk LOD system; do not revive the old far-terrain toggle or old far-block UI.
@@ -55,6 +55,7 @@
   `stages.chunk_ready_latency.median_ms` and `p95_ms` measure request-to-first-ready latency for chunks.
   `queues.*` are backlog depths sampled once per streaming update.
   `cache.climate.hit_rate` and `cache.surface.hit_rate` are cache efficiency for the terrain fragment caches.
+  `milestones.player_release_seconds|steady_state_seconds|full_exact_ready_seconds` separate time-to-interactive from full exact-fill completion.
   Percentiles are low-overhead histogram estimates, so values are best read as approximate bands rather than exact microsecond-precise timings.
 - After completing a user-requested task or answer, run `.\alert.ps1 -Task "<short task summary>"` so the user gets the phone notification that work is done.
 

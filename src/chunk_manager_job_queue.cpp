@@ -395,7 +395,7 @@ JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
     case JobType::Generate:
         bias = 1;
         break;
-    case JobType::ColumnPrefetch:
+    case JobType::WorldgenPagePrefetch:
         bias = 2;
         break;
     case JobType::BulkShellOracle:
@@ -451,7 +451,7 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     const std::size_t totalWorkers = std::max<std::size_t>(workerConcurrency_, 1);
     const std::size_t generateIndex = jobTypeIndex(JobType::Generate);
     const std::size_t meshIndex = jobTypeIndex(JobType::Mesh);
-    const std::size_t prefetchIndex = jobTypeIndex(JobType::ColumnPrefetch);
+    const std::size_t prefetchIndex = jobTypeIndex(JobType::WorldgenPagePrefetch);
     const std::size_t bulkShellIndex = jobTypeIndex(JobType::BulkShellOracle);
     const std::size_t generateBacklog = queues_[generateIndex].size();
     const std::size_t meshBacklog = queues_[meshIndex].size();

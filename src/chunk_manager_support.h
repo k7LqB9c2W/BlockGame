@@ -51,7 +51,7 @@ enum class JobType : std::uint8_t
 {
     Generate = 0,
     Mesh = 1,
-    ColumnPrefetch = 2,
+    WorldgenPagePrefetch = 2,
     BulkShellOracle = 3
 };
 

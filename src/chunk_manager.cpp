@@ -3904,18 +3904,18 @@ private:
     [[nodiscard]] bool exactGpuWorkerHasPendingWork();
     void startBulkShellOracle(const glm::ivec3& center, int horizontalRadius);
     void stopBulkShellOracle();
-    bool acquireNextColumnHeightPrefetch(glm::ivec2& column,
+    bool acquireNextWorldgenPagePrefetch(glm::ivec2& pageKey,
                                          std::uint64_t& token,
                                          ColumnHeightPrefetchPriority& priority,
                                          bool& resolveHeight,
                                          bool& buildOccupancy,
                                          bool& warmStructures);
-    void finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const;
-    void refillColumnHeightPrefetchJobs();
+    void finishWorldgenPagePrefetch(const glm::ivec2& pageKey, std::uint64_t token) const;
+    void refillWorldgenPagePrefetchJobs();
     void refillBulkShellOracleJobs();
-    bool processColumnHeightPrefetchJob();
+    bool processWorldgenPagePrefetchJob();
     bool processBulkShellOracleJob();
-    [[nodiscard]] std::size_t targetColumnHeightPrefetchJobs() const noexcept;
+    [[nodiscard]] std::size_t targetWorldgenPagePrefetchJobs() const noexcept;
     [[nodiscard]] std::size_t targetBulkShellOracleJobs() const noexcept;
     void enqueueJob(const std::shared_ptr<Chunk>& chunk,
                     JobType type,
@@ -4208,6 +4208,10 @@ private:
     [[nodiscard]] int adjustedSurfaceYForColumn(const WorldgenColumnValue& column,
                                                 float neighborAverage) const noexcept;
     [[nodiscard]] static glm::ivec2 worldgenPageKeyForWorld(int worldX, int worldZ) noexcept;
+    [[nodiscard]] static glm::ivec2 worldgenPageKeyForChunkColumn(const glm::ivec2& column) noexcept;
+    static void worldgenPageChunkColumnBounds(const glm::ivec2& pageKey,
+                                              glm::ivec2& outMinColumn,
+                                              glm::ivec2& outMaxColumn) noexcept;
     [[nodiscard]] std::shared_ptr<const WorldgenPage> getOrBuildWorldgenPage(const glm::ivec2& pageKey) const;
     [[nodiscard]] std::shared_ptr<const WorldgenPage> tryGetWorldgenPage(const glm::ivec2& pageKey) const;
     void pinWorldgenWindow(const glm::ivec3& center, int horizontalRadius);
@@ -4235,7 +4239,7 @@ private:
                                                                          const glm::ivec3& center,
                                                                          int horizontalRadius,
                                                                          int lookaheadChunks = 0) const noexcept;
-    void prefetchVisibleColumnHeights(const glm::ivec3& center,
+    void prefetchVisibleWorldgenPages(const glm::ivec3& center,
                                       const glm::ivec3& previousCenter,
                                       int horizontalRadius);
     void resetColumnBudgets();
@@ -4431,9 +4435,9 @@ private:
         Visible,
         Critical
     };
-    struct ColumnHeightPrefetchRequest
+    struct WorldgenPagePrefetchRequest
     {
-        glm::ivec2 column{0};
+        glm::ivec2 pageKey{0};
         std::uint64_t token{0};
         std::uint64_t sequence{0};
         std::uint32_t distance{0};
@@ -4442,7 +4446,7 @@ private:
         bool buildOccupancy{false};
         bool warmStructures{false};
     };
-    struct ColumnHeightPrefetchRequestState
+    struct WorldgenPagePrefetchRequestState
     {
         std::uint64_t token{0};
         ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
@@ -4451,19 +4455,20 @@ private:
         bool warmStructures{false};
         bool inFlight{false};
     };
-    struct FullRadiusColumnDiscoveryState
+    struct FullRadiusWorldgenPageDiscoveryState
     {
-        glm::ivec3 center{0};
-        int radius{0};
+        glm::ivec2 centerPage{0};
+        glm::ivec2 minPage{0};
+        glm::ivec2 maxPage{0};
         int nextRing{0};
         int nextEdge{0};
         int nextOffset{0};
         bool initialized{false};
     };
-    struct ColumnHeightPrefetchRequestCompare
+    struct WorldgenPagePrefetchRequestCompare
     {
-        bool operator()(const ColumnHeightPrefetchRequest& lhs,
-                        const ColumnHeightPrefetchRequest& rhs) const noexcept
+        bool operator()(const WorldgenPagePrefetchRequest& lhs,
+                        const WorldgenPagePrefetchRequest& rhs) const noexcept
         {
             if (lhs.priority != rhs.priority)
             {
@@ -4488,17 +4493,23 @@ private:
             return lhs.sequence > rhs.sequence;
         }
     };
+    bool requestWorldgenPagePrefetch(const glm::ivec2& pageKey,
+                                     ColumnHeightPrefetchPriority priority =
+                                         ColumnHeightPrefetchPriority::Normal,
+                                     bool buildOccupancy = false,
+                                     bool warmStructuresOnly = false) const;
     bool requestColumnHeightPrefetch(const glm::ivec2& column,
                                      ColumnHeightPrefetchPriority priority =
                                          ColumnHeightPrefetchPriority::Normal,
                                      bool buildOccupancy = false,
                                      bool warmStructuresOnly = false) const;
-    [[nodiscard]] std::size_t columnHeightPrefetchQueueLimit(ColumnHeightPrefetchPriority priority,
+    [[nodiscard]] std::size_t worldgenPagePrefetchQueueLimit(ColumnHeightPrefetchPriority priority,
                                                              bool buildOccupancy) const noexcept;
-    void resetFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept;
-    [[nodiscard]] bool nextFullRadiusColumnDiscoveryColumn(glm::ivec2& outColumn,
-                                                           ColumnHeightPrefetchPriority& outPriority) noexcept;
-    void requestFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius);
+    void resetFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept;
+    [[nodiscard]] bool nextFullRadiusWorldgenPageDiscoveryPage(glm::ivec2& outPageKey,
+                                                               ColumnHeightPrefetchPriority& outPriority) noexcept;
+    void requestFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius);
+    void precomputeFullRadiusWorldgenPageWindow(const glm::ivec3& center, int horizontalRadius);
     void mergePredictedColumnHeight(const glm::ivec2& column, int height) const;
     void refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const;
     void invalidatePredictedColumn(const glm::ivec2& column) const;
@@ -4803,14 +4814,14 @@ private:
     mutable std::mutex columnSlabOccupancyMutex_;
     mutable std::unordered_map<glm::ivec2, ColumnSlabOccupancy, ColumnHasher> columnSlabOccupancyCache_{};
     mutable std::mutex columnHeightPrefetchMutex_;
-    mutable std::priority_queue<ColumnHeightPrefetchRequest,
-                                std::vector<ColumnHeightPrefetchRequest>,
-                                ColumnHeightPrefetchRequestCompare> pendingColumnHeightPrefetchQueue_{};
-    mutable std::unordered_map<glm::ivec2, ColumnHeightPrefetchRequestState, ColumnHasher>
-        pendingColumnHeightPrefetchRequests_{};
-    mutable std::uint64_t nextColumnHeightPrefetchToken_{1};
-    mutable std::uint64_t nextColumnHeightPrefetchSequence_{1};
-    FullRadiusColumnDiscoveryState fullRadiusColumnDiscovery_{};
+    mutable std::priority_queue<WorldgenPagePrefetchRequest,
+                                std::vector<WorldgenPagePrefetchRequest>,
+                                WorldgenPagePrefetchRequestCompare> pendingWorldgenPagePrefetchQueue_{};
+    mutable std::unordered_map<glm::ivec2, WorldgenPagePrefetchRequestState, ColumnHasher>
+        pendingWorldgenPagePrefetchRequests_{};
+    mutable std::uint64_t nextWorldgenPagePrefetchToken_{1};
+    mutable std::uint64_t nextWorldgenPagePrefetchSequence_{1};
+    FullRadiusWorldgenPageDiscoveryState fullRadiusWorldgenPageDiscovery_{};
     std::unordered_map<glm::ivec3, std::vector<PendingStructureEdit>, ChunkHasher> pendingStructureEdits_;
     mutable std::mutex pendingStructureMutex_;
     std::unordered_map<glm::ivec3, DeferredStructureChunkBuild, ChunkHasher> deferredStructureChunkBuilds_{};
@@ -5689,7 +5700,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     viewDistance_ = targetViewDistance_;
 
     pinWorldgenWindow(centerChunk, renderSettings_.exactChunks);
-    prefetchVisibleColumnHeights(centerChunk, previousCenterChunk, targetViewDistance_);
+    prefetchVisibleWorldgenPages(centerChunk, previousCenterChunk, targetViewDistance_);
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     const bool needsFullExactCoverageMetrics = exactOnly && renderSettings_.exactChunks > targetViewDistance_;
 
@@ -5756,9 +5767,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                         std::memory_order_release);
     if (needsFullExactCoverageMetrics)
     {
-        requestFullRadiusColumnDiscovery(centerChunk, renderSettings_.exactChunks);
+        requestFullRadiusWorldgenPageDiscovery(centerChunk, renderSettings_.exactChunks);
     }
-    refillColumnHeightPrefetchJobs();
+    refillWorldgenPagePrefetchJobs();
     refillBulkShellOracleJobs();
 
     const auto uploadBudgetStart = std::chrono::steady_clock::now();
@@ -6145,7 +6156,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         {
             std::lock_guard<std::mutex> prefetchLock(columnHeightPrefetchMutex_);
             benchmarkMetrics_.columnPrefetchQueueDepth.record(
-                static_cast<std::uint64_t>(pendingColumnHeightPrefetchRequests_.size()));
+                static_cast<std::uint64_t>(pendingWorldgenPagePrefetchRequests_.size()));
         }
         benchmarkMetrics_.farBuildQueueDepth.record(
             static_cast<std::uint64_t>(std::max(farTerrainManager_.buildQueueDepth(), 0)));
@@ -6500,12 +6511,12 @@ void ChunkManager::Impl::clear()
     clearStreamingChunkLifecycleStates();
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        pendingColumnHeightPrefetchQueue_ = {};
-        pendingColumnHeightPrefetchRequests_.clear();
-        nextColumnHeightPrefetchToken_ = 1;
-        nextColumnHeightPrefetchSequence_ = 1;
+        pendingWorldgenPagePrefetchQueue_ = {};
+        pendingWorldgenPagePrefetchRequests_.clear();
+        nextWorldgenPagePrefetchToken_ = 1;
+        nextWorldgenPagePrefetchSequence_ = 1;
     }
-    fullRadiusColumnDiscovery_ = FullRadiusColumnDiscoveryState{};
+    fullRadiusWorldgenPageDiscovery_ = FullRadiusWorldgenPageDiscoveryState{};
     {
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
         pendingStructureEdits_.clear();
@@ -7367,7 +7378,9 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     if (renderSettings_.totalChunks <= renderSettings_.exactChunks)
     {
         startBulkShellOracle(startupState_.spawnChunk, renderSettings_.exactChunks);
-        requestFullRadiusColumnDiscovery(startupState_.spawnChunk, renderSettings_.exactChunks);
+        pinWorldgenWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
+        precomputeFullRadiusWorldgenPageWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
+        requestFullRadiusWorldgenPageDiscovery(startupState_.spawnChunk, renderSettings_.exactChunks);
     }
 }
 
@@ -7606,7 +7619,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
         snapshot.columnPrefetchQueueDepth = static_cast<int>(std::min<std::size_t>(
-            pendingColumnHeightPrefetchRequests_.size(),
+            pendingWorldgenPagePrefetchRequests_.size(),
             static_cast<std::size_t>(std::numeric_limits<int>::max())));
     }
     snapshot.ensureVolumeColumnsVisitedLastFrame = ensureVolumeColumnsVisitedLastFrame_;
@@ -7957,7 +7970,7 @@ void ChunkManager::Impl::startWorkerThreads()
     bulkShellOracleWorkerCount_ = exactOnly
         ? ((workerThreadCount_ >= 10) ? 2u : ((workerThreadCount_ >= 8) ? 1u : 0u))
         : 0u;
-    refillColumnHeightPrefetchJobs();
+    refillWorldgenPagePrefetchJobs();
     refillBulkShellOracleJobs();
 }
 
@@ -8037,10 +8050,10 @@ void ChunkManager::Impl::stopWorkerThreads()
     stopBulkShellOracle();
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        pendingColumnHeightPrefetchQueue_ = {};
-        pendingColumnHeightPrefetchRequests_.clear();
-        nextColumnHeightPrefetchToken_ = 1;
-        nextColumnHeightPrefetchSequence_ = 1;
+        pendingWorldgenPagePrefetchQueue_ = {};
+        pendingWorldgenPagePrefetchRequests_.clear();
+        nextWorldgenPagePrefetchToken_ = 1;
+        nextWorldgenPagePrefetchSequence_ = 1;
     }
     std::vector<Job> cancelledJobs = jobQueue_.stop();
     for (const Job& job : cancelledJobs)
@@ -8214,7 +8227,7 @@ bool ChunkManager::Impl::exactGpuWorkerHasPendingWork()
     return false;
 }
 
-bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
+bool ChunkManager::Impl::acquireNextWorldgenPagePrefetch(glm::ivec2& pageKey,
                                                          std::uint64_t& token,
                                                          ColumnHeightPrefetchPriority& priority,
                                                          bool& resolveHeight,
@@ -8222,18 +8235,18 @@ bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
                                                          bool& warmStructures)
 {
     std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-    while (!pendingColumnHeightPrefetchQueue_.empty())
+    while (!pendingWorldgenPagePrefetchQueue_.empty())
     {
-        const ColumnHeightPrefetchRequest request = pendingColumnHeightPrefetchQueue_.top();
-        pendingColumnHeightPrefetchQueue_.pop();
+        const WorldgenPagePrefetchRequest request = pendingWorldgenPagePrefetchQueue_.top();
+        pendingWorldgenPagePrefetchQueue_.pop();
 
-        auto requestIt = pendingColumnHeightPrefetchRequests_.find(request.column);
-        if (requestIt == pendingColumnHeightPrefetchRequests_.end())
+        auto requestIt = pendingWorldgenPagePrefetchRequests_.find(request.pageKey);
+        if (requestIt == pendingWorldgenPagePrefetchRequests_.end())
         {
             continue;
         }
 
-        ColumnHeightPrefetchRequestState& state = requestIt->second;
+        WorldgenPagePrefetchRequestState& state = requestIt->second;
         if (state.inFlight ||
             state.token != request.token ||
             state.priority != request.priority ||
@@ -8245,7 +8258,7 @@ bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
         }
 
         state.inFlight = true;
-        column = request.column;
+        pageKey = request.pageKey;
         token = request.token;
         priority = request.priority;
         resolveHeight = request.resolveHeight;
@@ -8256,13 +8269,13 @@ bool ChunkManager::Impl::acquireNextColumnHeightPrefetch(glm::ivec2& column,
     return false;
 }
 
-void ChunkManager::Impl::finishColumnHeightPrefetch(const glm::ivec2& column, std::uint64_t token) const
+void ChunkManager::Impl::finishWorldgenPagePrefetch(const glm::ivec2& pageKey, std::uint64_t token) const
 {
     std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-    auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
-    if (requestIt != pendingColumnHeightPrefetchRequests_.end() && requestIt->second.token == token)
+    auto requestIt = pendingWorldgenPagePrefetchRequests_.find(pageKey);
+    if (requestIt != pendingWorldgenPagePrefetchRequests_.end() && requestIt->second.token == token)
     {
-        pendingColumnHeightPrefetchRequests_.erase(requestIt);
+        pendingWorldgenPagePrefetchRequests_.erase(requestIt);
     }
 }
 
@@ -8338,10 +8351,10 @@ void ChunkManager::Impl::enqueueJob(const std::shared_ptr<Chunk>& chunk,
 
 void ChunkManager::Impl::processJob(const Job& job)
 {
-    if (job.type == JobType::ColumnPrefetch)
+    if (job.type == JobType::WorldgenPagePrefetch)
     {
-        (void)processColumnHeightPrefetchJob();
-        refillColumnHeightPrefetchJobs();
+        (void)processWorldgenPagePrefetchJob();
+        refillWorldgenPagePrefetchJobs();
         return;
     }
     if (job.type == JobType::BulkShellOracle)
@@ -8386,7 +8399,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             recordCount(benchmarkMetrics_.chunkReadyRequestQueuedMeshStage,
                         chunk->requestQueuedByType[jobTypeIndex(JobType::Mesh)]);
             recordCount(benchmarkMetrics_.chunkReadyRequestQueuedPrefetchStage,
-                        chunk->requestQueuedByType[jobTypeIndex(JobType::ColumnPrefetch)]);
+                        chunk->requestQueuedByType[jobTypeIndex(JobType::WorldgenPagePrefetch)]);
             recordCount(benchmarkMetrics_.chunkReadyRequestQueuedBulkStage,
                         chunk->requestQueuedByType[jobTypeIndex(JobType::BulkShellOracle)]);
             recordCount(benchmarkMetrics_.chunkReadyRequestLatencySensitiveOutstandingStage,
@@ -8396,7 +8409,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             benchmarkMetrics_.chunkReadyStartQueuedMeshStage.record(
                 static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::Mesh)]));
             benchmarkMetrics_.chunkReadyStartQueuedPrefetchStage.record(
-                static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::ColumnPrefetch)]));
+                static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::WorldgenPagePrefetch)]));
             benchmarkMetrics_.chunkReadyStartQueuedBulkStage.record(
                 static_cast<std::uint64_t>(queueSnapshot.queuedByType[jobTypeIndex(JobType::BulkShellOracle)]));
             benchmarkMetrics_.chunkReadyStartActiveGenerateStage.record(
@@ -8404,7 +8417,7 @@ void ChunkManager::Impl::processJob(const Job& job)
             benchmarkMetrics_.chunkReadyStartActiveMeshStage.record(
                 static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::Mesh)]));
             benchmarkMetrics_.chunkReadyStartActivePrefetchStage.record(
-                static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::ColumnPrefetch)]));
+                static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::WorldgenPagePrefetch)]));
             benchmarkMetrics_.chunkReadyStartActiveBulkStage.record(
                 static_cast<std::uint64_t>(queueSnapshot.activeByType[jobTypeIndex(JobType::BulkShellOracle)]));
             const std::size_t latencySensitiveOutstanding =
@@ -9291,7 +9304,7 @@ void ChunkManager::Impl::sealPendingChunkUploadPages(UINT64 uploadBatchId, UINT6
     }
 }
 
-std::size_t ChunkManager::Impl::targetColumnHeightPrefetchJobs() const noexcept
+std::size_t ChunkManager::Impl::targetWorldgenPagePrefetchJobs() const noexcept
 {
     if (shouldStop_.load(std::memory_order_acquire) || columnHeightPrefetchWorkerCount_ == 0)
     {
@@ -9349,7 +9362,7 @@ std::size_t ChunkManager::Impl::targetBulkShellOracleJobs() const noexcept
     return bulkShellOracleWorkerCount_;
 }
 
-std::size_t ChunkManager::Impl::columnHeightPrefetchQueueLimit(ColumnHeightPrefetchPriority priority,
+std::size_t ChunkManager::Impl::worldgenPagePrefetchQueueLimit(ColumnHeightPrefetchPriority priority,
                                                                bool buildOccupancy) const noexcept
 {
     const std::size_t workerScale = std::clamp<std::size_t>(columnHeightPrefetchWorkerCount_, 1u, 4u);
@@ -9383,84 +9396,186 @@ std::size_t ChunkManager::Impl::columnHeightPrefetchQueueLimit(ColumnHeightPrefe
     return 256u;
 }
 
-void ChunkManager::Impl::resetFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept
+void ChunkManager::Impl::resetFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept
 {
-    fullRadiusColumnDiscovery_.center = center;
-    fullRadiusColumnDiscovery_.radius = std::max(horizontalRadius, 0);
-    fullRadiusColumnDiscovery_.nextRing = 0;
-    fullRadiusColumnDiscovery_.nextEdge = 0;
-    fullRadiusColumnDiscovery_.nextOffset = 0;
-    fullRadiusColumnDiscovery_.initialized = true;
+    const int radius = std::max(horizontalRadius, 0);
+    const int minWorldX = (center.x - radius) * kChunkSizeX - 1;
+    const int maxWorldX = (center.x + radius + 1) * kChunkSizeX;
+    const int minWorldZ = (center.z - radius) * kChunkSizeZ - 1;
+    const int maxWorldZ = (center.z + radius + 1) * kChunkSizeZ;
+    fullRadiusWorldgenPageDiscovery_.centerPage = worldgenPageKeyForChunkColumn({center.x, center.z});
+    fullRadiusWorldgenPageDiscovery_.minPage = worldgenPageKeyForWorld(minWorldX, minWorldZ);
+    fullRadiusWorldgenPageDiscovery_.maxPage = worldgenPageKeyForWorld(maxWorldX, maxWorldZ);
+    fullRadiusWorldgenPageDiscovery_.nextRing = 0;
+    fullRadiusWorldgenPageDiscovery_.nextEdge = 0;
+    fullRadiusWorldgenPageDiscovery_.nextOffset = 0;
+    fullRadiusWorldgenPageDiscovery_.initialized = true;
 }
 
-bool ChunkManager::Impl::nextFullRadiusColumnDiscoveryColumn(glm::ivec2& outColumn,
-                                                             ColumnHeightPrefetchPriority& outPriority) noexcept
+bool ChunkManager::Impl::nextFullRadiusWorldgenPageDiscoveryPage(glm::ivec2& outPageKey,
+                                                                 ColumnHeightPrefetchPriority& outPriority) noexcept
 {
-    if (!fullRadiusColumnDiscovery_.initialized)
+    if (!fullRadiusWorldgenPageDiscovery_.initialized)
     {
         return false;
     }
 
-    const int radius = fullRadiusColumnDiscovery_.radius;
-    const int criticalRadius = std::clamp(std::max(8, startupState_.exactNearCurrentChunks + 2), 0, radius);
-    while (fullRadiusColumnDiscovery_.nextRing <= radius)
+    const glm::ivec2 centerPage = fullRadiusWorldgenPageDiscovery_.centerPage;
+    const glm::ivec2 minPage = fullRadiusWorldgenPageDiscovery_.minPage;
+    const glm::ivec2 maxPage = fullRadiusWorldgenPageDiscovery_.maxPage;
+    const int maxRing = std::max({std::abs(minPage.x - centerPage.x),
+                                  std::abs(maxPage.x - centerPage.x),
+                                  std::abs(minPage.y - centerPage.y),
+                                  std::abs(maxPage.y - centerPage.y)});
+    constexpr int kChunkColumnsPerWorldgenPage = WorldgenPage::kSize / kChunkSizeX;
+    const int criticalChunkRadius = std::max(8, startupState_.exactNearCurrentChunks + 2);
+    const int criticalPageRadius = std::max(0, (criticalChunkRadius + kChunkColumnsPerWorldgenPage - 1) /
+                                                   kChunkColumnsPerWorldgenPage);
+    auto tryEmit = [&](int pageX, int pageZ) -> bool
     {
-        const int ring = fullRadiusColumnDiscovery_.nextRing;
-        outPriority = (ring <= criticalRadius)
+        if (pageX < minPage.x || pageX > maxPage.x || pageZ < minPage.y || pageZ > maxPage.y)
+        {
+            return false;
+        }
+
+        outPageKey = {pageX, pageZ};
+        return true;
+    };
+    while (fullRadiusWorldgenPageDiscovery_.nextRing <= maxRing)
+    {
+        const int ring = fullRadiusWorldgenPageDiscovery_.nextRing;
+        outPriority = (ring <= criticalPageRadius)
             ? ColumnHeightPrefetchPriority::Critical
             : ColumnHeightPrefetchPriority::Visible;
 
         if (ring == 0)
         {
-            outColumn = {fullRadiusColumnDiscovery_.center.x, fullRadiusColumnDiscovery_.center.z};
-            ++fullRadiusColumnDiscovery_.nextRing;
-            fullRadiusColumnDiscovery_.nextEdge = 0;
-            fullRadiusColumnDiscovery_.nextOffset = 0;
-            return true;
-        }
-
-        if (fullRadiusColumnDiscovery_.nextEdge < 2)
-        {
-            if (fullRadiusColumnDiscovery_.nextOffset <= ring * 2)
+            ++fullRadiusWorldgenPageDiscovery_.nextRing;
+            fullRadiusWorldgenPageDiscovery_.nextEdge = 0;
+            fullRadiusWorldgenPageDiscovery_.nextOffset = 0;
+            if (tryEmit(centerPage.x, centerPage.y))
             {
-                const int dx = -ring + fullRadiusColumnDiscovery_.nextOffset;
-                const int z = (fullRadiusColumnDiscovery_.nextEdge == 0) ? -ring : ring;
-                outColumn = {fullRadiusColumnDiscovery_.center.x + dx, fullRadiusColumnDiscovery_.center.z + z};
-                ++fullRadiusColumnDiscovery_.nextOffset;
                 return true;
             }
-
-            ++fullRadiusColumnDiscovery_.nextEdge;
-            fullRadiusColumnDiscovery_.nextOffset = 1;
             continue;
         }
 
-        if (fullRadiusColumnDiscovery_.nextOffset <= ring * 2 - 1)
+        if (fullRadiusWorldgenPageDiscovery_.nextEdge < 2)
         {
-            const int dz = -ring + fullRadiusColumnDiscovery_.nextOffset;
-            const int x = (fullRadiusColumnDiscovery_.nextEdge == 2) ? -ring : ring;
-            outColumn = {fullRadiusColumnDiscovery_.center.x + x, fullRadiusColumnDiscovery_.center.z + dz};
-            ++fullRadiusColumnDiscovery_.nextOffset;
-            return true;
+            if (fullRadiusWorldgenPageDiscovery_.nextOffset <= ring * 2)
+            {
+                const int dx = -ring + fullRadiusWorldgenPageDiscovery_.nextOffset;
+                const int z = (fullRadiusWorldgenPageDiscovery_.nextEdge == 0) ? -ring : ring;
+                ++fullRadiusWorldgenPageDiscovery_.nextOffset;
+                if (tryEmit(centerPage.x + dx, centerPage.y + z))
+                {
+                    return true;
+                }
+                continue;
+            }
+
+            ++fullRadiusWorldgenPageDiscovery_.nextEdge;
+            fullRadiusWorldgenPageDiscovery_.nextOffset = 1;
+            continue;
         }
 
-        ++fullRadiusColumnDiscovery_.nextRing;
-        fullRadiusColumnDiscovery_.nextEdge = 0;
-        fullRadiusColumnDiscovery_.nextOffset = 0;
+        if (fullRadiusWorldgenPageDiscovery_.nextOffset <= ring * 2 - 1)
+        {
+            const int dz = -ring + fullRadiusWorldgenPageDiscovery_.nextOffset;
+            const int x = (fullRadiusWorldgenPageDiscovery_.nextEdge == 2) ? -ring : ring;
+            ++fullRadiusWorldgenPageDiscovery_.nextOffset;
+            if (tryEmit(centerPage.x + x, centerPage.y + dz))
+            {
+                return true;
+            }
+            continue;
+        }
+
+        ++fullRadiusWorldgenPageDiscovery_.nextRing;
+        fullRadiusWorldgenPageDiscovery_.nextEdge = 0;
+        fullRadiusWorldgenPageDiscovery_.nextOffset = 0;
     }
 
     return false;
 }
 
-void ChunkManager::Impl::refillColumnHeightPrefetchJobs()
+void ChunkManager::Impl::precomputeFullRadiusWorldgenPageWindow(const glm::ivec3& center, int horizontalRadius)
+{
+    if (horizontalRadius <= 0 || shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const int radius = std::max(horizontalRadius, 0);
+    const int minWorldX = (center.x - radius) * kChunkSizeX - 1;
+    const int maxWorldX = (center.x + radius + 1) * kChunkSizeX;
+    const int minWorldZ = (center.z - radius) * kChunkSizeZ - 1;
+    const int maxWorldZ = (center.z + radius + 1) * kChunkSizeZ;
+    const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn({center.x, center.z});
+    const glm::ivec2 minPage = worldgenPageKeyForWorld(minWorldX, minWorldZ);
+    const glm::ivec2 maxPage = worldgenPageKeyForWorld(maxWorldX, maxWorldZ);
+    constexpr int kChunkColumnsPerWorldgenPage = WorldgenPage::kSize / kChunkSizeX;
+    const int criticalChunkRadius = std::max(8, startupState_.exactNearCurrentChunks + 2);
+    const int criticalPageRadius = std::max(0, (criticalChunkRadius + kChunkColumnsPerWorldgenPage - 1) /
+                                                   kChunkColumnsPerWorldgenPage);
+
+    struct PageCandidate
+    {
+        glm::ivec2 pageKey{0};
+        ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Visible};
+        int ringDistance{0};
+    };
+
+    std::vector<PageCandidate> candidates;
+    candidates.reserve(static_cast<std::size_t>(std::max(maxPage.x - minPage.x + 1, 0)) *
+                       static_cast<std::size_t>(std::max(maxPage.y - minPage.y + 1, 0)));
+    for (int pageZ = minPage.y; pageZ <= maxPage.y; ++pageZ)
+    {
+        for (int pageX = minPage.x; pageX <= maxPage.x; ++pageX)
+        {
+            const int ringDistance = std::max(std::abs(pageX - centerPage.x), std::abs(pageZ - centerPage.y));
+            candidates.push_back(PageCandidate{
+                {pageX, pageZ},
+                ringDistance <= criticalPageRadius ? ColumnHeightPrefetchPriority::Critical
+                                                   : ColumnHeightPrefetchPriority::Visible,
+                ringDistance});
+        }
+    }
+
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const PageCandidate& lhs, const PageCandidate& rhs)
+              {
+                  if (lhs.priority != rhs.priority)
+                  {
+                      return lhs.priority > rhs.priority;
+                  }
+                  if (lhs.ringDistance != rhs.ringDistance)
+                  {
+                      return lhs.ringDistance < rhs.ringDistance;
+                  }
+                  if (lhs.pageKey.x != rhs.pageKey.x)
+                  {
+                      return lhs.pageKey.x < rhs.pageKey.x;
+                  }
+                  return lhs.pageKey.y < rhs.pageKey.y;
+              });
+
+    for (const PageCandidate& candidate : candidates)
+    {
+        (void)requestWorldgenPagePrefetch(candidate.pageKey, candidate.priority, true);
+    }
+}
+
+void ChunkManager::Impl::refillWorldgenPagePrefetchJobs()
 {
     if (shouldStop_.load(std::memory_order_acquire))
     {
         return;
     }
 
-    const std::size_t targetJobs = targetColumnHeightPrefetchJobs();
-    const std::size_t outstandingJobs = jobQueue_.outstanding(JobType::ColumnPrefetch);
+    const std::size_t targetJobs = targetWorldgenPagePrefetchJobs();
+    const std::size_t outstandingJobs = jobQueue_.outstanding(JobType::WorldgenPagePrefetch);
     if (outstandingJobs >= targetJobs)
     {
         return;
@@ -9469,7 +9584,7 @@ void ChunkManager::Impl::refillColumnHeightPrefetchJobs()
     for (std::size_t i = outstandingJobs; i < targetJobs; ++i)
     {
         enqueueJob(nullptr,
-                   JobType::ColumnPrefetch,
+                   JobType::WorldgenPagePrefetch,
                    schedulingPriorityOrigin_,
                    0,
                    false,
@@ -9502,71 +9617,83 @@ void ChunkManager::Impl::refillBulkShellOracleJobs()
     }
 }
 
-bool ChunkManager::Impl::processColumnHeightPrefetchJob()
+bool ChunkManager::Impl::processWorldgenPagePrefetchJob()
 {
-    glm::ivec2 column{0};
+    glm::ivec2 pageKey{0};
     std::uint64_t token = 0;
     ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
     bool resolveHeight = true;
     bool buildOccupancy = false;
     bool warmStructures = false;
-    if (!acquireNextColumnHeightPrefetch(column, token, priority, resolveHeight, buildOccupancy, warmStructures))
+    if (!acquireNextWorldgenPagePrefetch(pageKey, token, priority, resolveHeight, buildOccupancy, warmStructures))
     {
         return false;
     }
+    (void)priority;
+
+    glm::ivec2 minColumn{0};
+    glm::ivec2 maxColumn{0};
+    worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
 
     if (warmStructures)
     {
-        warmStructureRegionsForColumn(column);
+        for (int columnZ = minColumn.y; columnZ <= maxColumn.y; ++columnZ)
+        {
+            for (int columnX = minColumn.x; columnX <= maxColumn.x; ++columnX)
+            {
+                warmStructureRegionsForColumn({columnX, columnZ});
+            }
+        }
     }
     if (!resolveHeight)
     {
-        finishColumnHeightPrefetch(column, token);
+        finishWorldgenPagePrefetch(pageKey, token);
         return true;
     }
 
-    warmWorldgenPagesForColumn(column);
+    const std::shared_ptr<const WorldgenPage> page = getOrBuildWorldgenPage(pageKey);
 
-    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    int cachedHeight = ColumnManager::kNoHeight;
-    const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
-    ColumnSlabOccupancy occupancy{};
-    const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
-    if (haveHeight && haveOccupancy)
+    for (int columnZ = minColumn.y; columnZ <= maxColumn.y; ++columnZ)
     {
-        invalidateStreamingFrontierColumn(column);
-        finishColumnHeightPrefetch(column, token);
-        return true;
+        for (int columnX = minColumn.x; columnX <= maxColumn.x; ++columnX)
+        {
+            const glm::ivec2 column{columnX, columnZ};
+            const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+            int cachedHeight = ColumnManager::kNoHeight;
+            const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
+            ColumnSlabOccupancy occupancy{};
+            const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+
+            ColumnSlabOccupancy resolvedOccupancy = occupancy;
+            bool resolvedHaveOccupancy = haveOccupancy;
+            if (buildOccupancy && !haveOccupancy)
+            {
+                resolvedOccupancy = cachedColumnSlabOccupancy(column);
+                resolvedHaveOccupancy = true;
+            }
+
+            if (!haveHeight)
+            {
+                if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
+                {
+                    mergePredictedColumnHeight(
+                        column,
+                        resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
+                }
+                else
+                {
+                    const int localX = worldX - page->baseWorld.x;
+                    const int localZ = worldZ - page->baseWorld.y;
+                    mergePredictedColumnHeight(column, page->column(localX, localZ).surface.surfaceY);
+                }
+            }
+
+            invalidateStreamingFrontierColumn(column);
+        }
     }
 
-    const bool shouldBuildOccupancy = buildOccupancy;
-    ColumnSlabOccupancy resolvedOccupancy = occupancy;
-    bool resolvedHaveOccupancy = haveOccupancy;
-    if (shouldBuildOccupancy && !haveOccupancy)
-    {
-        resolvedOccupancy = cachedColumnSlabOccupancy(column);
-        resolvedHaveOccupancy = true;
-    }
-    if (!haveHeight)
-    {
-        if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
-        {
-            mergePredictedColumnHeight(column,
-                                       resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
-        }
-        else if (!shouldBuildOccupancy && surfaceMap_)
-        {
-            const terrain::SurfaceColumn surfaceColumn = surfaceMap_->columnValue(worldX, worldZ);
-            mergePredictedColumnHeight(column, surfaceColumn.surfaceY);
-        }
-        else
-        {
-            (void)cacheSampledColumnHeight(column, worldX, worldZ);
-        }
-    }
-    invalidateStreamingFrontierColumn(column);
-    finishColumnHeightPrefetch(column, token);
+    finishWorldgenPagePrefetch(pageKey, token);
     return true;
 }
 
@@ -11249,7 +11376,7 @@ int ChunkManager::Impl::cacheSampledColumnHeight(const glm::ivec2& column, int w
     return height;
 }
 
-bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
+bool ChunkManager::Impl::requestWorldgenPagePrefetch(const glm::ivec2& pageKey,
                                                      ColumnHeightPrefetchPriority priority,
                                                      bool buildOccupancy,
                                                      bool warmStructuresOnly) const
@@ -11264,29 +11391,19 @@ bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
         warmStructuresOnly || buildOccupancy ||
         priority >= ColumnHeightPrefetchPriority::Visible ||
         stationaryExactFillModeActive_;
-    const glm::ivec3 centerChunk = lastCenterChunk_;
-    const std::uint32_t distance = static_cast<std::uint32_t>(std::max(std::abs(column.x - centerChunk.x),
-                                                                       std::abs(column.y - centerChunk.z)));
-    if (resolveHeight && !buildOccupancy)
-    {
-        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-        int resolvedHeight = ColumnManager::kNoHeight;
-        if (tryGetCachedColumnHeight(column, worldX, worldZ, resolvedHeight))
-        {
-            return false;
-        }
-    }
+    const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn({lastCenterChunk_.x, lastCenterChunk_.z});
+    const std::uint32_t distance = static_cast<std::uint32_t>(std::max(std::abs(pageKey.x - centerPage.x),
+                                                                       std::abs(pageKey.y - centerPage.y)));
 
     bool shouldNotify = false;
     bool enqueued = false;
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        const std::size_t queueLimit = columnHeightPrefetchQueueLimit(priority, buildOccupancy);
-        auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
-        if (requestIt != pendingColumnHeightPrefetchRequests_.end())
+        const std::size_t queueLimit = worldgenPagePrefetchQueueLimit(priority, buildOccupancy);
+        auto requestIt = pendingWorldgenPagePrefetchRequests_.find(pageKey);
+        if (requestIt != pendingWorldgenPagePrefetchRequests_.end())
         {
-            ColumnHeightPrefetchRequestState& state = requestIt->second;
+            WorldgenPagePrefetchRequestState& state = requestIt->second;
             const bool coversRequest =
                 state.priority >= priority &&
                 (!resolveHeight || state.resolveHeight) &&
@@ -11301,17 +11418,17 @@ bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
             const bool mergedResolveHeight = state.resolveHeight || resolveHeight;
             const bool mergedBuildOccupancy = state.buildOccupancy || buildOccupancy;
             const bool mergedWarmStructures = state.warmStructures || warmStructures || mergedBuildOccupancy;
-            state.token = nextColumnHeightPrefetchToken_++;
+            state.token = nextWorldgenPagePrefetchToken_++;
             state.priority = mergedPriority;
             state.resolveHeight = mergedResolveHeight;
             state.buildOccupancy = mergedBuildOccupancy;
             state.warmStructures = mergedWarmStructures;
             state.inFlight = false;
-            pendingColumnHeightPrefetchQueue_.push(
-                ColumnHeightPrefetchRequest{
-                    column,
+            pendingWorldgenPagePrefetchQueue_.push(
+                WorldgenPagePrefetchRequest{
+                    pageKey,
                     state.token,
-                    nextColumnHeightPrefetchSequence_++,
+                    nextWorldgenPagePrefetchSequence_++,
                     distance,
                     mergedPriority,
                     mergedResolveHeight,
@@ -11323,25 +11440,25 @@ bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
         else
         {
             const bool latencySensitive = priority >= ColumnHeightPrefetchPriority::Critical;
-            if (pendingColumnHeightPrefetchRequests_.size() >= queueLimit && !latencySensitive)
+            if (pendingWorldgenPagePrefetchRequests_.size() >= queueLimit && !latencySensitive)
             {
                 return false;
             }
 
-            const std::uint64_t token = nextColumnHeightPrefetchToken_++;
-            pendingColumnHeightPrefetchRequests_.emplace(column,
-                                                         ColumnHeightPrefetchRequestState{
+            const std::uint64_t token = nextWorldgenPagePrefetchToken_++;
+            pendingWorldgenPagePrefetchRequests_.emplace(pageKey,
+                                                         WorldgenPagePrefetchRequestState{
                                                              token,
                                                              priority,
                                                              resolveHeight,
                                                              buildOccupancy,
                                                              warmStructures,
                                                              false});
-            pendingColumnHeightPrefetchQueue_.push(
-                ColumnHeightPrefetchRequest{
-                    column,
+            pendingWorldgenPagePrefetchQueue_.push(
+                WorldgenPagePrefetchRequest{
+                    pageKey,
                     token,
-                    nextColumnHeightPrefetchSequence_++,
+                    nextWorldgenPagePrefetchSequence_++,
                     distance,
                     priority,
                     resolveHeight,
@@ -11354,34 +11471,69 @@ bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
 
     if (shouldNotify)
     {
-        const_cast<ChunkManager::Impl*>(this)->refillColumnHeightPrefetchJobs();
+        const_cast<ChunkManager::Impl*>(this)->refillWorldgenPagePrefetchJobs();
     }
 
     return enqueued;
 }
 
-void ChunkManager::Impl::requestFullRadiusColumnDiscovery(const glm::ivec3& center, int horizontalRadius)
+bool ChunkManager::Impl::requestColumnHeightPrefetch(const glm::ivec2& column,
+                                                     ColumnHeightPrefetchPriority priority,
+                                                     bool buildOccupancy,
+                                                     bool warmStructuresOnly) const
+{
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return false;
+    }
+
+    const bool resolveHeight = !warmStructuresOnly;
+    if (resolveHeight && !buildOccupancy)
+    {
+        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+        int resolvedHeight = ColumnManager::kNoHeight;
+        if (tryGetCachedColumnHeight(column, worldX, worldZ, resolvedHeight))
+        {
+            return false;
+        }
+    }
+
+    return requestWorldgenPagePrefetch(
+        worldgenPageKeyForChunkColumn(column),
+        priority,
+        buildOccupancy,
+        warmStructuresOnly);
+}
+
+void ChunkManager::Impl::requestFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius)
 {
     if (horizontalRadius <= 0 || shouldStop_.load(std::memory_order_acquire))
     {
         return;
     }
 
-    if (!fullRadiusColumnDiscovery_.initialized ||
-        fullRadiusColumnDiscovery_.center != center ||
-        fullRadiusColumnDiscovery_.radius != horizontalRadius)
+    const int radius = std::max(horizontalRadius, 0);
+    const int minWorldX = (center.x - radius) * kChunkSizeX - 1;
+    const int maxWorldX = (center.x + radius + 1) * kChunkSizeX;
+    const int minWorldZ = (center.z - radius) * kChunkSizeZ - 1;
+    const int maxWorldZ = (center.z + radius + 1) * kChunkSizeZ;
+    if (!fullRadiusWorldgenPageDiscovery_.initialized ||
+        fullRadiusWorldgenPageDiscovery_.centerPage != worldgenPageKeyForChunkColumn({center.x, center.z}) ||
+        fullRadiusWorldgenPageDiscovery_.minPage != worldgenPageKeyForWorld(minWorldX, minWorldZ) ||
+        fullRadiusWorldgenPageDiscovery_.maxPage != worldgenPageKeyForWorld(maxWorldX, maxWorldZ))
     {
-        resetFullRadiusColumnDiscovery(center, horizontalRadius);
+        resetFullRadiusWorldgenPageDiscovery(center, horizontalRadius);
     }
 
     std::size_t queuedRequests = 0;
     {
         std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
-        queuedRequests = pendingColumnHeightPrefetchRequests_.size();
+        queuedRequests = pendingWorldgenPagePrefetchRequests_.size();
     }
 
     const std::size_t supportHeadroomLimit =
-        columnHeightPrefetchQueueLimit(ColumnHeightPrefetchPriority::Visible, true);
+        worldgenPagePrefetchQueueLimit(ColumnHeightPrefetchPriority::Visible, true);
     if (queuedRequests >= supportHeadroomLimit)
     {
         return;
@@ -11397,22 +11549,22 @@ void ChunkManager::Impl::requestFullRadiusColumnDiscovery(const glm::ivec3& cent
     int requested = 0;
     while (requested < maxNewRequests && attempts < maxAttempts)
     {
-        glm::ivec2 column{0};
+        glm::ivec2 pageKey{0};
         ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Visible;
-        if (!nextFullRadiusColumnDiscoveryColumn(column, priority))
+        if (!nextFullRadiusWorldgenPageDiscoveryPage(pageKey, priority))
         {
             break;
         }
 
         ++attempts;
-        if (requestColumnHeightPrefetch(column, priority, true))
+        if (requestWorldgenPagePrefetch(pageKey, priority, true))
         {
             ++requested;
         }
     }
 }
 
-void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
+void ChunkManager::Impl::prefetchVisibleWorldgenPages(const glm::ivec3& center,
                                                       const glm::ivec3& previousCenter,
                                                       int horizontalRadius)
 {
@@ -11444,7 +11596,7 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
 
     struct PrefetchCandidate
     {
-        glm::ivec2 column{0};
+        glm::ivec2 pageKey{0};
         ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
         float score{0.0f};
     };
@@ -11456,37 +11608,75 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
                : ((movementEnvelopeIdleMode_ && exactOnly) ? 96 : 64));
     std::vector<PrefetchCandidate> candidates;
     candidates.reserve(96u);
-    std::unordered_set<glm::ivec2, ColumnHasher> queuedColumns;
-    queuedColumns.reserve(128u);
+    std::unordered_map<glm::ivec2, std::size_t, ColumnHasher> queuedPages;
+    queuedPages.reserve(128u);
     const std::size_t candidateCap = needsStaticDiscovery
         ? ((movementEnvelopeIdleMode_ && exactOnly) ? 512u : 320u)
         : ((movementEnvelopeIdleMode_ && exactOnly) ? 224u : 160u);
 
     auto addCandidate = [&](const glm::ivec2& column, ColumnHeightPrefetchPriority priority, float score)
     {
+        const glm::ivec2 pageKey = worldgenPageKeyForChunkColumn(column);
+        auto queuedIt = queuedPages.find(pageKey);
+
+        const bool needsOccupancy = priority >= ColumnHeightPrefetchPriority::Visible;
+        bool pageNeedsWork = false;
+        glm::ivec2 minColumn{0};
+        glm::ivec2 maxColumn{0};
+        worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
+        for (int pageColumnZ = minColumn.y; pageColumnZ <= maxColumn.y && !pageNeedsWork; ++pageColumnZ)
+        {
+            for (int pageColumnX = minColumn.x; pageColumnX <= maxColumn.x; ++pageColumnX)
+            {
+                const glm::ivec2 pageColumn{pageColumnX, pageColumnZ};
+                const int worldX = pageColumn.x * kChunkSizeX + kChunkSizeX / 2;
+                const int worldZ = pageColumn.y * kChunkSizeZ + kChunkSizeZ / 2;
+                int cachedHeight = ColumnManager::kNoHeight;
+                if (!tryGetCachedColumnHeight(pageColumn, worldX, worldZ, cachedHeight))
+                {
+                    pageNeedsWork = true;
+                    break;
+                }
+
+                if (needsOccupancy)
+                {
+                    ColumnSlabOccupancy occupancy{};
+                    if (!tryGetCachedColumnSlabOccupancy(pageColumn, occupancy))
+                    {
+                        pageNeedsWork = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!pageNeedsWork)
+        {
+            return;
+        }
+
+        if (queuedIt != queuedPages.end())
+        {
+            PrefetchCandidate& existing = candidates[queuedIt->second];
+            if (priority > existing.priority)
+            {
+                existing.priority = priority;
+                existing.score = score;
+            }
+            else if (priority == existing.priority)
+            {
+                existing.score = std::min(existing.score, score);
+            }
+            return;
+        }
+
         if (candidates.size() >= candidateCap && priority < ColumnHeightPrefetchPriority::Critical)
         {
             return;
         }
 
-        if (!queuedColumns.insert(column).second)
-        {
-            return;
-        }
-
-        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-        int cachedHeight = ColumnManager::kNoHeight;
-        const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
-        const bool needsOccupancy = priority >= ColumnHeightPrefetchPriority::Visible;
-        ColumnSlabOccupancy occupancy{};
-        const bool haveOccupancy = !needsOccupancy || tryGetCachedColumnSlabOccupancy(column, occupancy);
-        if (haveHeight && haveOccupancy)
-        {
-            return;
-        }
-
-        candidates.push_back(PrefetchCandidate{column, priority, score});
+        queuedPages.emplace(pageKey, candidates.size());
+        candidates.push_back(PrefetchCandidate{pageKey, priority, score});
     };
 
     if (horizontalDominant)
@@ -11609,11 +11799,11 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
                   {
                       return lhs.score < rhs.score;
                   }
-                  if (lhs.column.x != rhs.column.x)
+                  if (lhs.pageKey.x != rhs.pageKey.x)
                   {
-                      return lhs.column.x < rhs.column.x;
+                      return lhs.pageKey.x < rhs.pageKey.x;
                   }
-                  return lhs.column.y < rhs.column.y;
+                  return lhs.pageKey.y < rhs.pageKey.y;
               });
 
     int requested = 0;
@@ -11624,7 +11814,7 @@ void ChunkManager::Impl::prefetchVisibleColumnHeights(const glm::ivec3& center,
             break;
         }
 
-        requestColumnHeightPrefetch(candidate.column,
+        requestWorldgenPagePrefetch(candidate.pageKey,
                                     candidate.priority,
                                     candidate.priority >= ColumnHeightPrefetchPriority::Visible);
         ++requested;
@@ -11657,17 +11847,6 @@ void ChunkManager::Impl::mergePredictedColumnHeight(const glm::ivec2& column, in
         if (!inserted)
         {
             it->second = std::max(it->second, height);
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> prefetchLock(columnHeightPrefetchMutex_);
-        auto requestIt = pendingColumnHeightPrefetchRequests_.find(column);
-        if (requestIt != pendingColumnHeightPrefetchRequests_.end() &&
-            !requestIt->second.inFlight &&
-            !requestIt->second.buildOccupancy)
-        {
-            pendingColumnHeightPrefetchRequests_.erase(requestIt);
         }
     }
 
@@ -12257,6 +12436,25 @@ glm::ivec2 ChunkManager::Impl::worldgenPageKeyForWorld(int worldX, int worldZ) n
 {
     constexpr int kPageSize = WorldgenPage::kSize;
     return {floorDiv(worldX, kPageSize), floorDiv(worldZ, kPageSize)};
+}
+
+glm::ivec2 ChunkManager::Impl::worldgenPageKeyForChunkColumn(const glm::ivec2& column) noexcept
+{
+    const int worldX = column.x * kChunkSizeX;
+    const int worldZ = column.y * kChunkSizeZ;
+    return worldgenPageKeyForWorld(worldX, worldZ);
+}
+
+void ChunkManager::Impl::worldgenPageChunkColumnBounds(const glm::ivec2& pageKey,
+                                                       glm::ivec2& outMinColumn,
+                                                       glm::ivec2& outMaxColumn) noexcept
+{
+    const int minWorldX = pageKey.x * WorldgenPage::kSize;
+    const int minWorldZ = pageKey.y * WorldgenPage::kSize;
+    const int maxWorldX = minWorldX + WorldgenPage::kSize - 1;
+    const int maxWorldZ = minWorldZ + WorldgenPage::kSize - 1;
+    outMinColumn = {floorDiv(minWorldX, kChunkSizeX), floorDiv(minWorldZ, kChunkSizeZ)};
+    outMaxColumn = {floorDiv(maxWorldX, kChunkSizeX), floorDiv(maxWorldZ, kChunkSizeZ)};
 }
 
 std::shared_ptr<const ChunkManager::Impl::WorldgenPage>

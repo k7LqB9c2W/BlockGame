@@ -213,6 +213,27 @@ using SteadyClock = std::chrono::steady_clock;
     return stream.str();
 }
 
+[[nodiscard]] std::uint8_t worldgenGrassTintIndexForBiome(const terrain::BiomeDefinition* biome) noexcept
+{
+    if (biome == nullptr)
+    {
+        return 1u;
+    }
+    if (biome->id == "dark_forest")
+    {
+        return 2u;
+    }
+    if (terrain::isTaigaBiome(*biome))
+    {
+        return 3u;
+    }
+    if (biome->id == "savanna" || biome->id == "desert")
+    {
+        return 4u;
+    }
+    return 1u;
+}
+
 inline void updateAtomicMax(std::atomic<std::uint64_t>& current, std::uint64_t value) noexcept
 {
     std::uint64_t observed = current.load(std::memory_order_relaxed);
@@ -4127,21 +4148,42 @@ private:
         std::atomic<std::size_t> nextFragmentIndex{0};
         std::atomic<std::size_t> remainingFragments{0};
     };
-    struct MetadataColumnValue
+    struct WorldgenColumnValue
     {
         terrain::SurfaceColumn surface{};
+        std::uint32_t biomeIndex{(std::numeric_limits<std::uint32_t>::max)()};
         float distanceToCoast{std::numeric_limits<float>::infinity()};
+        float signedDistanceToCoast{std::numeric_limits<float>::infinity()};
+        float landBaseHeight{0.0f};
+        float oceanBaseHeight{0.0f};
+        float keepOriginalMix{0.0f};
+        float soilCreepStrength{0.0f};
+        float stripeNoiseThreshold{1.0f};
+        std::uint16_t soilCreepMaxStep{0};
+        std::uint16_t soilCreepMaxDepth{0};
+        std::uint16_t waterFillMaxDepth{0};
+        std::uint16_t stripePeriod{0};
+        std::uint16_t stripeThickness{0};
+        std::uint8_t grassTintIndex{1};
         bool dominantIsOcean{false};
+        bool smoothBeaches{false};
+        bool taigaBiome{false};
+        bool waterFillEnabled{false};
+        bool stripesEnabled{false};
+        BlockId surfaceBlock{BlockId::Air};
+        BlockId fillerBlock{BlockId::Air};
+        BlockId waterBlock{BlockId::Air};
+        BlockId stripeBlock{BlockId::Air};
     };
-    struct MetadataPage
+    struct WorldgenPage
     {
         static constexpr int kSize = terrain::SurfaceFragment::kSize;
 
         glm::ivec2 key{0};
         glm::ivec2 baseWorld{0};
-        std::array<MetadataColumnValue, static_cast<std::size_t>(kSize * kSize)> columns{};
+        std::array<WorldgenColumnValue, static_cast<std::size_t>(kSize * kSize)> columns{};
 
-        [[nodiscard]] const MetadataColumnValue& column(int localX, int localZ) const noexcept
+        [[nodiscard]] const WorldgenColumnValue& column(int localX, int localZ) const noexcept
         {
             const int clampedX = std::clamp(localX, 0, kSize - 1);
             const int clampedZ = std::clamp(localZ, 0, kSize - 1);
@@ -4149,10 +4191,10 @@ private:
             return columns[index];
         }
     };
-    struct PendingMetadataPageBuild
+    struct PendingWorldgenPageBuild
     {
         std::condition_variable readyCondition{};
-        std::shared_ptr<MetadataPage> page{};
+        std::shared_ptr<WorldgenPage> page{};
         std::exception_ptr exception{};
         bool ready{false};
     };
@@ -4163,15 +4205,15 @@ private:
         int lodLevel{0};
         std::vector<StructureRegionKey> missingRegions{};
     };
-    [[nodiscard]] int adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
+    [[nodiscard]] int adjustedSurfaceYForColumn(const WorldgenColumnValue& column,
                                                 float neighborAverage) const noexcept;
-    [[nodiscard]] static glm::ivec2 metadataPageKeyForWorld(int worldX, int worldZ) noexcept;
-    [[nodiscard]] std::shared_ptr<const MetadataPage> getOrBuildMetadataPage(const glm::ivec2& pageKey) const;
-    [[nodiscard]] std::shared_ptr<const MetadataPage> tryGetMetadataPage(const glm::ivec2& pageKey) const;
-    void pinMetadataWindow(const glm::ivec3& center, int horizontalRadius);
-    void trimMetadataPages();
-    void warmMetadataPagesForChunk(const glm::ivec3& chunkCoord) const;
-    void warmMetadataPagesForColumn(const glm::ivec2& column) const;
+    [[nodiscard]] static glm::ivec2 worldgenPageKeyForWorld(int worldX, int worldZ) noexcept;
+    [[nodiscard]] std::shared_ptr<const WorldgenPage> getOrBuildWorldgenPage(const glm::ivec2& pageKey) const;
+    [[nodiscard]] std::shared_ptr<const WorldgenPage> tryGetWorldgenPage(const glm::ivec2& pageKey) const;
+    void pinWorldgenWindow(const glm::ivec3& center, int horizontalRadius);
+    void trimWorldgenPages();
+    void warmWorldgenPagesForChunk(const glm::ivec3& chunkCoord) const;
+    void warmWorldgenPagesForColumn(const glm::ivec2& column) const;
     ColumnSlabOccupancy buildColumnSlabOccupancy(const glm::ivec2& column) const;
     ColumnSlabOccupancy cachedColumnSlabOccupancy(const glm::ivec2& column) const;
     bool tryGetCachedColumnSlabOccupancy(const glm::ivec2& column, ColumnSlabOccupancy& out) const;
@@ -4727,11 +4769,11 @@ private:
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
     JobQueue jobQueue_;
     ColumnManager columnManager_;
-    mutable std::mutex metadataPageMutex_;
-    mutable std::unordered_map<glm::ivec2, std::shared_ptr<MetadataPage>, ColumnHasher> metadataPages_{};
-    mutable std::unordered_map<glm::ivec2, std::shared_ptr<PendingMetadataPageBuild>, ColumnHasher>
-        pendingMetadataPageBuilds_{};
-    std::unordered_set<glm::ivec2, ColumnHasher> pinnedMetadataPageKeys_{};
+    mutable std::mutex worldgenPageMutex_;
+    mutable std::unordered_map<glm::ivec2, std::shared_ptr<WorldgenPage>, ColumnHasher> worldgenPages_{};
+    mutable std::unordered_map<glm::ivec2, std::shared_ptr<PendingWorldgenPageBuild>, ColumnHasher>
+        pendingWorldgenPageBuilds_{};
+    std::unordered_set<glm::ivec2, ColumnHasher> pinnedWorldgenPageKeys_{};
     mutable std::mutex streamingFrontierMutex_;
     mutable std::unordered_set<glm::ivec2, ColumnHasher> streamingFrontierDirtyColumns_{};
     mutable bool streamingFrontierDirtyAllColumns_{false};
@@ -5646,7 +5688,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     }
     viewDistance_ = targetViewDistance_;
 
-    pinMetadataWindow(centerChunk, renderSettings_.exactChunks);
+    pinWorldgenWindow(centerChunk, renderSettings_.exactChunks);
     prefetchVisibleColumnHeights(centerChunk, previousCenterChunk, targetViewDistance_);
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     const bool needsFullExactCoverageMetrics = exactOnly && renderSettings_.exactChunks > targetViewDistance_;
@@ -6448,10 +6490,10 @@ void ChunkManager::Impl::clear()
         predictedColumnHeights_.clear();
     }
     {
-        std::lock_guard<std::mutex> lock(metadataPageMutex_);
-        metadataPages_.clear();
-        pendingMetadataPageBuilds_.clear();
-        pinnedMetadataPageKeys_.clear();
+        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+        worldgenPages_.clear();
+        pendingWorldgenPageBuilds_.clear();
+        pinnedWorldgenPageKeys_.clear();
     }
     invalidateAllColumnSlabOccupancy();
     resetStreamingFrontier();
@@ -9483,7 +9525,7 @@ bool ChunkManager::Impl::processColumnHeightPrefetchJob()
         return true;
     }
 
-    warmMetadataPagesForColumn(column);
+    warmWorldgenPagesForColumn(column);
 
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
@@ -12211,39 +12253,39 @@ int ChunkManager::Impl::chunkYDistanceToIntervals(int chunkY,
     return bestDistance;
 }
 
-glm::ivec2 ChunkManager::Impl::metadataPageKeyForWorld(int worldX, int worldZ) noexcept
+glm::ivec2 ChunkManager::Impl::worldgenPageKeyForWorld(int worldX, int worldZ) noexcept
 {
-    constexpr int kPageSize = MetadataPage::kSize;
+    constexpr int kPageSize = WorldgenPage::kSize;
     return {floorDiv(worldX, kPageSize), floorDiv(worldZ, kPageSize)};
 }
 
-std::shared_ptr<const ChunkManager::Impl::MetadataPage>
-ChunkManager::Impl::tryGetMetadataPage(const glm::ivec2& pageKey) const
+std::shared_ptr<const ChunkManager::Impl::WorldgenPage>
+ChunkManager::Impl::tryGetWorldgenPage(const glm::ivec2& pageKey) const
 {
-    std::lock_guard<std::mutex> lock(metadataPageMutex_);
-    auto it = metadataPages_.find(pageKey);
-    if (it == metadataPages_.end())
+    std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+    auto it = worldgenPages_.find(pageKey);
+    if (it == worldgenPages_.end())
     {
         return {};
     }
     return it->second;
 }
 
-std::shared_ptr<const ChunkManager::Impl::MetadataPage>
-ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
+std::shared_ptr<const ChunkManager::Impl::WorldgenPage>
+ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
 {
-    std::shared_ptr<MetadataPage> page;
-    std::shared_ptr<PendingMetadataPageBuild> pendingBuild;
+    std::shared_ptr<WorldgenPage> page;
+    std::shared_ptr<PendingWorldgenPageBuild> pendingBuild;
     {
-        std::unique_lock<std::mutex> lock(metadataPageMutex_);
-        auto it = metadataPages_.find(pageKey);
-        if (it != metadataPages_.end())
+        std::unique_lock<std::mutex> lock(worldgenPageMutex_);
+        auto it = worldgenPages_.find(pageKey);
+        if (it != worldgenPages_.end())
         {
             return it->second;
         }
 
-        auto pendingIt = pendingMetadataPageBuilds_.find(pageKey);
-        if (pendingIt != pendingMetadataPageBuilds_.end())
+        auto pendingIt = pendingWorldgenPageBuilds_.find(pageKey);
+        if (pendingIt != pendingWorldgenPageBuilds_.end())
         {
             pendingBuild = pendingIt->second;
             pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
@@ -12254,8 +12296,8 @@ ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
             return pendingBuild->page;
         }
 
-        pendingBuild = std::make_shared<PendingMetadataPageBuild>();
-        pendingMetadataPageBuilds_.emplace(pageKey, pendingBuild);
+        pendingBuild = std::make_shared<PendingWorldgenPageBuild>();
+        pendingWorldgenPageBuilds_.emplace(pageKey, pendingBuild);
     }
 
     std::exception_ptr buildException{};
@@ -12263,28 +12305,63 @@ ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
     {
         if (!surfaceMap_ || !climateMap_)
         {
-            throw std::runtime_error("Metadata page build requires initialized surface and climate maps");
+            throw std::runtime_error("Worldgen page build requires initialized surface and climate maps");
         }
 
-        page = std::make_shared<MetadataPage>();
+        page = std::make_shared<WorldgenPage>();
         page->key = pageKey;
-        page->baseWorld = pageKey * MetadataPage::kSize;
+        page->baseWorld = pageKey * WorldgenPage::kSize;
 
         const terrain::SurfaceFragment& surfaceFragment = surfaceMap_->getFragment(pageKey);
-        for (int localZ = 0; localZ < MetadataPage::kSize; ++localZ)
+        for (int localZ = 0; localZ < WorldgenPage::kSize; ++localZ)
         {
-            for (int localX = 0; localX < MetadataPage::kSize; ++localX)
+            for (int localX = 0; localX < WorldgenPage::kSize; ++localX)
             {
                 const std::size_t index =
-                    static_cast<std::size_t>(localZ) * MetadataPage::kSize + static_cast<std::size_t>(localX);
-                MetadataColumnValue& metadataColumn = page->columns[index];
-                metadataColumn.surface = surfaceFragment.column(localX, localZ);
+                    static_cast<std::size_t>(localZ) * WorldgenPage::kSize + static_cast<std::size_t>(localX);
+                WorldgenColumnValue& worldgenColumn = page->columns[index];
+                worldgenColumn.surface = surfaceFragment.column(localX, localZ);
 
                 const int worldX = page->baseWorld.x + localX;
                 const int worldZ = page->baseWorld.y + localZ;
                 const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
-                metadataColumn.distanceToCoast = climateSample.distanceToCoast;
-                metadataColumn.dominantIsOcean = climateSample.dominantIsOcean;
+                const BiomeDefinition* biome = worldgenColumn.surface.dominantBiome;
+
+                worldgenColumn.biomeIndex =
+                    biome != nullptr
+                        ? static_cast<std::uint32_t>(biomeDatabase_.definitionIndex(*biome))
+                        : (std::numeric_limits<std::uint32_t>::max)();
+                worldgenColumn.distanceToCoast = climateSample.distanceToCoast;
+                worldgenColumn.signedDistanceToCoast = climateSample.signedDistanceToCoast;
+                worldgenColumn.landBaseHeight = climateSample.landBaseHeight;
+                worldgenColumn.oceanBaseHeight = climateSample.oceanBaseHeight;
+                worldgenColumn.keepOriginalMix = climateSample.keepOriginalMix;
+                worldgenColumn.dominantIsOcean = climateSample.dominantIsOcean;
+                worldgenColumn.grassTintIndex = worldgenGrassTintIndexForBiome(biome);
+
+                if (biome != nullptr)
+                {
+                    worldgenColumn.surfaceBlock = biome->surfaceBlock;
+                    worldgenColumn.fillerBlock = biome->fillerBlock;
+                    worldgenColumn.smoothBeaches = biome->terrainSettings.smoothBeaches;
+                    worldgenColumn.taigaBiome = terrain::isTaigaBiome(*biome);
+                    worldgenColumn.soilCreepStrength = biome->terrainSettings.soilCreep.strength;
+                    worldgenColumn.soilCreepMaxStep =
+                        static_cast<std::uint16_t>(std::max(biome->terrainSettings.soilCreep.maxStep, 0));
+                    worldgenColumn.soilCreepMaxDepth =
+                        static_cast<std::uint16_t>(std::max(biome->terrainSettings.soilCreep.maxDepth, 0));
+                    worldgenColumn.waterFillEnabled = biome->terrainSettings.waterFill.enabled;
+                    worldgenColumn.waterFillMaxDepth =
+                        static_cast<std::uint16_t>(std::max(biome->terrainSettings.waterFill.maxDepth, 0));
+                    worldgenColumn.waterBlock = biome->terrainSettings.waterFill.block;
+                    worldgenColumn.stripesEnabled = biome->terrainSettings.stripes.enabled;
+                    worldgenColumn.stripePeriod =
+                        static_cast<std::uint16_t>(std::max(biome->terrainSettings.stripes.period, 0));
+                    worldgenColumn.stripeThickness =
+                        static_cast<std::uint16_t>(std::max(biome->terrainSettings.stripes.thickness, 0));
+                    worldgenColumn.stripeNoiseThreshold = biome->terrainSettings.stripes.noiseThreshold;
+                    worldgenColumn.stripeBlock = biome->terrainSettings.stripes.block;
+                }
             }
         }
     }
@@ -12294,10 +12371,10 @@ ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
     }
 
     {
-        std::lock_guard<std::mutex> lock(metadataPageMutex_);
+        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
         if (!buildException)
         {
-            auto [it, inserted] = metadataPages_.emplace(pageKey, page);
+            auto [it, inserted] = worldgenPages_.emplace(pageKey, page);
             if (!inserted)
             {
                 page = it->second;
@@ -12306,7 +12383,7 @@ ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
         }
         pendingBuild->exception = buildException;
         pendingBuild->ready = true;
-        pendingMetadataPageBuilds_.erase(pageKey);
+        pendingWorldgenPageBuilds_.erase(pageKey);
     }
     pendingBuild->readyCondition.notify_all();
 
@@ -12318,7 +12395,7 @@ ChunkManager::Impl::getOrBuildMetadataPage(const glm::ivec2& pageKey) const
     return page;
 }
 
-void ChunkManager::Impl::pinMetadataWindow(const glm::ivec3& center, int horizontalRadius)
+void ChunkManager::Impl::pinWorldgenWindow(const glm::ivec3& center, int horizontalRadius)
 {
     const int marginChunks = std::clamp(horizontalRadius / 6, 1, 4);
     const int minWorldX = (center.x - horizontalRadius - marginChunks) * kChunkSizeX;
@@ -12327,8 +12404,8 @@ void ChunkManager::Impl::pinMetadataWindow(const glm::ivec3& center, int horizon
     const int maxWorldZ = (center.z + horizontalRadius + marginChunks + 1) * kChunkSizeZ - 1;
 
     std::unordered_set<glm::ivec2, ColumnHasher> desiredKeys{};
-    const glm::ivec2 minKey = metadataPageKeyForWorld(minWorldX, minWorldZ);
-    const glm::ivec2 maxKey = metadataPageKeyForWorld(maxWorldX, maxWorldZ);
+    const glm::ivec2 minKey = worldgenPageKeyForWorld(minWorldX, minWorldZ);
+    const glm::ivec2 maxKey = worldgenPageKeyForWorld(maxWorldX, maxWorldZ);
     desiredKeys.reserve(static_cast<std::size_t>(std::max(maxKey.x - minKey.x + 1, 0)) *
                         static_cast<std::size_t>(std::max(maxKey.y - minKey.y + 1, 0)));
     for (int pageZ = minKey.y; pageZ <= maxKey.y; ++pageZ)
@@ -12340,87 +12417,80 @@ void ChunkManager::Impl::pinMetadataWindow(const glm::ivec3& center, int horizon
     }
 
     {
-        std::lock_guard<std::mutex> lock(metadataPageMutex_);
-        pinnedMetadataPageKeys_ = std::move(desiredKeys);
+        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+        pinnedWorldgenPageKeys_ = std::move(desiredKeys);
     }
-    trimMetadataPages();
+    trimWorldgenPages();
 }
 
-void ChunkManager::Impl::trimMetadataPages()
+void ChunkManager::Impl::trimWorldgenPages()
 {
-    std::lock_guard<std::mutex> lock(metadataPageMutex_);
+    std::lock_guard<std::mutex> lock(worldgenPageMutex_);
     const std::size_t keepSlack = 32;
-    if (metadataPages_.size() <= pinnedMetadataPageKeys_.size() + keepSlack)
+    if (worldgenPages_.size() <= pinnedWorldgenPageKeys_.size() + keepSlack)
     {
         return;
     }
 
-    for (auto it = metadataPages_.begin(); it != metadataPages_.end();)
+    for (auto it = worldgenPages_.begin(); it != worldgenPages_.end();)
     {
-        if (pinnedMetadataPageKeys_.contains(it->first))
+        if (pinnedWorldgenPageKeys_.contains(it->first))
         {
             ++it;
             continue;
         }
 
-        it = metadataPages_.erase(it);
-        if (metadataPages_.size() <= pinnedMetadataPageKeys_.size() + keepSlack)
+        it = worldgenPages_.erase(it);
+        if (worldgenPages_.size() <= pinnedWorldgenPageKeys_.size() + keepSlack)
         {
             break;
         }
     }
 }
 
-void ChunkManager::Impl::warmMetadataPagesForChunk(const glm::ivec3& chunkCoord) const
+void ChunkManager::Impl::warmWorldgenPagesForChunk(const glm::ivec3& chunkCoord) const
 {
     const int minWorldX = chunkCoord.x * kChunkSizeX - 1;
     const int maxWorldX = (chunkCoord.x + 1) * kChunkSizeX;
     const int minWorldZ = chunkCoord.z * kChunkSizeZ - 1;
     const int maxWorldZ = (chunkCoord.z + 1) * kChunkSizeZ;
-    const glm::ivec2 minKey = metadataPageKeyForWorld(minWorldX, minWorldZ);
-    const glm::ivec2 maxKey = metadataPageKeyForWorld(maxWorldX, maxWorldZ);
+    const glm::ivec2 minKey = worldgenPageKeyForWorld(minWorldX, minWorldZ);
+    const glm::ivec2 maxKey = worldgenPageKeyForWorld(maxWorldX, maxWorldZ);
     for (int pageZ = minKey.y; pageZ <= maxKey.y; ++pageZ)
     {
         for (int pageX = minKey.x; pageX <= maxKey.x; ++pageX)
         {
-            (void)getOrBuildMetadataPage({pageX, pageZ});
+            (void)getOrBuildWorldgenPage({pageX, pageZ});
         }
     }
 }
 
-void ChunkManager::Impl::warmMetadataPagesForColumn(const glm::ivec2& column) const
+void ChunkManager::Impl::warmWorldgenPagesForColumn(const glm::ivec2& column) const
 {
     const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
     const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-    (void)getOrBuildMetadataPage(metadataPageKeyForWorld(worldX, worldZ));
+    (void)getOrBuildWorldgenPage(worldgenPageKeyForWorld(worldX, worldZ));
 }
 
-int ChunkManager::Impl::adjustedSurfaceYForColumn(const terrain::SurfaceColumn& surfaceColumn,
+int ChunkManager::Impl::adjustedSurfaceYForColumn(const WorldgenColumnValue& column,
                                                   float neighborAverage) const noexcept
 {
-    const BiomeDefinition* biome = surfaceColumn.dominantBiome;
-    int adjustedSurfaceY = surfaceColumn.surfaceY;
-    if (biome == nullptr)
+    int adjustedSurfaceY = column.surface.surfaceY;
+    if (column.soilCreepStrength <= 0.0f || column.surface.soilCreepCoefficient <= 0.0f)
     {
         return adjustedSurfaceY;
     }
 
-    const auto& soilCreep = biome->terrainSettings.soilCreep;
-    if (soilCreep.strength <= 0.0f || surfaceColumn.soilCreepCoefficient <= 0.0f)
-    {
-        return adjustedSurfaceY;
-    }
-
-    const float strength = std::clamp(surfaceColumn.soilCreepCoefficient * soilCreep.strength, 0.0f, 1.0f);
+    const float strength = std::clamp(column.surface.soilCreepCoefficient * column.soilCreepStrength, 0.0f, 1.0f);
     float offset = (neighborAverage - static_cast<float>(adjustedSurfaceY)) * strength;
-    if (soilCreep.maxStep > 0)
+    if (column.soilCreepMaxStep > 0)
     {
-        const float maxStep = static_cast<float>(soilCreep.maxStep);
+        const float maxStep = static_cast<float>(column.soilCreepMaxStep);
         offset = std::clamp(offset, -maxStep, maxStep);
     }
-    if (soilCreep.maxDepth > 0)
+    if (column.soilCreepMaxDepth > 0)
     {
-        const float maxDepth = static_cast<float>(soilCreep.maxDepth);
+        const float maxDepth = static_cast<float>(column.soilCreepMaxDepth);
         offset = std::clamp(offset, -maxDepth, maxDepth);
     }
 
@@ -12441,19 +12511,24 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
     constexpr int kSampleExtentX = kChunkSizeX + 2;
     constexpr int kSampleExtentZ = kChunkSizeZ + 2;
 
-    std::array<terrain::SurfaceColumn, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)> surfaceColumns{};
+    std::array<WorldgenColumnValue, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)> worldgenColumns{};
     auto sampleIndex = [](int sampleX, int sampleZ) noexcept {
         return static_cast<std::size_t>(sampleZ * kSampleExtentX + sampleX);
     };
 
-    if (surfaceMap_)
+    if (surfaceMap_ && climateMap_)
     {
         for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
         {
             for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
             {
-                surfaceColumns[sampleIndex(sampleX + 1, sampleZ + 1)] =
-                    surfaceMap_->columnValue(baseWorldX + sampleX, baseWorldZ + sampleZ);
+                const int sampleWorldX = baseWorldX + sampleX;
+                const int sampleWorldZ = baseWorldZ + sampleZ;
+                const std::shared_ptr<const WorldgenPage> page =
+                    getOrBuildWorldgenPage(worldgenPageKeyForWorld(sampleWorldX, sampleWorldZ));
+                const int localPageX = sampleWorldX - page->baseWorld.x;
+                const int localPageZ = sampleWorldZ - page->baseWorld.y;
+                worldgenColumns[sampleIndex(sampleX + 1, sampleZ + 1)] = page->column(localPageX, localPageZ);
             }
         }
 
@@ -12469,7 +12544,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
                         continue;
                     }
                     sum += static_cast<float>(
-                        surfaceColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surfaceY);
+                        worldgenColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surface.surfaceY);
                     ++count;
                 }
             }
@@ -12484,28 +12559,27 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
         {
             for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
             {
-                const terrain::SurfaceColumn& surfaceColumn = surfaceColumns[sampleIndex(localX + 1, localZ + 1)];
-                const BiomeDefinition* biome = surfaceColumn.dominantBiome;
+                const WorldgenColumnValue& worldgenColumn = worldgenColumns[sampleIndex(localX + 1, localZ + 1)];
+                const BiomeDefinition* biome = worldgenColumn.surface.dominantBiome;
                 if (biome == nullptr)
                 {
                     continue;
                 }
 
-                const int adjustedSurfaceY =
-                    adjustedSurfaceYForColumn(surfaceColumn, computeNeighborAverage(localX, localZ));
+                const int adjustedSurfaceY = adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
                 highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
 
-                const auto& waterFill = biome->terrainSettings.waterFill;
-                if (!waterFill.enabled || adjustedSurfaceY >= globalSeaLevel_)
+                if (!worldgenColumn.waterFillEnabled || adjustedSurfaceY >= globalSeaLevel_)
                 {
                     continue;
                 }
 
                 int waterBottomWorld = adjustedSurfaceY + 1;
                 int waterTopWorld = globalSeaLevel_;
-                if (waterFill.maxDepth > 0)
+                if (worldgenColumn.waterFillMaxDepth > 0)
                 {
-                    waterBottomWorld = std::max(waterBottomWorld, waterTopWorld - waterFill.maxDepth + 1);
+                    waterBottomWorld = std::max(waterBottomWorld,
+                                                waterTopWorld - static_cast<int>(worldgenColumn.waterFillMaxDepth) + 1);
                 }
                 minWaterBottomWorld = std::min(minWaterBottomWorld, waterBottomWorld);
                 maxWaterTopWorld = std::max(maxWaterTopWorld, waterTopWorld);
@@ -18045,37 +18119,29 @@ ColumnSample ChunkManager::Impl::sampleColumn(
     }
 
     ColumnSample sample{};
-    const std::shared_ptr<const MetadataPage> cachedPage =
-        tryGetMetadataPage(metadataPageKeyForWorld(worldX, worldZ));
-    terrain::SurfaceColumn surfaceColumn{};
-    float distanceToCoast = std::numeric_limits<float>::infinity();
-    bool dominantIsOcean = false;
+    const std::shared_ptr<const WorldgenPage> cachedPage =
+        tryGetWorldgenPage(worldgenPageKeyForWorld(worldX, worldZ));
+    WorldgenColumnValue worldgenColumn{};
     if (cachedPage)
     {
         const int localX = worldX - cachedPage->baseWorld.x;
         const int localZ = worldZ - cachedPage->baseWorld.y;
-        const MetadataColumnValue& metadataColumn = cachedPage->column(localX, localZ);
-        surfaceColumn = metadataColumn.surface;
-        distanceToCoast = metadataColumn.distanceToCoast;
-        dominantIsOcean = metadataColumn.dominantIsOcean;
+        worldgenColumn = cachedPage->column(localX, localZ);
     }
     else
     {
-        const std::shared_ptr<const MetadataPage> page =
-            getOrBuildMetadataPage(metadataPageKeyForWorld(worldX, worldZ));
+        const std::shared_ptr<const WorldgenPage> page =
+            getOrBuildWorldgenPage(worldgenPageKeyForWorld(worldX, worldZ));
         const int localX = worldX - page->baseWorld.x;
         const int localZ = worldZ - page->baseWorld.y;
-        const MetadataColumnValue& metadataColumn = page->column(localX, localZ);
-        surfaceColumn = metadataColumn.surface;
-        distanceToCoast = metadataColumn.distanceToCoast;
-        dominantIsOcean = metadataColumn.dominantIsOcean;
+        worldgenColumn = page->column(localX, localZ);
     }
 
-    sample.dominantBiome = surfaceColumn.dominantBiome;
-    sample.dominantWeight = surfaceColumn.dominantWeight;
-    sample.surfaceHeight = surfaceColumn.surfaceHeight;
-    sample.surfaceY = surfaceColumn.surfaceY;
-    sample.originalSurfaceY = surfaceColumn.surfaceY;
+    sample.dominantBiome = worldgenColumn.surface.dominantBiome;
+    sample.dominantWeight = worldgenColumn.surface.dominantWeight;
+    sample.surfaceHeight = worldgenColumn.surface.surfaceHeight;
+    sample.surfaceY = worldgenColumn.surface.surfaceY;
+    sample.originalSurfaceY = worldgenColumn.surface.surfaceY;
     if (usesDefaultSlabBounds)
     {
         slabMinWorldY = sample.surfaceY;
@@ -18083,14 +18149,14 @@ ColumnSample ChunkManager::Impl::sampleColumn(
     }
     sample.minSurfaceY = std::min(sample.surfaceY, slabMinWorldY);
     sample.maxSurfaceY = std::max(sample.surfaceY, slabMaxWorldY);
-    sample.soilCreepCoefficient = surfaceColumn.soilCreepCoefficient;
-    sample.roughAmplitude = surfaceColumn.roughAmplitude;
-    sample.hillAmplitude = surfaceColumn.hillAmplitude;
-    sample.mountainAmplitude = surfaceColumn.mountainAmplitude;
-    sample.dominantIsOcean = dominantIsOcean;
-    sample.distanceToCoast = distanceToCoast;
-    sample.distanceToShore = std::isfinite(distanceToCoast)
-                                 ? distanceToCoast
+    sample.soilCreepCoefficient = worldgenColumn.surface.soilCreepCoefficient;
+    sample.roughAmplitude = worldgenColumn.surface.roughAmplitude;
+    sample.hillAmplitude = worldgenColumn.surface.hillAmplitude;
+    sample.mountainAmplitude = worldgenColumn.surface.mountainAmplitude;
+    sample.dominantIsOcean = worldgenColumn.dominantIsOcean;
+    sample.distanceToCoast = worldgenColumn.distanceToCoast;
+    sample.distanceToShore = std::isfinite(worldgenColumn.distanceToCoast)
+                                 ? worldgenColumn.distanceToCoast
                                  : std::numeric_limits<float>::infinity();
     sample.soilCreepOffset = 0.0f;
 
@@ -18113,10 +18179,10 @@ ColumnSample ChunkManager::Impl::sampleColumn(
         }
     }
 
-    sample.slabHasSolid = surfaceColumn.surfaceY >= slabMinWorldY;
+    sample.slabHasSolid = worldgenColumn.surface.surfaceY >= slabMinWorldY;
     if (sample.slabHasSolid)
     {
-        sample.slabHighestSolidY = std::min(surfaceColumn.surfaceY, slabMaxWorldY);
+        sample.slabHighestSolidY = std::min(worldgenColumn.surface.surfaceY, slabMaxWorldY);
     }
 
     if (!std::isfinite(sample.distanceToShore))
@@ -18882,7 +18948,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& columnResults,
     std::vector<PendingStructureEdit>* consumedPendingEdits)
 {
-    warmMetadataPagesForChunk(chunk.coord);
+    warmWorldgenPagesForChunk(chunk.coord);
 
     std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
     std::vector<StructureVoxelEdit> structureVoxelEdits;

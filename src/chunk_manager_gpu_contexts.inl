@@ -281,6 +281,15 @@ public:
     struct FlushResult
     {
         UINT64 fenceValue{0};
+        std::uint32_t submissionSlotIndex{std::numeric_limits<std::uint32_t>::max()};
+    };
+
+    struct SubmissionSlot
+    {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList{};
+        UINT64 fenceValue{0};
+        bool reserved{false};
     };
 
     ~FarLodGpuContext()
@@ -302,26 +311,39 @@ public:
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
         throwIfFailedDx(device_->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue_)),
                         "failed to create far lod compute queue");
-        throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&allocator_)),
-                        "failed to create far lod compute allocator");
-        throwIfFailedDx(device_->CreateCommandList(0,
-                                                   D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                                   allocator_.Get(),
-                                                   nullptr,
-                                                   IID_PPV_ARGS(&commandList_)),
-                        "failed to create far lod compute command list");
-        throwIfFailedDx(commandList_->Close(), "failed to close initial far lod compute command list");
         throwIfFailedDx(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)),
                         "failed to create far lod compute fence");
         setDebugObjectName(queue_.Get(), L"FarLodComputeQueue");
-        setDebugObjectName(allocator_.Get(), L"FarLodComputeAllocator");
-        setDebugObjectName(commandList_.Get(), L"FarLodComputeCommandList");
         setDebugObjectName(fence_.Get(), L"FarLodComputeFence");
         fenceEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (fenceEvent_ == nullptr)
         {
             throw std::runtime_error("failed to create far lod compute fence event");
         }
+
+        for (std::uint32_t slotIndex = 0; slotIndex < kMaxInFlightSubmissionSlots; ++slotIndex)
+        {
+            SubmissionSlot& slot = submissionSlots_[slotIndex];
+            throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                                            IID_PPV_ARGS(&slot.allocator)),
+                            "failed to create far lod compute allocator");
+            throwIfFailedDx(device_->CreateCommandList(0,
+                                                       D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                                       slot.allocator.Get(),
+                                                       nullptr,
+                                                       IID_PPV_ARGS(&slot.commandList)),
+                            "failed to create far lod compute command list");
+            throwIfFailedDx(slot.commandList->Close(), "failed to close initial far lod compute command list");
+
+            std::wostringstream allocatorName;
+            allocatorName << L"FarLodComputeAllocator[" << slotIndex << L"]";
+            setDebugObjectName(slot.allocator.Get(), allocatorName.str().c_str());
+            std::wostringstream commandListName;
+            commandListName << L"FarLodComputeCommandList[" << slotIndex << L"]";
+            setDebugObjectName(slot.commandList.Get(), commandListName.str().c_str());
+        }
+        allocator_ = submissionSlots_[0].allocator;
+        commandList_ = submissionSlots_[0].commandList;
 
         uploadScratch_ = createUploadBuffer(device_.Get(), kUploadScratchSizeBytes, uploadScratchMapped_);
         setDebugObjectName(uploadScratch_.Get(), L"FarLodComputeUploadScratch");
@@ -412,6 +434,13 @@ public:
         exactTimestampQueryHeap_.Reset();
         readbackScratch_.Reset();
         uploadScratch_.Reset();
+        for (SubmissionSlot& slot : submissionSlots_)
+        {
+            slot.commandList.Reset();
+            slot.allocator.Reset();
+            slot.fenceValue = 0;
+            slot.reserved = false;
+        }
         commandList_.Reset();
         allocator_.Reset();
         queue_.Reset();
@@ -433,6 +462,8 @@ public:
         exactTimingPending_ = false;
         exactTimingCaptureActive_ = false;
         exactLastCompletedTimings_ = {};
+        activeSubmissionSlotIndex_ = std::numeric_limits<std::uint32_t>::max();
+        submissionSlotCursor_ = 0;
     }
 
     void setReadbackEnabled(bool enabled)
@@ -475,11 +506,17 @@ public:
         {
             return true;
         }
-        if (fence_ != nullptr && fenceValue_ > 0 && fence_->GetCompletedValue() < fenceValue_)
+        const UINT64 completedFence = completedFenceValue();
+        const std::uint32_t slotIndex = acquireSubmissionSlot(completedFence);
+        if (slotIndex == std::numeric_limits<std::uint32_t>::max())
         {
             return false;
         }
 
+        SubmissionSlot& slot = submissionSlots_[slotIndex];
+        allocator_ = slot.allocator;
+        commandList_ = slot.commandList;
+        activeSubmissionSlotIndex_ = slotIndex;
         throwIfFailedDx(allocator_->Reset(), "failed to reset far lod compute allocator");
         throwIfFailedDx(commandList_->Reset(allocator_.Get(), nullptr), "failed to reset far lod compute command list");
         open_ = true;
@@ -491,8 +528,9 @@ public:
         if (chunkManagerDebugLoggingEnabled())
         {
             std::ostringstream stream;
-            stream << "Far LOD compute begin nextFence=" << (fenceValue_ + 1)
-                   << " completedFence=" << ((fence_ != nullptr) ? fence_->GetCompletedValue() : 0);
+            stream << "Far LOD compute begin slot=" << slotIndex
+                   << " nextFence=" << (fenceValue_ + 1)
+                   << " completedFence=" << completedFence;
             if (fence_ != nullptr && fence_->GetCompletedValue() == std::numeric_limits<std::uint64_t>::max())
             {
                 const std::string dredMessages = collectDeviceDredMessages(device_.Get());
@@ -516,15 +554,18 @@ public:
         }
 
         const std::uint64_t alignedOffset = (uploadCursor_ + alignment - 1u) / alignment * alignment;
-        if (alignedOffset + sizeInBytes > kUploadScratchSizeBytes)
+        if (alignedOffset + sizeInBytes > kUploadScratchBytesPerSubmission)
         {
             return allocation;
         }
 
+        const std::uint64_t baseOffset =
+            static_cast<std::uint64_t>(activeSubmissionSlotIndex_) * kUploadScratchBytesPerSubmission;
+        const std::uint64_t absoluteOffset = baseOffset + alignedOffset;
         allocation.resource = uploadScratch_.Get();
-        allocation.cpuPtr = uploadScratchMapped_ + alignedOffset;
-        allocation.gpuAddress = uploadScratch_->GetGPUVirtualAddress() + alignedOffset;
-        allocation.offset = alignedOffset;
+        allocation.cpuPtr = uploadScratchMapped_ + absoluteOffset;
+        allocation.gpuAddress = uploadScratch_->GetGPUVirtualAddress() + absoluteOffset;
+        allocation.offset = absoluteOffset;
         allocation.size = sizeInBytes;
         uploadCursor_ = alignedOffset + sizeInBytes;
         return allocation;
@@ -540,15 +581,18 @@ public:
         }
 
         const std::uint64_t alignedOffset = (readbackCursor_ + alignment - 1u) / alignment * alignment;
-        if (alignedOffset + sizeInBytes > kReadbackScratchSizeBytes)
+        if (alignedOffset + sizeInBytes > kReadbackScratchBytesPerSubmission)
         {
             return allocation;
         }
 
+        const std::uint64_t baseOffset =
+            static_cast<std::uint64_t>(activeSubmissionSlotIndex_) * kReadbackScratchBytesPerSubmission;
+        const std::uint64_t absoluteOffset = baseOffset + alignedOffset;
         allocation.resource = readbackScratch_.Get();
-        allocation.cpuPtr = readbackScratchMapped_ + alignedOffset;
-        allocation.gpuAddress = readbackScratch_->GetGPUVirtualAddress() + alignedOffset;
-        allocation.offset = alignedOffset;
+        allocation.cpuPtr = readbackScratchMapped_ + absoluteOffset;
+        allocation.gpuAddress = readbackScratch_->GetGPUVirtualAddress() + absoluteOffset;
+        allocation.offset = absoluteOffset;
         allocation.size = sizeInBytes;
         readbackCursor_ = alignedOffset + sizeInBytes;
         return allocation;
@@ -1663,16 +1707,29 @@ public:
                    static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(kExactFaceTotalScratchSliceBytes);
     }
 
-    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactOverflowCountScratchAddress() const noexcept
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactOverflowCountScratchAddress(std::uint32_t submissionSlotIndex) const noexcept
     {
-        return (exactOverflowCountScratchBuffer_ != nullptr) ? exactOverflowCountScratchBuffer_->GetGPUVirtualAddress()
-                                                             : 0;
+        if (exactOverflowCountScratchBuffer_ == nullptr || submissionSlotIndex >= kMaxInFlightSubmissionSlots)
+        {
+            return 0;
+        }
+
+        return exactOverflowCountScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(submissionSlotIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(sizeof(std::uint32_t));
     }
 
-    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactOverflowEntryScratchAddress() const noexcept
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactOverflowEntryScratchAddress(std::uint32_t submissionSlotIndex) const noexcept
     {
-        return (exactOverflowEntryScratchBuffer_ != nullptr) ? exactOverflowEntryScratchBuffer_->GetGPUVirtualAddress()
-                                                             : 0;
+        if (exactOverflowEntryScratchBuffer_ == nullptr || submissionSlotIndex >= kMaxInFlightSubmissionSlots)
+        {
+            return 0;
+        }
+
+        return exactOverflowEntryScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(submissionSlotIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(kMaxExactGpuBuildBatches) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(sizeof(ExactOverflowEntry));
     }
 
     bool clearExactOverflowCounter()
@@ -1698,7 +1755,7 @@ public:
         }
 
         copyBuffer(exactOverflowCountScratchBuffer_.Get(),
-                   0,
+                   static_cast<std::uint64_t>(activeSubmissionSlotIndex_) * sizeof(std::uint32_t),
                    zeroUpload.resource,
                    zeroUpload.offset,
                    sizeof(std::uint32_t));
@@ -1742,32 +1799,34 @@ public:
         copyBuffer(readback.allocation.resource,
                    readback.allocation.offset,
                    exactOverflowCountScratchBuffer_.Get(),
-                   0,
+                   static_cast<std::uint64_t>(activeSubmissionSlotIndex_) * sizeof(std::uint32_t),
                    sizeof(std::uint32_t));
         if (maxEntryCount > 0u)
         {
             copyBuffer(readback.allocation.resource,
                        readback.allocation.offset + entryOffset,
                        exactOverflowEntryScratchBuffer_.Get(),
-                       0,
+                       static_cast<std::uint64_t>(activeSubmissionSlotIndex_) *
+                           static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
+                           sizeof(ExactOverflowEntry),
                        static_cast<std::uint64_t>(maxEntryCount) * sizeof(ExactOverflowEntry));
         }
         return readback;
     }
 
-    [[nodiscard]] ExactFaceTotalsReadback queueExactFaceTotalsReadback(std::uint32_t buildCount)
+    [[nodiscard]] ExactFaceTotalsReadback queueExactFaceTotalsReadback(std::span<const std::uint32_t> buildIndices)
     {
         ExactFaceTotalsReadback readback{};
-        if (!open_ || buildCount == 0u || exactFaceTotalScratchBuffer_ == nullptr)
+        if (!open_ || buildIndices.empty() || exactFaceTotalScratchBuffer_ == nullptr)
         {
             return readback;
         }
 
         const std::uint64_t totalSize =
-            static_cast<std::uint64_t>(buildCount) * static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
+            static_cast<std::uint64_t>(buildIndices.size()) * static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
         readback.allocation = allocateReadback(totalSize, alignof(std::uint32_t));
         readback.strideBytes = static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
-        readback.buildCount = buildCount;
+        readback.buildCount = static_cast<std::uint32_t>(buildIndices.size());
         if (readback.allocation.resource == nullptr)
         {
             return readback;
@@ -1781,17 +1840,33 @@ public:
             exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
         }
 
-        copyBuffer(readback.allocation.resource,
-                   readback.allocation.offset,
-                   exactFaceTotalScratchBuffer_.Get(),
-                   0,
-                   totalSize);
+        for (std::size_t buildOrdinal = 0; buildOrdinal < buildIndices.size(); ++buildOrdinal)
+        {
+            copyBuffer(readback.allocation.resource,
+                       readback.allocation.offset + buildOrdinal * readback.strideBytes,
+                       exactFaceTotalScratchBuffer_.Get(),
+                       static_cast<std::uint64_t>(buildIndices[buildOrdinal]) *
+                           static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes),
+                       static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes));
+        }
         return readback;
     }
 
     [[nodiscard]] ID3D12Resource* exactDescriptorScratchBuffer() const noexcept
     {
         return exactDescriptorScratchBuffer_.Get();
+    }
+
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactDescriptorScratchAddress(std::uint32_t buildIndex) const noexcept
+    {
+        if (exactDescriptorScratchBuffer_ == nullptr || buildIndex >= kMaxExactGpuBuildBatches)
+        {
+            return 0;
+        }
+
+        return exactDescriptorScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(buildIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(kExactDescriptorScratchSliceBytes);
     }
 
     [[nodiscard]] std::uint64_t exactDescriptorScratchOffset(std::uint32_t buildIndex) const noexcept
@@ -1847,12 +1922,12 @@ public:
     }
 
     void dispatchExactSynth(int chunkMinWorldY,
-                            ID3D12Resource* columnBuffer,
+                            D3D12_GPU_VIRTUAL_ADDRESS columnBufferAddress,
                             ID3D12Resource* voxelBuffer)
     {
         if (!open_ ||
             exactSynthPipelineState_ == nullptr ||
-            columnBuffer == nullptr ||
+            columnBufferAddress == 0u ||
             voxelBuffer == nullptr)
         {
             return;
@@ -1866,12 +1941,21 @@ public:
         commandList_->SetPipelineState(exactSynthPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactSynthRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        commandList_->SetComputeRootShaderResourceView(1, columnBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(1, columnBufferAddress);
         commandList_->SetComputeRootUnorderedAccessView(2, voxelBuffer->GetGPUVirtualAddress());
         commandList_->Dispatch((kExactChunkSize + 7u) / 8u,
                                (kExactChunkSize + 7u) / 8u,
                                1u);
         hasCommands_ = true;
+    }
+
+    void dispatchExactSynth(int chunkMinWorldY,
+                            ID3D12Resource* columnBuffer,
+                            ID3D12Resource* voxelBuffer)
+    {
+        dispatchExactSynth(chunkMinWorldY,
+                           (columnBuffer != nullptr) ? columnBuffer->GetGPUVirtualAddress() : 0u,
+                           voxelBuffer);
     }
 
     void dispatchExactStamp(std::uint32_t sparseVoxelCount,
@@ -1946,7 +2030,7 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactLight(ID3D12Resource* columnBuffer,
+    void dispatchExactLight(D3D12_GPU_VIRTUAL_ADDRESS columnBufferAddress,
                             ID3D12Resource* centerVoxelBuffer,
                             ID3D12Resource* haloBuffer,
                             ID3D12Resource* destinationVoxelBuffer,
@@ -1956,7 +2040,7 @@ public:
     {
         if (!open_ ||
             exactLightPipelineState_ == nullptr ||
-            columnBuffer == nullptr ||
+            columnBufferAddress == 0u ||
             centerVoxelBuffer == nullptr ||
             haloBuffer == nullptr ||
             destinationVoxelBuffer == nullptr)
@@ -1972,12 +2056,29 @@ public:
         commandList_->SetPipelineState(exactLightPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactLightRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        commandList_->SetComputeRootShaderResourceView(1, columnBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(1, columnBufferAddress);
         commandList_->SetComputeRootShaderResourceView(2, centerVoxelBuffer->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(3, haloBuffer->GetGPUVirtualAddress());
         commandList_->SetComputeRootUnorderedAccessView(4, destinationVoxelBuffer->GetGPUVirtualAddress());
         commandList_->Dispatch(1u, 1u, 1u);
         hasCommands_ = true;
+    }
+
+    void dispatchExactLight(ID3D12Resource* columnBuffer,
+                            ID3D12Resource* centerVoxelBuffer,
+                            ID3D12Resource* haloBuffer,
+                            ID3D12Resource* destinationVoxelBuffer,
+                            std::uint32_t resolvedNeighborMask,
+                            std::uint32_t closedNeighborMask,
+                            std::uint32_t propagationPassCount)
+    {
+        dispatchExactLight((columnBuffer != nullptr) ? columnBuffer->GetGPUVirtualAddress() : 0u,
+                           centerVoxelBuffer,
+                           haloBuffer,
+                           destinationVoxelBuffer,
+                           resolvedNeighborMask,
+                           closedNeighborMask,
+                           propagationPassCount);
     }
 
     void dispatchExactFaceCount(ID3D12Resource* centerVoxelBuffer,
@@ -2081,7 +2182,7 @@ public:
                                std::uint32_t resolvedNeighborMask,
                                std::uint32_t closedNeighborMask,
                                std::uint32_t buildIndex,
-                               ID3D12Resource* columnBuffer,
+                               D3D12_GPU_VIRTUAL_ADDRESS columnBufferAddress,
                                ID3D12Resource* centerVoxelBuffer,
                                ID3D12Resource* haloBuffer,
                                ID3D12Resource* blockUvBuffer,
@@ -2091,7 +2192,7 @@ public:
     {
         if (!open_ ||
             exactFaceEmitPipelineState_ == nullptr ||
-            columnBuffer == nullptr ||
+            columnBufferAddress == 0u ||
             centerVoxelBuffer == nullptr ||
             haloBuffer == nullptr ||
             blockUvBuffer == nullptr ||
@@ -2167,7 +2268,7 @@ public:
         commandList_->SetPipelineState(exactFaceEmitPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactFaceEmitRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        commandList_->SetComputeRootShaderResourceView(1, columnBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(1, columnBufferAddress);
         commandList_->SetComputeRootShaderResourceView(2, centerVoxelBuffer->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(3, haloBuffer->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(4, exactFaceCountScratchAddress(buildIndex));
@@ -2178,10 +2279,43 @@ public:
         commandList_->SetComputeRootUnorderedAccessView(9, vertexBuffer->GetGPUVirtualAddress());
         commandList_->SetComputeRootUnorderedAccessView(10, indexBuffer->GetGPUVirtualAddress());
         commandList_->SetComputeRootUnorderedAccessView(11, drawRecordBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(12, exactOverflowCountScratchAddress());
-        commandList_->SetComputeRootUnorderedAccessView(13, exactOverflowEntryScratchAddress());
+        commandList_->SetComputeRootUnorderedAccessView(12, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(13, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
         commandList_->Dispatch(kExactChunkPlaneCount, 1u, 1u);
         hasCommands_ = true;
+    }
+
+    void dispatchExactFaceEmit(const glm::ivec3& worldMin,
+                               std::uint32_t vertexBase,
+                               std::uint32_t indexBase,
+                               std::uint32_t recordIndex,
+                               std::uint32_t reservedFaceCapacity,
+                               std::uint32_t resolvedNeighborMask,
+                               std::uint32_t closedNeighborMask,
+                               std::uint32_t buildIndex,
+                               ID3D12Resource* columnBuffer,
+                               ID3D12Resource* centerVoxelBuffer,
+                               ID3D12Resource* haloBuffer,
+                               ID3D12Resource* blockUvBuffer,
+                               ID3D12Resource* vertexBuffer,
+                               ID3D12Resource* indexBuffer,
+                               ID3D12Resource* drawRecordBuffer)
+    {
+        dispatchExactFaceEmit(worldMin,
+                              vertexBase,
+                              indexBase,
+                              recordIndex,
+                              reservedFaceCapacity,
+                              resolvedNeighborMask,
+                              closedNeighborMask,
+                              buildIndex,
+                              (columnBuffer != nullptr) ? columnBuffer->GetGPUVirtualAddress() : 0u,
+                              centerVoxelBuffer,
+                              haloBuffer,
+                              blockUvBuffer,
+                              vertexBuffer,
+                              indexBuffer,
+                              drawRecordBuffer);
     }
 
     [[nodiscard]] FlushResult flush()
@@ -2217,6 +2351,8 @@ public:
             throwIfFailedDx(queue_->Signal(fence_.Get(), fenceValue_), "failed to signal far lod compute fence");
             lastSubmittedFenceValue_ = fenceValue_;
             result.fenceValue = fenceValue_;
+            result.submissionSlotIndex = activeSubmissionSlotIndex_;
+            submissionSlots_[activeSubmissionSlotIndex_].fenceValue = fenceValue_;
             if (exactTimingCaptureActive_ && exactTimestampCursor_ > 1)
             {
                 exactTimestampPendingFenceValue_ = fenceValue_;
@@ -2235,10 +2371,36 @@ public:
             chunkManagerDebugLog("Far LOD GPU flush skipped (no commands)");
         }
 
+        if (!hasCommands_ &&
+            activeSubmissionSlotIndex_ != std::numeric_limits<std::uint32_t>::max())
+        {
+            releaseSubmissionSlot(activeSubmissionSlotIndex_);
+        }
         open_ = false;
         hasCommands_ = false;
         exactTimingCaptureActive_ = false;
+        activeSubmissionSlotIndex_ = std::numeric_limits<std::uint32_t>::max();
         return result;
+    }
+
+    [[nodiscard]] std::uint32_t currentSubmissionSlotIndex() const noexcept
+    {
+        return activeSubmissionSlotIndex_;
+    }
+
+    void releaseSubmissionSlot(std::uint32_t slotIndex)
+    {
+        if (slotIndex >= kMaxInFlightSubmissionSlots)
+        {
+            return;
+        }
+
+        SubmissionSlot& slot = submissionSlots_[slotIndex];
+        slot.reserved = false;
+        if (slot.fenceValue != 0 && completedFenceValue() >= slot.fenceValue)
+        {
+            slot.fenceValue = 0;
+        }
     }
 
     void waitForIdle()
@@ -2380,9 +2542,19 @@ public:
         return static_cast<std::size_t>(kUploadScratchSizeBytes);
     }
 
+    [[nodiscard]] std::size_t uploadScratchBytesPerSubmission() const noexcept
+    {
+        return static_cast<std::size_t>(kUploadScratchBytesPerSubmission);
+    }
+
     [[nodiscard]] std::size_t readbackScratchSizeBytes() const noexcept
     {
         return readbackEnabled_ ? static_cast<std::size_t>(kReadbackScratchSizeBytes) : 0u;
+    }
+
+    [[nodiscard]] std::size_t readbackScratchBytesPerSubmission() const noexcept
+    {
+        return readbackEnabled_ ? static_cast<std::size_t>(kReadbackScratchBytesPerSubmission) : 0u;
     }
 
     [[nodiscard]] std::size_t exactScratchSizeBytes() const noexcept
@@ -2393,10 +2565,11 @@ public:
                    (static_cast<std::size_t>(kExactFaceCountScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFaceDescriptorScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFacePrefixScratchSliceBytes) +
-                    static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes)) +
+               static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes)) +
                descriptorScratchBytes +
-               sizeof(std::uint32_t) +
-               static_cast<std::size_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry);
+               static_cast<std::size_t>(kMaxInFlightSubmissionSlots) * sizeof(std::uint32_t) +
+               static_cast<std::size_t>(kMaxInFlightSubmissionSlots) *
+                   static_cast<std::size_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry);
     }
 
     [[nodiscard]] std::size_t maxExactGpuBuildBatches() const noexcept
@@ -2410,6 +2583,29 @@ public:
     }
 
 private:
+    [[nodiscard]] std::uint32_t acquireSubmissionSlot(UINT64 completedFenceValue) noexcept
+    {
+        for (std::uint32_t attempt = 0; attempt < kMaxInFlightSubmissionSlots; ++attempt)
+        {
+            const std::uint32_t slotIndex = (submissionSlotCursor_ + attempt) % kMaxInFlightSubmissionSlots;
+            SubmissionSlot& slot = submissionSlots_[slotIndex];
+            if (slot.reserved)
+            {
+                if (slot.fenceValue != 0 && completedFenceValue >= slot.fenceValue)
+                {
+                    slot.fenceValue = 0;
+                }
+                continue;
+            }
+
+            slot.reserved = true;
+            submissionSlotCursor_ = (slotIndex + 1u) % kMaxInFlightSubmissionSlots;
+            return slotIndex;
+        }
+
+        return std::numeric_limits<std::uint32_t>::max();
+    }
+
     static constexpr std::uint32_t kGpuContextLogicalSize = 16u;
     static constexpr std::uint32_t kGpuContextColumnCount = kGpuContextLogicalSize * kGpuContextLogicalSize;
     static constexpr std::uint32_t kGpuContextVoxelCount = kGpuContextLogicalSize * kGpuContextLogicalSize * kGpuContextLogicalSize;
@@ -2479,9 +2675,18 @@ private:
          kExactIndirectRootBufferAlignment) *
         kExactIndirectRootBufferAlignment;
     static constexpr std::uint32_t kMaxExactGpuBuildBatches = 64u;
+    static constexpr std::uint32_t kMaxInFlightSubmissionSlots = 4u;
     static constexpr UINT kExactTimestampQueriesPerBuild = 12u;
     static constexpr UINT kExactTimestampQueryCount = kExactTimestampQueriesPerBuild * kMaxExactGpuBuildBatches;
     static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
+    static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
+    static constexpr std::uint64_t kReadbackScratchSizeBytes = 4ull * 1024ull * 1024ull;
+    static constexpr std::uint64_t kUploadScratchBytesPerSubmission =
+        kUploadScratchSizeBytes / kMaxInFlightSubmissionSlots;
+    static constexpr std::uint64_t kReadbackScratchBytesPerSubmission =
+        kReadbackScratchSizeBytes / kMaxInFlightSubmissionSlots;
+    static constexpr UINT kDescriptorHeapDescriptorsPerSubmission =
+        kDescriptorHeapDescriptorCount / kMaxInFlightSubmissionSlots;
 
     void createExactResources()
     {
@@ -2512,12 +2717,14 @@ private:
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactOverflowCountScratchBuffer_ = createDefaultBuffer(device_.Get(),
-                                                               kExactChunkPackedVoxelStrideBytes,
+                                                               static_cast<std::uint64_t>(kMaxInFlightSubmissionSlots) *
+                                                                   kExactChunkPackedVoxelStrideBytes,
                                                                D3D12_RESOURCE_STATE_COMMON,
                                                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactOverflowEntryScratchBuffer_ = createDefaultBuffer(
             device_.Get(),
-            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry),
+            static_cast<std::uint64_t>(kMaxInFlightSubmissionSlots) *
+                static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry),
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         setDebugObjectName(exactFaceCountScratchBuffer_.Get(), L"ExactChunkFaceCountScratch");
@@ -2587,11 +2794,11 @@ private:
 
     [[nodiscard]] UINT allocateDescriptorRange(UINT descriptorCount)
     {
-        if (descriptorCursor_ + descriptorCount > kDescriptorHeapDescriptorCount)
+        if (descriptorCursor_ + descriptorCount > kDescriptorHeapDescriptorsPerSubmission)
         {
             throw std::runtime_error("far lod compute descriptor heap exhausted");
         }
-        const UINT baseIndex = descriptorCursor_;
+        const UINT baseIndex = activeSubmissionSlotIndex_ * kDescriptorHeapDescriptorsPerSubmission + descriptorCursor_;
         descriptorCursor_ += descriptorCount;
         return baseIndex;
     }
@@ -3196,12 +3403,9 @@ private:
                         "failed to create exact chunk face emit pipeline");
 
     }
-
-    static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
-    static constexpr std::uint64_t kReadbackScratchSizeBytes = 4ull * 1024ull * 1024ull;
-
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
+    std::array<SubmissionSlot, kMaxInFlightSubmissionSlots> submissionSlots_{};
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
@@ -3280,6 +3484,8 @@ private:
     std::uint64_t readbackCursor_{0};
     UINT descriptorSize_{0};
     UINT descriptorCursor_{0};
+    std::uint32_t activeSubmissionSlotIndex_{std::numeric_limits<std::uint32_t>::max()};
+    std::uint32_t submissionSlotCursor_{0};
     UINT exactTimestampCursor_{0};
     UINT exactTimestampSubmittedCount_{0};
     D3D12_RESOURCE_STATES exactFaceCountScratchState_{D3D12_RESOURCE_STATE_COMMON};

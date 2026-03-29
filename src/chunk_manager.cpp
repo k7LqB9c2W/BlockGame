@@ -4103,6 +4103,7 @@ private:
         std::uint32_t faceCapacity{0};
         std::uint8_t pendingNeighborMask{0};
         std::uint32_t batchBuildIndex{0};
+        std::uint32_t scratchSliceIndex{std::numeric_limits<std::uint32_t>::max()};
         ChunkAllocation allocation{};
         UINT64 computeFenceValue{0};
         bool rebuildVoxelInputs{false};
@@ -4114,6 +4115,25 @@ private:
         {
             return chunk != nullptr && allocation.pageIndex != kInvalidChunkBufferPage;
         }
+    };
+
+    enum class ExactGpuBatchPhase : std::uint8_t
+    {
+        PrepassSubmitted,
+        EmitSubmitted,
+    };
+
+    struct PendingExactGpuBatch
+    {
+        std::vector<PendingExactGpuBuild> builds{};
+        std::vector<std::uint32_t> faceCounts{};
+        ExactGpuBatchPhase phase{ExactGpuBatchPhase::PrepassSubmitted};
+        UINT64 prepassFenceValue{0};
+        UINT64 emitFenceValue{0};
+        std::uint32_t prepassSubmissionSlot{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t emitSubmissionSlot{std::numeric_limits<std::uint32_t>::max()};
+        FarLodGpuContext::ExactFaceTotalsReadback faceTotalsReadback{};
+        FarLodGpuContext::ExactOverflowReadback overflowReadback{};
     };
 
     static std::size_t nextPowerOfTwo(std::size_t value) noexcept;
@@ -4840,6 +4860,7 @@ private:
     FarLodGpuContext exactGpuContext_{};
     std::deque<ExactGpuBuildRequest> pendingExactGpuBuildQueue_{};
     std::vector<PendingExactGpuBuild> pendingExactGpuBuilds_{};
+    std::vector<PendingExactGpuBatch> pendingExactGpuBatches_{};
     std::mutex pendingExactGpuBuildMutex_;
     std::mutex pendingExactGpuBuildsMutex_;
     std::mutex exactGpuExecutionMutex_;
@@ -4867,6 +4888,7 @@ private:
     double exactGpuPrepareCpuMsLastCycle_{0.0};
     double exactGpuSubmitCpuMsLastCycle_{0.0};
     double exactGpuCommitCpuMsLastCycle_{0.0};
+    std::vector<std::uint32_t> freeExactGpuScratchSlices_{};
 
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
@@ -5248,6 +5270,7 @@ ChunkManager::Impl::~Impl()
     farTerrainManager_.shutdown();
     clear();
     destroyBufferPages();
+    freeExactGpuScratchSlices_.clear();
     exactGpuContext_.shutdown();
     exactGpuBlockUvBuffer_.Reset();
     exactGpuEmptyVoxelBuffer_.Reset();
@@ -5276,6 +5299,12 @@ void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
     chunkDrawRecordUploadContext_.initialize(device_.Get());
     exactGpuContext_.initialize(device_.Get());
     exactGpuContext_.setReadbackEnabled(true);
+    freeExactGpuScratchSlices_.clear();
+    freeExactGpuScratchSlices_.reserve(exactGpuContext_.maxExactGpuBuildBatches());
+    for (std::uint32_t sliceIndex = 0; sliceIndex < exactGpuContext_.maxExactGpuBuildBatches(); ++sliceIndex)
+    {
+        freeExactGpuScratchSlices_.push_back(sliceIndex);
+    }
     farTerrainManager_.setDevice(device_.Get());
     rebuildExactGpuBlockUvBuffer();
     ensureExactGpuEmptyVoxelBuffer();
@@ -5390,15 +5419,6 @@ bool ChunkManager::Impl::ensureChunkExactGpuBuildResourcesLocked(Chunk& chunk)
         return false;
     }
 
-    const std::uint64_t columnBytes =
-        static_cast<std::uint64_t>(kExactChunkColumnCount) * sizeof(GpuExactColumnDescriptor);
-    if (chunk.exactGpu.columnBuffer == nullptr)
-    {
-        chunk.exactGpu.columnBuffer =
-            createDefaultBuffer(device_.Get(), columnBytes, D3D12_RESOURCE_STATE_COMMON);
-        chunk.exactGpu.columnState = D3D12_RESOURCE_STATE_COMMON;
-    }
-
     const std::uint32_t sparseVoxelCount =
         static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
     if (sparseVoxelCount > 0 &&
@@ -5443,8 +5463,7 @@ bool ChunkManager::Impl::ensureChunkExactGpuBuildResourcesLocked(Chunk& chunk)
         chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_COMMON;
     }
 
-    return chunk.exactGpu.columnBuffer != nullptr &&
-           chunk.exactGpu.voxelBuffer != nullptr &&
+    return chunk.exactGpu.voxelBuffer != nullptr &&
            chunk.exactGpu.haloBuffer != nullptr &&
            chunk.exactGpu.lightScratchBuffer != nullptr &&
            (sparseVoxelCount == 0 || chunk.exactGpu.sparseVoxelBuffer != nullptr);
@@ -7760,8 +7779,13 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     }
     {
         std::lock_guard<std::mutex> pendingLock(pendingExactGpuBuildsMutex_);
+        std::size_t pendingBuildCount = 0u;
+        for (const PendingExactGpuBatch& batch : pendingExactGpuBatches_)
+        {
+            pendingBuildCount += batch.builds.size();
+        }
         snapshot.exactGpuPendingBuilds = static_cast<int>(std::min<std::size_t>(
-            pendingExactGpuBuilds_.size(),
+            pendingBuildCount,
             static_cast<std::size_t>(std::numeric_limits<int>::max())));
     }
     {
@@ -7917,8 +7941,6 @@ void ChunkManager::Impl::resetBenchmarkMetrics()
     exactGpuBuildsSubmitted_.store(0, std::memory_order_relaxed);
     exactGpuBuildsCommitted_.store(0, std::memory_order_relaxed);
     exactGpuMeshReplacements_.store(0, std::memory_order_relaxed);
-    pendingExactGpuPrepassTimings_ = {};
-    pendingExactGpuPrepassTimingsValid_ = false;
     {
         std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
         lastExactGpuPassTimings_ = {};
@@ -8205,7 +8227,23 @@ void ChunkManager::Impl::cancelPendingExactGpuBuildsForShutdown()
     std::vector<PendingExactGpuBuild> pendingBuilds;
     {
         std::lock_guard<std::mutex> lock(pendingExactGpuBuildsMutex_);
-        pendingBuilds.swap(pendingExactGpuBuilds_);
+        for (PendingExactGpuBatch& batch : pendingExactGpuBatches_)
+        {
+            if (batch.prepassSubmissionSlot != std::numeric_limits<std::uint32_t>::max())
+            {
+                exactGpuContext_.releaseSubmissionSlot(batch.prepassSubmissionSlot);
+            }
+            if (batch.emitSubmissionSlot != std::numeric_limits<std::uint32_t>::max())
+            {
+                exactGpuContext_.releaseSubmissionSlot(batch.emitSubmissionSlot);
+            }
+            for (PendingExactGpuBuild& build : batch.builds)
+            {
+                freeExactGpuScratchSlices_.push_back(build.scratchSliceIndex);
+                pendingBuilds.push_back(std::move(build));
+            }
+        }
+        pendingExactGpuBatches_.clear();
     }
 
     for (PendingExactGpuBuild& pending : pendingBuilds)
@@ -8258,8 +8296,7 @@ void ChunkManager::Impl::cancelPendingExactGpuBuildsForShutdown()
         }
     }
 
-    pendingExactGpuPrepassTimings_ = {};
-    pendingExactGpuPrepassTimingsValid_ = false;
+    std::sort(freeExactGpuScratchSlices_.begin(), freeExactGpuScratchSlices_.end());
 }
 
 void ChunkManager::Impl::exactGpuWorkerThreadFunction()
@@ -8312,7 +8349,7 @@ bool ChunkManager::Impl::exactGpuWorkerHasPendingWork()
     }
     {
         std::lock_guard<std::mutex> lock(pendingExactGpuBuildsMutex_);
-        if (!pendingExactGpuBuilds_.empty())
+        if (!pendingExactGpuBatches_.empty())
         {
             return true;
         }
@@ -14545,26 +14582,29 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         return;
     }
 
-    std::size_t pendingBuildCount = 0;
+    std::size_t pendingBuildCount = 0u;
     {
         std::lock_guard<std::mutex> lock(pendingExactGpuBuildsMutex_);
-        pendingBuildCount = pendingExactGpuBuilds_.size();
+        for (const PendingExactGpuBatch& batch : pendingExactGpuBatches_)
+        {
+            pendingBuildCount += batch.builds.size();
+        }
     }
-    if (pendingBuildCount >= kMaxOutstandingExactGpuBuilds || pendingBuildCount != 0u)
+    if (pendingBuildCount >= kMaxOutstandingExactGpuBuilds || freeExactGpuScratchSlices_.empty())
+    {
+        return;
+    }
+    const std::size_t availableBuildSlots =
+        std::min({kMaxOutstandingExactGpuBuilds - pendingBuildCount,
+                  exactGpuContext_.maxExactGpuBuildBatches(),
+                  freeExactGpuScratchSlices_.size()});
+    if (availableBuildSlots == 0u)
     {
         return;
     }
     std::unique_lock<std::mutex> exactLock(exactGpuExecutionMutex_);
     if (!exactGpuContext_.begin())
     {
-        return;
-    }
-
-    const std::size_t availableBuildSlots = std::min(kMaxOutstandingExactGpuBuilds,
-                                                     exactGpuContext_.maxExactGpuBuildBatches());
-    if (availableBuildSlots == 0)
-    {
-        (void)exactGpuContext_.flush();
         return;
     }
 
@@ -14576,6 +14616,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         }
         return ((value + alignment - 1u) / alignment) * alignment;
     };
+    const std::uint64_t exactUploadBudget =
+        static_cast<std::uint64_t>(exactGpuContext_.uploadScratchBytesPerSubmission());
     const auto appendExactUploadBytes = [&](std::uint64_t& cursor,
                                             std::uint64_t sizeInBytes,
                                             std::uint64_t alignment) -> bool
@@ -14586,7 +14628,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         }
 
         const std::uint64_t alignedOffset = alignUp(cursor, alignment);
-        if (alignedOffset + sizeInBytes > exactGpuContext_.uploadScratchSizeBytes())
+        // Match the actual per-submission allocator budget to avoid staging work that
+        // cannot fit into the active submission slot and would immediately requeue.
+        if (alignedOffset + sizeInBytes > exactUploadBudget)
         {
             return false;
         }
@@ -14597,19 +14641,20 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     std::deque<ExactGpuBuildRequest> deferredRequests;
     std::vector<PendingExactGpuBuild> stagedBuilds;
     stagedBuilds.reserve(availableBuildSlots);
-    const UINT64 batchId = nextExactGpuBuildBatchId_++;
 
     auto requeueBuildRequest = [&](PendingExactGpuBuild& pending)
     {
+        if (pending.scratchSliceIndex != std::numeric_limits<std::uint32_t>::max())
+        {
+            freeExactGpuScratchSlices_.push_back(pending.scratchSliceIndex);
+            pending.scratchSliceIndex = std::numeric_limits<std::uint32_t>::max();
+        }
         if (!pending.chunk)
         {
             return;
         }
         pending.chunk->exactGpuBuildQueued.store(true, std::memory_order_release);
         pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
-        pending.mappedOverflowCount = nullptr;
-        pending.mappedOverflowEntries = nullptr;
-        pending.overflowEntryCapacity = 0u;
         if (pending.valid())
         {
             if (pending.allocation.pageIndex < bufferPages_.size() &&
@@ -14640,6 +14685,16 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             requeueBuildRequest(stagedBuilds[i]);
         }
         stagedBuilds.resize(beginIndex);
+    };
+
+    const auto discardOpenSubmission = [&]()
+    {
+        const FarLodGpuContext::FlushResult discardFlush = exactGpuContext_.flush();
+        if (discardFlush.fenceValue != 0)
+        {
+            exactGpuContext_.waitForFence(discardFlush.fenceValue);
+            exactGpuContext_.releaseSubmissionSlot(discardFlush.submissionSlotIndex);
+        }
     };
 
     while (stagedBuilds.size() < availableBuildSlots)
@@ -14708,7 +14763,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             request.rebuildVoxelInputs ||
             chunk.exactGpuInputsDirty.load(std::memory_order_acquire) ||
             !chunk.exactGpuResident.load(std::memory_order_acquire) ||
-            chunk.exactGpu.columnBuffer == nullptr ||
             chunk.exactGpu.voxelBuffer == nullptr;
 
         const SteadyClock::time_point prepareStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
@@ -14719,7 +14773,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                 std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - prepareStart).count());
         }
         if (!resourcesReady ||
-            chunk.exactGpu.columnBuffer == nullptr ||
             chunk.exactGpu.voxelBuffer == nullptr ||
             chunk.exactGpu.haloBuffer == nullptr ||
             chunk.exactGpu.lightScratchBuffer == nullptr ||
@@ -14743,6 +14796,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         pending.generationEpoch = request.generationEpoch;
         pending.inputVersion = request.inputVersion;
         pending.rebuildVoxelInputs = rebuildVoxelInputs;
+        pending.scratchSliceIndex = freeExactGpuScratchSlices_.back();
+        freeExactGpuScratchSlices_.pop_back();
         stagedBuilds.push_back(std::move(pending));
     }
 
@@ -14763,7 +14818,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         return;
     }
 
-    constexpr std::uint32_t kInvalidDescriptorBuildIndex = std::numeric_limits<std::uint32_t>::max();
     std::unordered_map<glm::ivec2, std::uint32_t, ColumnHasher> stagedPageIndexByKey{};
     stagedPageIndexByKey.reserve(stagedBuilds.size() * 4u);
     std::vector<std::shared_ptr<const WorldgenPage>> stagedPages{};
@@ -14772,17 +14826,13 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     descriptorBuildParams.reserve(stagedBuilds.size());
     std::vector<std::uint32_t> descriptorSkyLightValues{};
     descriptorSkyLightValues.reserve(stagedBuilds.size() * kExactChunkColumnCount);
-    std::vector<std::uint32_t> descriptorBuildIndexByBuild(stagedBuilds.size(), kInvalidDescriptorBuildIndex);
+    std::vector<std::uint32_t> faceTotalSliceIndices{};
+    faceTotalSliceIndices.reserve(stagedBuilds.size());
     std::uint64_t exactUploadCursor = 0u;
 
     auto tryStageDescriptorInputs = [&](std::size_t buildIndex) -> bool
     {
         PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
-        if (!pending.rebuildVoxelInputs)
-        {
-            return true;
-        }
-
         Chunk& chunk = *pending.chunk;
         const ExactGpuWorldgenPageWindow pageWindow = exactGpuWorldgenPageWindowForChunk(chunk.coord);
         std::array<std::shared_ptr<const WorldgenPage>, 4> resolvedPages{};
@@ -14827,7 +14877,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
 
         const std::uint32_t sparseVoxelCount =
             static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
-        if (sparseVoxelCount > 0u)
+        if (pending.rebuildVoxelInputs && sparseVoxelCount > 0u)
         {
             const std::uint64_t sparseBytes =
                 static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
@@ -14850,9 +14900,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             resolvedPageIndices[pageSlot] = pageIndex;
         }
 
-        const std::uint32_t descriptorBuildIndex = static_cast<std::uint32_t>(descriptorBuildParams.size());
         const std::uint32_t skyLightOffset = static_cast<std::uint32_t>(descriptorSkyLightValues.size());
-        descriptorBuildIndexByBuild[buildIndex] = descriptorBuildIndex;
         descriptorBuildParams.push_back(GpuExactDescriptorBuildParams{
             chunk.coord.x * kChunkSizeX,
             chunk.coord.z * kChunkSizeZ,
@@ -14864,12 +14912,13 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             resolvedPageIndices[2],
             resolvedPageIndices[3],
             skyLightOffset,
-            descriptorBuildIndex * kExactChunkColumnCount,
+            pending.scratchSliceIndex * kExactChunkColumnCount,
             0u});
         for (std::uint8_t skyLight : chunk.skyLightFromAboveCache)
         {
             descriptorSkyLightValues.push_back(static_cast<std::uint32_t>(skyLight));
         }
+        faceTotalSliceIndices.push_back(pending.scratchSliceIndex);
         exactUploadCursor = candidateCursor;
         return true;
     };
@@ -14889,7 +14938,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     if (stagedBuilds.empty())
     {
         (void)exactGpuContext_.flush();
-        pendingExactGpuPrepassTimingsValid_ = false;
         recordSubmitStats(processedRequests);
         return;
     }
@@ -14904,8 +14952,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         {
             exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
             requeueRemainingStagedBuilds(0);
-            (void)exactGpuContext_.flush();
-            pendingExactGpuPrepassTimingsValid_ = false;
+            discardOpenSubmission();
             recordSubmitStats(processedRequests);
             return;
         }
@@ -14931,8 +14978,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         {
             exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
             requeueRemainingStagedBuilds(0);
-            (void)exactGpuContext_.flush();
-            pendingExactGpuPrepassTimingsValid_ = false;
+            discardOpenSubmission();
             recordSubmitStats(processedRequests);
             return;
         }
@@ -14952,8 +14998,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         {
             exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
             requeueRemainingStagedBuilds(0);
-            (void)exactGpuContext_.flush();
-            pendingExactGpuPrepassTimingsValid_ = false;
+            discardOpenSubmission();
             recordSubmitStats(processedRequests);
             return;
         }
@@ -14984,7 +15029,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             {
                 exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
                 requeueRemainingStagedBuilds(0);
-                break;
+                discardOpenSubmission();
+                recordSubmitStats(processedRequests);
+                return;
             }
 
             std::memcpy(sparseUpload.cpuPtr,
@@ -15011,7 +15058,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     if (stagedBuilds.empty())
     {
         (void)exactGpuContext_.flush();
-        pendingExactGpuPrepassTimingsValid_ = false;
         recordSubmitStats(processedRequests);
         return;
     }
@@ -15025,37 +15071,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             descriptorBuildUpload.resource->GetGPUVirtualAddress() + descriptorBuildUpload.offset,
             descriptorSkyLightUpload.resource->GetGPUVirtualAddress() + descriptorSkyLightUpload.offset);
         exactGpuContext_.uavBarrier(exactGpuContext_.exactDescriptorScratchBuffer());
-        exactGpuContext_.transitionExactDescriptorScratch(D3D12_RESOURCE_STATE_COPY_SOURCE);
-
-        const std::uint64_t columnBytes =
-            static_cast<std::uint64_t>(kExactChunkColumnCount) * sizeof(GpuExactColumnDescriptor);
-        for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
-        {
-            const std::uint32_t descriptorBuildIndex = descriptorBuildIndexByBuild[buildIndex];
-            if (descriptorBuildIndex == kInvalidDescriptorBuildIndex)
-            {
-                continue;
-            }
-
-            PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
-            Chunk& chunk = *pending.chunk;
-            if (chunk.exactGpu.columnState != D3D12_RESOURCE_STATE_COPY_DEST)
-            {
-                exactGpuContext_.transition(chunk.exactGpu.columnBuffer.Get(),
-                                            chunk.exactGpu.columnState,
-                                            D3D12_RESOURCE_STATE_COPY_DEST);
-                chunk.exactGpu.columnState = D3D12_RESOURCE_STATE_COPY_DEST;
-            }
-            exactGpuContext_.copyBuffer(chunk.exactGpu.columnBuffer.Get(),
-                                        0,
-                                        exactGpuContext_.exactDescriptorScratchBuffer(),
-                                        exactGpuContext_.exactDescriptorScratchOffset(descriptorBuildIndex),
-                                        columnBytes);
-            exactGpuContext_.transition(chunk.exactGpu.columnBuffer.Get(),
-                                        chunk.exactGpu.columnState,
-                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            chunk.exactGpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
+        exactGpuContext_.transitionExactDescriptorScratch(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
 
     if (exactGpuBlockUvBufferState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
@@ -15078,14 +15094,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     {
         PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
         Chunk& chunk = *pending.chunk;
-        if (chunk.exactGpu.columnState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-        {
-            exactGpuContext_.transition(chunk.exactGpu.columnBuffer.Get(),
-                                        chunk.exactGpu.columnState,
-                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            chunk.exactGpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
-        pending.batchBuildIndex = static_cast<std::uint32_t>(buildIndex);
+        const D3D12_GPU_VIRTUAL_ADDRESS descriptorAddress =
+            exactGpuContext_.exactDescriptorScratchAddress(pending.scratchSliceIndex);
         if (pending.rebuildVoxelInputs)
         {
             if (chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
@@ -15097,7 +15107,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             }
             exactGpuContext_.markExactTimingBegin();
             exactGpuContext_.dispatchExactSynth(chunk.minWorldY,
-                                                chunk.exactGpu.columnBuffer.Get(),
+                                                descriptorAddress,
                                                 chunk.exactGpu.voxelBuffer.Get());
             exactGpuContext_.markExactTimingEnd();
             exactGpuContext_.uavBarrier(chunk.exactGpu.voxelBuffer.Get());
@@ -15181,7 +15191,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
 
         const std::uint32_t lightClosedNeighborMask = 0u;
         exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactLight(chunk.exactGpu.columnBuffer.Get(),
+        exactGpuContext_.dispatchExactLight(descriptorAddress,
                                             chunk.exactGpu.voxelBuffer.Get(),
                                             chunk.exactGpu.haloBuffer.Get(),
                                             chunk.exactGpu.lightScratchBuffer.Get(),
@@ -15205,27 +15215,22 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                                 chunk.exactGpu.haloBuffer.Get(),
                                                 resolvedNeighborMask,
                                                 closedNeighborMask,
-                                                pending.batchBuildIndex);
+                                                pending.scratchSliceIndex);
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.uavBarrier(nullptr);
         exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactFacePrefix(pending.batchBuildIndex);
+        exactGpuContext_.dispatchExactFacePrefix(pending.scratchSliceIndex);
         exactGpuContext_.markExactTimingEnd();
         exactGpuContext_.uavBarrier(nullptr);
     }
 
     const FarLodGpuContext::ExactFaceTotalsReadback faceTotalsReadback =
-        exactGpuContext_.queueExactFaceTotalsReadback(static_cast<std::uint32_t>(stagedBuilds.size()));
+        exactGpuContext_.queueExactFaceTotalsReadback(faceTotalSliceIndices);
     if (faceTotalsReadback.allocation.cpuPtr == nullptr)
     {
         exactGpuBuildReadbackFailures_.fetch_add(1, std::memory_order_relaxed);
         requeueRemainingStagedBuilds(0);
-        const FarLodGpuContext::FlushResult discardFlush = exactGpuContext_.flush();
-        if (discardFlush.fenceValue != 0)
-        {
-            exactGpuContext_.waitForFence(discardFlush.fenceValue);
-        }
-        pendingExactGpuPrepassTimingsValid_ = false;
+        discardOpenSubmission();
         recordSubmitStats(processedRequests);
         return;
     }
@@ -15235,209 +15240,18 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     if (prepassFlushResult.fenceValue == 0)
     {
         requeueRemainingStagedBuilds(0);
-        pendingExactGpuPrepassTimingsValid_ = false;
         recordSubmitStats(processedRequests);
         return;
     }
-    exactGpuContext_.waitForFence(prepassFlushResult.fenceValue);
-    pendingExactGpuPrepassTimings_ = exactGpuContext_.latestExactPassTimings();
-    pendingExactGpuPrepassTimingsValid_ = pendingExactGpuPrepassTimings_.totalMs > 0.0;
-
-    std::vector<std::uint32_t> faceCounts(stagedBuilds.size(), 0u);
-    for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
-    {
-        const std::byte* totalPtr =
-            faceTotalsReadback.allocation.cpuPtr + buildIndex * faceTotalsReadback.strideBytes;
-        faceCounts[buildIndex] = *reinterpret_cast<const std::uint32_t*>(totalPtr);
-    }
-
-    exactLock.lock();
-    if (!exactGpuContext_.begin())
-    {
-        requeueRemainingStagedBuilds(0);
-        pendingExactGpuPrepassTimingsValid_ = false;
-        recordSubmitStats(processedRequests);
-        return;
-    }
-    if (!exactGpuContext_.clearExactOverflowCounter())
-    {
-        exactGpuBuildReadbackFailures_.fetch_add(1, std::memory_order_relaxed);
-        requeueRemainingStagedBuilds(0);
-        (void)exactGpuContext_.flush();
-        pendingExactGpuPrepassTimingsValid_ = false;
-        recordSubmitStats(processedRequests);
-        return;
-    }
-
-    exactGpuContext_.beginExactTimingBatch();
-
-    for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
-    {
-        PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
-        const std::uint32_t faceCapacity = std::max(faceCounts[buildIndex], 1u);
-        const std::size_t reservedVertexCount = static_cast<std::size_t>(faceCapacity) * 4u;
-        const std::size_t reservedIndexCount = static_cast<std::size_t>(faceCapacity) * 6u;
-        ChunkAllocation allocation = acquireChunkAllocation(reservedVertexCount,
-                                                            reservedIndexCount,
-                                                            batchId,
-                                                            ChunkBufferPageUsage::ExactGpu);
-        if (allocation.pageIndex == kInvalidChunkBufferPage || allocation.pageIndex >= bufferPages_.size())
-        {
-            requeueRemainingStagedBuilds(buildIndex);
-            break;
-        }
-
-        pending.faceCapacity = faceCapacity;
-        pending.allocation = allocation;
-    }
-
-    if (stagedBuilds.empty())
-    {
-        (void)exactGpuContext_.flush();
-        pendingExactGpuPrepassTimingsValid_ = false;
-        recordSubmitStats(processedRequests);
-        return;
-    }
-
-    for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
-    {
-        PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
-        Chunk& chunk = *pending.chunk;
-        ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
-        exactGpuContext_.transition(page.vertexBuffer.Get(),
-                                    page.vertexState,
-                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        page.vertexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        exactGpuContext_.transition(page.indexBuffer.Get(),
-                                    page.indexState,
-                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        page.indexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        exactGpuContext_.transition(page.drawRecordBuffer.Get(),
-                                    page.drawRecordState,
-                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-        const std::uint32_t closedNeighborMask = 0u;
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactFaceEmit(glm::ivec3(chunk.coord.x * kChunkSizeX,
-                                                          chunk.minWorldY,
-                                                          chunk.coord.z * kChunkSizeZ),
-                                               static_cast<std::uint32_t>(pending.allocation.vertexOffset),
-                                               static_cast<std::uint32_t>(pending.allocation.indexOffset),
-                                               pending.allocation.recordIndex,
-                                               pending.faceCapacity,
-                                               0u,
-                                               closedNeighborMask,
-                                               pending.batchBuildIndex,
-                                               chunk.exactGpu.columnBuffer.Get(),
-                                               chunk.exactGpu.voxelBuffer.Get(),
-                                               chunk.exactGpu.haloBuffer.Get(),
-                                               exactGpuBlockUvBuffer_.Get(),
-                                               page.vertexBuffer.Get(),
-                                               page.indexBuffer.Get(),
-                                               page.drawRecordBuffer.Get());
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.uavBarrier(page.vertexBuffer.Get());
-        exactGpuContext_.uavBarrier(page.indexBuffer.Get());
-        exactGpuContext_.uavBarrier(page.drawRecordBuffer.Get());
-        exactGpuContext_.transition(page.vertexBuffer.Get(),
-                                    page.vertexState,
-                                    D3D12_RESOURCE_STATE_COMMON);
-        page.vertexState = D3D12_RESOURCE_STATE_COMMON;
-        exactGpuContext_.transition(page.indexBuffer.Get(),
-                                    page.indexState,
-                                    D3D12_RESOURCE_STATE_COMMON);
-        page.indexState = D3D12_RESOURCE_STATE_COMMON;
-        exactGpuContext_.transition(page.drawRecordBuffer.Get(),
-                                    page.drawRecordState,
-                                    D3D12_RESOURCE_STATE_COMMON);
-        page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
-        if (chunk.exactGpu.columnState != D3D12_RESOURCE_STATE_COMMON)
-        {
-            exactGpuContext_.transition(chunk.exactGpu.columnBuffer.Get(),
-                                        chunk.exactGpu.columnState,
-                                        D3D12_RESOURCE_STATE_COMMON);
-            chunk.exactGpu.columnState = D3D12_RESOURCE_STATE_COMMON;
-        }
-        if (chunk.exactGpu.sparseVoxelBuffer != nullptr &&
-            chunk.exactGpu.sparseVoxelState != D3D12_RESOURCE_STATE_COMMON)
-        {
-            exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
-                                        chunk.exactGpu.sparseVoxelState,
-                                        D3D12_RESOURCE_STATE_COMMON);
-            chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_COMMON;
-        }
-        if (chunk.exactGpu.lightScratchBuffer != nullptr &&
-            chunk.exactGpu.lightScratchState != D3D12_RESOURCE_STATE_COMMON)
-        {
-            exactGpuContext_.transition(chunk.exactGpu.lightScratchBuffer.Get(),
-                                        chunk.exactGpu.lightScratchState,
-                                        D3D12_RESOURCE_STATE_COMMON);
-            chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_COMMON;
-        }
-        if (chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_COMMON)
-        {
-            exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
-                                        chunk.exactGpu.voxelState,
-                                        D3D12_RESOURCE_STATE_COMMON);
-            chunk.exactGpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
-        }
-        if (chunk.exactGpu.haloBuffer != nullptr &&
-            chunk.exactGpu.haloState != D3D12_RESOURCE_STATE_COMMON)
-        {
-            exactGpuContext_.transition(chunk.exactGpu.haloBuffer.Get(),
-                                        chunk.exactGpu.haloState,
-                                        D3D12_RESOURCE_STATE_COMMON);
-            chunk.exactGpu.haloState = D3D12_RESOURCE_STATE_COMMON;
-        }
-    }
-
-    const FarLodGpuContext::ExactOverflowReadback overflowReadback =
-        exactGpuContext_.queueExactOverflowReadback(static_cast<std::uint32_t>(stagedBuilds.size()));
-    std::uint32_t* mappedOverflowCount =
-        (overflowReadback.allocation.cpuPtr != nullptr)
-            ? reinterpret_cast<std::uint32_t*>(overflowReadback.allocation.cpuPtr)
-            : nullptr;
-    auto* mappedOverflowEntries =
-        (overflowReadback.allocation.cpuPtr != nullptr)
-            ? reinterpret_cast<FarLodGpuContext::ExactOverflowEntry*>(
-                  overflowReadback.allocation.cpuPtr + overflowReadback.entryOffset)
-            : nullptr;
-    if (mappedOverflowCount == nullptr || mappedOverflowEntries == nullptr)
-    {
-        exactGpuBuildReadbackFailures_.fetch_add(1, std::memory_order_relaxed);
-    }
-    for (PendingExactGpuBuild& pending : stagedBuilds)
-    {
-        pending.mappedOverflowCount = mappedOverflowCount;
-        pending.mappedOverflowEntries = mappedOverflowEntries;
-        pending.overflowEntryCapacity = static_cast<std::uint32_t>(stagedBuilds.size());
-    }
-
-    const FarLodGpuContext::FlushResult flushResult = exactGpuContext_.flush();
-    exactLock.unlock();
+    PendingExactGpuBatch batch{};
+    batch.builds = std::move(stagedBuilds);
+    batch.phase = ExactGpuBatchPhase::PrepassSubmitted;
+    batch.faceTotalsReadback = faceTotalsReadback;
+    batch.prepassFenceValue = prepassFlushResult.fenceValue;
+    batch.prepassSubmissionSlot = prepassFlushResult.submissionSlotIndex;
     {
         std::lock_guard<std::mutex> lock(pendingExactGpuBuildsMutex_);
-        for (PendingExactGpuBuild& pending : stagedBuilds)
-        {
-            pending.computeFenceValue = flushResult.fenceValue;
-            if (pending.chunk)
-            {
-                pending.chunk->exactGpu.readyFenceValue = flushResult.fenceValue;
-                exactGpuBuildsSubmitted_.fetch_add(1, std::memory_order_relaxed);
-            }
-            pendingExactGpuBuilds_.push_back(std::move(pending));
-        }
+        pendingExactGpuBatches_.push_back(std::move(batch));
     }
     recordSubmitStats(processedRequests);
 }
@@ -15447,7 +15261,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const SteadyClock::time_point commitStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     std::lock_guard<std::mutex> pendingLock(pendingExactGpuBuildsMutex_);
-    const bool hadPendingBuilds = !pendingExactGpuBuilds_.empty();
+    const bool hadPendingBuilds = !pendingExactGpuBatches_.empty() || !pendingExactGpuBuilds_.empty();
     const UINT64 completedGpuFenceValue = exactGpuContext_.completedFenceValue();
     const FarLodGpuContext::ExactPassTimings latestExactTimings = exactGpuContext_.latestExactPassTimings();
     if (latestExactTimings.totalMs > 0.0)
@@ -15466,6 +15280,500 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
         }
         std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
         lastExactGpuPassTimings_ = combinedTimings;
+    }
+    if (!pendingExactGpuBatches_.empty())
+    {
+        const auto releaseExactGpuScratch = [](Chunk& chunk)
+        {
+            chunk.exactGpu.reset();
+        };
+        const auto releaseExactGpuTransient = [](Chunk& chunk)
+        {
+            chunk.exactGpu.releaseTransient();
+        };
+        const auto finalizeBuild = [&](PendingExactGpuBuild& pending, bool keepOutstandingWork)
+        {
+            if (pending.chunk)
+            {
+                pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+                if (!keepOutstandingWork)
+                {
+                    pending.chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+        };
+        const std::array<std::pair<glm::ivec3, std::uint8_t>, 6> seamNeighbors{{
+            {glm::ivec3(1, 0, 0), kExactGpuSeamPosXBit},
+            {glm::ivec3(-1, 0, 0), kExactGpuSeamNegXBit},
+            {glm::ivec3(0, 1, 0), kExactGpuSeamPosYBit},
+            {glm::ivec3(0, -1, 0), kExactGpuSeamNegYBit},
+            {glm::ivec3(0, 0, 1), kExactGpuSeamPosZBit},
+            {glm::ivec3(0, 0, -1), kExactGpuSeamNegZBit},
+        }};
+        const auto computeCurrentPendingNeighborMask = [&](const Chunk& targetChunk) -> std::uint8_t
+        {
+            std::uint8_t pendingMask = 0u;
+            for (const auto& [offset, seamBit] : seamNeighbors)
+            {
+                const glm::ivec3 neighborCoord = targetChunk.coord + offset;
+                bool ready = false;
+                {
+                    std::lock_guard<std::mutex> lock(chunksMutex);
+                    const auto it = chunks_.find(neighborCoord);
+                    if (it != chunks_.end() && it->second)
+                    {
+                        const Chunk& neighbor = *it->second;
+                        ready = neighbor.exactGpu.voxelBuffer != nullptr &&
+                                neighbor.exactGpu.readyFenceValue != 0 &&
+                                completedGpuFenceValue >= neighbor.exactGpu.readyFenceValue &&
+                                !neighbor.exactGpuBuildInFlight.load(std::memory_order_acquire);
+                    }
+                }
+                if (!ready)
+                {
+                    pendingMask |= seamBit;
+                }
+            }
+            return pendingMask;
+        };
+        const auto queuePendingNeighborRefreshes = [&](const Chunk& committedChunk)
+        {
+            for (const auto& [offset, seamBit] : seamNeighbors)
+            {
+                const std::shared_ptr<Chunk> neighbor = getChunkShared(committedChunk.coord + offset);
+                if (!neighbor)
+                {
+                    continue;
+                }
+                const std::uint8_t requiredPendingBit = oppositeExactGpuSeamBit(seamBit);
+                const bool waitingOnCommittedFace =
+                    (neighbor->exactGpuPendingNeighborMask.load(std::memory_order_acquire) & requiredPendingBit) != 0u;
+                if (!waitingOnCommittedFace)
+                {
+                    continue;
+                }
+                const std::uint8_t currentPendingMask = computeCurrentPendingNeighborMask(*neighbor);
+                if ((currentPendingMask & requiredPendingBit) != 0u)
+                {
+                    continue;
+                }
+                queueChunkForExactGpuBorderRefresh(neighbor);
+            }
+        };
+        const auto requeueBuildRequest = [&](PendingExactGpuBuild& pending)
+        {
+            if (pending.scratchSliceIndex != std::numeric_limits<std::uint32_t>::max())
+            {
+                freeExactGpuScratchSlices_.push_back(pending.scratchSliceIndex);
+                pending.scratchSliceIndex = std::numeric_limits<std::uint32_t>::max();
+            }
+            if (!pending.chunk)
+            {
+                return;
+            }
+            pending.chunk->exactGpuBuildQueued.store(true, std::memory_order_release);
+            pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(pendingExactGpuBuildMutex_);
+            pendingExactGpuBuildQueue_.push_front(ExactGpuBuildRequest{
+                pending.chunk,
+                pending.buildVersion,
+                pending.generationEpoch,
+                pending.inputVersion,
+                pending.rebuildVoxelInputs});
+        };
+        const auto releaseBatchScratchSlices = [&](PendingExactGpuBatch& batch)
+        {
+            for (PendingExactGpuBuild& pending : batch.builds)
+            {
+                if (pending.scratchSliceIndex != std::numeric_limits<std::uint32_t>::max())
+                {
+                    freeExactGpuScratchSlices_.push_back(pending.scratchSliceIndex);
+                    pending.scratchSliceIndex = std::numeric_limits<std::uint32_t>::max();
+                }
+            }
+        };
+
+        std::size_t writeIndex = 0u;
+        for (std::size_t i = 0; i < pendingExactGpuBatches_.size(); ++i)
+        {
+            PendingExactGpuBatch& batch = pendingExactGpuBatches_[i];
+            bool keepBatch = true;
+
+            if (batch.phase == ExactGpuBatchPhase::PrepassSubmitted)
+            {
+                if (batch.faceCounts.empty())
+                {
+                    if (batch.prepassFenceValue == 0 || completedGpuFenceValue < batch.prepassFenceValue)
+                    {
+                        if (writeIndex != i)
+                        {
+                            pendingExactGpuBatches_[writeIndex] = std::move(batch);
+                        }
+                        ++writeIndex;
+                        continue;
+                    }
+
+                    batch.faceCounts.resize(batch.builds.size(), 0u);
+                    for (std::size_t buildIndex = 0; buildIndex < batch.builds.size(); ++buildIndex)
+                    {
+                        const std::byte* totalPtr =
+                            batch.faceTotalsReadback.allocation.cpuPtr +
+                            buildIndex * batch.faceTotalsReadback.strideBytes;
+                        batch.faceCounts[buildIndex] = *reinterpret_cast<const std::uint32_t*>(totalPtr);
+                    }
+                    if (batch.prepassSubmissionSlot != std::numeric_limits<std::uint32_t>::max())
+                    {
+                        exactGpuContext_.releaseSubmissionSlot(batch.prepassSubmissionSlot);
+                        batch.prepassSubmissionSlot = std::numeric_limits<std::uint32_t>::max();
+                    }
+                }
+
+                std::unique_lock<std::mutex> exactLock(exactGpuExecutionMutex_);
+                if (exactGpuContext_.begin())
+                {
+                    if (!exactGpuContext_.clearExactOverflowCounter())
+                    {
+                        exactGpuBuildReadbackFailures_.fetch_add(1, std::memory_order_relaxed);
+                        (void)exactGpuContext_.flush();
+                    }
+                    else
+                    {
+                        exactGpuContext_.beginExactTimingBatch();
+                        const UINT64 batchId = nextExactGpuBuildBatchId_++;
+                        std::size_t acceptedBuildCount = 0u;
+                        for (; acceptedBuildCount < batch.builds.size(); ++acceptedBuildCount)
+                        {
+                            PendingExactGpuBuild& pending = batch.builds[acceptedBuildCount];
+                            const std::uint32_t faceCapacity = std::max(batch.faceCounts[acceptedBuildCount], 1u);
+                            ChunkAllocation allocation = acquireChunkAllocation(static_cast<std::size_t>(faceCapacity) * 4u,
+                                                                                static_cast<std::size_t>(faceCapacity) * 6u,
+                                                                                batchId,
+                                                                                ChunkBufferPageUsage::ExactGpu);
+                            if (allocation.pageIndex == kInvalidChunkBufferPage || allocation.pageIndex >= bufferPages_.size())
+                            {
+                                break;
+                            }
+                            pending.faceCapacity = faceCapacity;
+                            pending.allocation = allocation;
+                        }
+                        if (acceptedBuildCount < batch.builds.size())
+                        {
+                            for (std::size_t buildIndex = acceptedBuildCount; buildIndex < batch.builds.size(); ++buildIndex)
+                            {
+                                requeueBuildRequest(batch.builds[buildIndex]);
+                            }
+                            batch.builds.resize(acceptedBuildCount);
+                            batch.faceCounts.resize(acceptedBuildCount);
+                        }
+
+                        if (!batch.builds.empty())
+                        {
+                            for (PendingExactGpuBuild& pending : batch.builds)
+                            {
+                                Chunk& chunk = *pending.chunk;
+                                ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
+                                const D3D12_GPU_VIRTUAL_ADDRESS descriptorAddress =
+                                    exactGpuContext_.exactDescriptorScratchAddress(pending.scratchSliceIndex);
+                                exactGpuContext_.transition(page.vertexBuffer.Get(), page.vertexState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                                page.vertexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                                exactGpuContext_.transition(page.indexBuffer.Get(), page.indexState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                                page.indexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                                exactGpuContext_.transition(page.drawRecordBuffer.Get(), page.drawRecordState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                                page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                                exactGpuContext_.markExactTimingBegin();
+                                exactGpuContext_.markExactTimingEnd();
+                                exactGpuContext_.markExactTimingBegin();
+                                exactGpuContext_.markExactTimingEnd();
+                                exactGpuContext_.markExactTimingBegin();
+                                exactGpuContext_.markExactTimingEnd();
+                                exactGpuContext_.markExactTimingBegin();
+                                exactGpuContext_.markExactTimingEnd();
+                                exactGpuContext_.markExactTimingBegin();
+                                exactGpuContext_.markExactTimingEnd();
+                                exactGpuContext_.markExactTimingBegin();
+                                exactGpuContext_.dispatchExactFaceEmit(glm::ivec3(chunk.coord.x * kChunkSizeX, chunk.minWorldY, chunk.coord.z * kChunkSizeZ),
+                                                                       static_cast<std::uint32_t>(pending.allocation.vertexOffset),
+                                                                       static_cast<std::uint32_t>(pending.allocation.indexOffset),
+                                                                       pending.allocation.recordIndex,
+                                                                       pending.faceCapacity,
+                                                                       0u,
+                                                                       0u,
+                                                                       pending.scratchSliceIndex,
+                                                                       descriptorAddress,
+                                                                       chunk.exactGpu.voxelBuffer.Get(),
+                                                                       chunk.exactGpu.haloBuffer.Get(),
+                                                                       exactGpuBlockUvBuffer_.Get(),
+                                                                       page.vertexBuffer.Get(),
+                                                                       page.indexBuffer.Get(),
+                                                                       page.drawRecordBuffer.Get());
+                                exactGpuContext_.markExactTimingEnd();
+                                exactGpuContext_.uavBarrier(page.vertexBuffer.Get());
+                                exactGpuContext_.uavBarrier(page.indexBuffer.Get());
+                                exactGpuContext_.uavBarrier(page.drawRecordBuffer.Get());
+                                exactGpuContext_.transition(page.vertexBuffer.Get(), page.vertexState, D3D12_RESOURCE_STATE_COMMON);
+                                page.vertexState = D3D12_RESOURCE_STATE_COMMON;
+                                exactGpuContext_.transition(page.indexBuffer.Get(), page.indexState, D3D12_RESOURCE_STATE_COMMON);
+                                page.indexState = D3D12_RESOURCE_STATE_COMMON;
+                                exactGpuContext_.transition(page.drawRecordBuffer.Get(), page.drawRecordState, D3D12_RESOURCE_STATE_COMMON);
+                                page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
+                                if (chunk.exactGpu.sparseVoxelBuffer != nullptr && chunk.exactGpu.sparseVoxelState != D3D12_RESOURCE_STATE_COMMON)
+                                {
+                                    exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
+                                                                chunk.exactGpu.sparseVoxelState,
+                                                                D3D12_RESOURCE_STATE_COMMON);
+                                    chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_COMMON;
+                                }
+                                if (chunk.exactGpu.lightScratchBuffer != nullptr && chunk.exactGpu.lightScratchState != D3D12_RESOURCE_STATE_COMMON)
+                                {
+                                    exactGpuContext_.transition(chunk.exactGpu.lightScratchBuffer.Get(),
+                                                                chunk.exactGpu.lightScratchState,
+                                                                D3D12_RESOURCE_STATE_COMMON);
+                                    chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_COMMON;
+                                }
+                                if (chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_COMMON)
+                                {
+                                    exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
+                                                                chunk.exactGpu.voxelState,
+                                                                D3D12_RESOURCE_STATE_COMMON);
+                                    chunk.exactGpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+                                }
+                                if (chunk.exactGpu.haloBuffer != nullptr && chunk.exactGpu.haloState != D3D12_RESOURCE_STATE_COMMON)
+                                {
+                                    exactGpuContext_.transition(chunk.exactGpu.haloBuffer.Get(),
+                                                                chunk.exactGpu.haloState,
+                                                                D3D12_RESOURCE_STATE_COMMON);
+                                    chunk.exactGpu.haloState = D3D12_RESOURCE_STATE_COMMON;
+                                }
+                            }
+
+                            batch.overflowReadback = exactGpuContext_.queueExactOverflowReadback(static_cast<std::uint32_t>(batch.builds.size()));
+                            const FarLodGpuContext::FlushResult emitFlushResult = exactGpuContext_.flush();
+                            if (emitFlushResult.fenceValue != 0 && batch.overflowReadback.allocation.cpuPtr != nullptr)
+                            {
+                                batch.emitFenceValue = emitFlushResult.fenceValue;
+                                batch.emitSubmissionSlot = emitFlushResult.submissionSlotIndex;
+                                batch.phase = ExactGpuBatchPhase::EmitSubmitted;
+                                for (PendingExactGpuBuild& pending : batch.builds)
+                                {
+                                    if (pending.chunk)
+                                    {
+                                        pending.chunk->exactGpu.readyFenceValue = emitFlushResult.fenceValue;
+                                        exactGpuBuildsSubmitted_.fetch_add(1, std::memory_order_relaxed);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                if (emitFlushResult.fenceValue != 0)
+                                {
+                                    exactGpuContext_.waitForFence(emitFlushResult.fenceValue);
+                                    exactGpuContext_.releaseSubmissionSlot(emitFlushResult.submissionSlotIndex);
+                                }
+                                for (PendingExactGpuBuild& pending : batch.builds)
+                                {
+                                    requeueBuildRequest(pending);
+                                }
+                                keepBatch = false;
+                            }
+                        }
+                        else
+                        {
+                            (void)exactGpuContext_.flush();
+                            keepBatch = false;
+                        }
+                    }
+                }
+                exactLock.unlock();
+            }
+
+            if (keepBatch && batch.phase == ExactGpuBatchPhase::EmitSubmitted &&
+                batch.emitFenceValue != 0 && completedGpuFenceValue >= batch.emitFenceValue)
+            {
+                const std::uint32_t* mappedOverflowCount =
+                    (batch.overflowReadback.allocation.cpuPtr != nullptr)
+                        ? reinterpret_cast<const std::uint32_t*>(batch.overflowReadback.allocation.cpuPtr)
+                        : nullptr;
+                auto* mappedOverflowEntries =
+                    (batch.overflowReadback.allocation.cpuPtr != nullptr)
+                        ? reinterpret_cast<const FarLodGpuContext::ExactOverflowEntry*>(
+                              batch.overflowReadback.allocation.cpuPtr + batch.overflowReadback.entryOffset)
+                        : nullptr;
+                const std::uint32_t overflowEntryCount =
+                    (mappedOverflowCount != nullptr)
+                        ? std::min(*mappedOverflowCount, static_cast<std::uint32_t>(batch.builds.size()))
+                        : 0u;
+
+                for (PendingExactGpuBuild& pending : batch.builds)
+                {
+                    if (!pending.valid())
+                    {
+                        if (pending.chunk)
+                        {
+                            releaseExactGpuScratch(*pending.chunk);
+                        }
+                        finalizeBuild(pending, false);
+                        continue;
+                    }
+
+                    Chunk& chunk = *pending.chunk;
+                    const std::uint32_t currentBuildVersion = chunk.exactGpuBuildVersion.load(std::memory_order_acquire);
+                    const std::uint32_t currentGenerationEpoch = chunk.generationEpoch.load(std::memory_order_acquire);
+                    if (pending.buildVersion != currentBuildVersion ||
+                        pending.generationEpoch != currentGenerationEpoch)
+                    {
+                        exactGpuBuildStaleCancels_.fetch_add(1, std::memory_order_relaxed);
+                        if (pending.allocation.pageIndex < bufferPages_.size() &&
+                            pending.allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
+                        {
+                            clearChunkDrawRecord(bufferPages_[pending.allocation.pageIndex], pending.allocation.recordIndex);
+                        }
+                        releaseChunkAllocationRange(pending.allocation.pageIndex,
+                                                    pending.allocation.vertexOffset,
+                                                    static_cast<std::size_t>(pending.faceCapacity) * 4u,
+                                                    pending.allocation.indexOffset,
+                                                    static_cast<std::size_t>(pending.faceCapacity) * 6u,
+                                                    false);
+                        releaseExactGpuScratch(chunk);
+                        finalizeBuild(pending, chunk.exactGpuBuildQueued.load(std::memory_order_acquire));
+                        continue;
+                    }
+
+                    bool overflowed = false;
+                    for (std::uint32_t overflowIndex = 0; overflowIndex < overflowEntryCount; ++overflowIndex)
+                    {
+                        if (mappedOverflowEntries[overflowIndex].buildIndex == pending.scratchSliceIndex)
+                        {
+                            overflowed = true;
+                            break;
+                        }
+                    }
+                    if (overflowed)
+                    {
+                        exactGpuBuildOverflows_.fetch_add(1, std::memory_order_relaxed);
+                        queueChunkForExactGpuBuild(pending.chunk, pending.buildVersion);
+                        if (pending.allocation.pageIndex < bufferPages_.size() &&
+                            pending.allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
+                        {
+                            clearChunkDrawRecord(bufferPages_[pending.allocation.pageIndex], pending.allocation.recordIndex);
+                        }
+                        releaseChunkAllocationRange(pending.allocation.pageIndex,
+                                                    pending.allocation.vertexOffset,
+                                                    static_cast<std::size_t>(pending.faceCapacity) * 4u,
+                                                    pending.allocation.indexOffset,
+                                                    static_cast<std::size_t>(pending.faceCapacity) * 6u,
+                                                    false);
+                        releaseExactGpuScratch(chunk);
+                        finalizeBuild(pending, true);
+                        continue;
+                    }
+
+                    const std::uint32_t oldPageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
+                    const std::size_t oldVertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
+                    const std::size_t oldIndexOffset = chunk.indexOffset.load(std::memory_order_acquire);
+                    const std::size_t oldVertexCount = chunk.vertexCount.load(std::memory_order_acquire);
+                    const std::size_t oldIndexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
+                    const std::uint32_t oldRecordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
+                    chunk.bufferPageIndex.store(pending.allocation.pageIndex, std::memory_order_release);
+                    chunk.vertexOffset.store(pending.allocation.vertexOffset, std::memory_order_release);
+                    chunk.indexOffset.store(pending.allocation.indexOffset, std::memory_order_release);
+                    chunk.vertexCount.store(0, std::memory_order_release);
+                    chunk.indexCount.store(0, std::memory_order_release);
+                    chunk.exactGpuRecordIndex.store(pending.allocation.recordIndex, std::memory_order_release);
+                    chunk.exactGpuResident.store(true, std::memory_order_release);
+                    chunk.exactGpuPendingNeighborMask.store(pending.pendingNeighborMask, std::memory_order_release);
+                    chunk.exactGpuReadyVersion.store(pending.inputVersion, std::memory_order_release);
+                    chunk.exactGpuHaloDirty.store(false, std::memory_order_release);
+                    if (chunk.exactGpuInputsVersion.load(std::memory_order_acquire) == pending.inputVersion)
+                    {
+                        chunk.exactGpuInputsDirty.store(false, std::memory_order_release);
+                    }
+                    chunk.state.store(ChunkState::Uploaded, std::memory_order_release);
+                    chunk.meshReady.store(false, std::memory_order_release);
+                    chunk.residencyMode.store(shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_)
+                                                  ? ExactChunkResidencyMode::GpuPendingRetire
+                                                  : ExactChunkResidencyMode::GpuResidentNonlocal,
+                                              std::memory_order_release);
+
+                    {
+                        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+                        if (pending.allocation.pageIndex < bufferPages_.size())
+                        {
+                            ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
+                            if (page.pendingChunks > 0)
+                            {
+                                --page.pendingChunks;
+                            }
+                            ++page.residentChunks;
+                            page.recordActiveCount =
+                                std::max(page.recordActiveCount,
+                                         static_cast<std::size_t>(pending.allocation.recordIndex + 1u));
+                            page.state = ChunkBufferPageState::Resident;
+                            page.uploadFenceValue = 0;
+                            page.pendingBatchId = 0;
+                            releaseChunkBufferPageUploadBuffers(page);
+                        }
+                    }
+
+                    if (oldPageIndex != kInvalidChunkBufferPage)
+                    {
+                        exactGpuMeshReplacements_.fetch_add(1, std::memory_order_relaxed);
+                        if (oldPageIndex < bufferPages_.size() &&
+                            oldRecordIndex != kInvalidExactGpuDrawRecordIndex)
+                        {
+                            clearChunkDrawRecord(bufferPages_[oldPageIndex], oldRecordIndex);
+                        }
+                        releaseChunkAllocationRange(oldPageIndex,
+                                                    oldVertexOffset,
+                                                    oldVertexCount,
+                                                    oldIndexOffset,
+                                                    oldIndexCount,
+                                                    true);
+                    }
+
+                    noteChunkReadyLatency(chunk);
+                    setStreamingChunkLifecycleState(chunk.coord, FrontierDemandState::Ready);
+                    releaseExactGpuTransient(chunk);
+                    exactGpuBuildsCommitted_.fetch_add(1, std::memory_order_relaxed);
+                    if (!chunk.exactGpuInputsDirty.load(std::memory_order_acquire) &&
+                        !chunk.exactGpuBuildQueued.load(std::memory_order_acquire))
+                    {
+                        std::vector<GpuExactSparseVoxel>().swap(chunk.gpuExactSparseVoxels);
+                        chunk.gpuExactSparseVoxelsReady = false;
+                    }
+                    queuePendingNeighborRefreshes(chunk);
+                    finalizeBuild(pending, chunk.exactGpuBuildQueued.load(std::memory_order_acquire));
+                }
+
+                if (batch.emitSubmissionSlot != std::numeric_limits<std::uint32_t>::max())
+                {
+                    exactGpuContext_.releaseSubmissionSlot(batch.emitSubmissionSlot);
+                    batch.emitSubmissionSlot = std::numeric_limits<std::uint32_t>::max();
+                }
+                releaseBatchScratchSlices(batch);
+                keepBatch = false;
+            }
+
+            if (keepBatch)
+            {
+                if (writeIndex != i)
+                {
+                    pendingExactGpuBatches_[writeIndex] = std::move(batch);
+                }
+                ++writeIndex;
+            }
+        }
+
+        pendingExactGpuBatches_.resize(writeIndex);
+        std::sort(freeExactGpuScratchSlices_.begin(), freeExactGpuScratchSlices_.end());
+        if (benchmarkEnabled && hadPendingBuilds)
+        {
+            const std::uint64_t commitMicros = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - commitStart).count());
+            benchmarkMetrics_.exactGpuCommitCpuStage.recordMicros(commitMicros);
+            std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
+            exactGpuCommitCpuMsLastCycle_ = static_cast<double>(commitMicros) / 1000.0;
+        }
+        return;
     }
     if (exactUploadDebugLoggingEnabled() && !pendingExactGpuBuilds_.empty())
     {

@@ -1789,6 +1789,63 @@ public:
         return readback;
     }
 
+    [[nodiscard]] ID3D12Resource* exactDescriptorScratchBuffer() const noexcept
+    {
+        return exactDescriptorScratchBuffer_.Get();
+    }
+
+    [[nodiscard]] std::uint64_t exactDescriptorScratchOffset(std::uint32_t buildIndex) const noexcept
+    {
+        return static_cast<std::uint64_t>(buildIndex) * kExactDescriptorScratchSliceBytes;
+    }
+
+    void transitionExactDescriptorScratch(D3D12_RESOURCE_STATES targetState)
+    {
+        if (!open_ || exactDescriptorScratchBuffer_ == nullptr || exactDescriptorScratchState_ == targetState)
+        {
+            return;
+        }
+
+        transition(exactDescriptorScratchBuffer_.Get(), exactDescriptorScratchState_, targetState);
+        exactDescriptorScratchState_ = targetState;
+    }
+
+    void dispatchExactDescriptorGen(int seaLevel,
+                                    std::uint32_t buildCount,
+                                    D3D12_GPU_VIRTUAL_ADDRESS pageColumnsAddress,
+                                    D3D12_GPU_VIRTUAL_ADDRESS buildParamsAddress,
+                                    D3D12_GPU_VIRTUAL_ADDRESS skyLightAddress)
+    {
+        if (!open_ ||
+            exactDescriptorGenPipelineState_ == nullptr ||
+            exactDescriptorScratchBuffer_ == nullptr ||
+            buildCount == 0u ||
+            pageColumnsAddress == 0u ||
+            buildParamsAddress == 0u ||
+            skyLightAddress == 0u)
+        {
+            return;
+        }
+
+        transitionExactDescriptorScratch(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const std::array<std::uint32_t, 4> constants{
+            static_cast<std::uint32_t>(seaLevel),
+            buildCount,
+            0u,
+            0u};
+        commandList_->SetPipelineState(exactDescriptorGenPipelineState_.Get());
+        commandList_->SetComputeRootSignature(exactDescriptorGenRootSignature_.Get());
+        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
+        commandList_->SetComputeRootShaderResourceView(1, pageColumnsAddress);
+        commandList_->SetComputeRootShaderResourceView(2, buildParamsAddress);
+        commandList_->SetComputeRootShaderResourceView(3, skyLightAddress);
+        commandList_->SetComputeRootUnorderedAccessView(4, exactDescriptorScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->Dispatch((kExactChunkSize + 7u) / 8u,
+                               (kExactChunkSize + 7u) / 8u,
+                               buildCount);
+        hasCommands_ = true;
+    }
+
     void dispatchExactSynth(int chunkMinWorldY,
                             ID3D12Resource* columnBuffer,
                             ID3D12Resource* voxelBuffer)
@@ -2240,12 +2297,14 @@ public:
                facePrefixScanPipelineState_ != nullptr &&
                facePrefixAddPipelineState_ != nullptr &&
                faceEmitPipelineState_ != nullptr &&
+               exactDescriptorGenPipelineState_ != nullptr &&
                exactSynthPipelineState_ != nullptr &&
                exactStampPipelineState_ != nullptr &&
                exactLightPipelineState_ != nullptr &&
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
+               exactDescriptorScratchBuffer_ != nullptr &&
                exactFaceCountScratchBuffer_ != nullptr &&
                exactFaceDescriptorScratchBuffer_ != nullptr &&
                exactFacePrefixScratchBuffer_ != nullptr &&
@@ -2328,11 +2387,14 @@ public:
 
     [[nodiscard]] std::size_t exactScratchSizeBytes() const noexcept
     {
+        const std::size_t descriptorScratchBytes =
+            static_cast<std::size_t>(kMaxExactGpuBuildBatches) * kExactDescriptorScratchSliceBytes;
         return static_cast<std::size_t>(kMaxExactGpuBuildBatches) *
                    (static_cast<std::size_t>(kExactFaceCountScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFaceDescriptorScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFacePrefixScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes)) +
+               descriptorScratchBytes +
                sizeof(std::uint32_t) +
                static_cast<std::size_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry);
     }
@@ -2393,6 +2455,12 @@ private:
     static constexpr std::uint32_t kExactChunkSparseVoxelStrideBytes = 16u;
     static constexpr std::uint32_t kExactChunkPackedVoxelStrideBytes = 4u;
     static constexpr std::uint32_t kExactChunkFaceDescriptorStrideBytes = 16u;
+    static constexpr std::uint32_t kWorldgenPageSize = 64u;
+    static constexpr std::uint32_t kWorldgenPageColumnCount = kWorldgenPageSize * kWorldgenPageSize;
+    static constexpr std::uint32_t kExactWorldgenPageColumnStrideBytes = 32u;
+    static constexpr std::uint32_t kExactDescriptorBuildParamsStrideBytes = 48u;
+    static constexpr std::uint32_t kExactDescriptorScratchSliceBytes =
+        kExactChunkColumnCount * kExactChunkColumnDescriptorStrideBytes;
     static constexpr std::uint32_t kExactIndirectRootBufferAlignment = 256u;
     static constexpr std::uint32_t kExactFaceCountScratchSliceBytes =
         ((kExactChunkPlaneCount * kExactChunkPackedVoxelStrideBytes + kExactIndirectRootBufferAlignment - 1u) /
@@ -2438,6 +2506,11 @@ private:
                                                                kExactFaceTotalScratchSliceBytes,
                                                            D3D12_RESOURCE_STATE_COMMON,
                                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        exactDescriptorScratchBuffer_ = createDefaultBuffer(
+            device_.Get(),
+            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) * kExactDescriptorScratchSliceBytes,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactOverflowCountScratchBuffer_ = createDefaultBuffer(device_.Get(),
                                                                kExactChunkPackedVoxelStrideBytes,
                                                                D3D12_RESOURCE_STATE_COMMON,
@@ -2451,12 +2524,14 @@ private:
         setDebugObjectName(exactFaceDescriptorScratchBuffer_.Get(), L"ExactChunkFaceDescriptorScratch");
         setDebugObjectName(exactFacePrefixScratchBuffer_.Get(), L"ExactChunkFacePrefixScratch");
         setDebugObjectName(exactFaceTotalScratchBuffer_.Get(), L"ExactChunkFaceTotalScratch");
+        setDebugObjectName(exactDescriptorScratchBuffer_.Get(), L"ExactChunkDescriptorScratch");
         setDebugObjectName(exactOverflowCountScratchBuffer_.Get(), L"ExactChunkOverflowCountScratch");
         setDebugObjectName(exactOverflowEntryScratchBuffer_.Get(), L"ExactChunkOverflowEntryScratch");
         exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COMMON;
+        exactDescriptorScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_COMMON;
     }
@@ -2582,6 +2657,8 @@ private:
             loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_prefix_cs.hlsl").string(), "FarLodChunkFacePrefixAddMain", "cs_5_0");
         faceEmitShader_ =
             loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_emit_cs.hlsl").string(), "FarLodChunkFaceEmitMain", "cs_5_0");
+        exactDescriptorGenShader_ =
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_descriptor_gen_cs.hlsl").string(), "ExactChunkDescriptorGenMain", "cs_5_0");
         exactSynthShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_synth_cs.hlsl").string(), "ExactChunkSynthMain", "cs_5_0");
         exactStampShader_ =
@@ -2939,6 +3016,32 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&faceEmitPso, IID_PPV_ARGS(&faceEmitPipelineState_)),
                         "failed to create far lod face emit pipeline");
 
+        std::array<D3D12_ROOT_PARAMETER, 5> exactDescriptorGenParams{};
+        exactDescriptorGenParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        exactDescriptorGenParams[0].Constants.ShaderRegister = 0;
+        exactDescriptorGenParams[0].Constants.Num32BitValues = 4;
+        for (UINT parameterIndex = 1; parameterIndex <= 3; ++parameterIndex)
+        {
+            exactDescriptorGenParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            exactDescriptorGenParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
+        }
+        exactDescriptorGenParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactDescriptorGenParams[4].Descriptor.ShaderRegister = 0;
+        D3D12_ROOT_SIGNATURE_DESC exactDescriptorGenDesc{};
+        exactDescriptorGenDesc.NumParameters = static_cast<UINT>(exactDescriptorGenParams.size());
+        exactDescriptorGenDesc.pParameters = exactDescriptorGenParams.data();
+        createRootSignature(exactDescriptorGenDesc,
+                            exactDescriptorGenRootSignature_,
+                            "exact chunk descriptor gen root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC exactDescriptorGenPso{};
+        exactDescriptorGenPso.pRootSignature = exactDescriptorGenRootSignature_.Get();
+        exactDescriptorGenPso.CS = {exactDescriptorGenShader_->GetBufferPointer(),
+                                    exactDescriptorGenShader_->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&exactDescriptorGenPso,
+                                                            IID_PPV_ARGS(&exactDescriptorGenPipelineState_)),
+                        "failed to create exact chunk descriptor gen pipeline");
+
         std::array<D3D12_ROOT_PARAMETER, 3> exactSynthParams{};
         exactSynthParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactSynthParams[0].Constants.ShaderRegister = 0;
@@ -3115,6 +3218,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> facePrefixScanShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> facePrefixAddShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> faceEmitShader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> exactDescriptorGenShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactSynthShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactStampShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactHaloCacheShader_;
@@ -3132,6 +3236,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> facePrefixScanRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> facePrefixAddRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> faceEmitRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactDescriptorGenRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactSynthRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactStampRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactHaloCacheRootSignature_;
@@ -3149,6 +3254,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> facePrefixScanPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> facePrefixAddPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> faceEmitPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactDescriptorGenPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactSynthPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactStampPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactHaloCachePipelineState_;
@@ -3165,6 +3271,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceDescriptorScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFacePrefixScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceTotalScratchBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> exactDescriptorScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactOverflowCountScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactOverflowEntryScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> exactTimestampQueryHeap_;
@@ -3179,6 +3286,7 @@ private:
     D3D12_RESOURCE_STATES exactFaceDescriptorScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFacePrefixScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFaceTotalScratchState_{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES exactDescriptorScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactOverflowCountScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactOverflowEntryScratchState_{D3D12_RESOURCE_STATE_COMMON};
     UINT64 exactTimestampFrequency_{0};

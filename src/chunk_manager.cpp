@@ -3044,6 +3044,44 @@ struct GpuExactSparseVoxel
 };
 static_assert(sizeof(GpuExactSparseVoxel) == 16u);
 
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagHasBiome = 1u << 0u;
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagDominantIsOcean = 1u << 1u;
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagSmoothBeaches = 1u << 2u;
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagTaigaBiome = 1u << 3u;
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagWaterFillEnabled = 1u << 4u;
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagStripesEnabled = 1u << 5u;
+inline constexpr std::uint32_t kGpuWorldgenPageColumnFlagBiomeIsOcean = 1u << 6u;
+
+struct GpuWorldgenPageColumn
+{
+    std::int32_t surfaceY{0};
+    float distanceToCoast{std::numeric_limits<float>::infinity()};
+    float soilCreepStrength{0.0f};
+    float stripeNoiseThreshold{1.0f};
+    std::uint32_t packedBlocks{0};
+    std::uint32_t packedFlagsTintWaterDepth{0};
+    std::uint32_t packedSoilDepths{0};
+    std::uint32_t packedStripes{0};
+};
+static_assert(sizeof(GpuWorldgenPageColumn) == 32u);
+
+struct GpuExactDescriptorBuildParams
+{
+    std::int32_t chunkBaseWorldX{0};
+    std::int32_t chunkBaseWorldZ{0};
+    std::int32_t chunkMinWorldY{0};
+    std::int32_t sampleMinPageBaseWorldX{0};
+    std::int32_t sampleMinPageBaseWorldZ{0};
+    std::uint32_t pageIndex00{0};
+    std::uint32_t pageIndex10{0};
+    std::uint32_t pageIndex01{0};
+    std::uint32_t pageIndex11{0};
+    std::uint32_t skyLightOffset{0};
+    std::uint32_t descriptorOffset{0};
+    std::uint32_t reserved0{0};
+};
+static_assert(sizeof(GpuExactDescriptorBuildParams) == 48u);
+
 #include "chunk_manager_structure_registry.inl"
 
 struct MeshData
@@ -3310,9 +3348,8 @@ struct Chunk
         std::vector<std::uint8_t>().swap(lightLevels);
         structureVoxelEdits.clear();
         gpuExactSparseVoxels.clear();
-        exactColumnDescriptorsReady = false;
+        exactBaseTerrainPresent = false;
         structureVoxelEditsReady = false;
-        gpuExactColumnDescriptorsReady = false;
         gpuExactSparseVoxelsReady = false;
         state.store(ChunkState::Empty, std::memory_order_relaxed);
         residencyMode.store(ExactChunkResidencyMode::CpuMaterializing, std::memory_order_relaxed);
@@ -3400,10 +3437,7 @@ struct Chunk
     glm::ivec3 coord;
     int minWorldY{0};
     int maxWorldY{0};
-    std::array<terrain::ExactChunkColumnDescriptor, kColumnCount> exactColumnDescriptors{};
-    bool exactColumnDescriptorsReady{false};
-    std::array<GpuExactColumnDescriptor, kColumnCount> gpuExactColumnDescriptors{};
-    bool gpuExactColumnDescriptorsReady{false};
+    bool exactBaseTerrainPresent{false};
     std::vector<StructureVoxelEdit> structureVoxelEdits;
     bool structureVoxelEditsReady{false};
     std::vector<GpuExactSparseVoxel> gpuExactSparseVoxels;
@@ -3479,25 +3513,71 @@ namespace
     return ChunkBlockView{chunk.coord, chunk.minWorldY, std::span<const BlockId>(chunk.blocks)};
 }
 
-[[nodiscard]] GpuExactColumnDescriptor packGpuExactColumnDescriptor(
-    const terrain::ExactChunkColumnDescriptor& descriptor,
-    std::uint8_t skyLightFromAbove) noexcept
+[[nodiscard]] std::uint32_t packGpuWorldgenBlocks(BlockId surfaceBlock,
+                                                  BlockId fillerBlock,
+                                                  BlockId waterBlock,
+                                                  BlockId stripeBlock) noexcept
 {
-    GpuExactColumnDescriptor packed{};
-    packed.surfaceY = descriptor.surfaceY;
-    packed.highestSolidWorld = descriptor.highestSolidWorld;
-    packed.waterTopWorld = descriptor.waterTopWorld;
-    packed.waterBottomWorld = descriptor.waterBottomWorld;
-    packed.stripeOffset = descriptor.stripeOffset;
-    packed.flags = descriptor.flags;
-    packed.stripePeriod = descriptor.stripePeriod;
-    packed.stripeThickness = descriptor.stripeThickness;
-    packed.grassTintIndex = descriptor.grassTintIndex;
-    packed.surfaceBlock = static_cast<std::uint32_t>(descriptor.surfaceBlock);
-    packed.fillerBlock = static_cast<std::uint32_t>(descriptor.fillerBlock);
-    packed.waterBlock = static_cast<std::uint32_t>(descriptor.waterBlock);
-    packed.stripeBlock = static_cast<std::uint32_t>(descriptor.stripeBlock);
-    packed.skyLightFromAbove = static_cast<std::uint32_t>(skyLightFromAbove);
+    return static_cast<std::uint32_t>(surfaceBlock) |
+           (static_cast<std::uint32_t>(fillerBlock) << 8u) |
+           (static_cast<std::uint32_t>(waterBlock) << 16u) |
+           (static_cast<std::uint32_t>(stripeBlock) << 24u);
+}
+
+template <typename WorldgenColumnT>
+[[nodiscard]] GpuWorldgenPageColumn packGpuWorldgenPageColumn(const WorldgenColumnT& column) noexcept
+{
+    GpuWorldgenPageColumn packed{};
+    packed.surfaceY = column.surface.surfaceY;
+    packed.distanceToCoast = column.distanceToCoast;
+    packed.soilCreepStrength =
+        std::clamp(column.surface.soilCreepCoefficient * column.soilCreepStrength, 0.0f, 1.0f);
+    packed.stripeNoiseThreshold = column.stripeNoiseThreshold;
+    packed.packedBlocks = packGpuWorldgenBlocks(column.surfaceBlock,
+                                                column.fillerBlock,
+                                                column.waterBlock,
+                                                column.stripeBlock);
+
+    std::uint32_t flags = 0u;
+    if (column.surface.dominantBiome != nullptr)
+    {
+        flags |= kGpuWorldgenPageColumnFlagHasBiome;
+    }
+    if (column.dominantIsOcean)
+    {
+        flags |= kGpuWorldgenPageColumnFlagDominantIsOcean;
+    }
+    if (column.surface.dominantBiome != nullptr && column.surface.dominantBiome->isOcean())
+    {
+        flags |= kGpuWorldgenPageColumnFlagBiomeIsOcean;
+    }
+    if (column.smoothBeaches)
+    {
+        flags |= kGpuWorldgenPageColumnFlagSmoothBeaches;
+    }
+    if (column.taigaBiome)
+    {
+        flags |= kGpuWorldgenPageColumnFlagTaigaBiome;
+    }
+    if (column.waterFillEnabled)
+    {
+        flags |= kGpuWorldgenPageColumnFlagWaterFillEnabled;
+    }
+    if (column.stripesEnabled)
+    {
+        flags |= kGpuWorldgenPageColumnFlagStripesEnabled;
+    }
+
+    packed.packedFlagsTintWaterDepth =
+        (flags & 0xFFu) |
+        (static_cast<std::uint32_t>(column.grassTintIndex) << 8u) |
+        (static_cast<std::uint32_t>(column.waterFillMaxDepth) << 16u);
+    packed.packedSoilDepths =
+        static_cast<std::uint32_t>(column.soilCreepMaxStep) |
+        (static_cast<std::uint32_t>(column.soilCreepMaxDepth) << 16u);
+    packed.packedStripes =
+        static_cast<std::uint32_t>(column.stripePeriod) |
+        (static_cast<std::uint32_t>(column.stripeThickness) << 16u);
     return packed;
 }
 
@@ -4178,10 +4258,12 @@ private:
     struct WorldgenPage
     {
         static constexpr int kSize = terrain::SurfaceFragment::kSize;
+        static constexpr std::size_t kColumnCount = static_cast<std::size_t>(kSize * kSize);
 
         glm::ivec2 key{0};
         glm::ivec2 baseWorld{0};
-        std::array<WorldgenColumnValue, static_cast<std::size_t>(kSize * kSize)> columns{};
+        std::array<WorldgenColumnValue, kColumnCount> columns{};
+        std::array<GpuWorldgenPageColumn, kColumnCount> gpuColumns{};
 
         [[nodiscard]] const WorldgenColumnValue& column(int localX, int localZ) const noexcept
         {
@@ -4198,6 +4280,11 @@ private:
         std::exception_ptr exception{};
         bool ready{false};
     };
+    struct ExactGpuWorldgenPageWindow
+    {
+        glm::ivec2 minPageKey{0};
+        std::array<glm::ivec2, 4> pageKeys{};
+    };
     struct DeferredStructureChunkBuild
     {
         glm::ivec3 queryMin{0};
@@ -4207,6 +4294,12 @@ private:
     };
     [[nodiscard]] int adjustedSurfaceYForColumn(const WorldgenColumnValue& column,
                                                 float neighborAverage) const noexcept;
+    [[nodiscard]] ExactGpuWorldgenPageWindow exactGpuWorldgenPageWindowForChunk(const glm::ivec3& chunkCoord) const noexcept;
+    bool computeChunkBaseTerrainState(const glm::ivec3& chunkCoord,
+                                      int minWorldY,
+                                      int maxWorldY,
+                                      std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& highestSolidWorlds,
+                                      bool& outAnyBaseTerrain) const;
     [[nodiscard]] static glm::ivec2 worldgenPageKeyForWorld(int worldX, int worldZ) noexcept;
     [[nodiscard]] static glm::ivec2 worldgenPageKeyForChunkColumn(const glm::ivec2& column) noexcept;
     static void worldgenPageChunkColumnBounds(const glm::ivec2& pageKey,
@@ -5298,7 +5391,7 @@ bool ChunkManager::Impl::ensureChunkExactGpuBuildResourcesLocked(Chunk& chunk)
     }
 
     const std::uint64_t columnBytes =
-        static_cast<std::uint64_t>(chunk.gpuExactColumnDescriptors.size() * sizeof(GpuExactColumnDescriptor));
+        static_cast<std::uint64_t>(kExactChunkColumnCount) * sizeof(GpuExactColumnDescriptor);
     if (chunk.exactGpu.columnBuffer == nullptr)
     {
         chunk.exactGpu.columnBuffer =
@@ -7700,7 +7793,7 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
             if (chunk->exactGpu.columnBuffer != nullptr)
             {
                 snapshot.exactGpuColumnBytes +=
-                    static_cast<std::size_t>(chunk->gpuExactColumnDescriptors.size()) * sizeof(GpuExactColumnDescriptor);
+                    static_cast<std::size_t>(kExactChunkColumnCount) * sizeof(GpuExactColumnDescriptor);
             }
             snapshot.exactGpuSparseVoxelBytes +=
                 static_cast<std::size_t>(chunk->exactGpu.sparseVoxelCapacity) * sizeof(GpuExactSparseVoxel);
@@ -12560,6 +12653,8 @@ ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
                     worldgenColumn.stripeNoiseThreshold = biome->terrainSettings.stripes.noiseThreshold;
                     worldgenColumn.stripeBlock = biome->terrainSettings.stripes.block;
                 }
+
+                page->gpuColumns[index] = packGpuWorldgenPageColumn(worldgenColumn);
             }
         }
     }
@@ -12693,6 +12788,129 @@ int ChunkManager::Impl::adjustedSurfaceYForColumn(const WorldgenColumnValue& col
     }
 
     return static_cast<int>(std::round(static_cast<float>(adjustedSurfaceY) + offset));
+}
+
+ChunkManager::Impl::ExactGpuWorldgenPageWindow
+ChunkManager::Impl::exactGpuWorldgenPageWindowForChunk(const glm::ivec3& chunkCoord) const noexcept
+{
+    const int minSampleWorldX = chunkCoord.x * kChunkSizeX - 1;
+    const int minSampleWorldZ = chunkCoord.z * kChunkSizeZ - 1;
+    const int maxSampleWorldX = chunkCoord.x * kChunkSizeX + kChunkSizeX;
+    const int maxSampleWorldZ = chunkCoord.z * kChunkSizeZ + kChunkSizeZ;
+
+    ExactGpuWorldgenPageWindow window{};
+    window.minPageKey = worldgenPageKeyForWorld(minSampleWorldX, minSampleWorldZ);
+    const glm::ivec2 maxPageKey = worldgenPageKeyForWorld(maxSampleWorldX, maxSampleWorldZ);
+    window.pageKeys[0] = window.minPageKey;
+    window.pageKeys[1] = {maxPageKey.x, window.minPageKey.y};
+    window.pageKeys[2] = {window.minPageKey.x, maxPageKey.y};
+    window.pageKeys[3] = maxPageKey;
+    return window;
+}
+
+bool ChunkManager::Impl::computeChunkBaseTerrainState(
+    const glm::ivec3& chunkCoord,
+    int minWorldY,
+    int maxWorldY,
+    std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& highestSolidWorlds,
+    bool& outAnyBaseTerrain) const
+{
+    highestSolidWorlds.fill(ColumnManager::kNoHeight);
+    outAnyBaseTerrain = false;
+
+    constexpr int kSampleExtentX = kChunkSizeX + 2;
+    constexpr int kSampleExtentZ = kChunkSizeZ + 2;
+    auto sampleIndex = [](int sampleX, int sampleZ) noexcept
+    {
+        return static_cast<std::size_t>(sampleZ * kSampleExtentX + sampleX);
+    };
+
+    std::array<WorldgenColumnValue, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)> worldgenColumns{};
+    const int baseWorldX = chunkCoord.x * kChunkSizeX;
+    const int baseWorldZ = chunkCoord.z * kChunkSizeZ;
+
+    for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
+    {
+        for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
+        {
+            const int sampleWorldX = baseWorldX + sampleX;
+            const int sampleWorldZ = baseWorldZ + sampleZ;
+            const std::shared_ptr<const WorldgenPage> page =
+                getOrBuildWorldgenPage(worldgenPageKeyForWorld(sampleWorldX, sampleWorldZ));
+            if (!page)
+            {
+                return false;
+            }
+
+            const int localPageX = sampleWorldX - page->baseWorld.x;
+            const int localPageZ = sampleWorldZ - page->baseWorld.y;
+            worldgenColumns[sampleIndex(sampleX + 1, sampleZ + 1)] = page->column(localPageX, localPageZ);
+        }
+    }
+
+    auto computeNeighborAverage = [&](int localX, int localZ) noexcept
+    {
+        float sum = 0.0f;
+        int count = 0;
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            for (int dz = -1; dz <= 1; ++dz)
+            {
+                if (dx == 0 && dz == 0)
+                {
+                    continue;
+                }
+
+                sum += static_cast<float>(
+                    worldgenColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surface.surfaceY);
+                ++count;
+            }
+        }
+
+        return count > 0 ? sum / static_cast<float>(count) : 0.0f;
+    };
+
+    for (int localX = 0; localX < kChunkSizeX; ++localX)
+    {
+        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+        {
+            const WorldgenColumnValue& worldgenColumn = worldgenColumns[sampleIndex(localX + 1, localZ + 1)];
+            if (worldgenColumn.surface.dominantBiome == nullptr)
+            {
+                continue;
+            }
+
+            int adjustedSurfaceY = adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
+            adjustedSurfaceY = std::clamp(adjustedSurfaceY,
+                                          std::min(worldgenColumn.surface.surfaceY, minWorldY),
+                                          std::max(worldgenColumn.surface.surfaceY, maxWorldY));
+
+            const std::size_t columnIdx = columnIndex(localX, localZ);
+            if (adjustedSurfaceY >= minWorldY)
+            {
+                highestSolidWorlds[columnIdx] = std::min(adjustedSurfaceY, maxWorldY);
+                outAnyBaseTerrain = true;
+            }
+
+            if (worldgenColumn.waterFillEnabled && adjustedSurfaceY < globalSeaLevel_)
+            {
+                int waterBottomWorld = std::max(adjustedSurfaceY + 1, minWorldY);
+                const int waterTopWorld = std::min(globalSeaLevel_, maxWorldY);
+                if (worldgenColumn.waterFillMaxDepth > 0)
+                {
+                    waterBottomWorld = std::max(
+                        waterBottomWorld,
+                        waterTopWorld - static_cast<int>(worldgenColumn.waterFillMaxDepth) + 1);
+                }
+                if (waterBottomWorld <= waterTopWorld)
+                {
+                    outAnyBaseTerrain = true;
+                }
+            }
+        }
+    }
+
+    return true;
 }
 
 ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccupancy(const glm::ivec2& column) const
@@ -13935,26 +14153,6 @@ bool ChunkManager::Impl::rebuildChunkGpuExactInputsLocked(
     std::span<const PendingStructureEdit> pendingStructureEdits,
     std::span<const BlockEditOverlayEntry> blockOverlays)
 {
-    if (!chunk.exactColumnDescriptorsReady)
-    {
-        return false;
-    }
-
-    const bool anyDescriptorBlocks = std::any_of(chunk.exactColumnDescriptors.begin(),
-                                                 chunk.exactColumnDescriptors.end(),
-                                                 [](const terrain::ExactChunkColumnDescriptor& descriptor)
-                                                 {
-                                                     return descriptor.hasSolid() || descriptor.hasWater();
-                                                 });
-
-    for (std::size_t i = 0; i < chunk.gpuExactColumnDescriptors.size(); ++i)
-    {
-        chunk.gpuExactColumnDescriptors[i] =
-            packGpuExactColumnDescriptor(chunk.exactColumnDescriptors[i],
-                                         chunk.skyLightFromAboveCache[i]);
-    }
-    chunk.gpuExactColumnDescriptorsReady = true;
-
     std::vector<GpuExactSparseVoxel> gpuSparseVoxels;
     gpuSparseVoxels.reserve(chunk.structureVoxelEdits.size() +
                             pendingStructureEdits.size() +
@@ -13997,7 +14195,7 @@ bool ChunkManager::Impl::rebuildChunkGpuExactInputsLocked(
     chunk.gpuExactSparseVoxelsReady = true;
     chunk.exactGpuInputsDirty.store(true, std::memory_order_release);
 
-    const bool anyBlocks = anyDescriptorBlocks ||
+    const bool anyBlocks = chunk.exactBaseTerrainPresent ||
                            !chunk.structureVoxelEdits.empty() ||
                            !pendingStructureEdits.empty() ||
                            !blockOverlays.empty() ||
@@ -14027,7 +14225,6 @@ bool ChunkManager::Impl::refreshChunkGpuExactInputs(Chunk& chunk)
 bool ChunkManager::Impl::queuePreparedExactGpuBuildLocked(const std::shared_ptr<Chunk>& chunk)
 {
     if (!chunk ||
-        !chunk->gpuExactColumnDescriptorsReady ||
         (chunk->exactGpuInputsDirty.load(std::memory_order_acquire) && !chunk->gpuExactSparseVoxelsReady))
     {
         return false;
@@ -14397,39 +14594,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         cursor = alignedOffset + sizeInBytes;
         return true;
     };
-    auto canFitExactUploadBudget = [&](const Chunk& chunk,
-                                       bool rebuildVoxelInputs,
-                                       std::uint64_t currentUploadCursor) -> bool
-    {
-        std::uint64_t candidateCursor = currentUploadCursor;
-        if (rebuildVoxelInputs)
-        {
-            const std::uint64_t columnBytes =
-                static_cast<std::uint64_t>(chunk.gpuExactColumnDescriptors.size() * sizeof(GpuExactColumnDescriptor));
-            if (!appendExactUploadBytes(candidateCursor, columnBytes, alignof(GpuExactColumnDescriptor)))
-            {
-                return false;
-            }
-
-            const std::uint32_t sparseVoxelCount = static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
-            if (sparseVoxelCount > 0u)
-            {
-                const std::uint64_t sparseBytes =
-                    static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
-                if (!appendExactUploadBytes(candidateCursor, sparseBytes, alignof(GpuExactSparseVoxel)))
-                {
-                    return false;
-                }
-            }
-        }
-
-        return appendExactUploadBytes(candidateCursor, sizeof(std::uint32_t), alignof(std::uint32_t));
-    };
-
     std::deque<ExactGpuBuildRequest> deferredRequests;
     std::vector<PendingExactGpuBuild> stagedBuilds;
     stagedBuilds.reserve(availableBuildSlots);
-    std::uint64_t estimatedUploadCursor = 0u;
     const UINT64 batchId = nextExactGpuBuildBatchId_++;
 
     auto requeueBuildRequest = [&](PendingExactGpuBuild& pending)
@@ -14508,8 +14675,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             deferredRequests.push_back(std::move(request));
             continue;
         }
-        if (!chunk.gpuExactColumnDescriptorsReady ||
-            ((request.rebuildVoxelInputs ||
+        if (((request.rebuildVoxelInputs ||
               chunk.exactGpuInputsDirty.load(std::memory_order_acquire) ||
               !chunk.exactGpuResident.load(std::memory_order_acquire)) &&
              !chunk.gpuExactSparseVoxelsReady))
@@ -14544,11 +14710,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             !chunk.exactGpuResident.load(std::memory_order_acquire) ||
             chunk.exactGpu.columnBuffer == nullptr ||
             chunk.exactGpu.voxelBuffer == nullptr;
-        if (!canFitExactUploadBudget(chunk, rebuildVoxelInputs, estimatedUploadCursor))
-        {
-            deferredRequests.push_back(std::move(request));
-            break;
-        }
 
         const SteadyClock::time_point prepareStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
         const bool resourcesReady = ensureChunkExactGpuBuildResourcesLocked(chunk);
@@ -14583,19 +14744,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         pending.inputVersion = request.inputVersion;
         pending.rebuildVoxelInputs = rebuildVoxelInputs;
         stagedBuilds.push_back(std::move(pending));
-        if (rebuildVoxelInputs)
-        {
-            const std::uint64_t columnBytes =
-                static_cast<std::uint64_t>(chunk.gpuExactColumnDescriptors.size() * sizeof(GpuExactColumnDescriptor));
-            (void)appendExactUploadBytes(estimatedUploadCursor, columnBytes, alignof(GpuExactColumnDescriptor));
-            const std::uint32_t sparseVoxelCount = static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
-            if (sparseVoxelCount > 0u)
-            {
-                const std::uint64_t sparseBytes =
-                    static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
-                (void)appendExactUploadBytes(estimatedUploadCursor, sparseBytes, alignof(GpuExactSparseVoxel));
-            }
-        }
     }
 
     if (!deferredRequests.empty())
@@ -14615,26 +14763,282 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         return;
     }
 
+    constexpr std::uint32_t kInvalidDescriptorBuildIndex = std::numeric_limits<std::uint32_t>::max();
+    std::unordered_map<glm::ivec2, std::uint32_t, ColumnHasher> stagedPageIndexByKey{};
+    stagedPageIndexByKey.reserve(stagedBuilds.size() * 4u);
+    std::vector<std::shared_ptr<const WorldgenPage>> stagedPages{};
+    stagedPages.reserve(stagedBuilds.size() * 2u);
+    std::vector<GpuExactDescriptorBuildParams> descriptorBuildParams{};
+    descriptorBuildParams.reserve(stagedBuilds.size());
+    std::vector<std::uint32_t> descriptorSkyLightValues{};
+    descriptorSkyLightValues.reserve(stagedBuilds.size() * kExactChunkColumnCount);
+    std::vector<std::uint32_t> descriptorBuildIndexByBuild(stagedBuilds.size(), kInvalidDescriptorBuildIndex);
+    std::uint64_t exactUploadCursor = 0u;
+
+    auto tryStageDescriptorInputs = [&](std::size_t buildIndex) -> bool
+    {
+        PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
+        if (!pending.rebuildVoxelInputs)
+        {
+            return true;
+        }
+
+        Chunk& chunk = *pending.chunk;
+        const ExactGpuWorldgenPageWindow pageWindow = exactGpuWorldgenPageWindowForChunk(chunk.coord);
+        std::array<std::shared_ptr<const WorldgenPage>, 4> resolvedPages{};
+        std::array<std::uint32_t, 4> resolvedPageIndices{};
+        std::array<bool, 4> pageIsNew{};
+
+        std::uint64_t candidateCursor = exactUploadCursor;
+        for (std::size_t pageSlot = 0; pageSlot < pageWindow.pageKeys.size(); ++pageSlot)
+        {
+            const glm::ivec2& pageKey = pageWindow.pageKeys[pageSlot];
+            auto it = stagedPageIndexByKey.find(pageKey);
+            if (it != stagedPageIndexByKey.end())
+            {
+                resolvedPageIndices[pageSlot] = it->second;
+                continue;
+            }
+
+            resolvedPages[pageSlot] = getOrBuildWorldgenPage(pageKey);
+            if (!resolvedPages[pageSlot])
+            {
+                return false;
+            }
+
+            const std::uint64_t pageBytes =
+                static_cast<std::uint64_t>(resolvedPages[pageSlot]->gpuColumns.size()) * sizeof(GpuWorldgenPageColumn);
+            if (!appendExactUploadBytes(candidateCursor, pageBytes, alignof(GpuWorldgenPageColumn)))
+            {
+                return false;
+            }
+            pageIsNew[pageSlot] = true;
+        }
+
+        if (!appendExactUploadBytes(candidateCursor,
+                                    sizeof(GpuExactDescriptorBuildParams),
+                                    alignof(GpuExactDescriptorBuildParams)) ||
+            !appendExactUploadBytes(candidateCursor,
+                                    static_cast<std::uint64_t>(kExactChunkColumnCount) * sizeof(std::uint32_t),
+                                    alignof(std::uint32_t)))
+        {
+            return false;
+        }
+
+        const std::uint32_t sparseVoxelCount =
+            static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
+        if (sparseVoxelCount > 0u)
+        {
+            const std::uint64_t sparseBytes =
+                static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
+            if (!appendExactUploadBytes(candidateCursor, sparseBytes, alignof(GpuExactSparseVoxel)))
+            {
+                return false;
+            }
+        }
+
+        for (std::size_t pageSlot = 0; pageSlot < pageWindow.pageKeys.size(); ++pageSlot)
+        {
+            if (!pageIsNew[pageSlot])
+            {
+                continue;
+            }
+
+            const std::uint32_t pageIndex = static_cast<std::uint32_t>(stagedPages.size());
+            stagedPageIndexByKey.emplace(pageWindow.pageKeys[pageSlot], pageIndex);
+            stagedPages.push_back(resolvedPages[pageSlot]);
+            resolvedPageIndices[pageSlot] = pageIndex;
+        }
+
+        const std::uint32_t descriptorBuildIndex = static_cast<std::uint32_t>(descriptorBuildParams.size());
+        const std::uint32_t skyLightOffset = static_cast<std::uint32_t>(descriptorSkyLightValues.size());
+        descriptorBuildIndexByBuild[buildIndex] = descriptorBuildIndex;
+        descriptorBuildParams.push_back(GpuExactDescriptorBuildParams{
+            chunk.coord.x * kChunkSizeX,
+            chunk.coord.z * kChunkSizeZ,
+            chunk.minWorldY,
+            pageWindow.minPageKey.x * WorldgenPage::kSize,
+            pageWindow.minPageKey.y * WorldgenPage::kSize,
+            resolvedPageIndices[0],
+            resolvedPageIndices[1],
+            resolvedPageIndices[2],
+            resolvedPageIndices[3],
+            skyLightOffset,
+            descriptorBuildIndex * kExactChunkColumnCount,
+            0u});
+        for (std::uint8_t skyLight : chunk.skyLightFromAboveCache)
+        {
+            descriptorSkyLightValues.push_back(static_cast<std::uint32_t>(skyLight));
+        }
+        exactUploadCursor = candidateCursor;
+        return true;
+    };
+
+    std::size_t acceptedBuildCount = 0u;
+    for (; acceptedBuildCount < stagedBuilds.size(); ++acceptedBuildCount)
+    {
+        if (!tryStageDescriptorInputs(acceptedBuildCount))
+        {
+            break;
+        }
+    }
+    if (acceptedBuildCount < stagedBuilds.size())
+    {
+        requeueRemainingStagedBuilds(acceptedBuildCount);
+    }
+    if (stagedBuilds.empty())
+    {
+        (void)exactGpuContext_.flush();
+        pendingExactGpuPrepassTimingsValid_ = false;
+        recordSubmitStats(processedRequests);
+        return;
+    }
+
+    FarLodGpuContext::ScratchAllocation pageUpload{};
+    if (!stagedPages.empty())
+    {
+        const std::uint64_t pageBytes =
+            static_cast<std::uint64_t>(stagedPages.size()) * WorldgenPage::kColumnCount * sizeof(GpuWorldgenPageColumn);
+        pageUpload = exactGpuContext_.allocateUpload(pageBytes, alignof(GpuWorldgenPageColumn));
+        if (pageUpload.resource == nullptr || pageUpload.cpuPtr == nullptr)
+        {
+            exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+            requeueRemainingStagedBuilds(0);
+            (void)exactGpuContext_.flush();
+            pendingExactGpuPrepassTimingsValid_ = false;
+            recordSubmitStats(processedRequests);
+            return;
+        }
+
+        std::byte* writePtr = pageUpload.cpuPtr;
+        for (const std::shared_ptr<const WorldgenPage>& page : stagedPages)
+        {
+            std::memcpy(writePtr,
+                        page->gpuColumns.data(),
+                        page->gpuColumns.size() * sizeof(GpuWorldgenPageColumn));
+            writePtr += page->gpuColumns.size() * sizeof(GpuWorldgenPageColumn);
+        }
+    }
+
+    FarLodGpuContext::ScratchAllocation descriptorBuildUpload{};
+    if (!descriptorBuildParams.empty())
+    {
+        const std::uint64_t buildBytes =
+            static_cast<std::uint64_t>(descriptorBuildParams.size()) * sizeof(GpuExactDescriptorBuildParams);
+        descriptorBuildUpload =
+            exactGpuContext_.allocateUpload(buildBytes, alignof(GpuExactDescriptorBuildParams));
+        if (descriptorBuildUpload.resource == nullptr || descriptorBuildUpload.cpuPtr == nullptr)
+        {
+            exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+            requeueRemainingStagedBuilds(0);
+            (void)exactGpuContext_.flush();
+            pendingExactGpuPrepassTimingsValid_ = false;
+            recordSubmitStats(processedRequests);
+            return;
+        }
+
+        std::memcpy(descriptorBuildUpload.cpuPtr,
+                    descriptorBuildParams.data(),
+                    static_cast<std::size_t>(buildBytes));
+    }
+
+    FarLodGpuContext::ScratchAllocation descriptorSkyLightUpload{};
+    if (!descriptorSkyLightValues.empty())
+    {
+        const std::uint64_t skyLightBytes =
+            static_cast<std::uint64_t>(descriptorSkyLightValues.size()) * sizeof(std::uint32_t);
+        descriptorSkyLightUpload = exactGpuContext_.allocateUpload(skyLightBytes, alignof(std::uint32_t));
+        if (descriptorSkyLightUpload.resource == nullptr || descriptorSkyLightUpload.cpuPtr == nullptr)
+        {
+            exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+            requeueRemainingStagedBuilds(0);
+            (void)exactGpuContext_.flush();
+            pendingExactGpuPrepassTimingsValid_ = false;
+            recordSubmitStats(processedRequests);
+            return;
+        }
+
+        std::memcpy(descriptorSkyLightUpload.cpuPtr,
+                    descriptorSkyLightValues.data(),
+                    static_cast<std::size_t>(skyLightBytes));
+    }
+
     for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
     {
         PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
         Chunk& chunk = *pending.chunk;
-        if (pending.rebuildVoxelInputs)
+        if (!pending.rebuildVoxelInputs)
         {
-            const std::uint64_t columnBytes =
-                static_cast<std::uint64_t>(chunk.gpuExactColumnDescriptors.size() * sizeof(GpuExactColumnDescriptor));
-            const FarLodGpuContext::ScratchAllocation columnUpload =
-                exactGpuContext_.allocateUpload(columnBytes, alignof(GpuExactColumnDescriptor));
-            if (columnUpload.resource == nullptr || columnUpload.cpuPtr == nullptr)
+            continue;
+        }
+
+        const std::uint32_t sparseVoxelCount =
+            static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
+        if (sparseVoxelCount > 0 && chunk.exactGpu.sparseVoxelBuffer != nullptr)
+        {
+            const std::uint64_t sparseBytes =
+                static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
+            const FarLodGpuContext::ScratchAllocation sparseUpload =
+                exactGpuContext_.allocateUpload(sparseBytes, alignof(GpuExactSparseVoxel));
+            if (sparseUpload.resource == nullptr || sparseUpload.cpuPtr == nullptr)
             {
                 exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
-                requeueRemainingStagedBuilds(buildIndex);
+                requeueRemainingStagedBuilds(0);
                 break;
             }
 
-            std::memcpy(columnUpload.cpuPtr,
-                        chunk.gpuExactColumnDescriptors.data(),
-                        static_cast<std::size_t>(columnBytes));
+            std::memcpy(sparseUpload.cpuPtr,
+                        chunk.gpuExactSparseVoxels.data(),
+                        static_cast<std::size_t>(sparseBytes));
+            if (chunk.exactGpu.sparseVoxelState != D3D12_RESOURCE_STATE_COPY_DEST)
+            {
+                exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
+                                            chunk.exactGpu.sparseVoxelState,
+                                            D3D12_RESOURCE_STATE_COPY_DEST);
+                chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_COPY_DEST;
+            }
+            exactGpuContext_.copyBuffer(chunk.exactGpu.sparseVoxelBuffer.Get(),
+                                        0,
+                                        sparseUpload.resource,
+                                        sparseUpload.offset,
+                                        sparseBytes);
+            exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
+                                        chunk.exactGpu.sparseVoxelState,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
+    }
+    if (stagedBuilds.empty())
+    {
+        (void)exactGpuContext_.flush();
+        pendingExactGpuPrepassTimingsValid_ = false;
+        recordSubmitStats(processedRequests);
+        return;
+    }
+
+    if (!descriptorBuildParams.empty())
+    {
+        exactGpuContext_.dispatchExactDescriptorGen(
+            globalSeaLevel_,
+            static_cast<std::uint32_t>(descriptorBuildParams.size()),
+            pageUpload.resource->GetGPUVirtualAddress() + pageUpload.offset,
+            descriptorBuildUpload.resource->GetGPUVirtualAddress() + descriptorBuildUpload.offset,
+            descriptorSkyLightUpload.resource->GetGPUVirtualAddress() + descriptorSkyLightUpload.offset);
+        exactGpuContext_.uavBarrier(exactGpuContext_.exactDescriptorScratchBuffer());
+        exactGpuContext_.transitionExactDescriptorScratch(D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        const std::uint64_t columnBytes =
+            static_cast<std::uint64_t>(kExactChunkColumnCount) * sizeof(GpuExactColumnDescriptor);
+        for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
+        {
+            const std::uint32_t descriptorBuildIndex = descriptorBuildIndexByBuild[buildIndex];
+            if (descriptorBuildIndex == kInvalidDescriptorBuildIndex)
+            {
+                continue;
+            }
+
+            PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
+            Chunk& chunk = *pending.chunk;
             if (chunk.exactGpu.columnState != D3D12_RESOURCE_STATE_COPY_DEST)
             {
                 exactGpuContext_.transition(chunk.exactGpu.columnBuffer.Get(),
@@ -14644,57 +15048,14 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             }
             exactGpuContext_.copyBuffer(chunk.exactGpu.columnBuffer.Get(),
                                         0,
-                                        columnUpload.resource,
-                                        columnUpload.offset,
+                                        exactGpuContext_.exactDescriptorScratchBuffer(),
+                                        exactGpuContext_.exactDescriptorScratchOffset(descriptorBuildIndex),
                                         columnBytes);
             exactGpuContext_.transition(chunk.exactGpu.columnBuffer.Get(),
                                         chunk.exactGpu.columnState,
                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             chunk.exactGpu.columnState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-
-            const std::uint32_t sparseVoxelCount =
-                static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
-            if (sparseVoxelCount > 0 && chunk.exactGpu.sparseVoxelBuffer != nullptr)
-            {
-                const std::uint64_t sparseBytes =
-                    static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
-                const FarLodGpuContext::ScratchAllocation sparseUpload =
-                    exactGpuContext_.allocateUpload(sparseBytes, alignof(GpuExactSparseVoxel));
-                if (sparseUpload.resource == nullptr || sparseUpload.cpuPtr == nullptr)
-                {
-                    exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
-                    requeueRemainingStagedBuilds(buildIndex);
-                    break;
-                }
-
-                std::memcpy(sparseUpload.cpuPtr,
-                            chunk.gpuExactSparseVoxels.data(),
-                            static_cast<std::size_t>(sparseBytes));
-                if (chunk.exactGpu.sparseVoxelState != D3D12_RESOURCE_STATE_COPY_DEST)
-                {
-                    exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
-                                                chunk.exactGpu.sparseVoxelState,
-                                                D3D12_RESOURCE_STATE_COPY_DEST);
-                    chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_COPY_DEST;
-                }
-                exactGpuContext_.copyBuffer(chunk.exactGpu.sparseVoxelBuffer.Get(),
-                                            0,
-                                            sparseUpload.resource,
-                                            sparseUpload.offset,
-                                            sparseBytes);
-                exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
-                                            chunk.exactGpu.sparseVoxelState,
-                                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-            }
         }
-    }
-    if (stagedBuilds.empty())
-    {
-        (void)exactGpuContext_.flush();
-        pendingExactGpuPrepassTimingsValid_ = false;
-        recordSubmitStats(processedRequests);
-        return;
     }
 
     if (exactGpuBlockUvBufferState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
@@ -15721,8 +16082,6 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     std::vector<BlockId> chunkBlocks;
     std::vector<std::uint8_t> chunkLightLevels;
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
-    std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
-    bool haveColumnDescriptors = false;
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         if (!chunk.hasBlocks.load(std::memory_order_acquire))
@@ -15733,11 +16092,6 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         }
 
         incomingSky = chunk.skyLightFromAboveCache;
-        haveColumnDescriptors = chunk.exactColumnDescriptorsReady;
-        if (haveColumnDescriptors)
-        {
-            columnDescriptors = chunk.exactColumnDescriptors;
-        }
         if (chunk.cpuDataResident)
         {
             chunkBlocks = chunk.blocks;
@@ -15764,30 +16118,16 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
     const glm::vec3 chunkOrigin(static_cast<float>(baseWorldX), static_cast<float>(baseWorldY), static_cast<float>(baseWorldZ));
     std::array<std::uint8_t, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> grassTintByColumn{};
-    if (haveColumnDescriptors)
+    for (int localX = 0; localX < kChunkSizeX; ++localX)
     {
-        for (int localX = 0; localX < kChunkSizeX; ++localX)
+        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
         {
-            for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
-            {
-                const std::size_t descriptorIndex = static_cast<std::size_t>(localZ * kChunkSizeX + localX);
-                grassTintByColumn[descriptorIndex] = columnDescriptors[descriptorIndex].grassTintIndex;
-            }
-        }
-    }
-    else
-    {
-        for (int localX = 0; localX < kChunkSizeX; ++localX)
-        {
-            for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
-            {
-                const ColumnSample columnSample = sampleColumn(baseWorldX + localX,
-                                                               baseWorldZ + localZ,
-                                                               baseWorldY,
-                                                               baseWorldY + kChunkSizeY - 1);
-                grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)] =
-                    static_cast<std::uint8_t>(grassTintIndexForBiome(columnSample.dominantBiome));
-            }
+            const ColumnSample columnSample = sampleColumn(baseWorldX + localX,
+                                                           baseWorldZ + localZ,
+                                                           baseWorldY,
+                                                           baseWorldY + kChunkSizeY - 1);
+            grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)] =
+                static_cast<std::uint8_t>(grassTintIndexForBiome(columnSample.dominantBiome));
         }
     }
 
@@ -16777,7 +17117,7 @@ void ChunkManager::Impl::refreshExactGpuColumnVisualsAfterSkyLightChange(const g
 
     for (const auto& chunk : columnChunks)
     {
-        if (!chunk || !chunk->exactColumnDescriptorsReady)
+        if (!chunk)
         {
             continue;
         }
@@ -18752,25 +19092,20 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const bool localAuthoritative = shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-    std::array<terrain::ExactChunkColumnDescriptor, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>
-        columnDescriptors{};
     std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> highestSolidWorlds{};
-    highestSolidWorlds.fill(ColumnManager::kNoHeight);
-
-    if (terrainGenerator_)
+    bool anyBaseTerrain = false;
+    if (!computeChunkBaseTerrainState(chunk.coord,
+                                      chunk.minWorldY,
+                                      chunk.maxWorldY,
+                                      highestSolidWorlds,
+                                      anyBaseTerrain))
     {
-        terrainGenerator_->describeChunkColumns(chunk.coord,
-                                               chunk.minWorldY,
-                                               chunk.maxWorldY,
-                                               kChunkSizeX,
-                                               kChunkSizeY,
-                                               kChunkSizeZ,
-                                               columnDescriptors,
-                                               columnResults);
+        return false;
     }
     for (std::size_t i = 0; i < highestSolidWorlds.size(); ++i)
     {
-        highestSolidWorlds[i] = columnResults[i].highestSolidWorld;
+        columnResults[i].highestSolidWorld = highestSolidWorlds[i];
+        columnResults[i].wroteSolid = highestSolidWorlds[i] != ColumnManager::kNoHeight;
     }
 
     std::vector<StructureVoxelEdit> structureVoxelEdits;
@@ -18816,13 +19151,7 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
             blockOverlayEntriesForGpu = overlayIt->second;
         }
     }
-    const bool anyDescriptorBlocks = std::any_of(columnDescriptors.begin(),
-                                                 columnDescriptors.end(),
-                                                 [](const terrain::ExactChunkColumnDescriptor& descriptor)
-                                                 {
-                                                     return descriptor.hasSolid() || descriptor.hasWater();
-                                                 });
-    const bool anyBlocks = anyDescriptorBlocks ||
+    const bool anyBlocks = anyBaseTerrain ||
                            !structureVoxelEdits.empty() ||
                            !pendingStructureEditsForGpu.empty() ||
                            !blockOverlayEntriesForGpu.empty() ||
@@ -18834,14 +19163,6 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     }
     ChunkBuildScratch scratch(chunk);
     std::vector<PendingStructureEdit> pendingEdits;
-    std::array<GpuExactColumnDescriptor, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>
-        gpuColumnDescriptors{};
-    for (std::size_t i = 0; i < gpuColumnDescriptors.size(); ++i)
-    {
-        gpuColumnDescriptors[i] =
-            packGpuExactColumnDescriptor(columnDescriptors[i],
-                                         chunk.skyLightFromAboveCache[i]);
-    }
     std::vector<GpuExactSparseVoxel> gpuSparseVoxels;
     gpuSparseVoxels.reserve(structureVoxelEdits.size() +
                             pendingStructureEditsForGpu.size() +
@@ -18916,10 +19237,7 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
             return false;
         }
 
-        chunk.exactColumnDescriptors = columnDescriptors;
-        chunk.exactColumnDescriptorsReady = true;
-        chunk.gpuExactColumnDescriptors = gpuColumnDescriptors;
-        chunk.gpuExactColumnDescriptorsReady = true;
+        chunk.exactBaseTerrainPresent = anyBaseTerrain;
         chunk.structureVoxelEdits = std::move(structureVoxelEdits);
         chunk.structureVoxelEditsReady = true;
         chunk.gpuExactSparseVoxels = std::move(gpuSparseVoxels);
@@ -19150,15 +19468,9 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
 
     std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
     std::vector<StructureVoxelEdit> structureVoxelEdits;
-    bool haveStoredDescriptors = false;
     bool haveStoredStructureEdits = false;
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
-        haveStoredDescriptors = chunk.exactColumnDescriptorsReady;
-        if (haveStoredDescriptors)
-        {
-            columnDescriptors = chunk.exactColumnDescriptors;
-        }
         haveStoredStructureEdits = chunk.structureVoxelEditsReady;
         if (haveStoredStructureEdits)
         {
@@ -19166,28 +19478,16 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
         }
     }
 
-    if (!haveStoredDescriptors)
+    if (terrainGenerator_)
     {
-        if (terrainGenerator_)
-        {
-            terrainGenerator_->describeChunkColumns(chunk.coord,
-                                                   chunk.minWorldY,
-                                                   chunk.maxWorldY,
-                                                   kChunkSizeX,
-                                                   kChunkSizeY,
-                                                   kChunkSizeZ,
-                                                   columnDescriptors,
-                                                   columnResults);
-        }
-    }
-    else
-    {
-        for (std::size_t i = 0; i < columnDescriptors.size(); ++i)
-        {
-            columnResults[i].highestSolidWorld = columnDescriptors[i].highestSolidWorld;
-            columnResults[i].waterTopWorld = columnDescriptors[i].waterTopWorld;
-            columnResults[i].wroteSolid = columnDescriptors[i].hasSolid() || columnDescriptors[i].hasWater();
-        }
+        terrainGenerator_->describeChunkColumns(chunk.coord,
+                                               chunk.minWorldY,
+                                               chunk.maxWorldY,
+                                               kChunkSizeX,
+                                               kChunkSizeY,
+                                               kChunkSizeZ,
+                                               columnDescriptors,
+                                               columnResults);
     }
 
     auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
@@ -19582,7 +19882,7 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
             const bool requiresGpuHandoff =
                 device_ != nullptr &&
                 exactGpuContext_.ready() &&
-                chunk->exactColumnDescriptorsReady &&
+                chunk->hasBlocks.load(std::memory_order_acquire) &&
                 (!chunk->exactGpuResident.load(std::memory_order_acquire) ||
                  chunk->exactGpuInputsDirty.load(std::memory_order_acquire) ||
                  chunk->exactGpuReadyVersion.load(std::memory_order_acquire) !=

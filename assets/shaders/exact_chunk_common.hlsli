@@ -7,6 +7,8 @@ static const uint kExactChunkFaceDescriptorCount = kExactChunkPlaneCount * kExac
 static const uint kExactChunkHaloFaceVoxelCount = kExactChunkSize * kExactChunkSize;
 static const uint kExactChunkHaloFaceCount = 6u;
 static const uint kExactChunkHaloVoxelCount = kExactChunkHaloFaceCount * kExactChunkHaloFaceVoxelCount;
+static const uint kWorldgenPageSize = 64u;
+static const uint kWorldgenPageColumnCount = kWorldgenPageSize * kWorldgenPageSize;
 static const uint kExactNeighborPosXBit = 1u << 0u;
 static const uint kExactNeighborNegXBit = 1u << 1u;
 static const uint kExactNeighborPosYBit = 1u << 2u;
@@ -28,8 +30,10 @@ static const uint kExactDrawRecordFaceCountMask = 0x7fffffffu;
 static const uint kBlockAir = 0u;
 static const uint kBlockGrass = 1u;
 static const uint kBlockLeaves = 3u;
+static const uint kBlockSand = 4u;
 static const uint kBlockWater = 5u;
 static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockPodzol = 9u;
 static const uint kBlockDebugLamp = 10u;
 static const uint kBlockDarkOakLeaves = 12u;
 static const uint kBlockBirchLeaves = 14u;
@@ -59,6 +63,34 @@ struct GpuExactColumnDescriptor
     uint skyLightFromAbove;
     uint reserved1;
     uint reserved2;
+};
+
+struct GpuWorldgenPageColumn
+{
+    int surfaceY;
+    float distanceToCoast;
+    float soilCreepStrength;
+    float stripeNoiseThreshold;
+    uint packedBlocks;
+    uint packedFlagsTintWaterDepth;
+    uint packedSoilDepths;
+    uint packedStripes;
+};
+
+struct GpuExactDescriptorBuildParams
+{
+    int chunkBaseWorldX;
+    int chunkBaseWorldZ;
+    int chunkMinWorldY;
+    int sampleMinPageBaseWorldX;
+    int sampleMinPageBaseWorldZ;
+    uint pageIndex00;
+    uint pageIndex10;
+    uint pageIndex01;
+    uint pageIndex11;
+    uint skyLightOffset;
+    uint descriptorOffset;
+    uint reserved0;
 };
 
 struct GpuExactSparseVoxel

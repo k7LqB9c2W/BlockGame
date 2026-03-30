@@ -9694,7 +9694,8 @@ bool ChunkManager::Impl::ensureExactGpuAllocatorBuffers(std::size_t pageCount)
         {
             exactGpuAllocatorStateBuffer_ = createDefaultBuffer(device_.Get(),
                                                                 exactGpuAllocatorStateBytes(),
-                                                                D3D12_RESOURCE_STATE_COMMON);
+                                                                D3D12_RESOURCE_STATE_COMMON,
+                                                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             setDebugObjectName(exactGpuAllocatorStateBuffer_.Get(), L"ExactGpuAllocatorState");
             exactGpuAllocatorStateBufferState_ = D3D12_RESOURCE_STATE_COMMON;
             exactGpuAllocatorStateDirty_ = true;
@@ -9705,7 +9706,8 @@ bool ChunkManager::Impl::ensureExactGpuAllocatorBuffers(std::size_t pageCount)
             exactGpuAllocatorPageMetadataBuffer_ = createDefaultBuffer(
                 device_.Get(),
                 exactGpuAllocatorPageMetadataBytes(requiredPageCapacity),
-                D3D12_RESOURCE_STATE_COMMON);
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             setDebugObjectName(exactGpuAllocatorPageMetadataBuffer_.Get(), L"ExactGpuAllocatorPages");
             exactGpuAllocatorPageMetadataBufferState_ = D3D12_RESOURCE_STATE_COMMON;
             exactGpuAllocatorPageMetadataCapacity_ = requiredPageCapacity;
@@ -9717,7 +9719,8 @@ bool ChunkManager::Impl::ensureExactGpuAllocatorBuffers(std::size_t pageCount)
             exactGpuAllocatorFreePageListBuffer_ = createDefaultBuffer(
                 device_.Get(),
                 exactGpuAllocatorFreePageListBytes(requiredPageCapacity),
-                D3D12_RESOURCE_STATE_COMMON);
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             setDebugObjectName(exactGpuAllocatorFreePageListBuffer_.Get(), L"ExactGpuAllocatorFreePages");
             exactGpuAllocatorFreePageListBufferState_ = D3D12_RESOURCE_STATE_COMMON;
             exactGpuAllocatorFreePageListCapacity_ = requiredPageCapacity;
@@ -9763,7 +9766,8 @@ bool ChunkManager::Impl::ensureExactGpuChunkAllocationRecordBuffer()
             device_.Get(),
             static_cast<std::uint64_t>(requiredCapacity) *
                 sizeof(FarLodGpuContext::ExactChunkAllocationRecord),
-            D3D12_RESOURCE_STATE_COMMON);
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         setDebugObjectName(exactGpuChunkAllocationRecordBuffer_.Get(), L"ExactGpuChunkAllocationRecords");
         exactGpuChunkAllocationRecordBufferState_ = D3D12_RESOURCE_STATE_COMMON;
         exactGpuChunkAllocationRecordCapacity_ = requiredCapacity;

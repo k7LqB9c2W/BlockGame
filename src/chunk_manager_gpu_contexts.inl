@@ -2345,6 +2345,53 @@ public:
         hasCommands_ = true;
     }
 
+    void dispatchExactAllocate(std::uint32_t buildIndex,
+                               ID3D12Resource* allocatorStateBuffer,
+                               ID3D12Resource* pageMetadataBuffer,
+                               ID3D12Resource* freePageListBuffer,
+                               ID3D12Resource* buildRecordBuffer)
+    {
+        if (!open_ ||
+            exactAllocatePipelineState_ == nullptr ||
+            allocatorStateBuffer == nullptr ||
+            pageMetadataBuffer == nullptr ||
+            freePageListBuffer == nullptr ||
+            buildRecordBuffer == nullptr ||
+            exactFaceTotalScratchBuffer_ == nullptr ||
+            exactCompletionScratchBuffer_ == nullptr)
+        {
+            return;
+        }
+
+        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        {
+            transition(exactFaceTotalScratchBuffer_.Get(),
+                       exactFaceTotalScratchState_,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
+        if (exactCompletionScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(exactCompletionScratchBuffer_.Get(),
+                       exactCompletionScratchState_,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            exactCompletionScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+
+        const std::array<std::uint32_t, 1> constants{buildIndex};
+        commandList_->SetPipelineState(exactAllocatePipelineState_.Get());
+        commandList_->SetComputeRootSignature(exactAllocateRootSignature_.Get());
+        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
+        commandList_->SetComputeRootShaderResourceView(1, exactFaceTotalScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(2, allocatorStateBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(3, pageMetadataBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(4, freePageListBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(5, buildRecordBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(6, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->Dispatch(1u, 1u, 1u);
+        hasCommands_ = true;
+    }
+
     void dispatchExactFaceEmit(std::uint32_t buildIndex,
                                ID3D12Resource* allocatorStateBuffer,
                                ID3D12Resource* buildRecordBuffer,
@@ -2584,6 +2631,7 @@ public:
                exactLightPipelineState_ != nullptr &&
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
+               exactAllocatePipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
                exactDescriptorScratchBuffer_ != nullptr &&
                exactFaceCountScratchBuffer_ != nullptr &&
@@ -3092,6 +3140,8 @@ private:
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_count_cs.hlsl").string(), "ExactChunkFaceCountMain", "cs_6_6");
         exactFacePrefixShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_prefix_cs.hlsl").string(), "ExactChunkFacePrefixMain", "cs_6_6");
+        exactAllocateShader_ =
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_allocate_cs.hlsl").string(), "ExactChunkAllocateMain", "cs_6_6");
         exactFaceEmitShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_emit_cs.hlsl").string(), "ExactChunkFaceEmitMain", "cs_6_6");
     }
@@ -3591,6 +3641,28 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactPrefixPso, IID_PPV_ARGS(&exactFacePrefixPipelineState_)),
                         "failed to create exact chunk face prefix pipeline");
 
+        std::array<D3D12_ROOT_PARAMETER, 7> exactAllocateParams{};
+        exactAllocateParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        exactAllocateParams[0].Constants.ShaderRegister = 0;
+        exactAllocateParams[0].Constants.Num32BitValues = 1;
+        exactAllocateParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        exactAllocateParams[1].Descriptor.ShaderRegister = 0;
+        for (UINT parameterIndex = 2; parameterIndex <= 6; ++parameterIndex)
+        {
+            exactAllocateParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+            exactAllocateParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 2;
+        }
+        D3D12_ROOT_SIGNATURE_DESC exactAllocateDesc{};
+        exactAllocateDesc.NumParameters = static_cast<UINT>(exactAllocateParams.size());
+        exactAllocateDesc.pParameters = exactAllocateParams.data();
+        createRootSignature(exactAllocateDesc, exactAllocateRootSignature_, "exact chunk allocate root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC exactAllocatePso{};
+        exactAllocatePso.pRootSignature = exactAllocateRootSignature_.Get();
+        exactAllocatePso.CS = {exactAllocateShader_->GetBufferPointer(), exactAllocateShader_->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&exactAllocatePso, IID_PPV_ARGS(&exactAllocatePipelineState_)),
+                        "failed to create exact chunk allocate pipeline");
+
         std::array<D3D12_ROOT_PARAMETER, 11> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceEmitParams[0].Constants.ShaderRegister = 0;
@@ -3644,6 +3716,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> exactLightShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceCountShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFacePrefixShader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> exactAllocateShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceEmitShader_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasSeedRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasSampleRootSignature_;
@@ -3662,6 +3735,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactLightRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactFaceCountRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactFacePrefixRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactAllocateRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactFaceEmitRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> atlasSeedCachePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> atlasSampleCachePipelineState_;
@@ -3680,6 +3754,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactLightPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFacePrefixPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactAllocatePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceEmitPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptorHeap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> uploadScratch_;

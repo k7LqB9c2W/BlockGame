@@ -459,12 +459,6 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
 
     if (!validEmitRecord)
     {
-        if (planeIndex == 0u && groupThreadId.x == 0u)
-        {
-            GpuExactCompletionEntry completion = (GpuExactCompletionEntry)0;
-            completion.buildIndex = gBuildIndex;
-            gCompletionEntries[gBuildIndex] = completion;
-        }
         return;
     }
 

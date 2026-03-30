@@ -3764,6 +3764,7 @@ inline constexpr std::uint32_t kExactCompletionStatusAllocatorExhaustedBit = 1u 
 inline constexpr std::uint32_t kExactChunkAllocationPhasePrepassSubmitted = 1u;
 inline constexpr std::uint32_t kExactChunkAllocationPhaseEmitSubmitted = 2u;
 inline constexpr std::size_t kExactGpuReserveFreePageWatermark = 8u;
+inline constexpr std::uint32_t kInvalidExactGpuAllocatorFreePageSlot = std::numeric_limits<std::uint32_t>::max();
 
 [[nodiscard]] constexpr std::uint8_t oppositeExactGpuSeamBit(std::uint8_t seamBit) noexcept
 {
@@ -4207,14 +4208,9 @@ private:
         std::uint64_t inputVersion{0};
         std::uint32_t faceCapacity{0};
         std::uint8_t pendingNeighborMask{0};
-        std::uint32_t batchBuildIndex{0};
         std::uint32_t scratchSliceIndex{std::numeric_limits<std::uint32_t>::max()};
         ChunkAllocation allocation{};
-        UINT64 computeFenceValue{0};
         bool rebuildVoxelInputs{false};
-        std::uint32_t* mappedOverflowCount{nullptr};
-        FarLodGpuContext::ExactOverflowEntry* mappedOverflowEntries{nullptr};
-        std::uint32_t overflowEntryCapacity{0};
 
         [[nodiscard]] bool valid() const noexcept
         {
@@ -4273,7 +4269,6 @@ private:
     [[nodiscard]] static std::uint64_t exactGpuAllocatorStateBytes() noexcept;
     [[nodiscard]] static std::uint64_t exactGpuAllocatorPageMetadataBytes(std::size_t pageCount) noexcept;
     [[nodiscard]] static std::uint64_t exactGpuAllocatorFreePageListBytes(std::size_t pageCount) noexcept;
-    [[nodiscard]] std::uint64_t exactGpuChunkAllocationRecordBytes() const noexcept;
     [[nodiscard]] static FarLodGpuContext::ExactAllocatorPageMetadata buildExactGpuAllocatorPageMetadata(
         std::uint32_t pageIndex,
         const ChunkBufferPage& page) noexcept;
@@ -4286,9 +4281,10 @@ private:
     void markExactGpuAllocatorMetadataDirty() noexcept;
     void queueExactGpuAllocatorPagePatch(std::uint32_t pageIndex) noexcept;
     void queueExactGpuAllocatorPageStateChange(std::uint32_t pageIndex) noexcept;
-    void queueExactGpuAllocatorFreeListRefresh() noexcept;
+    void queueExactGpuAllocatorFreePageSlotPatch(std::uint32_t slotIndex) noexcept;
     void queueExactGpuAllocatorStateRefresh() noexcept;
     void queueAllExactGpuAllocatorPagePatches() noexcept;
+    void queueAllExactGpuAllocatorFreePageSlotPatches() noexcept;
     void updateExactGpuChunkAllocationRecord(const PendingExactGpuBuild& pending,
                                              std::uint32_t requiredFaceCount,
                                              std::uint32_t reservedFaceCapacity,
@@ -5033,12 +5029,13 @@ private:
     std::vector<FarLodGpuContext::ExactAllocatorPageMetadata> exactGpuAllocatorPageMetadataShadow_{};
     std::vector<FarLodGpuContext::ExactAllocatorFreePageEntry> exactGpuAllocatorFreePageListShadow_{};
     std::vector<std::uint32_t> exactGpuAllocatorDirtyPageIndices_{};
+    std::vector<std::uint32_t> exactGpuAllocatorDirtyFreePageSlots_{};
     std::vector<std::uint8_t> exactGpuAllocatorPagePatchQueued_{};
-    bool exactGpuAllocatorFreeListDirty_{true};
+    std::vector<std::uint8_t> exactGpuAllocatorFreePageSlotPatchQueued_{};
+    std::vector<std::uint32_t> exactGpuAllocatorFreePageSlotByPage_{};
     bool exactGpuAllocatorStateDirty_{true};
     std::vector<FarLodGpuContext::ExactChunkAllocationRecord> exactGpuChunkAllocationRecords_{};
     std::deque<ExactGpuBuildRequest> pendingExactGpuBuildQueue_{};
-    std::vector<PendingExactGpuBuild> pendingExactGpuBuilds_{};
     std::vector<PendingExactGpuBatch> pendingExactGpuBatches_{};
     std::mutex pendingExactGpuBuildMutex_;
     std::mutex pendingExactGpuBuildsMutex_;
@@ -9432,12 +9429,6 @@ std::uint64_t ChunkManager::Impl::exactGpuAllocatorFreePageListBytes(std::size_t
     return static_cast<std::uint64_t>(pageCount) * sizeof(FarLodGpuContext::ExactAllocatorFreePageEntry);
 }
 
-std::uint64_t ChunkManager::Impl::exactGpuChunkAllocationRecordBytes() const noexcept
-{
-    return static_cast<std::uint64_t>(exactGpuChunkAllocationRecords_.size()) *
-           sizeof(FarLodGpuContext::ExactChunkAllocationRecord);
-}
-
 FarLodGpuContext::ExactAllocatorPageMetadata ChunkManager::Impl::buildExactGpuAllocatorPageMetadata(
     std::uint32_t pageIndex,
     const ChunkBufferPage& page) noexcept
@@ -9511,8 +9502,10 @@ void ChunkManager::Impl::resetExactGpuAllocatorBuffers() noexcept
     exactGpuAllocatorPageMetadataShadow_.clear();
     exactGpuAllocatorFreePageListShadow_.clear();
     exactGpuAllocatorDirtyPageIndices_.clear();
+    exactGpuAllocatorDirtyFreePageSlots_.clear();
     exactGpuAllocatorPagePatchQueued_.clear();
-    exactGpuAllocatorFreeListDirty_ = true;
+    exactGpuAllocatorFreePageSlotPatchQueued_.clear();
+    exactGpuAllocatorFreePageSlotByPage_.clear();
     exactGpuAllocatorStateDirty_ = true;
     exactGpuAllocatorPageMetadataCapacity_ = 0;
     exactGpuAllocatorFreePageListCapacity_ = 0;
@@ -9527,7 +9520,10 @@ void ChunkManager::Impl::rebuildExactGpuAllocatorMirrorsLocked() noexcept
     exactGpuAllocatorFreePageListShadow_.clear();
     exactGpuAllocatorFreePageListShadow_.reserve(bufferPages_.size());
     exactGpuAllocatorDirtyPageIndices_.clear();
+    exactGpuAllocatorDirtyFreePageSlots_.clear();
     exactGpuAllocatorPagePatchQueued_.assign(bufferPages_.size(), 0u);
+    exactGpuAllocatorFreePageSlotPatchQueued_.clear();
+    exactGpuAllocatorFreePageSlotByPage_.assign(bufferPages_.size(), kInvalidExactGpuAllocatorFreePageSlot);
 
     for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
     {
@@ -9535,6 +9531,8 @@ void ChunkManager::Impl::rebuildExactGpuAllocatorMirrorsLocked() noexcept
         exactGpuAllocatorPageMetadataShadow_.push_back(buildExactGpuAllocatorPageMetadata(pageIndex, page));
         if (isExactGpuAllocatorFreePage(page))
         {
+            exactGpuAllocatorFreePageSlotByPage_[pageIndex] =
+                static_cast<std::uint32_t>(exactGpuAllocatorFreePageListShadow_.size());
             exactGpuAllocatorFreePageListShadow_.push_back(FarLodGpuContext::ExactAllocatorFreePageEntry{pageIndex});
         }
     }
@@ -9551,7 +9549,7 @@ void ChunkManager::Impl::markExactGpuAllocatorMetadataDirty() noexcept
 {
     rebuildExactGpuAllocatorMirrorsLocked();
     queueAllExactGpuAllocatorPagePatches();
-    queueExactGpuAllocatorFreeListRefresh();
+    queueAllExactGpuAllocatorFreePageSlotPatches();
     queueExactGpuAllocatorStateRefresh();
 }
 
@@ -9570,6 +9568,21 @@ void ChunkManager::Impl::queueExactGpuAllocatorPagePatch(std::uint32_t pageIndex
     exactGpuAllocatorDirtyPageIndices_.push_back(pageIndex);
 }
 
+void ChunkManager::Impl::queueExactGpuAllocatorFreePageSlotPatch(std::uint32_t slotIndex) noexcept
+{
+    if (slotIndex >= exactGpuAllocatorFreePageSlotPatchQueued_.size())
+    {
+        exactGpuAllocatorFreePageSlotPatchQueued_.resize(static_cast<std::size_t>(slotIndex) + 1u, 0u);
+    }
+    if (exactGpuAllocatorFreePageSlotPatchQueued_[slotIndex] != 0u)
+    {
+        return;
+    }
+
+    exactGpuAllocatorFreePageSlotPatchQueued_[slotIndex] = 1u;
+    exactGpuAllocatorDirtyFreePageSlots_.push_back(slotIndex);
+}
+
 void ChunkManager::Impl::queueExactGpuAllocatorPageStateChange(std::uint32_t pageIndex) noexcept
 {
     if (pageIndex >= bufferPages_.size())
@@ -9586,6 +9599,7 @@ void ChunkManager::Impl::queueExactGpuAllocatorPageStateChange(std::uint32_t pag
         const std::size_t oldSize = exactGpuAllocatorPageMetadataShadow_.size();
         exactGpuAllocatorPageMetadataShadow_.resize(bufferPages_.size());
         exactGpuAllocatorPagePatchQueued_.resize(bufferPages_.size(), 0u);
+        exactGpuAllocatorFreePageSlotByPage_.resize(bufferPages_.size(), kInvalidExactGpuAllocatorFreePageSlot);
         if (oldSize != bufferPages_.size())
         {
             exactGpuAllocatorStateShadow_.pageCount = static_cast<std::uint32_t>(bufferPages_.size());
@@ -9597,46 +9611,53 @@ void ChunkManager::Impl::queueExactGpuAllocatorPageStateChange(std::uint32_t pag
     exactGpuAllocatorPageMetadataShadow_[pageIndex] = buildExactGpuAllocatorPageMetadata(pageIndex, page);
 
     const bool shouldBeFree = isExactGpuAllocatorFreePage(page);
-    const auto freeIt =
-        std::find_if(exactGpuAllocatorFreePageListShadow_.begin(),
-                     exactGpuAllocatorFreePageListShadow_.end(),
-                     [pageIndex](const FarLodGpuContext::ExactAllocatorFreePageEntry& entry)
-                     {
-                         return entry.pageIndex == pageIndex;
-                     });
-    const bool freeListContainsPage = freeIt != exactGpuAllocatorFreePageListShadow_.end();
-    if (shouldBeFree && !freeListContainsPage)
+    const std::uint32_t currentSlot =
+        (pageIndex < exactGpuAllocatorFreePageSlotByPage_.size())
+            ? exactGpuAllocatorFreePageSlotByPage_[pageIndex]
+            : kInvalidExactGpuAllocatorFreePageSlot;
+    if (shouldBeFree)
     {
-        const auto insertIt =
-            std::lower_bound(exactGpuAllocatorFreePageListShadow_.begin(),
-                             exactGpuAllocatorFreePageListShadow_.end(),
-                             pageIndex,
-                             [](const FarLodGpuContext::ExactAllocatorFreePageEntry& entry, std::uint32_t value)
-                             {
-                                 return entry.pageIndex < value;
-                             });
-        exactGpuAllocatorFreePageListShadow_.insert(insertIt,
-                                                    FarLodGpuContext::ExactAllocatorFreePageEntry{pageIndex});
-        exactGpuAllocatorStateShadow_.freePageCount =
-            static_cast<std::uint32_t>(exactGpuAllocatorFreePageListShadow_.size());
-        queueExactGpuAllocatorFreeListRefresh();
-        queueExactGpuAllocatorStateRefresh();
+        if (currentSlot == kInvalidExactGpuAllocatorFreePageSlot)
+        {
+            const std::uint32_t newSlot = static_cast<std::uint32_t>(exactGpuAllocatorFreePageListShadow_.size());
+            exactGpuAllocatorFreePageListShadow_.push_back(FarLodGpuContext::ExactAllocatorFreePageEntry{pageIndex});
+            exactGpuAllocatorFreePageSlotByPage_[pageIndex] = newSlot;
+            exactGpuAllocatorStateShadow_.freePageCount =
+                static_cast<std::uint32_t>(exactGpuAllocatorFreePageListShadow_.size());
+            queueExactGpuAllocatorFreePageSlotPatch(newSlot);
+            queueExactGpuAllocatorStateRefresh();
+        }
+        else if (currentSlot < exactGpuAllocatorFreePageListShadow_.size() &&
+                 exactGpuAllocatorFreePageListShadow_[currentSlot].pageIndex != pageIndex)
+        {
+            exactGpuAllocatorFreePageListShadow_[currentSlot].pageIndex = pageIndex;
+            queueExactGpuAllocatorFreePageSlotPatch(currentSlot);
+        }
     }
-    else if (!shouldBeFree && freeListContainsPage)
+    else if (currentSlot != kInvalidExactGpuAllocatorFreePageSlot &&
+             currentSlot < exactGpuAllocatorFreePageListShadow_.size())
     {
-        exactGpuAllocatorFreePageListShadow_.erase(freeIt);
+        const std::uint32_t lastSlot =
+            static_cast<std::uint32_t>(exactGpuAllocatorFreePageListShadow_.size() - 1u);
+        if (currentSlot != lastSlot)
+        {
+            const FarLodGpuContext::ExactAllocatorFreePageEntry movedEntry =
+                exactGpuAllocatorFreePageListShadow_.back();
+            exactGpuAllocatorFreePageListShadow_[currentSlot] = movedEntry;
+            if (movedEntry.pageIndex < exactGpuAllocatorFreePageSlotByPage_.size())
+            {
+                exactGpuAllocatorFreePageSlotByPage_[movedEntry.pageIndex] = currentSlot;
+            }
+            queueExactGpuAllocatorFreePageSlotPatch(currentSlot);
+        }
+        exactGpuAllocatorFreePageListShadow_.pop_back();
+        exactGpuAllocatorFreePageSlotByPage_[pageIndex] = kInvalidExactGpuAllocatorFreePageSlot;
         exactGpuAllocatorStateShadow_.freePageCount =
             static_cast<std::uint32_t>(exactGpuAllocatorFreePageListShadow_.size());
-        queueExactGpuAllocatorFreeListRefresh();
         queueExactGpuAllocatorStateRefresh();
     }
 
     queueExactGpuAllocatorPagePatch(pageIndex);
-}
-
-void ChunkManager::Impl::queueExactGpuAllocatorFreeListRefresh() noexcept
-{
-    exactGpuAllocatorFreeListDirty_ = true;
 }
 
 void ChunkManager::Impl::queueExactGpuAllocatorStateRefresh() noexcept
@@ -9649,6 +9670,14 @@ void ChunkManager::Impl::queueAllExactGpuAllocatorPagePatches() noexcept
     for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
     {
         queueExactGpuAllocatorPagePatch(pageIndex);
+    }
+}
+
+void ChunkManager::Impl::queueAllExactGpuAllocatorFreePageSlotPatches() noexcept
+{
+    for (std::uint32_t slotIndex = 0; slotIndex < exactGpuAllocatorFreePageListShadow_.size(); ++slotIndex)
+    {
+        queueExactGpuAllocatorFreePageSlotPatch(slotIndex);
     }
 }
 
@@ -9749,7 +9778,7 @@ bool ChunkManager::Impl::ensureExactGpuAllocatorBuffers(std::size_t pageCount)
             setDebugObjectName(exactGpuAllocatorFreePageListBuffer_.Get(), L"ExactGpuAllocatorFreePages");
             exactGpuAllocatorFreePageListBufferState_ = D3D12_RESOURCE_STATE_COMMON;
             exactGpuAllocatorFreePageListCapacity_ = requiredPageCapacity;
-            exactGpuAllocatorFreeListDirty_ = true;
+            queueAllExactGpuAllocatorFreePageSlotPatches();
         }
     }
     catch (const std::exception&)
@@ -9813,7 +9842,7 @@ bool ChunkManager::Impl::syncExactGpuAllocatorMetadata(
     {
         rebuildExactGpuAllocatorMirrorsLocked();
         queueAllExactGpuAllocatorPagePatches();
-        queueExactGpuAllocatorFreeListRefresh();
+        queueAllExactGpuAllocatorFreePageSlotPatches();
         queueExactGpuAllocatorStateRefresh();
     }
 
@@ -9892,34 +9921,40 @@ bool ChunkManager::Impl::syncExactGpuAllocatorMetadata(
                             exactGpuAllocatorPageMetadataBufferState_);
     }
 
-    if (exactGpuAllocatorFreeListDirty_)
+    if (!exactGpuAllocatorDirtyFreePageSlots_.empty())
     {
-        const std::uint64_t bytes =
-            exactGpuAllocatorFreePageListBytes(exactGpuAllocatorFreePageListShadow_.size());
-        if (bytes > 0u)
+        transitionForCopyDest(exactGpuAllocatorFreePageListBuffer_.Get(),
+                              exactGpuAllocatorFreePageListBufferState_);
+        for (const std::uint32_t slotIndex : exactGpuAllocatorDirtyFreePageSlots_)
         {
             const FarLodGpuContext::ScratchAllocation upload =
-                exactGpuContext_.allocateUpload(bytes,
+                exactGpuContext_.allocateUpload(sizeof(FarLodGpuContext::ExactAllocatorFreePageEntry),
                                                 alignof(FarLodGpuContext::ExactAllocatorFreePageEntry));
             if (upload.resource == nullptr || upload.cpuPtr == nullptr)
             {
+                transitionForCommon(exactGpuAllocatorFreePageListBuffer_.Get(),
+                                    exactGpuAllocatorFreePageListBufferState_);
                 return false;
             }
 
+            if (slotIndex >= exactGpuAllocatorFreePageListShadow_.size())
+            {
+                continue;
+            }
+
             std::memcpy(upload.cpuPtr,
-                        exactGpuAllocatorFreePageListShadow_.data(),
-                        static_cast<std::size_t>(bytes));
+                        &exactGpuAllocatorFreePageListShadow_[slotIndex],
+                        sizeof(FarLodGpuContext::ExactAllocatorFreePageEntry));
             ownedUploads.push_back(upload);
-            transitionForCopyDest(exactGpuAllocatorFreePageListBuffer_.Get(),
-                                  exactGpuAllocatorFreePageListBufferState_);
             exactGpuContext_.copyBuffer(exactGpuAllocatorFreePageListBuffer_.Get(),
-                                        0,
+                                        static_cast<std::uint64_t>(slotIndex) *
+                                            sizeof(FarLodGpuContext::ExactAllocatorFreePageEntry),
                                         upload.resource,
                                         upload.offset,
-                                        bytes);
-            transitionForCommon(exactGpuAllocatorFreePageListBuffer_.Get(),
-                                exactGpuAllocatorFreePageListBufferState_);
+                                        sizeof(FarLodGpuContext::ExactAllocatorFreePageEntry));
         }
+        transitionForCommon(exactGpuAllocatorFreePageListBuffer_.Get(),
+                            exactGpuAllocatorFreePageListBufferState_);
     }
 
     for (const std::uint32_t pageIndex : exactGpuAllocatorDirtyPageIndices_)
@@ -9929,8 +9964,15 @@ bool ChunkManager::Impl::syncExactGpuAllocatorMetadata(
             exactGpuAllocatorPagePatchQueued_[pageIndex] = 0u;
         }
     }
+    for (const std::uint32_t slotIndex : exactGpuAllocatorDirtyFreePageSlots_)
+    {
+        if (slotIndex < exactGpuAllocatorFreePageSlotPatchQueued_.size())
+        {
+            exactGpuAllocatorFreePageSlotPatchQueued_[slotIndex] = 0u;
+        }
+    }
     exactGpuAllocatorDirtyPageIndices_.clear();
-    exactGpuAllocatorFreeListDirty_ = false;
+    exactGpuAllocatorDirtyFreePageSlots_.clear();
     exactGpuAllocatorStateDirty_ = false;
     return true;
 }
@@ -15681,38 +15723,61 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         return;
     }
 
-    const std::uint64_t prepassBuildRecordUploadBytes = exactGpuChunkAllocationRecordBytes();
-    const std::uint64_t emitBuildRecordUploadBytes = exactGpuChunkAllocationRecordBytes();
-    const std::size_t currentExactGpuPageCount = [&]()
+    const auto exactBuildRecordUploadBytes = [](std::size_t buildCount) -> std::uint64_t
+    {
+        return static_cast<std::uint64_t>(buildCount) * sizeof(FarLodGpuContext::ExactChunkAllocationRecord);
+    };
+    const auto exactBatchBuildIndexUploadBytes = [](std::size_t buildCount) -> std::uint64_t
+    {
+        return static_cast<std::uint64_t>(buildCount) * sizeof(std::uint32_t);
+    };
+    const auto pendingExactGpuAllocatorUploadBytes = [&]() -> std::uint64_t
     {
         std::lock_guard<std::mutex> lock(bufferPageMutex_);
-        return static_cast<std::size_t>(std::count_if(bufferPages_.begin(),
-                                                      bufferPages_.end(),
-                                                      [](const ChunkBufferPage& page)
-                                                      {
-                                                          return page.usage == ChunkBufferPageUsage::ExactGpu;
-                                                      }));
-    }();
+        const std::size_t pageCount = bufferPages_.size();
+        const bool rebuildMirrors = exactGpuAllocatorPageMetadataShadow_.size() != pageCount;
+        const std::uint32_t requiredPageCapacity = static_cast<std::uint32_t>(
+            std::max<std::size_t>(1u, nextPowerOfTwo(std::max<std::size_t>(pageCount, 1u))));
+        const bool stateUploadRequired = exactGpuAllocatorStateDirty_ || exactGpuAllocatorStateBuffer_ == nullptr;
+        const bool pageMetadataFullRefresh =
+            rebuildMirrors ||
+            exactGpuAllocatorPageMetadataBuffer_ == nullptr ||
+            exactGpuAllocatorPageMetadataCapacity_ < requiredPageCapacity;
+        const bool freeListFullRefresh =
+            rebuildMirrors ||
+            exactGpuAllocatorFreePageListBuffer_ == nullptr ||
+            exactGpuAllocatorFreePageListCapacity_ < requiredPageCapacity;
+        const std::size_t freePageCount = rebuildMirrors
+            ? static_cast<std::size_t>(std::count_if(bufferPages_.begin(),
+                                                     bufferPages_.end(),
+                                                     [](const ChunkBufferPage& page)
+                                                     {
+                                                         return isExactGpuAllocatorFreePage(page);
+                                                     }))
+            : exactGpuAllocatorFreePageListShadow_.size();
+
+        return (stateUploadRequired ? exactGpuAllocatorStateBytes() : 0u) +
+               static_cast<std::uint64_t>(pageMetadataFullRefresh ? pageCount : exactGpuAllocatorDirtyPageIndices_.size()) *
+                   sizeof(FarLodGpuContext::ExactAllocatorPageMetadata) +
+               static_cast<std::uint64_t>(freeListFullRefresh ? freePageCount : exactGpuAllocatorDirtyFreePageSlots_.size()) *
+                   sizeof(FarLodGpuContext::ExactAllocatorFreePageEntry);
+    };
     const auto fitsEmitPhaseResources = [&](std::size_t buildCount) -> bool
     {
         std::uint64_t emitUploadCursor = 0u;
         std::uint64_t emitReadbackCursor = 0u;
-        const std::size_t maxPageCount = currentExactGpuPageCount + buildCount;
         return appendExactUploadBytes(emitUploadCursor,
                                       sizeof(std::uint32_t),
                                       alignof(std::uint32_t)) &&
                appendExactUploadBytes(emitUploadCursor,
-                                      exactGpuAllocatorStateBytes(),
-                                      alignof(FarLodGpuContext::ExactAllocatorState)) &&
-               appendExactUploadBytes(emitUploadCursor,
-                                      exactGpuAllocatorPageMetadataBytes(maxPageCount),
+                                      pendingExactGpuAllocatorUploadBytes(),
                                       alignof(FarLodGpuContext::ExactAllocatorPageMetadata)) &&
                appendExactUploadBytes(emitUploadCursor,
-                                      exactGpuAllocatorFreePageListBytes(maxPageCount),
-                                      alignof(FarLodGpuContext::ExactAllocatorFreePageEntry)) &&
-               appendExactUploadBytes(emitUploadCursor,
-                                      emitBuildRecordUploadBytes,
+                                      exactBuildRecordUploadBytes(buildCount),
                                       alignof(FarLodGpuContext::ExactChunkAllocationRecord)) &&
+               appendExactUploadBytes(emitUploadCursor,
+                                      exactBatchBuildIndexUploadBytes(buildCount),
+                                      alignof(std::uint32_t)) &&
                appendExactReadbackBytes(emitReadbackCursor,
                                         exactGpuContext_.exactCompletionReadbackBytes(buildCount),
                                         alignof(FarLodGpuContext::ExactCompletionEntry));
@@ -15844,15 +15909,6 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     std::vector<std::uint32_t> descriptorSkyLightValues{};
     descriptorSkyLightValues.reserve(preparedBuilds.size() * kExactChunkColumnCount);
     std::uint64_t exactUploadCursor = 0u;
-    if (!appendExactUploadBytes(exactUploadCursor,
-                                prepassBuildRecordUploadBytes,
-                                alignof(FarLodGpuContext::ExactChunkAllocationRecord)))
-    {
-        requeueRemainingPreparedBuilds(0);
-        discardOpenSubmission();
-        recordSubmitStats(processedRequests);
-        return;
-    }
 
     auto tryStageDescriptorInputs = [&](std::size_t buildIndex) -> bool
     {
@@ -15909,6 +15965,12 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             {
                 return false;
             }
+        }
+        if (!appendExactUploadBytes(candidateCursor,
+                                    exactBuildRecordUploadBytes(buildIndex + 1u),
+                                    alignof(FarLodGpuContext::ExactChunkAllocationRecord)))
+        {
+            return false;
         }
         if (!fitsEmitPhaseResources(buildIndex + 1u))
         {
@@ -16311,7 +16373,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const SteadyClock::time_point commitStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     std::lock_guard<std::mutex> pendingLock(pendingExactGpuBuildsMutex_);
-    const bool hadPendingBuilds = !pendingExactGpuBatches_.empty() || !pendingExactGpuBuilds_.empty();
+    const bool hadPendingBuilds = !pendingExactGpuBatches_.empty();
     const UINT64 completedGpuFenceValue = exactGpuContext_.completedFenceValue();
     const FarLodGpuContext::ExactPassTimings latestExactTimings = exactGpuContext_.latestExactPassTimings();
     if (latestExactTimings.totalMs > 0.0)
@@ -16625,7 +16687,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                 for (std::size_t buildIndex = 0; buildIndex < batch.builds.size(); ++buildIndex)
                                 {
                                     PendingExactGpuBuild& pending = batch.builds[buildIndex];
-                                    pending.batchBuildIndex = static_cast<std::uint32_t>(buildIndex);
                                     Chunk& chunk = *pending.chunk;
                                     const FarLodGpuContext::ExactBuildInputDescriptorIndices descriptorIndices =
                                         exactGpuContext_.writeExactBuildInputDescriptors(chunk.exactGpu.voxelBuffer.Get(),
@@ -16714,17 +16775,17 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             exactGpuChunkAllocationRecordBufferState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
                             transitionAllExactPageOutputs(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-                            for (PendingExactGpuBuild& pending : batch.builds)
-                            {
-                                exactGpuContext_.markExactTimingBegin();
-                                exactGpuContext_.dispatchExactAllocate(pending.scratchSliceIndex,
-                                                                      exactGpuAllocatorStateBuffer_.Get(),
-                                                                      exactGpuAllocatorPageMetadataBuffer_.Get(),
-                                                                      exactGpuAllocatorFreePageListBuffer_.Get(),
-                                                                      exactGpuChunkAllocationRecordBuffer_.Get());
-                                exactGpuContext_.markExactTimingEnd();
-                                exactGpuContext_.uavBarrier(nullptr);
-                            }
+                            const FarLodGpuContext::ScratchAllocation& buildIndexUpload = emitOwnedUploads.back();
+                            exactGpuContext_.markExactTimingBegin();
+                            exactGpuContext_.dispatchExactAllocate(
+                                static_cast<std::uint32_t>(batch.builds.size()),
+                                buildIndexUpload.gpuAddress,
+                                exactGpuAllocatorStateBuffer_.Get(),
+                                exactGpuAllocatorPageMetadataBuffer_.Get(),
+                                exactGpuAllocatorFreePageListBuffer_.Get(),
+                                exactGpuChunkAllocationRecordBuffer_.Get());
+                            exactGpuContext_.markExactTimingEnd();
+                            exactGpuContext_.uavBarrier(nullptr);
 
                             exactGpuContext_.transition(exactGpuAllocatorStateBuffer_.Get(),
                                                         exactGpuAllocatorStateBufferState_,
@@ -16743,7 +16804,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                                         D3D12_RESOURCE_STATE_COMMON);
                             exactGpuChunkAllocationRecordBufferState_ = D3D12_RESOURCE_STATE_COMMON;
 
-                            const FarLodGpuContext::ScratchAllocation& buildIndexUpload = emitOwnedUploads.back();
                             exactGpuContext_.markExactTimingBegin();
                             exactGpuContext_.dispatchExactFaceEmit(
                                 static_cast<std::uint32_t>(batch.builds.size()),
@@ -17046,278 +17106,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             exactGpuCommitCpuMsLastCycle_ = static_cast<double>(commitMicros) / 1000.0;
         }
         return;
-    }
-    if (exactUploadDebugLoggingEnabled() && !pendingExactGpuBuilds_.empty())
-    {
-        std::ostringstream stream;
-        stream << "exact gpu commit begin"
-               << " pending=" << pendingExactGpuBuilds_.size()
-               << " completedFence=" << completedGpuFenceValue;
-        exactUploadDebugLog(stream.str());
-    }
-    auto finalizeBuild = [&](PendingExactGpuBuild& pending, bool keepOutstandingWork)
-    {
-        pending.mappedOverflowCount = nullptr;
-        pending.mappedOverflowEntries = nullptr;
-        pending.overflowEntryCapacity = 0u;
-        if (pending.chunk)
-        {
-            pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
-            if (!keepOutstandingWork)
-            {
-                pending.chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
-            }
-        }
-    };
-    const auto releaseExactGpuScratch = [](Chunk& chunk)
-    {
-        chunk.exactGpu.reset();
-    };
-    const auto releaseExactGpuTransient = [](Chunk& chunk)
-    {
-        chunk.exactGpu.releaseTransient();
-    };
-    const std::array<std::pair<glm::ivec3, std::uint8_t>, 6> seamNeighbors{{
-        {glm::ivec3(1, 0, 0), kExactGpuSeamPosXBit},
-        {glm::ivec3(-1, 0, 0), kExactGpuSeamNegXBit},
-        {glm::ivec3(0, 1, 0), kExactGpuSeamPosYBit},
-        {glm::ivec3(0, -1, 0), kExactGpuSeamNegYBit},
-        {glm::ivec3(0, 0, 1), kExactGpuSeamPosZBit},
-        {glm::ivec3(0, 0, -1), kExactGpuSeamNegZBit},
-    }};
-    auto computeCurrentPendingNeighborMask = [&](const Chunk& targetChunk) -> std::uint8_t
-    {
-        std::uint8_t pendingMask = 0u;
-        for (const auto& [offset, seamBit] : seamNeighbors)
-        {
-            const glm::ivec3 neighborCoord = targetChunk.coord + offset;
-            bool ready = false;
-            {
-                std::lock_guard<std::mutex> lock(chunksMutex);
-                const auto it = chunks_.find(neighborCoord);
-                if (it != chunks_.end() && it->second)
-                {
-                    const Chunk& neighbor = *it->second;
-                    ready = neighbor.exactGpu.voxelBuffer != nullptr &&
-                            neighbor.exactGpu.readyFenceValue != 0 &&
-                            completedGpuFenceValue >= neighbor.exactGpu.readyFenceValue &&
-                            !neighbor.exactGpuBuildInFlight.load(std::memory_order_acquire);
-                }
-            }
-
-            if (!ready)
-            {
-                pendingMask |= seamBit;
-            }
-        }
-
-        return pendingMask;
-    };
-    auto queuePendingNeighborRefreshes = [&](const Chunk& committedChunk)
-    {
-        for (const auto& [offset, seamBit] : seamNeighbors)
-        {
-            const std::shared_ptr<Chunk> neighbor = getChunkShared(committedChunk.coord + offset);
-            if (!neighbor)
-            {
-                continue;
-            }
-
-            const std::uint8_t requiredPendingBit = oppositeExactGpuSeamBit(seamBit);
-            const bool waitingOnCommittedFace =
-                (neighbor->exactGpuPendingNeighborMask.load(std::memory_order_acquire) & requiredPendingBit) != 0u;
-            if (!waitingOnCommittedFace)
-            {
-                continue;
-            }
-            const std::uint8_t currentPendingMask = computeCurrentPendingNeighborMask(*neighbor);
-            if ((currentPendingMask & requiredPendingBit) != 0u)
-            {
-                continue;
-            }
-
-            queueChunkForExactGpuBorderRefresh(neighbor);
-        }
-    };
-
-    std::size_t writeIndex = 0;
-    for (std::size_t i = 0; i < pendingExactGpuBuilds_.size(); ++i)
-    {
-        PendingExactGpuBuild& pending = pendingExactGpuBuilds_[i];
-        if (pending.computeFenceValue == 0 || completedGpuFenceValue < pending.computeFenceValue)
-        {
-            if (writeIndex != i)
-            {
-                pendingExactGpuBuilds_[writeIndex] = std::move(pending);
-            }
-            ++writeIndex;
-            continue;
-        }
-        if (!pending.chunk)
-        {
-            finalizeBuild(pending, false);
-            continue;
-        }
-
-        Chunk& chunk = *pending.chunk;
-        const std::uint32_t currentBuildVersion = chunk.exactGpuBuildVersion.load(std::memory_order_acquire);
-        const std::uint32_t currentGenerationEpoch = chunk.generationEpoch.load(std::memory_order_acquire);
-        if (pending.buildVersion != currentBuildVersion ||
-            pending.generationEpoch != currentGenerationEpoch)
-        {
-            exactGpuBuildStaleCancels_.fetch_add(1, std::memory_order_relaxed);
-            if (pending.allocation.pageIndex < bufferPages_.size() &&
-                pending.allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
-            {
-                clearChunkDrawRecord(bufferPages_[pending.allocation.pageIndex], pending.allocation.recordIndex);
-            }
-            releaseChunkAllocationRange(pending.allocation.pageIndex,
-                                        pending.allocation.vertexOffset,
-                                        static_cast<std::size_t>(pending.faceCapacity) * 4u,
-                                        pending.allocation.indexOffset,
-                                        static_cast<std::size_t>(pending.faceCapacity) * 6u,
-                                        false);
-            releaseExactGpuScratch(chunk);
-            finalizeBuild(pending, chunk.exactGpuBuildQueued.load(std::memory_order_acquire));
-            continue;
-        }
-
-        std::uint32_t actualFaceCount = 0u;
-        bool overflowed = false;
-        if (pending.mappedOverflowCount != nullptr && pending.mappedOverflowEntries != nullptr)
-        {
-            const std::uint32_t overflowEntryCount =
-                std::min(*pending.mappedOverflowCount, pending.overflowEntryCapacity);
-            for (std::uint32_t overflowIndex = 0; overflowIndex < overflowEntryCount; ++overflowIndex)
-            {
-                const FarLodGpuContext::ExactOverflowEntry& entry = pending.mappedOverflowEntries[overflowIndex];
-                if (entry.buildIndex != pending.batchBuildIndex)
-                {
-                    continue;
-                }
-
-                overflowed = true;
-                actualFaceCount = entry.requiredFaces;
-                break;
-            }
-        }
-        if (overflowed)
-        {
-            exactGpuBuildOverflows_.fetch_add(1, std::memory_order_relaxed);
-            queueChunkForExactGpuBuild(pending.chunk, pending.buildVersion);
-            if (pending.allocation.pageIndex < bufferPages_.size() &&
-                pending.allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
-            {
-                clearChunkDrawRecord(bufferPages_[pending.allocation.pageIndex], pending.allocation.recordIndex);
-            }
-            releaseChunkAllocationRange(pending.allocation.pageIndex,
-                                        pending.allocation.vertexOffset,
-                                        static_cast<std::size_t>(pending.faceCapacity) * 4u,
-                                        pending.allocation.indexOffset,
-                                        static_cast<std::size_t>(pending.faceCapacity) * 6u,
-                                        false);
-            releaseExactGpuScratch(chunk);
-            finalizeBuild(pending, true);
-            continue;
-        }
-
-        const std::uint32_t oldPageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
-        const std::size_t oldVertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
-        const std::size_t oldIndexOffset = chunk.indexOffset.load(std::memory_order_acquire);
-        const std::size_t oldVertexCount = chunk.vertexCount.load(std::memory_order_acquire);
-        const std::size_t oldIndexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
-        const std::uint32_t oldRecordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
-        chunk.bufferPageIndex.store(pending.allocation.pageIndex, std::memory_order_release);
-        chunk.vertexOffset.store(pending.allocation.vertexOffset, std::memory_order_release);
-        chunk.indexOffset.store(pending.allocation.indexOffset, std::memory_order_release);
-        chunk.vertexCount.store(0, std::memory_order_release);
-        chunk.indexCount.store(0, std::memory_order_release);
-        chunk.exactGpuRecordIndex.store(pending.allocation.recordIndex, std::memory_order_release);
-        chunk.exactGpuResident.store(true, std::memory_order_release);
-        chunk.exactGpuPendingNeighborMask.store(pending.pendingNeighborMask, std::memory_order_release);
-        chunk.exactGpuReadyVersion.store(pending.inputVersion, std::memory_order_release);
-        chunk.exactGpuHaloDirty.store(false, std::memory_order_release);
-        if (chunk.exactGpuInputsVersion.load(std::memory_order_acquire) == pending.inputVersion)
-        {
-            chunk.exactGpuInputsDirty.store(false, std::memory_order_release);
-        }
-        chunk.state.store(ChunkState::Uploaded, std::memory_order_release);
-        chunk.meshReady.store(false, std::memory_order_release);
-        chunk.residencyMode.store(shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_)
-                                      ? ExactChunkResidencyMode::GpuPendingRetire
-                                      : ExactChunkResidencyMode::GpuResidentNonlocal,
-                                  std::memory_order_release);
-        if (exactUploadDebugLoggingEnabled())
-        {
-            std::ostringstream stream;
-            stream << "exact gpu commit resident chunk=("
-                   << chunk.coord.x << "," << chunk.coord.y << "," << chunk.coord.z << ")"
-                   << " page=" << pending.allocation.pageIndex
-                   << " record=" << pending.allocation.recordIndex
-                   << " faceCapacity=" << pending.faceCapacity
-                   << " overflowReadback=" << (pending.mappedOverflowCount != nullptr ? "y" : "n");
-            exactUploadDebugLog(stream.str());
-        }
-
-        {
-            std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-            if (pending.allocation.pageIndex < bufferPages_.size())
-            {
-                ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
-                if (page.pendingChunks > 0)
-                {
-                    --page.pendingChunks;
-                }
-                ++page.residentChunks;
-                page.recordActiveCount =
-                    std::max(page.recordActiveCount,
-                             static_cast<std::size_t>(pending.allocation.recordIndex + 1u));
-                page.state = ChunkBufferPageState::Resident;
-                page.uploadFenceValue = 0;
-                page.pendingBatchId = 0;
-                releaseChunkBufferPageUploadBuffers(page);
-                queueExactGpuAllocatorPageStateChange(pending.allocation.pageIndex);
-            }
-        }
-
-        if (oldPageIndex != kInvalidChunkBufferPage)
-        {
-            exactGpuMeshReplacements_.fetch_add(1, std::memory_order_relaxed);
-            if (oldPageIndex < bufferPages_.size() &&
-                oldRecordIndex != kInvalidExactGpuDrawRecordIndex)
-            {
-                clearChunkDrawRecord(bufferPages_[oldPageIndex], oldRecordIndex);
-            }
-            releaseChunkAllocationRange(oldPageIndex,
-                                        oldVertexOffset,
-                                        oldVertexCount,
-                                        oldIndexOffset,
-                                        oldIndexCount,
-                                        true);
-        }
-
-        noteChunkReadyLatency(chunk);
-        setStreamingChunkLifecycleState(chunk.coord, FrontierDemandState::Ready);
-        releaseExactGpuTransient(chunk);
-        exactGpuBuildsCommitted_.fetch_add(1, std::memory_order_relaxed);
-        if (!chunk.exactGpuInputsDirty.load(std::memory_order_acquire) &&
-            !chunk.exactGpuBuildQueued.load(std::memory_order_acquire))
-        {
-            std::vector<GpuExactSparseVoxel>().swap(chunk.gpuExactSparseVoxels);
-            chunk.gpuExactSparseVoxelsReady = false;
-        }
-        queuePendingNeighborRefreshes(chunk);
-        finalizeBuild(pending, chunk.exactGpuBuildQueued.load(std::memory_order_acquire));
-    }
-
-    pendingExactGpuBuilds_.resize(writeIndex);
-    if (benchmarkEnabled && hadPendingBuilds)
-    {
-        const std::uint64_t commitMicros = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - commitStart).count());
-        benchmarkMetrics_.exactGpuCommitCpuStage.recordMicros(commitMicros);
-        std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
-        exactGpuCommitCpuMsLastCycle_ = static_cast<double>(commitMicros) / 1000.0;
     }
 }
 

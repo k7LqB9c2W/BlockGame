@@ -257,19 +257,6 @@ public:
         std::uint64_t size{0};
     };
 
-    struct ExactOverflowReadback
-    {
-        ScratchAllocation allocation{};
-        std::uint64_t entryOffset{0};
-    };
-
-    struct ExactFaceTotalsReadback
-    {
-        ScratchAllocation allocation{};
-        std::uint64_t strideBytes{0};
-        std::uint32_t buildCount{0};
-    };
-
     struct ExactCompletionReadback
     {
         ScratchAllocation allocation{};
@@ -1896,96 +1883,6 @@ public:
         return true;
     }
 
-    [[nodiscard]] ExactOverflowReadback queueExactOverflowReadback(std::uint32_t maxEntryCount)
-    {
-        ExactOverflowReadback readback{};
-        if (!open_ || exactOverflowCountScratchBuffer_ == nullptr || exactOverflowEntryScratchBuffer_ == nullptr)
-        {
-            return readback;
-        }
-
-        const std::uint64_t entryOffset = (sizeof(std::uint32_t) + alignof(ExactOverflowEntry) - 1u) /
-                                          alignof(ExactOverflowEntry) * alignof(ExactOverflowEntry);
-        const std::uint64_t totalSize =
-            entryOffset + static_cast<std::uint64_t>(maxEntryCount) * sizeof(ExactOverflowEntry);
-        readback.allocation = allocateReadback(totalSize, alignof(ExactOverflowEntry));
-        readback.entryOffset = entryOffset;
-        if (readback.allocation.resource == nullptr)
-        {
-            return readback;
-        }
-
-        if (exactOverflowCountScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
-        {
-            transition(exactOverflowCountScratchBuffer_.Get(),
-                       exactOverflowCountScratchState_,
-                       D3D12_RESOURCE_STATE_COPY_SOURCE);
-            exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        }
-        if (exactOverflowEntryScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
-        {
-            transition(exactOverflowEntryScratchBuffer_.Get(),
-                       exactOverflowEntryScratchState_,
-                       D3D12_RESOURCE_STATE_COPY_SOURCE);
-            exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        }
-
-        copyBuffer(readback.allocation.resource,
-                   readback.allocation.offset,
-                   exactOverflowCountScratchBuffer_.Get(),
-                   static_cast<std::uint64_t>(activeSubmissionSlotIndex_) * sizeof(std::uint32_t),
-                   sizeof(std::uint32_t));
-        if (maxEntryCount > 0u)
-        {
-            copyBuffer(readback.allocation.resource,
-                       readback.allocation.offset + entryOffset,
-                       exactOverflowEntryScratchBuffer_.Get(),
-                       static_cast<std::uint64_t>(activeSubmissionSlotIndex_) *
-                           static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
-                           sizeof(ExactOverflowEntry),
-                       static_cast<std::uint64_t>(maxEntryCount) * sizeof(ExactOverflowEntry));
-        }
-        return readback;
-    }
-
-    [[nodiscard]] ExactFaceTotalsReadback queueExactFaceTotalsReadback(std::span<const std::uint32_t> buildIndices)
-    {
-        ExactFaceTotalsReadback readback{};
-        if (!open_ || buildIndices.empty() || exactFaceTotalScratchBuffer_ == nullptr)
-        {
-            return readback;
-        }
-
-        const std::uint64_t totalSize =
-            static_cast<std::uint64_t>(buildIndices.size()) * static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
-        readback.allocation = allocateReadback(totalSize, alignof(std::uint32_t));
-        readback.strideBytes = static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes);
-        readback.buildCount = static_cast<std::uint32_t>(buildIndices.size());
-        if (readback.allocation.resource == nullptr)
-        {
-            return readback;
-        }
-
-        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
-        {
-            transition(exactFaceTotalScratchBuffer_.Get(),
-                       exactFaceTotalScratchState_,
-                       D3D12_RESOURCE_STATE_COPY_SOURCE);
-            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        }
-
-        for (std::size_t buildOrdinal = 0; buildOrdinal < buildIndices.size(); ++buildOrdinal)
-        {
-            copyBuffer(readback.allocation.resource,
-                       readback.allocation.offset + buildOrdinal * readback.strideBytes,
-                       exactFaceTotalScratchBuffer_.Get(),
-                       static_cast<std::uint64_t>(buildIndices[buildOrdinal]) *
-                           static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes),
-                       static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes));
-        }
-        return readback;
-    }
-
     [[nodiscard]] ExactCompletionReadback queueExactCompletionReadback(std::span<const std::uint32_t> buildIndices)
     {
         ExactCompletionReadback readback{};
@@ -2345,7 +2242,8 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactAllocate(std::uint32_t buildIndex,
+    void dispatchExactAllocate(std::uint32_t batchBuildCount,
+                               D3D12_GPU_VIRTUAL_ADDRESS batchBuildIndicesAddress,
                                ID3D12Resource* allocatorStateBuffer,
                                ID3D12Resource* pageMetadataBuffer,
                                ID3D12Resource* freePageListBuffer,
@@ -2353,6 +2251,8 @@ public:
     {
         if (!open_ ||
             exactAllocatePipelineState_ == nullptr ||
+            batchBuildCount == 0u ||
+            batchBuildIndicesAddress == 0u ||
             allocatorStateBuffer == nullptr ||
             pageMetadataBuffer == nullptr ||
             freePageListBuffer == nullptr ||
@@ -2378,17 +2278,18 @@ public:
             exactCompletionScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
-        const std::array<std::uint32_t, 1> constants{buildIndex};
+        const std::array<std::uint32_t, 1> constants{batchBuildCount};
         commandList_->SetPipelineState(exactAllocatePipelineState_.Get());
         commandList_->SetComputeRootSignature(exactAllocateRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
         commandList_->SetComputeRootShaderResourceView(1, exactFaceTotalScratchBuffer_->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(2, allocatorStateBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(3, pageMetadataBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(4, freePageListBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(5, buildRecordBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(6, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
-        commandList_->Dispatch(1u, 1u, 1u);
+        commandList_->SetComputeRootShaderResourceView(2, batchBuildIndicesAddress);
+        commandList_->SetComputeRootUnorderedAccessView(3, allocatorStateBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(4, pageMetadataBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(5, freePageListBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(6, buildRecordBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(7, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->Dispatch((batchBuildCount + 63u) / 64u, 1u, 1u);
         hasCommands_ = true;
     }
 
@@ -2753,11 +2654,6 @@ public:
     [[nodiscard]] std::size_t maxInFlightSubmissionSlots() const noexcept
     {
         return static_cast<std::size_t>(kMaxInFlightSubmissionSlots);
-    }
-
-    [[nodiscard]] std::size_t exactFaceTotalsReadbackBytes(std::size_t buildCount) const noexcept
-    {
-        return buildCount * static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes);
     }
 
     [[nodiscard]] std::size_t exactCompletionReadbackBytes(std::size_t buildCount) const noexcept
@@ -3645,16 +3541,18 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactPrefixPso, IID_PPV_ARGS(&exactFacePrefixPipelineState_)),
                         "failed to create exact chunk face prefix pipeline");
 
-        std::array<D3D12_ROOT_PARAMETER, 7> exactAllocateParams{};
+        std::array<D3D12_ROOT_PARAMETER, 8> exactAllocateParams{};
         exactAllocateParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactAllocateParams[0].Constants.ShaderRegister = 0;
         exactAllocateParams[0].Constants.Num32BitValues = 1;
         exactAllocateParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         exactAllocateParams[1].Descriptor.ShaderRegister = 0;
-        for (UINT parameterIndex = 2; parameterIndex <= 6; ++parameterIndex)
+        exactAllocateParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        exactAllocateParams[2].Descriptor.ShaderRegister = 1;
+        for (UINT parameterIndex = 3; parameterIndex <= 7; ++parameterIndex)
         {
             exactAllocateParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-            exactAllocateParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 2;
+            exactAllocateParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 3;
         }
         D3D12_ROOT_SIGNATURE_DESC exactAllocateDesc{};
         exactAllocateDesc.NumParameters = static_cast<UINT>(exactAllocateParams.size());

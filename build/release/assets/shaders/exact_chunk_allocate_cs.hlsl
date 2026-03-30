@@ -2,13 +2,14 @@
 
 cbuffer ExactChunkAllocateParams : register(b0)
 {
-    uint gBuildIndex;
+    uint gBatchBuildCount;
     uint gReserved0;
     uint gReserved1;
     uint gReserved2;
 };
 
 StructuredBuffer<uint> gFaceTotalScratch : register(t0);
+StructuredBuffer<uint> gBatchBuildIndices : register(t1);
 RWStructuredBuffer<GpuExactAllocatorState> gAllocatorStateBuffer : register(u0);
 RWStructuredBuffer<GpuExactAllocatorPageMetadata> gPageMetadata : register(u1);
 RWStructuredBuffer<GpuExactAllocatorFreePageEntry> gFreePageList : register(u2);
@@ -17,10 +18,10 @@ RWStructuredBuffer<GpuExactCompletionEntry> gCompletionEntries : register(u4);
 
 static const uint kExactFaceTotalScratchStride = 64u;
 
-GpuExactCompletionEntry makeBaseCompletion(GpuExactChunkAllocationRecord build, uint requiredFaces)
+GpuExactCompletionEntry makeBaseCompletion(uint buildIndex, GpuExactChunkAllocationRecord build, uint requiredFaces)
 {
     GpuExactCompletionEntry completion = (GpuExactCompletionEntry)0;
-    completion.buildIndex = gBuildIndex;
+    completion.buildIndex = buildIndex;
     completion.requiredFaces = requiredFaces;
     completion.reservedFaceCapacity = 0u;
     completion.chunkWorldMinX = build.chunkWorldMinX;
@@ -202,24 +203,29 @@ bool tryReserveFromFreePages(uint requiredFaces,
     return reserved;
 }
 
-[numthreads(1, 1, 1)]
+[numthreads(64, 1, 1)]
 void ExactChunkAllocateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    (void)dispatchThreadId;
-
-    const GpuExactAllocatorState allocatorState = gAllocatorStateBuffer[0];
-    if (gBuildIndex >= allocatorState.buildRecordCount)
+    const uint buildOrdinal = dispatchThreadId.x;
+    if (buildOrdinal >= gBatchBuildCount)
     {
         return;
     }
 
-    GpuExactChunkAllocationRecord build = gBuildRecords[gBuildIndex];
+    const GpuExactAllocatorState allocatorState = gAllocatorStateBuffer[0];
+    const uint buildIndex = gBatchBuildIndices[buildOrdinal];
+    if (buildIndex >= allocatorState.buildRecordCount)
+    {
+        return;
+    }
+
+    GpuExactChunkAllocationRecord build = gBuildRecords[buildIndex];
     if (build.phase != kExactChunkAllocationPhasePrepassSubmitted)
     {
         return;
     }
 
-    const uint requiredFaces = gFaceTotalScratch[gBuildIndex * kExactFaceTotalScratchStride];
+    const uint requiredFaces = gFaceTotalScratch[buildIndex * kExactFaceTotalScratchStride];
     build.requiredFaceCount = requiredFaces;
     build.pageIndex = kInvalidExactPageIndex;
     build.recordIndex = kInvalidExactRecordIndex;
@@ -228,13 +234,13 @@ void ExactChunkAllocateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     build.reservedFaceCapacity = 0u;
     build.statusFlags = 0u;
 
-    GpuExactCompletionEntry completion = makeBaseCompletion(build, requiredFaces);
+    GpuExactCompletionEntry completion = makeBaseCompletion(buildIndex, build, requiredFaces);
     if (requiredFaces == 0u)
     {
         build.statusFlags = kExactCompletionStatusCompletedBit | kExactCompletionStatusZeroFacesBit;
         completion.statusFlags = build.statusFlags;
-        gBuildRecords[gBuildIndex] = build;
-        gCompletionEntries[gBuildIndex] = completion;
+        gBuildRecords[buildIndex] = build;
+        gCompletionEntries[buildIndex] = completion;
         return;
     }
 
@@ -265,8 +271,8 @@ void ExactChunkAllocateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         build.statusFlags = kExactCompletionStatusAllocatorExhaustedBit;
         completion.statusFlags = kExactCompletionStatusAllocatorExhaustedBit;
-        gBuildRecords[gBuildIndex] = build;
-        gCompletionEntries[gBuildIndex] = completion;
+        gBuildRecords[buildIndex] = build;
+        gCompletionEntries[buildIndex] = completion;
         return;
     }
 
@@ -275,6 +281,6 @@ void ExactChunkAllocateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     completion.vertexBase = build.vertexBase;
     completion.indexBase = build.indexBase;
     completion.reservedFaceCapacity = build.reservedFaceCapacity;
-    gBuildRecords[gBuildIndex] = build;
-    gCompletionEntries[gBuildIndex] = completion;
+    gBuildRecords[buildIndex] = build;
+    gCompletionEntries[buildIndex] = completion;
 }

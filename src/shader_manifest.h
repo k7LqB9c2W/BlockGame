@@ -46,14 +46,14 @@ inline constexpr std::array<ShaderCompileSpec, 40> kBlockGameShaderCompileSpecs{
     {"far_lod_chunk_face_prefix_cs.hlsl", "FarLodChunkFacePrefixScanMain", "cs_5_0"},
     {"far_lod_chunk_face_prefix_cs.hlsl", "FarLodChunkFacePrefixAddMain", "cs_5_0"},
     {"far_lod_chunk_face_emit_cs.hlsl", "FarLodChunkFaceEmitMain", "cs_5_0"},
-    {"exact_chunk_descriptor_gen_cs.hlsl", "ExactChunkDescriptorGenMain", "cs_5_0"},
-    {"exact_chunk_synth_cs.hlsl", "ExactChunkSynthMain", "cs_5_0"},
-    {"exact_chunk_structure_stamp_cs.hlsl", "ExactChunkStructureStampMain", "cs_5_0"},
-    {"exact_chunk_halo_cache_cs.hlsl", "ExactChunkHaloCacheMain", "cs_5_0"},
-    {"exact_chunk_light_cs.hlsl", "ExactChunkLightMain", "cs_5_0"},
-    {"exact_chunk_face_count_cs.hlsl", "ExactChunkFaceCountMain", "cs_5_0"},
-    {"exact_chunk_face_prefix_cs.hlsl", "ExactChunkFacePrefixMain", "cs_5_0"},
-    {"exact_chunk_face_emit_cs.hlsl", "ExactChunkFaceEmitMain", "cs_5_0"},
+    {"exact_chunk_descriptor_gen_cs.hlsl", "ExactChunkDescriptorGenMain", "cs_6_6"},
+    {"exact_chunk_synth_cs.hlsl", "ExactChunkSynthMain", "cs_6_6"},
+    {"exact_chunk_structure_stamp_cs.hlsl", "ExactChunkStructureStampMain", "cs_6_6"},
+    {"exact_chunk_halo_cache_cs.hlsl", "ExactChunkHaloCacheMain", "cs_6_6"},
+    {"exact_chunk_light_cs.hlsl", "ExactChunkLightMain", "cs_6_6"},
+    {"exact_chunk_face_count_cs.hlsl", "ExactChunkFaceCountMain", "cs_6_6"},
+    {"exact_chunk_face_prefix_cs.hlsl", "ExactChunkFacePrefixMain", "cs_6_6"},
+    {"exact_chunk_face_emit_cs.hlsl", "ExactChunkFaceEmitMain", "cs_6_6"},
 }};
 
 inline std::string sanitizeShaderName(std::string_view value)

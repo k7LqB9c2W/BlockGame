@@ -145,16 +145,38 @@ if (NOT DEFINED VCPKG_TARGET_TRIPLET)
     set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "Vcpkg target triplet")
 endif()
 
+if (DEFINED VCPKG_INSTALLED_DIR AND EXISTS "${VCPKG_INSTALLED_DIR}")
+    set(BLOCKGAME_VCPKG_INSTALLED_DIR "${VCPKG_INSTALLED_DIR}")
+elseif (DEFINED ENV{VCPKG_ROOT} AND EXISTS "$ENV{VCPKG_ROOT}/installed")
+    set(BLOCKGAME_VCPKG_INSTALLED_DIR "$ENV{VCPKG_ROOT}/installed")
+elseif (EXISTS "C:/vcpkg/installed")
+    set(BLOCKGAME_VCPKG_INSTALLED_DIR "C:/vcpkg/installed")
+else()
+    message(FATAL_ERROR "Unable to locate the vcpkg installed directory required for the DirectX 12 Agility SDK runtime.")
+endif()
+
+set(BLOCKGAME_D3D12_AGILITY_CORE
+    "${BLOCKGAME_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/D3D12Core.dll")
+set(BLOCKGAME_D3D12_AGILITY_LAYERS
+    "${BLOCKGAME_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/bin/d3d12SDKLayers.dll")
+
+if (NOT EXISTS "${BLOCKGAME_D3D12_AGILITY_CORE}" OR NOT EXISTS "${BLOCKGAME_D3D12_AGILITY_LAYERS}")
+    message(FATAL_ERROR
+        "The DirectX 12 Agility SDK runtime was not found. Install directx12-agility:${VCPKG_TARGET_TRIPLET} via vcpkg.")
+endif()
+
 find_package(glfw3 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(directx-headers CONFIG REQUIRED)
 
 target_link_libraries(blockgame
     PRIVATE
         glfw
         imgui::imgui
+        Microsoft::DirectX-Headers
+        Microsoft::DirectX-Guids
         d3d12
         dxgi
-        dxguid
         Dbghelp
         d3dcompiler
         user32
@@ -176,6 +198,19 @@ add_custom_command(TARGET blockgame POST_BUILD
         $<TARGET_FILE_DIR:blockgame>
     COMMAND_EXPAND_LISTS
     COMMENT "Copying runtime DLLs"
+)
+
+add_custom_command(TARGET blockgame POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:blockgame>/D3D12"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${BLOCKGAME_D3D12_AGILITY_CORE}"
+        "$<TARGET_FILE_DIR:blockgame>/D3D12"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${BLOCKGAME_D3D12_AGILITY_LAYERS}"
+        "$<TARGET_FILE_DIR:blockgame>/D3D12"
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copying DirectX 12 Agility SDK runtime"
 )
 
 if (EXISTS "${CMAKE_SOURCE_DIR}/block_atlas.png")

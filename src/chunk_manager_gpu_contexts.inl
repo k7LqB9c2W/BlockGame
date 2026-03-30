@@ -270,6 +270,13 @@ public:
         std::uint32_t buildCount{0};
     };
 
+    struct ExactCompletionReadback
+    {
+        ScratchAllocation allocation{};
+        std::uint64_t strideBytes{0};
+        std::uint32_t buildCount{0};
+    };
+
     struct ExactOverflowEntry
     {
         std::uint32_t buildIndex{0};
@@ -277,6 +284,120 @@ public:
         std::uint32_t reserved0{0};
         std::uint32_t reserved1{0};
     };
+
+    struct ExactAllocatorState
+    {
+        std::uint32_t pageCount{0};
+        std::uint32_t freePageCount{0};
+        std::uint32_t buildRecordCount{0};
+        std::uint32_t blockFaceUvDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+    };
+
+    struct ExactAllocatorPageMetadata
+    {
+        std::uint32_t pageIndex{0};
+        std::uint32_t usage{0};
+        std::uint32_t state{0};
+        std::uint32_t allocationLockWord{0};
+        std::uint32_t recordCapacity{0};
+        std::uint32_t vertexCapacity{0};
+        std::uint32_t indexCapacity{0};
+        std::uint32_t reserved0{0};
+        std::uint32_t vertexCursor{0};
+        std::uint32_t indexCursor{0};
+        std::uint32_t recordCursor{0};
+        std::uint32_t recordActiveCount{0};
+        std::uint32_t residentChunks{0};
+        std::uint32_t pendingChunks{0};
+        std::uint32_t vertexUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t indexUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t drawRecordUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t drawRecordMetadataUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t pendingBatchIdLo{0};
+        std::uint32_t pendingBatchIdHi{0};
+        std::uint32_t uploadFenceValueLo{0};
+        std::uint32_t uploadFenceValueHi{0};
+        std::uint32_t retireFenceValueLo{0};
+        std::uint32_t retireFenceValueHi{0};
+    };
+
+    struct ExactAllocatorFreePageEntry
+    {
+        std::uint32_t pageIndex{0};
+    };
+
+    struct ExactChunkAllocationRecord
+    {
+        std::int32_t chunkWorldMinX{0};
+        std::int32_t chunkWorldMinY{0};
+        std::int32_t chunkWorldMinZ{0};
+        std::uint32_t phase{0};
+        std::uint32_t statusFlags{0};
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+        std::uint32_t requiredFaceCount{0};
+        std::uint32_t pageIndex{0};
+        std::uint32_t recordIndex{0};
+        std::uint32_t vertexBase{0};
+        std::uint32_t indexBase{0};
+        std::uint32_t reservedFaceCapacity{0};
+        std::uint32_t centerVoxelSrvDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t haloSrvDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t reserved0{0};
+        std::uint32_t inputVersionLo{0};
+        std::uint32_t inputVersionHi{0};
+        std::uint32_t reserved1{0};
+        std::uint32_t reserved2{0};
+    };
+
+    struct ExactDrawRecordMetadata
+    {
+        std::int32_t chunkWorldMinX{0};
+        std::int32_t chunkWorldMinY{0};
+        std::int32_t chunkWorldMinZ{0};
+        std::uint32_t pageIndex{0};
+        std::uint32_t recordIndex{0};
+        std::uint32_t buildIndex{0};
+        std::uint32_t vertexBase{0};
+        std::uint32_t indexBase{0};
+        std::uint32_t faceCount{0};
+        std::uint32_t statusFlags{0};
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+        std::uint32_t inputVersionLo{0};
+        std::uint32_t inputVersionHi{0};
+        std::uint32_t reserved0{0};
+        std::uint32_t reserved1{0};
+    };
+
+    struct ExactCompletionEntry
+    {
+        std::uint32_t buildIndex{0};
+        std::uint32_t statusFlags{0};
+        std::uint32_t requiredFaces{0};
+        std::uint32_t reservedFaceCapacity{0};
+        std::int32_t chunkWorldMinX{0};
+        std::int32_t chunkWorldMinY{0};
+        std::int32_t chunkWorldMinZ{0};
+        std::uint32_t pageIndex{0};
+        std::uint32_t recordIndex{0};
+        std::uint32_t vertexBase{0};
+        std::uint32_t indexBase{0};
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+        std::uint32_t inputVersionLo{0};
+        std::uint32_t inputVersionHi{0};
+        std::uint32_t reserved0{0};
+    };
+
+    static constexpr std::uint32_t kInvalidDescriptorIndex = std::numeric_limits<std::uint32_t>::max();
+
+    static_assert(sizeof(ExactAllocatorState) == 16u);
+    static_assert(sizeof(ExactAllocatorPageMetadata) == 96u);
+    static_assert(sizeof(ExactAllocatorFreePageEntry) == 4u);
+    static_assert(sizeof(ExactChunkAllocationRecord) == 80u);
+    static_assert(sizeof(ExactDrawRecordMetadata) == 64u);
+    static_assert(sizeof(ExactCompletionEntry) == 64u);
 
     struct FlushResult
     {
@@ -430,6 +551,7 @@ public:
         exactFaceTotalScratchBuffer_.Reset();
         exactOverflowCountScratchBuffer_.Reset();
         exactOverflowEntryScratchBuffer_.Reset();
+        exactCompletionScratchBuffer_.Reset();
         exactTimestampReadbackBuffer_.Reset();
         exactTimestampQueryHeap_.Reset();
         readbackScratch_.Reset();
@@ -453,6 +575,7 @@ public:
         readbackEnabled_ = false;
         uploadCursor_ = 0;
         readbackCursor_ = 0;
+        persistentDescriptorCursor_ = 0;
         lastSubmittedFenceValue_ = 0;
         fenceValue_ = 0;
         exactTimestampFrequency_ = 0;
@@ -462,6 +585,7 @@ public:
         exactTimingPending_ = false;
         exactTimingCaptureActive_ = false;
         exactLastCompletedTimings_ = {};
+        exactCompletionScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         activeSubmissionSlotIndex_ = std::numeric_limits<std::uint32_t>::max();
         submissionSlotCursor_ = 0;
     }
@@ -1732,15 +1856,25 @@ public:
                    static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(sizeof(ExactOverflowEntry));
     }
 
-    bool clearExactOverflowCounter()
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS exactCompletionScratchAddress(std::uint32_t buildIndex) const noexcept
     {
-        if (!open_ || exactOverflowCountScratchBuffer_ == nullptr)
+        if (exactCompletionScratchBuffer_ == nullptr || buildIndex >= kMaxExactGpuBuildBatches)
         {
-            return false;
+            return 0;
         }
 
-        const ScratchAllocation zeroUpload = allocateUpload(sizeof(std::uint32_t), alignof(std::uint32_t));
-        if (zeroUpload.resource == nullptr || zeroUpload.cpuPtr == nullptr)
+        return exactCompletionScratchBuffer_->GetGPUVirtualAddress() +
+               static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(buildIndex) *
+                   static_cast<D3D12_GPU_VIRTUAL_ADDRESS>(sizeof(ExactCompletionEntry));
+    }
+
+    bool clearExactOverflowCounter(const ScratchAllocation& zeroUpload)
+    {
+        if (!open_ ||
+            exactOverflowCountScratchBuffer_ == nullptr ||
+            zeroUpload.resource == nullptr ||
+            zeroUpload.cpuPtr == nullptr ||
+            zeroUpload.size < sizeof(std::uint32_t))
         {
             return false;
         }
@@ -1848,6 +1982,43 @@ public:
                        static_cast<std::uint64_t>(buildIndices[buildOrdinal]) *
                            static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes),
                        static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes));
+        }
+        return readback;
+    }
+
+    [[nodiscard]] ExactCompletionReadback queueExactCompletionReadback(std::span<const std::uint32_t> buildIndices)
+    {
+        ExactCompletionReadback readback{};
+        if (!open_ || buildIndices.empty() || exactCompletionScratchBuffer_ == nullptr)
+        {
+            return readback;
+        }
+
+        const std::uint64_t totalSize =
+            static_cast<std::uint64_t>(buildIndices.size()) * sizeof(ExactCompletionEntry);
+        readback.allocation = allocateReadback(totalSize, alignof(ExactCompletionEntry));
+        readback.strideBytes = sizeof(ExactCompletionEntry);
+        readback.buildCount = static_cast<std::uint32_t>(buildIndices.size());
+        if (readback.allocation.resource == nullptr)
+        {
+            return readback;
+        }
+
+        if (exactCompletionScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        {
+            transition(exactCompletionScratchBuffer_.Get(),
+                       exactCompletionScratchState_,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            exactCompletionScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+
+        for (std::size_t buildOrdinal = 0; buildOrdinal < buildIndices.size(); ++buildOrdinal)
+        {
+            copyBuffer(readback.allocation.resource,
+                       readback.allocation.offset + buildOrdinal * readback.strideBytes,
+                       exactCompletionScratchBuffer_.Get(),
+                       static_cast<std::uint64_t>(buildIndices[buildOrdinal]) * sizeof(ExactCompletionEntry),
+                       sizeof(ExactCompletionEntry));
         }
         return readback;
     }
@@ -2174,37 +2345,24 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactFaceEmit(const glm::ivec3& worldMin,
-                               std::uint32_t vertexBase,
-                               std::uint32_t indexBase,
-                               std::uint32_t recordIndex,
-                               std::uint32_t reservedFaceCapacity,
-                               std::uint32_t resolvedNeighborMask,
-                               std::uint32_t closedNeighborMask,
-                               std::uint32_t buildIndex,
-                               D3D12_GPU_VIRTUAL_ADDRESS columnBufferAddress,
-                               ID3D12Resource* centerVoxelBuffer,
-                               ID3D12Resource* haloBuffer,
-                               ID3D12Resource* blockUvBuffer,
-                               ID3D12Resource* vertexBuffer,
-                               ID3D12Resource* indexBuffer,
-                               ID3D12Resource* drawRecordBuffer)
+    void dispatchExactFaceEmit(std::uint32_t buildIndex,
+                               ID3D12Resource* allocatorStateBuffer,
+                               ID3D12Resource* buildRecordBuffer,
+                               ID3D12Resource* pageMetadataBuffer)
     {
         if (!open_ ||
             exactFaceEmitPipelineState_ == nullptr ||
-            columnBufferAddress == 0u ||
-            centerVoxelBuffer == nullptr ||
-            haloBuffer == nullptr ||
-            blockUvBuffer == nullptr ||
-            vertexBuffer == nullptr ||
-            indexBuffer == nullptr ||
-            drawRecordBuffer == nullptr ||
+            allocatorStateBuffer == nullptr ||
+            buildRecordBuffer == nullptr ||
+            pageMetadataBuffer == nullptr ||
+            descriptorHeap_ == nullptr ||
             exactFaceCountScratchBuffer_ == nullptr ||
             exactFaceDescriptorScratchBuffer_ == nullptr ||
             exactFacePrefixScratchBuffer_ == nullptr ||
-            exactFaceTotalScratchBuffer_ == nullptr ||
+            exactDescriptorScratchBuffer_ == nullptr ||
             exactOverflowCountScratchBuffer_ == nullptr ||
-            exactOverflowEntryScratchBuffer_ == nullptr)
+            exactOverflowEntryScratchBuffer_ == nullptr ||
+            exactCompletionScratchBuffer_ == nullptr)
         {
             return;
         }
@@ -2230,13 +2388,6 @@ public:
                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
-        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-        {
-            transition(exactFaceTotalScratchBuffer_.Get(),
-                       exactFaceTotalScratchState_,
-                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        }
         if (exactOverflowCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         {
             transition(exactOverflowCountScratchBuffer_.Get(),
@@ -2251,71 +2402,39 @@ public:
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
+        if (exactCompletionScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(exactCompletionScratchBuffer_.Get(),
+                       exactCompletionScratchState_,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            exactCompletionScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        if (exactDescriptorScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        {
+            transition(exactDescriptorScratchBuffer_.Get(),
+                       exactDescriptorScratchState_,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            exactDescriptorScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
 
-        const std::array<std::uint32_t, 12> constants{
-            static_cast<std::uint32_t>(worldMin.x),
-            static_cast<std::uint32_t>(worldMin.y),
-            static_cast<std::uint32_t>(worldMin.z),
-            kExactChunkPlaneCount,
-            vertexBase,
-            indexBase,
-            recordIndex,
-            reservedFaceCapacity,
-            resolvedNeighborMask,
-            closedNeighborMask,
-            buildIndex,
-            0u};
+        const std::array<std::uint32_t, 1> constants{buildIndex};
+        ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
+        commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactFaceEmitPipelineState_.Get());
         commandList_->SetComputeRootSignature(exactFaceEmitRootSignature_.Get());
         commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
-        commandList_->SetComputeRootShaderResourceView(1, columnBufferAddress);
-        commandList_->SetComputeRootShaderResourceView(2, centerVoxelBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(3, haloBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(4, exactFaceCountScratchAddress(buildIndex));
-        commandList_->SetComputeRootShaderResourceView(5, exactFaceDescriptorScratchAddress(buildIndex));
-        commandList_->SetComputeRootShaderResourceView(6, exactFacePrefixScratchAddress(buildIndex));
-        commandList_->SetComputeRootShaderResourceView(7, exactFaceTotalScratchAddress(buildIndex));
-        commandList_->SetComputeRootShaderResourceView(8, blockUvBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(9, vertexBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(10, indexBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(11, drawRecordBuffer->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(12, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
-        commandList_->SetComputeRootUnorderedAccessView(13, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootShaderResourceView(1, allocatorStateBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(2, buildRecordBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(3, pageMetadataBuffer->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(4, exactDescriptorScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(5, exactFaceCountScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(6, exactFaceDescriptorScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(7, exactFacePrefixScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(8, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(9, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(10, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
         commandList_->Dispatch(kExactChunkPlaneCount, 1u, 1u);
         hasCommands_ = true;
-    }
-
-    void dispatchExactFaceEmit(const glm::ivec3& worldMin,
-                               std::uint32_t vertexBase,
-                               std::uint32_t indexBase,
-                               std::uint32_t recordIndex,
-                               std::uint32_t reservedFaceCapacity,
-                               std::uint32_t resolvedNeighborMask,
-                               std::uint32_t closedNeighborMask,
-                               std::uint32_t buildIndex,
-                               ID3D12Resource* columnBuffer,
-                               ID3D12Resource* centerVoxelBuffer,
-                               ID3D12Resource* haloBuffer,
-                               ID3D12Resource* blockUvBuffer,
-                               ID3D12Resource* vertexBuffer,
-                               ID3D12Resource* indexBuffer,
-                               ID3D12Resource* drawRecordBuffer)
-    {
-        dispatchExactFaceEmit(worldMin,
-                              vertexBase,
-                              indexBase,
-                              recordIndex,
-                              reservedFaceCapacity,
-                              resolvedNeighborMask,
-                              closedNeighborMask,
-                              buildIndex,
-                              (columnBuffer != nullptr) ? columnBuffer->GetGPUVirtualAddress() : 0u,
-                              centerVoxelBuffer,
-                              haloBuffer,
-                              blockUvBuffer,
-                              vertexBuffer,
-                              indexBuffer,
-                              drawRecordBuffer);
     }
 
     [[nodiscard]] FlushResult flush()
@@ -2472,7 +2591,8 @@ public:
                exactFacePrefixScratchBuffer_ != nullptr &&
                exactFaceTotalScratchBuffer_ != nullptr &&
                exactOverflowCountScratchBuffer_ != nullptr &&
-               exactOverflowEntryScratchBuffer_ != nullptr;
+               exactOverflowEntryScratchBuffer_ != nullptr &&
+               exactCompletionScratchBuffer_ != nullptr;
     }
 
     [[nodiscard]] UINT64 completedFenceValue() const noexcept
@@ -2567,6 +2687,7 @@ public:
                     static_cast<std::size_t>(kExactFacePrefixScratchSliceBytes) +
                static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes)) +
                descriptorScratchBytes +
+               static_cast<std::size_t>(kMaxExactGpuBuildBatches) * sizeof(ExactCompletionEntry) +
                static_cast<std::size_t>(kMaxInFlightSubmissionSlots) * sizeof(std::uint32_t) +
                static_cast<std::size_t>(kMaxInFlightSubmissionSlots) *
                    static_cast<std::size_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry);
@@ -2577,9 +2698,86 @@ public:
         return static_cast<std::size_t>(kMaxExactGpuBuildBatches);
     }
 
+    [[nodiscard]] std::size_t maxInFlightSubmissionSlots() const noexcept
+    {
+        return static_cast<std::size_t>(kMaxInFlightSubmissionSlots);
+    }
+
+    [[nodiscard]] std::size_t exactFaceTotalsReadbackBytes(std::size_t buildCount) const noexcept
+    {
+        return buildCount * static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes);
+    }
+
+    [[nodiscard]] std::size_t exactCompletionReadbackBytes(std::size_t buildCount) const noexcept
+    {
+        return buildCount * sizeof(ExactCompletionEntry);
+    }
+
     [[nodiscard]] const std::byte* readbackMappedData() const noexcept
     {
         return readbackScratchMapped_;
+    }
+
+    [[nodiscard]] UINT allocatePersistentDescriptorRange(UINT descriptorCount)
+    {
+        if (persistentDescriptorCursor_ + descriptorCount > kDescriptorHeapPersistentDescriptorCount)
+        {
+            throw std::runtime_error("far lod compute persistent descriptor heap exhausted");
+        }
+
+        const UINT baseIndex = persistentDescriptorCursor_;
+        persistentDescriptorCursor_ += descriptorCount;
+        return baseIndex;
+    }
+
+    void writePersistentStructuredSrvDescriptor(std::uint32_t descriptorIndex,
+                                                ID3D12Resource* resource,
+                                                std::uint64_t byteOffset,
+                                                std::uint32_t elementCount,
+                                                std::uint32_t strideBytes)
+    {
+        writeStructuredSrvDescriptor(descriptorIndex, resource, byteOffset, elementCount, strideBytes);
+    }
+
+    void writePersistentStructuredUavDescriptor(std::uint32_t descriptorIndex,
+                                                ID3D12Resource* resource,
+                                                std::uint64_t byteOffset,
+                                                std::uint32_t elementCount,
+                                                std::uint32_t strideBytes)
+    {
+        writeStructuredUavDescriptor(descriptorIndex, resource, byteOffset, elementCount, strideBytes);
+    }
+
+    struct ExactBuildInputDescriptorIndices
+    {
+        std::uint32_t centerVoxelSrvDescriptorIndex{kInvalidDescriptorIndex};
+        std::uint32_t haloSrvDescriptorIndex{kInvalidDescriptorIndex};
+    };
+
+    [[nodiscard]] ExactBuildInputDescriptorIndices writeExactBuildInputDescriptors(
+        ID3D12Resource* centerVoxelBuffer,
+        ID3D12Resource* haloBuffer)
+    {
+        ExactBuildInputDescriptorIndices indices{};
+        if (centerVoxelBuffer == nullptr || haloBuffer == nullptr)
+        {
+            return indices;
+        }
+
+        const UINT descriptorIndex = allocateDescriptorRange(2u);
+        writeStructuredSrvDescriptor(descriptorIndex,
+                                     centerVoxelBuffer,
+                                     0,
+                                     kExactChunkVoxelCount,
+                                     kExactChunkPackedVoxelStrideBytes);
+        writeStructuredSrvDescriptor(descriptorIndex + 1u,
+                                     haloBuffer,
+                                     0,
+                                     kExactChunkHaloVoxelCount,
+                                     kExactChunkPackedVoxelStrideBytes);
+        indices.centerVoxelSrvDescriptorIndex = descriptorIndex;
+        indices.haloSrvDescriptorIndex = descriptorIndex + 1u;
+        return indices;
     }
 
 private:
@@ -2640,6 +2838,10 @@ private:
     static constexpr std::uint32_t kExactChunkColumnCount = kExactChunkSize * kExactChunkSize;
     static constexpr std::uint32_t kExactChunkVoxelCount =
         kExactChunkSize * kExactChunkSize * kExactChunkSize;
+    static constexpr std::uint32_t kExactChunkHaloFaceCount = 6u;
+    static constexpr std::uint32_t kExactChunkHaloFaceVoxelCount = kExactChunkSize * kExactChunkSize;
+    static constexpr std::uint32_t kExactChunkHaloVoxelCount =
+        kExactChunkHaloFaceCount * kExactChunkHaloFaceVoxelCount;
     static constexpr std::uint32_t kExactChunkPlaneCount = 102u;
     static constexpr std::uint32_t kExactChunkPlaneDispatchGroupCount =
         (kExactChunkPlaneCount + 63u) / 64u;
@@ -2678,7 +2880,10 @@ private:
     static constexpr std::uint32_t kMaxInFlightSubmissionSlots = 4u;
     static constexpr UINT kExactTimestampQueriesPerBuild = 12u;
     static constexpr UINT kExactTimestampQueryCount = kExactTimestampQueriesPerBuild * kMaxExactGpuBuildBatches;
-    static constexpr UINT kDescriptorHeapDescriptorCount = 2048u;
+    static constexpr UINT kDescriptorHeapPersistentDescriptorCount = 4096u;
+    static constexpr UINT kDescriptorHeapSubmissionDescriptorCount = 4096u;
+    static constexpr UINT kDescriptorHeapDescriptorCount =
+        kDescriptorHeapPersistentDescriptorCount + kDescriptorHeapSubmissionDescriptorCount;
     static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
     static constexpr std::uint64_t kReadbackScratchSizeBytes = 4ull * 1024ull * 1024ull;
     static constexpr std::uint64_t kUploadScratchBytesPerSubmission =
@@ -2686,7 +2891,7 @@ private:
     static constexpr std::uint64_t kReadbackScratchBytesPerSubmission =
         kReadbackScratchSizeBytes / kMaxInFlightSubmissionSlots;
     static constexpr UINT kDescriptorHeapDescriptorsPerSubmission =
-        kDescriptorHeapDescriptorCount / kMaxInFlightSubmissionSlots;
+        kDescriptorHeapSubmissionDescriptorCount / kMaxInFlightSubmissionSlots;
 
     void createExactResources()
     {
@@ -2727,6 +2932,11 @@ private:
                 static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) * sizeof(ExactOverflowEntry),
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        exactCompletionScratchBuffer_ = createDefaultBuffer(
+            device_.Get(),
+            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) * sizeof(ExactCompletionEntry),
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         setDebugObjectName(exactFaceCountScratchBuffer_.Get(), L"ExactChunkFaceCountScratch");
         setDebugObjectName(exactFaceDescriptorScratchBuffer_.Get(), L"ExactChunkFaceDescriptorScratch");
         setDebugObjectName(exactFacePrefixScratchBuffer_.Get(), L"ExactChunkFacePrefixScratch");
@@ -2734,6 +2944,7 @@ private:
         setDebugObjectName(exactDescriptorScratchBuffer_.Get(), L"ExactChunkDescriptorScratch");
         setDebugObjectName(exactOverflowCountScratchBuffer_.Get(), L"ExactChunkOverflowCountScratch");
         setDebugObjectName(exactOverflowEntryScratchBuffer_.Get(), L"ExactChunkOverflowEntryScratch");
+        setDebugObjectName(exactCompletionScratchBuffer_.Get(), L"ExactChunkCompletionScratch");
         exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_COMMON;
@@ -2741,6 +2952,7 @@ private:
         exactDescriptorScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactOverflowCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactOverflowEntryScratchState_ = D3D12_RESOURCE_STATE_COMMON;
+        exactCompletionScratchState_ = D3D12_RESOURCE_STATE_COMMON;
     }
 
     void createExactTimestampResources()
@@ -2798,7 +3010,9 @@ private:
         {
             throw std::runtime_error("far lod compute descriptor heap exhausted");
         }
-        const UINT baseIndex = activeSubmissionSlotIndex_ * kDescriptorHeapDescriptorsPerSubmission + descriptorCursor_;
+        const UINT baseIndex = kDescriptorHeapPersistentDescriptorCount +
+                               activeSubmissionSlotIndex_ * kDescriptorHeapDescriptorsPerSubmission +
+                               descriptorCursor_;
         descriptorCursor_ += descriptorCount;
         return baseIndex;
     }
@@ -2865,21 +3079,21 @@ private:
         faceEmitShader_ =
             loadShaderBytecodeLocal((shaderRoot / "far_lod_chunk_face_emit_cs.hlsl").string(), "FarLodChunkFaceEmitMain", "cs_5_0");
         exactDescriptorGenShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_descriptor_gen_cs.hlsl").string(), "ExactChunkDescriptorGenMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_descriptor_gen_cs.hlsl").string(), "ExactChunkDescriptorGenMain", "cs_6_6");
         exactSynthShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_synth_cs.hlsl").string(), "ExactChunkSynthMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_synth_cs.hlsl").string(), "ExactChunkSynthMain", "cs_6_6");
         exactStampShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_structure_stamp_cs.hlsl").string(), "ExactChunkStructureStampMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_structure_stamp_cs.hlsl").string(), "ExactChunkStructureStampMain", "cs_6_6");
         exactHaloCacheShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_halo_cache_cs.hlsl").string(), "ExactChunkHaloCacheMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_halo_cache_cs.hlsl").string(), "ExactChunkHaloCacheMain", "cs_6_6");
         exactLightShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_light_cs.hlsl").string(), "ExactChunkLightMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_light_cs.hlsl").string(), "ExactChunkLightMain", "cs_6_6");
         exactFaceCountShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_count_cs.hlsl").string(), "ExactChunkFaceCountMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_count_cs.hlsl").string(), "ExactChunkFaceCountMain", "cs_6_6");
         exactFacePrefixShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_prefix_cs.hlsl").string(), "ExactChunkFacePrefixMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_prefix_cs.hlsl").string(), "ExactChunkFacePrefixMain", "cs_6_6");
         exactFaceEmitShader_ =
-            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_emit_cs.hlsl").string(), "ExactChunkFaceEmitMain", "cs_5_0");
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_emit_cs.hlsl").string(), "ExactChunkFaceEmitMain", "cs_6_6");
     }
 
     void createPipelines()
@@ -3377,23 +3591,24 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactPrefixPso, IID_PPV_ARGS(&exactFacePrefixPipelineState_)),
                         "failed to create exact chunk face prefix pipeline");
 
-        std::array<D3D12_ROOT_PARAMETER, 14> exactFaceEmitParams{};
+        std::array<D3D12_ROOT_PARAMETER, 11> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceEmitParams[0].Constants.ShaderRegister = 0;
-        exactFaceEmitParams[0].Constants.Num32BitValues = 12;
-        for (UINT parameterIndex = 1; parameterIndex <= 8; ++parameterIndex)
+        exactFaceEmitParams[0].Constants.Num32BitValues = 1;
+        for (UINT parameterIndex = 1; parameterIndex <= 7; ++parameterIndex)
         {
             exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
             exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
         }
-        for (UINT parameterIndex = 9; parameterIndex <= 13; ++parameterIndex)
+        for (UINT parameterIndex = 8; parameterIndex <= 10; ++parameterIndex)
         {
             exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 9;
+            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 8;
         }
         D3D12_ROOT_SIGNATURE_DESC exactFaceEmitDesc{};
         exactFaceEmitDesc.NumParameters = static_cast<UINT>(exactFaceEmitParams.size());
         exactFaceEmitDesc.pParameters = exactFaceEmitParams.data();
+        exactFaceEmitDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
         createRootSignature(exactFaceEmitDesc, exactFaceEmitRootSignature_, "exact chunk face emit root signature");
 
         D3D12_COMPUTE_PIPELINE_STATE_DESC exactFaceEmitPso{};
@@ -3478,12 +3693,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> exactDescriptorScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactOverflowCountScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactOverflowEntryScratchBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> exactCompletionScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> exactTimestampQueryHeap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactTimestampReadbackBuffer_;
     std::uint64_t uploadCursor_{0};
     std::uint64_t readbackCursor_{0};
     UINT descriptorSize_{0};
     UINT descriptorCursor_{0};
+    UINT persistentDescriptorCursor_{0};
     std::uint32_t activeSubmissionSlotIndex_{std::numeric_limits<std::uint32_t>::max()};
     std::uint32_t submissionSlotCursor_{0};
     UINT exactTimestampCursor_{0};
@@ -3495,6 +3712,7 @@ private:
     D3D12_RESOURCE_STATES exactDescriptorScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactOverflowCountScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactOverflowEntryScratchState_{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES exactCompletionScratchState_{D3D12_RESOURCE_STATE_COMMON};
     UINT64 exactTimestampFrequency_{0};
     UINT64 exactTimestampPendingFenceValue_{0};
     bool exactTimingPending_{false};

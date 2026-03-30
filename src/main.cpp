@@ -58,6 +58,13 @@
 #include <DbgHelp.h>
 #endif
 
+extern "C"
+{
+// Export the DirectX 12 Agility SDK contract so d3d12.dll loads the local
+// runtime from .\D3D12 before BlockGame creates its D3D12 device.
+__declspec(dllexport) extern const UINT D3D12SDKVersion = 618;
+__declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
 
 namespace
 {

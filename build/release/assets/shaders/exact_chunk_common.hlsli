@@ -26,6 +26,11 @@ static const uint kMaterialFlagGrassTintShift = 2u;
 static const uint kMaterialFlagGrassSideTint = 0x20u;
 static const uint kExactDrawRecordOverflowFlag = 0x80000000u;
 static const uint kExactDrawRecordFaceCountMask = 0x7fffffffu;
+static const uint kExactCompletionStatusCompletedBit = 1u << 0u;
+static const uint kExactCompletionStatusOverflowBit = 1u << 1u;
+static const uint kExactCompletionStatusZeroFacesBit = 1u << 2u;
+static const uint kExactChunkAllocationPhasePrepassSubmitted = 1u;
+static const uint kExactChunkAllocationPhaseEmitSubmitted = 2u;
 
 static const uint kBlockAir = 0u;
 static const uint kBlockGrass = 1u;
@@ -115,6 +120,111 @@ struct GpuExactOverflowEntry
     uint requiredFaces;
     uint reserved0;
     uint reserved1;
+};
+
+struct GpuExactAllocatorState
+{
+    uint pageCount;
+    uint freePageCount;
+    uint buildRecordCount;
+    uint blockFaceUvDescriptorIndex;
+};
+
+struct GpuExactAllocatorPageMetadata
+{
+    uint pageIndex;
+    uint usage;
+    uint state;
+    uint allocationLockWord;
+    uint recordCapacity;
+    uint vertexCapacity;
+    uint indexCapacity;
+    uint reserved0;
+    uint vertexCursor;
+    uint indexCursor;
+    uint recordCursor;
+    uint recordActiveCount;
+    uint residentChunks;
+    uint pendingChunks;
+    uint vertexUavDescriptorIndex;
+    uint indexUavDescriptorIndex;
+    uint drawRecordUavDescriptorIndex;
+    uint drawRecordMetadataUavDescriptorIndex;
+    uint pendingBatchIdLo;
+    uint pendingBatchIdHi;
+    uint uploadFenceValueLo;
+    uint uploadFenceValueHi;
+    uint retireFenceValueLo;
+    uint retireFenceValueHi;
+};
+
+struct GpuExactAllocatorFreePageEntry
+{
+    uint pageIndex;
+};
+
+struct GpuExactChunkAllocationRecord
+{
+    int chunkWorldMinX;
+    int chunkWorldMinY;
+    int chunkWorldMinZ;
+    uint phase;
+    uint statusFlags;
+    uint buildVersion;
+    uint generationEpoch;
+    uint requiredFaceCount;
+    uint pageIndex;
+    uint recordIndex;
+    uint vertexBase;
+    uint indexBase;
+    uint reservedFaceCapacity;
+    uint centerVoxelSrvDescriptorIndex;
+    uint haloSrvDescriptorIndex;
+    uint reserved0;
+    uint inputVersionLo;
+    uint inputVersionHi;
+    uint reserved1;
+    uint reserved2;
+};
+
+struct GpuExactDrawRecordMetadata
+{
+    int chunkWorldMinX;
+    int chunkWorldMinY;
+    int chunkWorldMinZ;
+    uint pageIndex;
+    uint recordIndex;
+    uint buildIndex;
+    uint vertexBase;
+    uint indexBase;
+    uint faceCount;
+    uint statusFlags;
+    uint buildVersion;
+    uint generationEpoch;
+    uint inputVersionLo;
+    uint inputVersionHi;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct GpuExactCompletionEntry
+{
+    uint buildIndex;
+    uint statusFlags;
+    uint requiredFaces;
+    uint reservedFaceCapacity;
+    int chunkWorldMinX;
+    int chunkWorldMinY;
+    int chunkWorldMinZ;
+    uint pageIndex;
+    uint recordIndex;
+    uint vertexBase;
+    uint indexBase;
+    uint buildVersion;
+    uint generationEpoch;
+    uint inputVersionLo;
+    uint inputVersionHi;
+    uint reserved0;
 };
 
 struct GpuBlockFaceUv

@@ -2,35 +2,29 @@
 
 cbuffer ExactChunkFaceEmitParams : register(b0)
 {
-    int gWorldMinX;
-    int gWorldMinY;
-    int gWorldMinZ;
-    uint gPlaneCount;
-    uint gVertexBase;
-    uint gIndexBase;
-    uint gRecordIndex;
-    uint gReservedFaceCapacity;
-    uint gResolvedNeighborMask;
-    uint gClosedNeighborMask;
     uint gBuildIndex;
     uint gReserved0;
+    uint gReserved1;
+    uint gReserved2;
 };
 
-StructuredBuffer<GpuExactColumnDescriptor> gColumns : register(t0);
-StructuredBuffer<uint> gCenterVoxels : register(t1);
-StructuredBuffer<uint> gHaloVoxels : register(t2);
-StructuredBuffer<uint> gFaceCounts : register(t3);
-StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(t4);
-StructuredBuffer<uint> gFacePrefixes : register(t5);
-StructuredBuffer<uint> gFaceTotals : register(t6);
-StructuredBuffer<GpuBlockFaceUv> gBlockFaceUvs : register(t7);
-RWStructuredBuffer<WorldVertex> gVertices : register(u0);
-RWStructuredBuffer<uint> gIndices : register(u1);
-RWStructuredBuffer<GpuCullRecord> gDrawRecords : register(u2);
-RWStructuredBuffer<uint> gOverflowCount : register(u3);
-RWStructuredBuffer<GpuExactOverflowEntry> gOverflowEntries : register(u4);
+StructuredBuffer<GpuExactAllocatorState> gAllocatorStateBuffer : register(t0);
+StructuredBuffer<GpuExactChunkAllocationRecord> gBuildRecords : register(t1);
+StructuredBuffer<GpuExactAllocatorPageMetadata> gPageMetadata : register(t2);
+StructuredBuffer<GpuExactColumnDescriptor> gColumnScratch : register(t3);
+StructuredBuffer<uint> gFaceCountScratch : register(t4);
+StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(t5);
+StructuredBuffer<uint> gFacePrefixScratch : register(t6);
+RWStructuredBuffer<uint> gOverflowCount : register(u0);
+RWStructuredBuffer<GpuExactOverflowEntry> gOverflowEntries : register(u1);
+RWStructuredBuffer<GpuExactCompletionEntry> gCompletionEntries : register(u2);
 
 static const uint kLightingFlagAlphaCutoutBit = 1u << 24u;
+static const uint kExactIndirectRootBufferAlignment = 256u;
+static const uint kExactFaceCountScratchStride =
+    (((kExactChunkPlaneCount * 4u) + kExactIndirectRootBufferAlignment - 1u) / kExactIndirectRootBufferAlignment) *
+    (kExactIndirectRootBufferAlignment / 4u);
+static const uint kExactFacePrefixScratchStride = kExactFaceCountScratchStride;
 
 uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
 {
@@ -43,12 +37,16 @@ uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
     return bufferRef[voxelIndex(uint(x), uint(y), uint(z))];
 }
 
-uint sampleVoxelWithNeighbors(int x, int y, int z)
+uint sampleVoxelWithNeighbors(StructuredBuffer<uint> centerVoxels,
+                              StructuredBuffer<uint> haloVoxels,
+                              int x,
+                              int y,
+                              int z)
 {
     if (x >= 0 && y >= 0 && z >= 0 &&
         x < int(kExactChunkSize) && y < int(kExactChunkSize) && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gCenterVoxels, x, y, z);
+        return sampleVoxel(centerVoxels, x, y, z);
     }
 
     uint seamBit = 0u;
@@ -87,15 +85,19 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
-    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
+    return sampleHaloVoxel(haloVoxels, seamBit, x, y, z);
 }
 
-uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
+uint sampleLightingVoxelWithNeighbors(StructuredBuffer<uint> centerVoxels,
+                                      StructuredBuffer<uint> haloVoxels,
+                                      int x,
+                                      int y,
+                                      int z)
 {
     if (x >= 0 && y >= 0 && z >= 0 &&
         x < int(kExactChunkSize) && y < int(kExactChunkSize) && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gCenterVoxels, x, y, z);
+        return sampleVoxel(centerVoxels, x, y, z);
     }
 
     const bool posX = x >= int(kExactChunkSize);
@@ -114,29 +116,32 @@ uint sampleLightingVoxelWithNeighbors(int x, int y, int z)
 
     if (posX)
     {
-        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborPosXBit, 0, clampedY, clampedZ);
+        packedSamples[sampleCount++] = sampleHaloVoxel(haloVoxels, kExactNeighborPosXBit, 0, clampedY, clampedZ);
     }
     else if (negX)
     {
-        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborNegXBit, int(kExactChunkSize) - 1, clampedY, clampedZ);
+        packedSamples[sampleCount++] =
+            sampleHaloVoxel(haloVoxels, kExactNeighborNegXBit, int(kExactChunkSize) - 1, clampedY, clampedZ);
     }
 
     if (posY)
     {
-        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborPosYBit, clampedX, 0, clampedZ);
+        packedSamples[sampleCount++] = sampleHaloVoxel(haloVoxels, kExactNeighborPosYBit, clampedX, 0, clampedZ);
     }
     else if (negY)
     {
-        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborNegYBit, clampedX, int(kExactChunkSize) - 1, clampedZ);
+        packedSamples[sampleCount++] =
+            sampleHaloVoxel(haloVoxels, kExactNeighborNegYBit, clampedX, int(kExactChunkSize) - 1, clampedZ);
     }
 
     if (posZ)
     {
-        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborPosZBit, clampedX, clampedY, 0);
+        packedSamples[sampleCount++] = sampleHaloVoxel(haloVoxels, kExactNeighborPosZBit, clampedX, clampedY, 0);
     }
     else if (negZ)
     {
-        packedSamples[sampleCount++] = sampleHaloVoxel(gHaloVoxels, kExactNeighborNegZBit, clampedX, clampedY, int(kExactChunkSize) - 1);
+        packedSamples[sampleCount++] =
+            sampleHaloVoxel(haloVoxels, kExactNeighborNegZBit, clampedX, clampedY, int(kExactChunkSize) - 1);
     }
 
     if (sampleCount == 0u)
@@ -278,7 +283,12 @@ int lightingMetricFromPackedVertex(uint packedLighting)
     return sky * 24 + block * 18 + (3 - ao) * 20;
 }
 
-uint buildCornerLighting(int3 owningLocal, uint faceId, int uSign, int vSign)
+uint buildCornerLighting(StructuredBuffer<uint> centerVoxels,
+                         StructuredBuffer<uint> haloVoxels,
+                         int3 owningLocal,
+                         uint faceId,
+                         int uSign,
+                         int vSign)
 {
     int3 outward;
     int3 sideU;
@@ -296,10 +306,10 @@ uint buildCornerLighting(int3 owningLocal, uint faceId, int uSign, int vSign)
     uint blockSum = 0u;
     uint validSamples = 0u;
     const uint packedSamples[4] = {
-        sampleLightingVoxelWithNeighbors(sample0.x, sample0.y, sample0.z),
-        sampleLightingVoxelWithNeighbors(sample1.x, sample1.y, sample1.z),
-        sampleLightingVoxelWithNeighbors(sample2.x, sample2.y, sample2.z),
-        sampleLightingVoxelWithNeighbors(sample3.x, sample3.y, sample3.z)
+        sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample0.x, sample0.y, sample0.z),
+        sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample1.x, sample1.y, sample1.z),
+        sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample2.x, sample2.y, sample2.z),
+        sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample3.x, sample3.y, sample3.z)
     };
 
     [unroll]
@@ -325,26 +335,34 @@ uint buildCornerLighting(int3 owningLocal, uint faceId, int uSign, int vSign)
     }
     else
     {
-        const uint fallbackPacked = sampleLightingVoxelWithNeighbors(fallbackSample.x, fallbackSample.y, fallbackSample.z);
+        const uint fallbackPacked =
+            sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, fallbackSample.x, fallbackSample.y, fallbackSample.z);
         skyLight = voxelSkyLight(fallbackPacked);
         blockLight = voxelBlockLight(fallbackPacked);
     }
 
     const uint side1Solid =
-        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(sample1.x, sample1.y, sample1.z))) ? 1u : 0u;
+        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample1.x, sample1.y, sample1.z))) ? 1u : 0u;
     const uint side2Solid =
-        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(sample2.x, sample2.y, sample2.z))) ? 1u : 0u;
+        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample2.x, sample2.y, sample2.z))) ? 1u : 0u;
     const uint cornerSolid =
-        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(sample3.x, sample3.y, sample3.z))) ? 1u : 0u;
+        isAoSolid(voxelBlock(sampleLightingVoxelWithNeighbors(centerVoxels, haloVoxels, sample3.x, sample3.y, sample3.z))) ? 1u : 0u;
     const uint aoLevel = (side1Solid != 0u && side2Solid != 0u) ? 3u : (side1Solid + side2Solid + cornerSolid);
     return packLightingData(skyLight, blockLight, aoLevel, 0u);
 }
 
-void faceVertices(uint3 localPos, uint faceId, out float3 p0, out float3 p1, out float3 p2, out float3 p3, out float3 normal)
+void faceVertices(int3 chunkWorldMin,
+                  uint3 localPos,
+                  uint faceId,
+                  out float3 p0,
+                  out float3 p1,
+                  out float3 p2,
+                  out float3 p3,
+                  out float3 normal)
 {
-    const float3 base = float3(float(gWorldMinX + int(localPos.x)),
-                               float(gWorldMinY + int(localPos.y)),
-                               float(gWorldMinZ + int(localPos.z)));
+    const float3 base = float3(float(chunkWorldMin.x + int(localPos.x)),
+                               float(chunkWorldMin.y + int(localPos.y)),
+                               float(chunkWorldMin.z + int(localPos.z)));
 
     if (faceId == 0u)
     {
@@ -405,28 +423,92 @@ void faceVertices(uint3 localPos, uint faceId, out float3 p0, out float3 p1, out
 void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint planeIndex = groupId.x;
-    if (planeIndex >= gPlaneCount)
+    if (planeIndex >= kExactChunkPlaneCount)
     {
         return;
     }
 
-    const uint totalFaces = gFaceTotals[0];
+    const GpuExactAllocatorState allocatorState = gAllocatorStateBuffer[0];
+    const bool validBuildIndex = gBuildIndex < allocatorState.buildRecordCount;
+    GpuExactChunkAllocationRecord build = (GpuExactChunkAllocationRecord)0;
+    if (validBuildIndex)
+    {
+        build = gBuildRecords[gBuildIndex];
+    }
+    const bool validPageIndex =
+        validBuildIndex &&
+        build.pageIndex != 0xffffffffu &&
+        build.pageIndex < allocatorState.pageCount;
+    GpuExactAllocatorPageMetadata page = (GpuExactAllocatorPageMetadata)0;
+    if (validPageIndex)
+    {
+        page = gPageMetadata[build.pageIndex];
+    }
+    const bool validEmitRecord =
+        validBuildIndex &&
+        build.phase == kExactChunkAllocationPhaseEmitSubmitted &&
+        validPageIndex &&
+        build.recordIndex != 0xffffffffu &&
+        allocatorState.blockFaceUvDescriptorIndex != 0xffffffffu &&
+        build.centerVoxelSrvDescriptorIndex != 0xffffffffu &&
+        build.haloSrvDescriptorIndex != 0xffffffffu &&
+        page.vertexUavDescriptorIndex != 0xffffffffu &&
+        page.indexUavDescriptorIndex != 0xffffffffu &&
+        page.drawRecordUavDescriptorIndex != 0xffffffffu &&
+        page.drawRecordMetadataUavDescriptorIndex != 0xffffffffu;
+
+    if (!validEmitRecord)
+    {
+        if (planeIndex == 0u && groupThreadId.x == 0u)
+        {
+            GpuExactCompletionEntry completion = (GpuExactCompletionEntry)0;
+            completion.buildIndex = gBuildIndex;
+            gCompletionEntries[gBuildIndex] = completion;
+        }
+        return;
+    }
+
+    StructuredBuffer<uint> centerVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.centerVoxelSrvDescriptorIndex)];
+    StructuredBuffer<uint> haloVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.haloSrvDescriptorIndex)];
+    StructuredBuffer<GpuBlockFaceUv> blockFaceUvs =
+        ResourceDescriptorHeap[NonUniformResourceIndex(allocatorState.blockFaceUvDescriptorIndex)];
+    RWStructuredBuffer<WorldVertex> vertices =
+        ResourceDescriptorHeap[NonUniformResourceIndex(page.vertexUavDescriptorIndex)];
+    RWStructuredBuffer<uint> indices =
+        ResourceDescriptorHeap[NonUniformResourceIndex(page.indexUavDescriptorIndex)];
+    RWStructuredBuffer<GpuCullRecord> drawRecords =
+        ResourceDescriptorHeap[NonUniformResourceIndex(page.drawRecordUavDescriptorIndex)];
+    RWStructuredBuffer<GpuExactDrawRecordMetadata> drawRecordMetadata =
+        ResourceDescriptorHeap[NonUniformResourceIndex(page.drawRecordMetadataUavDescriptorIndex)];
+
+    const int3 chunkWorldMin = int3(build.chunkWorldMinX, build.chunkWorldMinY, build.chunkWorldMinZ);
+    const uint totalFaces = build.requiredFaceCount;
     if (planeIndex == 0u && groupThreadId.x == 0u)
     {
-        GpuCullRecord record;
-        record.boundsMin = float4(float(gWorldMinX), float(gWorldMinY), float(gWorldMinZ), 1.0f);
-        record.boundsMax = float4(float(gWorldMinX + int(kExactChunkSize)),
-                                  float(gWorldMinY + int(kExactChunkSize)),
-                                  float(gWorldMinZ + int(kExactChunkSize)),
-                                  1.0f);
-        record.indexCount = (totalFaces <= gReservedFaceCapacity) ? (totalFaces * 6u) : 0u;
-        record.firstIndexLocation = gIndexBase;
-        record.baseVertex = int(gVertexBase);
-        record.reserved = min(totalFaces, kExactDrawRecordFaceCountMask) |
-                          ((totalFaces > gReservedFaceCapacity) ? kExactDrawRecordOverflowFlag : 0u);
-        gDrawRecords[gRecordIndex] = record;
-        if (totalFaces > gReservedFaceCapacity)
+        uint statusFlags = build.statusFlags | kExactCompletionStatusCompletedBit;
+        if (totalFaces == 0u)
         {
+            statusFlags |= kExactCompletionStatusZeroFacesBit;
+        }
+
+        GpuCullRecord record;
+        record.boundsMin = float4(float(build.chunkWorldMinX), float(build.chunkWorldMinY), float(build.chunkWorldMinZ), 1.0f);
+        record.boundsMax = float4(float(build.chunkWorldMinX + int(kExactChunkSize)),
+                                  float(build.chunkWorldMinY + int(kExactChunkSize)),
+                                  float(build.chunkWorldMinZ + int(kExactChunkSize)),
+                                  1.0f);
+        record.indexCount = (totalFaces <= build.reservedFaceCapacity) ? (totalFaces * 6u) : 0u;
+        record.firstIndexLocation = build.indexBase;
+        record.baseVertex = int(build.vertexBase);
+        record.reserved = min(totalFaces, kExactDrawRecordFaceCountMask) |
+                          ((totalFaces > build.reservedFaceCapacity) ? kExactDrawRecordOverflowFlag : 0u);
+        drawRecords[build.recordIndex] = record;
+
+        if (totalFaces > build.reservedFaceCapacity)
+        {
+            statusFlags |= kExactCompletionStatusOverflowBit;
             uint overflowIndex = 0u;
             InterlockedAdd(gOverflowCount[0], 1u, overflowIndex);
             GpuExactOverflowEntry entry;
@@ -436,49 +518,94 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             entry.reserved1 = 0u;
             gOverflowEntries[overflowIndex] = entry;
         }
+
+        GpuExactDrawRecordMetadata metadata;
+        metadata.chunkWorldMinX = build.chunkWorldMinX;
+        metadata.chunkWorldMinY = build.chunkWorldMinY;
+        metadata.chunkWorldMinZ = build.chunkWorldMinZ;
+        metadata.pageIndex = build.pageIndex;
+        metadata.recordIndex = build.recordIndex;
+        metadata.buildIndex = gBuildIndex;
+        metadata.vertexBase = build.vertexBase;
+        metadata.indexBase = build.indexBase;
+        metadata.faceCount = totalFaces;
+        metadata.statusFlags = statusFlags;
+        metadata.buildVersion = build.buildVersion;
+        metadata.generationEpoch = build.generationEpoch;
+        metadata.inputVersionLo = build.inputVersionLo;
+        metadata.inputVersionHi = build.inputVersionHi;
+        metadata.reserved0 = 0u;
+        metadata.reserved1 = 0u;
+        drawRecordMetadata[build.recordIndex] = metadata;
+
+        GpuExactCompletionEntry completion;
+        completion.buildIndex = gBuildIndex;
+        completion.statusFlags = statusFlags;
+        completion.requiredFaces = totalFaces;
+        completion.reservedFaceCapacity = build.reservedFaceCapacity;
+        completion.chunkWorldMinX = build.chunkWorldMinX;
+        completion.chunkWorldMinY = build.chunkWorldMinY;
+        completion.chunkWorldMinZ = build.chunkWorldMinZ;
+        completion.pageIndex = build.pageIndex;
+        completion.recordIndex = build.recordIndex;
+        completion.vertexBase = build.vertexBase;
+        completion.indexBase = build.indexBase;
+        completion.buildVersion = build.buildVersion;
+        completion.generationEpoch = build.generationEpoch;
+        completion.inputVersionLo = build.inputVersionLo;
+        completion.inputVersionHi = build.inputVersionHi;
+        completion.reserved0 = 0u;
+        gCompletionEntries[gBuildIndex] = completion;
     }
 
-    if (totalFaces == 0u || totalFaces > gReservedFaceCapacity)
+    if (totalFaces == 0u || totalFaces > build.reservedFaceCapacity)
     {
         return;
     }
 
-    const uint faceCount = gFaceCounts[planeIndex];
-    const uint faceBase = gFacePrefixes[planeIndex];
-    const uint descriptorBase = planeIndex * kExactChunkMaxDescriptorsPerPlane;
+    const uint faceCount = gFaceCountScratch[gBuildIndex * kExactFaceCountScratchStride + planeIndex];
+    const uint faceBase = gFacePrefixScratch[gBuildIndex * kExactFacePrefixScratchStride + planeIndex];
+    const uint descriptorBase =
+        gBuildIndex * kExactChunkFaceDescriptorCount + planeIndex * kExactChunkMaxDescriptorsPerPlane;
+    const uint columnBase = gBuildIndex * kExactChunkColumnCount;
 
     for (uint localIndex = groupThreadId.x; localIndex < faceCount; localIndex += 64u)
     {
-        const GpuExactFaceDescriptor descriptor = gFaceDescriptors[descriptorBase + localIndex];
+        const GpuExactFaceDescriptor descriptor = gFaceDescriptorScratch[descriptorBase + localIndex];
         const uint localX = faceLocalX(descriptor.packedLocal);
         const uint localY = faceLocalY(descriptor.packedLocal);
         const uint localZ = faceLocalZ(descriptor.packedLocal);
         const uint faceId = faceLocalFaceId(descriptor.packedLocal);
-        const uint packedVoxel = sampleVoxel(gCenterVoxels, int(localX), int(localY), int(localZ));
+        const uint packedVoxel = sampleVoxel(centerVoxels, int(localX), int(localY), int(localZ));
         const uint blockId = voxelBlock(packedVoxel);
-        const GpuExactColumnDescriptor column = gColumns[columnIndex(localX, localZ)];
+        const GpuExactColumnDescriptor column = gColumnScratch[columnBase + columnIndex(localX, localZ)];
         const uint materialFlags = materialFlagsForFace(blockId, faceId, column);
         const uint alphaCutoutLightingFlag = isAlphaCutoutBlock(blockId) ? kLightingFlagAlphaCutoutBit : 0u;
         const uint faceIndex = faceBase + localIndex;
         const uint localVertexOffset = faceIndex * 4u;
-        const uint vertexIndex = gVertexBase + localVertexOffset;
-        const uint indexIndex = gIndexBase + faceIndex * 6u;
+        const uint vertexIndex = build.vertexBase + localVertexOffset;
+        const uint indexIndex = build.indexBase + faceIndex * 6u;
 
         float3 p0;
         float3 p1;
         float3 p2;
         float3 p3;
         float3 normal;
-        faceVertices(uint3(localX, localY, localZ), faceId, p0, p1, p2, p3, normal);
+        faceVertices(chunkWorldMin, uint3(localX, localY, localZ), faceId, p0, p1, p2, p3, normal);
 
-        const GpuBlockFaceUv uv = gBlockFaceUvs[blockId * 6u + faceId];
+        const GpuBlockFaceUv uv = blockFaceUvs[blockId * 6u + faceId];
         const int cornerUSigns[4] = {-1, 1, 1, -1};
         const int cornerVSigns[4] = {-1, -1, 1, 1};
         uint cornerLighting[4];
         [unroll]
         for (uint i = 0u; i < 4u; ++i)
         {
-            cornerLighting[i] = buildCornerLighting(int3(localX, localY, localZ), faceId, cornerUSigns[i], cornerVSigns[i]);
+            cornerLighting[i] = buildCornerLighting(centerVoxels,
+                                                    haloVoxels,
+                                                    int3(localX, localY, localZ),
+                                                    faceId,
+                                                    cornerUSigns[i],
+                                                    cornerVSigns[i]);
         }
         int3 outwardUnused;
         int3 sideU;
@@ -537,28 +664,28 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             ((vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
 
-        gVertices[vertexIndex + 0u] = v0;
-        gVertices[vertexIndex + 1u] = v1;
-        gVertices[vertexIndex + 2u] = v2;
-        gVertices[vertexIndex + 3u] = v3;
+        vertices[vertexIndex + 0u] = v0;
+        vertices[vertexIndex + 1u] = v1;
+        vertices[vertexIndex + 2u] = v2;
+        vertices[vertexIndex + 3u] = v3;
 
         if (flipDiagonal)
         {
-            gIndices[indexIndex + 0u] = localVertexOffset + 0u;
-            gIndices[indexIndex + 1u] = localVertexOffset + 1u;
-            gIndices[indexIndex + 2u] = localVertexOffset + 3u;
-            gIndices[indexIndex + 3u] = localVertexOffset + 1u;
-            gIndices[indexIndex + 4u] = localVertexOffset + 2u;
-            gIndices[indexIndex + 5u] = localVertexOffset + 3u;
+            indices[indexIndex + 0u] = localVertexOffset + 0u;
+            indices[indexIndex + 1u] = localVertexOffset + 1u;
+            indices[indexIndex + 2u] = localVertexOffset + 3u;
+            indices[indexIndex + 3u] = localVertexOffset + 1u;
+            indices[indexIndex + 4u] = localVertexOffset + 2u;
+            indices[indexIndex + 5u] = localVertexOffset + 3u;
         }
         else
         {
-            gIndices[indexIndex + 0u] = localVertexOffset + 0u;
-            gIndices[indexIndex + 1u] = localVertexOffset + 1u;
-            gIndices[indexIndex + 2u] = localVertexOffset + 2u;
-            gIndices[indexIndex + 3u] = localVertexOffset + 0u;
-            gIndices[indexIndex + 4u] = localVertexOffset + 2u;
-            gIndices[indexIndex + 5u] = localVertexOffset + 3u;
+            indices[indexIndex + 0u] = localVertexOffset + 0u;
+            indices[indexIndex + 1u] = localVertexOffset + 1u;
+            indices[indexIndex + 2u] = localVertexOffset + 2u;
+            indices[indexIndex + 3u] = localVertexOffset + 0u;
+            indices[indexIndex + 4u] = localVertexOffset + 2u;
+            indices[indexIndex + 5u] = localVertexOffset + 3u;
         }
     }
 }

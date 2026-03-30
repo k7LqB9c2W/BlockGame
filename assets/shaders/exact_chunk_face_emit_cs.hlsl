@@ -2,7 +2,7 @@
 
 cbuffer ExactChunkFaceEmitParams : register(b0)
 {
-    uint gBuildIndex;
+    uint gBatchBuildCount;
     uint gReserved0;
     uint gReserved1;
     uint gReserved2;
@@ -15,6 +15,7 @@ StructuredBuffer<GpuExactColumnDescriptor> gColumnScratch : register(t3);
 StructuredBuffer<uint> gFaceCountScratch : register(t4);
 StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(t5);
 StructuredBuffer<uint> gFacePrefixScratch : register(t6);
+StructuredBuffer<uint> gBatchBuildIndices : register(t7);
 RWStructuredBuffer<uint> gOverflowCount : register(u0);
 RWStructuredBuffer<GpuExactOverflowEntry> gOverflowEntries : register(u1);
 RWStructuredBuffer<GpuExactCompletionEntry> gCompletionEntries : register(u2);
@@ -423,17 +424,23 @@ void faceVertices(int3 chunkWorldMin,
 void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint planeIndex = groupId.x;
+    const uint buildOrdinal = groupId.y;
     if (planeIndex >= kExactChunkPlaneCount)
+    {
+        return;
+    }
+    if (buildOrdinal >= gBatchBuildCount)
     {
         return;
     }
 
     const GpuExactAllocatorState allocatorState = gAllocatorStateBuffer[0];
-    const bool validBuildIndex = gBuildIndex < allocatorState.buildRecordCount;
+    const uint buildIndex = gBatchBuildIndices[buildOrdinal];
+    const bool validBuildIndex = buildIndex < allocatorState.buildRecordCount;
     GpuExactChunkAllocationRecord build = (GpuExactChunkAllocationRecord)0;
     if (validBuildIndex)
     {
-        build = gBuildRecords[gBuildIndex];
+        build = gBuildRecords[buildIndex];
     }
     const bool validPageIndex =
         validBuildIndex &&
@@ -506,7 +513,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             uint overflowIndex = 0u;
             InterlockedAdd(gOverflowCount[0], 1u, overflowIndex);
             GpuExactOverflowEntry entry;
-            entry.buildIndex = gBuildIndex;
+            entry.buildIndex = buildOrdinal;
             entry.requiredFaces = totalFaces;
             entry.reserved0 = 0u;
             entry.reserved1 = 0u;
@@ -519,7 +526,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         metadata.chunkWorldMinZ = build.chunkWorldMinZ;
         metadata.pageIndex = build.pageIndex;
         metadata.recordIndex = build.recordIndex;
-        metadata.buildIndex = gBuildIndex;
+        metadata.buildIndex = buildIndex;
         metadata.vertexBase = build.vertexBase;
         metadata.indexBase = build.indexBase;
         metadata.faceCount = totalFaces;
@@ -533,7 +540,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         drawRecordMetadata[build.recordIndex] = metadata;
 
         GpuExactCompletionEntry completion;
-        completion.buildIndex = gBuildIndex;
+        completion.buildIndex = buildIndex;
         completion.statusFlags = statusFlags;
         completion.requiredFaces = totalFaces;
         completion.reservedFaceCapacity = build.reservedFaceCapacity;
@@ -549,7 +556,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         completion.inputVersionLo = build.inputVersionLo;
         completion.inputVersionHi = build.inputVersionHi;
         completion.reserved0 = 0u;
-        gCompletionEntries[gBuildIndex] = completion;
+        gCompletionEntries[buildIndex] = completion;
     }
 
     if (totalFaces == 0u || totalFaces > build.reservedFaceCapacity)
@@ -557,11 +564,11 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         return;
     }
 
-    const uint faceCount = gFaceCountScratch[gBuildIndex * kExactFaceCountScratchStride + planeIndex];
-    const uint faceBase = gFacePrefixScratch[gBuildIndex * kExactFacePrefixScratchStride + planeIndex];
+    const uint faceCount = gFaceCountScratch[buildIndex * kExactFaceCountScratchStride + planeIndex];
+    const uint faceBase = gFacePrefixScratch[buildIndex * kExactFacePrefixScratchStride + planeIndex];
     const uint descriptorBase =
-        gBuildIndex * kExactChunkFaceDescriptorCount + planeIndex * kExactChunkMaxDescriptorsPerPlane;
-    const uint columnBase = gBuildIndex * kExactChunkColumnCount;
+        buildIndex * kExactChunkFaceDescriptorCount + planeIndex * kExactChunkMaxDescriptorsPerPlane;
+    const uint columnBase = buildIndex * kExactChunkColumnCount;
 
     for (uint localIndex = groupThreadId.x; localIndex < faceCount; localIndex += 64u)
     {

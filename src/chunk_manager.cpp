@@ -16602,7 +16602,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     else
                     {
                         std::vector<FarLodGpuContext::ScratchAllocation> emitOwnedUploads{};
-                        emitOwnedUploads.reserve(4u);
+                        emitOwnedUploads.reserve(5u);
                         emitOwnedUploads.push_back(overflowCounterUpload);
                         exactGpuContext_.beginExactTimingBatch();
 
@@ -16625,6 +16625,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                 for (std::size_t buildIndex = 0; buildIndex < batch.builds.size(); ++buildIndex)
                                 {
                                     PendingExactGpuBuild& pending = batch.builds[buildIndex];
+                                    pending.batchBuildIndex = static_cast<std::uint32_t>(buildIndex);
                                     Chunk& chunk = *pending.chunk;
                                     const FarLodGpuContext::ExactBuildInputDescriptorIndices descriptorIndices =
                                         exactGpuContext_.writeExactBuildInputDescriptors(chunk.exactGpu.voxelBuffer.Get(),
@@ -16662,6 +16663,33 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                         requeueBuildRequest(pending);
                                     }
                                     keepBatch = false;
+                                }
+                            }
+                            if (keepBatch)
+                            {
+                                const std::uint64_t buildIndexBytes =
+                                    static_cast<std::uint64_t>(batch.builds.size()) * sizeof(std::uint32_t);
+                                const FarLodGpuContext::ScratchAllocation buildIndexUpload =
+                                    exactGpuContext_.allocateUpload(buildIndexBytes, alignof(std::uint32_t));
+                                if (buildIndexUpload.resource == nullptr || buildIndexUpload.cpuPtr == nullptr)
+                                {
+                                    exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+                                    discardExactSubmission();
+                                    for (PendingExactGpuBuild& pending : batch.builds)
+                                    {
+                                        requeueBuildRequest(pending);
+                                    }
+                                    keepBatch = false;
+                                }
+                                else
+                                {
+                                    std::uint32_t* buildIndexWritePtr =
+                                        reinterpret_cast<std::uint32_t*>(buildIndexUpload.cpuPtr);
+                                    for (std::size_t buildIndex = 0; buildIndex < batch.builds.size(); ++buildIndex)
+                                    {
+                                        buildIndexWritePtr[buildIndex] = batch.builds[buildIndex].scratchSliceIndex;
+                                    }
+                                    emitOwnedUploads.push_back(buildIndexUpload);
                                 }
                             }
                         }
@@ -16715,16 +16743,20 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                                         D3D12_RESOURCE_STATE_COMMON);
                             exactGpuChunkAllocationRecordBufferState_ = D3D12_RESOURCE_STATE_COMMON;
 
+                            const FarLodGpuContext::ScratchAllocation& buildIndexUpload = emitOwnedUploads.back();
+                            exactGpuContext_.markExactTimingBegin();
+                            exactGpuContext_.dispatchExactFaceEmit(
+                                static_cast<std::uint32_t>(batch.builds.size()),
+                                buildIndexUpload.gpuAddress,
+                                exactGpuAllocatorStateBuffer_.Get(),
+                                exactGpuChunkAllocationRecordBuffer_.Get(),
+                                exactGpuAllocatorPageMetadataBuffer_.Get());
+                            exactGpuContext_.markExactTimingEnd();
+                            exactGpuContext_.uavBarrier(nullptr);
+
                             for (PendingExactGpuBuild& pending : batch.builds)
                             {
                                 Chunk& chunk = *pending.chunk;
-                                exactGpuContext_.markExactTimingBegin();
-                                exactGpuContext_.dispatchExactFaceEmit(pending.scratchSliceIndex,
-                                                                       exactGpuAllocatorStateBuffer_.Get(),
-                                                                       exactGpuChunkAllocationRecordBuffer_.Get(),
-                                                                       exactGpuAllocatorPageMetadataBuffer_.Get());
-                                exactGpuContext_.markExactTimingEnd();
-                                exactGpuContext_.uavBarrier(nullptr);
                                 if (chunk.exactGpu.sparseVoxelBuffer != nullptr && chunk.exactGpu.sparseVoxelState != D3D12_RESOURCE_STATE_COMMON)
                                 {
                                     exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
@@ -16827,18 +16859,23 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     }
 
                     Chunk& chunk = *pending.chunk;
+                    const bool completionPresent =
+                        mappedCompletionEntries != nullptr &&
+                        buildOrdinal < batch.completionReadback.buildCount;
                     const FarLodGpuContext::ExactCompletionEntry completion =
-                        (mappedCompletionEntries != nullptr &&
-                         buildOrdinal < batch.completionReadback.buildCount)
+                        completionPresent
                             ? mappedCompletionEntries[buildOrdinal]
                             : FarLodGpuContext::ExactCompletionEntry{};
+                    const bool completionMatchesScratchSlice =
+                        completionPresent &&
+                        completion.buildIndex == pending.scratchSliceIndex;
                     const bool completionMatchesPending =
-                        completion.buildIndex == pending.scratchSliceIndex &&
+                        completionMatchesScratchSlice &&
                         completion.buildVersion == pending.buildVersion &&
                         completion.generationEpoch == pending.generationEpoch &&
                         completion.inputVersionLo == static_cast<std::uint32_t>(pending.inputVersion & 0xffffffffu) &&
                         completion.inputVersionHi == static_cast<std::uint32_t>(pending.inputVersion >> 32u);
-                    if (completionMatchesPending)
+                    if (completionMatchesScratchSlice)
                     {
                         applyCompletionAllocation(pending, completion);
                     }

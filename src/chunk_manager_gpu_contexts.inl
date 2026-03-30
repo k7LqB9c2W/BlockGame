@@ -2392,13 +2392,16 @@ public:
         hasCommands_ = true;
     }
 
-    void dispatchExactFaceEmit(std::uint32_t buildIndex,
+    void dispatchExactFaceEmit(std::uint32_t batchBuildCount,
+                               D3D12_GPU_VIRTUAL_ADDRESS batchBuildIndicesAddress,
                                ID3D12Resource* allocatorStateBuffer,
                                ID3D12Resource* buildRecordBuffer,
                                ID3D12Resource* pageMetadataBuffer)
     {
         if (!open_ ||
             exactFaceEmitPipelineState_ == nullptr ||
+            batchBuildCount == 0u ||
+            batchBuildIndicesAddress == 0u ||
             allocatorStateBuffer == nullptr ||
             buildRecordBuffer == nullptr ||
             pageMetadataBuffer == nullptr ||
@@ -2464,7 +2467,7 @@ public:
             exactDescriptorScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
 
-        const std::array<std::uint32_t, 1> constants{buildIndex};
+        const std::array<std::uint32_t, 1> constants{batchBuildCount};
         ID3D12DescriptorHeap* heaps[] = {descriptorHeap_.Get()};
         commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
         commandList_->SetPipelineState(exactFaceEmitPipelineState_.Get());
@@ -2477,10 +2480,11 @@ public:
         commandList_->SetComputeRootShaderResourceView(5, exactFaceCountScratchBuffer_->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(6, exactFaceDescriptorScratchBuffer_->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(7, exactFacePrefixScratchBuffer_->GetGPUVirtualAddress());
-        commandList_->SetComputeRootUnorderedAccessView(8, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
-        commandList_->SetComputeRootUnorderedAccessView(9, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
-        commandList_->SetComputeRootUnorderedAccessView(10, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
-        commandList_->Dispatch(kExactChunkPlaneCount, 1u, 1u);
+        commandList_->SetComputeRootShaderResourceView(8, batchBuildIndicesAddress);
+        commandList_->SetComputeRootUnorderedAccessView(9, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(10, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(11, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->Dispatch(kExactChunkPlaneCount, batchBuildCount, 1u);
         hasCommands_ = true;
     }
 
@@ -3663,19 +3667,19 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactAllocatePso, IID_PPV_ARGS(&exactAllocatePipelineState_)),
                         "failed to create exact chunk allocate pipeline");
 
-        std::array<D3D12_ROOT_PARAMETER, 11> exactFaceEmitParams{};
+        std::array<D3D12_ROOT_PARAMETER, 12> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceEmitParams[0].Constants.ShaderRegister = 0;
         exactFaceEmitParams[0].Constants.Num32BitValues = 1;
-        for (UINT parameterIndex = 1; parameterIndex <= 7; ++parameterIndex)
+        for (UINT parameterIndex = 1; parameterIndex <= 8; ++parameterIndex)
         {
             exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
             exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
         }
-        for (UINT parameterIndex = 8; parameterIndex <= 10; ++parameterIndex)
+        for (UINT parameterIndex = 9; parameterIndex <= 11; ++parameterIndex)
         {
             exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 8;
+            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 9;
         }
         D3D12_ROOT_SIGNATURE_DESC exactFaceEmitDesc{};
         exactFaceEmitDesc.NumParameters = static_cast<UINT>(exactFaceEmitParams.size());

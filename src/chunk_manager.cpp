@@ -4278,6 +4278,9 @@ private:
         std::uint32_t pageIndex,
         const ChunkBufferPage& page) noexcept;
     [[nodiscard]] static bool isExactGpuAllocatorFreePage(const ChunkBufferPage& page) noexcept;
+    static void advanceExactGpuPageAllocationMirror(ChunkBufferPage& page,
+                                                    const ChunkAllocation& allocation,
+                                                    std::uint32_t reservedFaceCapacity) noexcept;
     void resetExactGpuAllocatorBuffers() noexcept;
     void rebuildExactGpuAllocatorMirrorsLocked() noexcept;
     void markExactGpuAllocatorMetadataDirty() noexcept;
@@ -9470,6 +9473,28 @@ bool ChunkManager::Impl::isExactGpuAllocatorFreePage(const ChunkBufferPage& page
 {
     return page.usage == ChunkBufferPageUsage::ExactGpu &&
            page.state == ChunkBufferPageState::Available;
+}
+
+void ChunkManager::Impl::advanceExactGpuPageAllocationMirror(ChunkBufferPage& page,
+                                                             const ChunkAllocation& allocation,
+                                                             std::uint32_t reservedFaceCapacity) noexcept
+{
+    if (allocation.pageIndex == kInvalidChunkBufferPage ||
+        allocation.recordIndex == kInvalidExactGpuDrawRecordIndex)
+    {
+        return;
+    }
+
+    const std::size_t vertexEnd =
+        allocation.vertexOffset + static_cast<std::size_t>(reservedFaceCapacity) * 4u;
+    const std::size_t indexEnd =
+        allocation.indexOffset + static_cast<std::size_t>(reservedFaceCapacity) * 6u;
+    const std::size_t recordEnd = static_cast<std::size_t>(allocation.recordIndex) + 1u;
+
+    page.vertexCursor = std::max(page.vertexCursor, vertexEnd);
+    page.indexCursor = std::max(page.indexCursor, indexEnd);
+    page.recordCursor = std::max(page.recordCursor, recordEnd);
+    page.recordActiveCount = std::max(page.recordActiveCount, recordEnd);
 }
 
 void ChunkManager::Impl::resetExactGpuAllocatorBuffers() noexcept
@@ -16420,6 +16445,15 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             pending.allocation.vertexOffset = completion.vertexBase;
             pending.allocation.indexOffset = completion.indexBase;
             pending.allocation.recordIndex = completion.recordIndex;
+            {
+                std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+                if (pending.allocation.pageIndex < bufferPages_.size())
+                {
+                    advanceExactGpuPageAllocationMirror(bufferPages_[pending.allocation.pageIndex],
+                                                        pending.allocation,
+                                                        pending.faceCapacity);
+                }
+            }
         };
         const auto requeueBuildRequest = [&](PendingExactGpuBuild& pending)
         {
@@ -17156,7 +17190,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
         const std::size_t oldVertexCount = chunk.vertexCount.load(std::memory_order_acquire);
         const std::size_t oldIndexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
         const std::uint32_t oldRecordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
-
         chunk.bufferPageIndex.store(pending.allocation.pageIndex, std::memory_order_release);
         chunk.vertexOffset.store(pending.allocation.vertexOffset, std::memory_order_release);
         chunk.indexOffset.store(pending.allocation.indexOffset, std::memory_order_release);

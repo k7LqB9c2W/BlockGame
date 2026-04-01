@@ -27,7 +27,8 @@ public:
         kTopPlaneCount * kMaxTopDescriptorsPerPlane +
         (kPlaneCount - kTopPlaneCount) * kMaxSideDescriptorsPerPlane;
     static constexpr std::uint32_t kGpuDrawRecordOverflowFlag = 0x80000000u;
-    static constexpr std::uint32_t kGpuDrawRecordFaceCountMask = 0x7fffffffu;
+    static constexpr std::uint32_t kGpuDrawRecordActiveBit = 0x40000000u;
+    static constexpr std::uint32_t kGpuDrawRecordFaceCountMask = 0x3fffffffu;
 
     struct FarLodChunkKey
     {
@@ -5733,6 +5734,16 @@ private:
             if (chunk.pendingMesh.gpuGenerated)
             {
                 pendingRecord = *chunk.pendingMesh.mappedDrawRecord;
+                const bool active = (pendingRecord.reserved & kGpuDrawRecordActiveBit) != 0u;
+                if (!active)
+                {
+                    releasePendingMeshAllocation(chunk);
+                    if (!chunk.dirty)
+                    {
+                        markDirty(chunk);
+                    }
+                    continue;
+                }
                 actualFaceCount = pendingRecord.reserved & kGpuDrawRecordFaceCountMask;
                 overflowed = (pendingRecord.reserved & kGpuDrawRecordOverflowFlag) != 0u;
                 if (overflowed)

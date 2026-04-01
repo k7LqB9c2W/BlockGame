@@ -193,6 +193,10 @@ struct ChunkRenderBatch
     std::vector<std::int32_t> baseVertices;
     struct GpuCullRecord
     {
+        static constexpr std::uint32_t kReservedActiveBit = 1u << 30u;
+        static constexpr std::uint32_t kReservedOverflowBit = 1u << 31u;
+        static constexpr std::uint32_t kReservedFaceCountMask = kReservedActiveBit - 1u;
+
         glm::vec4 boundsMin{0.0f};
         glm::vec4 boundsMax{0.0f};
         std::uint32_t indexCount{0};
@@ -292,6 +296,7 @@ struct ChunkProfilingSnapshot
     double exactGpuSubmitCpuMs{0.0};
     double exactGpuCommitCpuMs{0.0};
     double exactGpuWorldgenResolveMsLastCycle{0.0};
+    double exactGpuPrepassFaceTotalsReadbackMsLastCycle{0.0};
     double exactGpuAllocatorSyncMsLastCycle{0.0};
     double exactGpuPageSweepMsLastCycle{0.0};
     double exactGpuEmitWaitMsLastCycle{0.0};
@@ -493,6 +498,7 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats exactGpuSubmitCpuStage{};
     BenchmarkStageStats exactGpuCommitCpuStage{};
     BenchmarkStageStats exactGpuWorldgenResolveStage{};
+    BenchmarkStageStats exactGpuPrepassFaceTotalsReadbackStage{};
     BenchmarkStageStats exactGpuAllocatorSyncStage{};
     BenchmarkStageStats exactGpuPageSweepStage{};
     BenchmarkStageStats exactGpuEmitWaitStage{};

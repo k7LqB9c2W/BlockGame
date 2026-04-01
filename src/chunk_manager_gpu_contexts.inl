@@ -277,6 +277,13 @@ public:
         std::uint32_t buildCount{0};
     };
 
+    struct ExactFaceTotalsReadback
+    {
+        ScratchAllocation allocation{};
+        std::uint64_t strideBytes{0};
+        std::uint32_t buildCount{0};
+    };
+
     struct ExactOverflowEntry
     {
         std::uint32_t buildIndex{0};
@@ -1952,6 +1959,44 @@ public:
         return readback;
     }
 
+    [[nodiscard]] ExactFaceTotalsReadback queueExactFaceTotalsReadback(std::span<const std::uint32_t> buildIndices)
+    {
+        ExactFaceTotalsReadback readback{};
+        if (!open_ || buildIndices.empty() || exactFaceTotalScratchBuffer_ == nullptr)
+        {
+            return readback;
+        }
+
+        const std::uint64_t totalSize =
+            static_cast<std::uint64_t>(buildIndices.size()) * sizeof(std::uint32_t);
+        readback.allocation = allocateReadback(totalSize, alignof(std::uint32_t));
+        readback.strideBytes = sizeof(std::uint32_t);
+        readback.buildCount = static_cast<std::uint32_t>(buildIndices.size());
+        if (readback.allocation.resource == nullptr)
+        {
+            return readback;
+        }
+
+        if (exactFaceTotalScratchState_ != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        {
+            transition(exactFaceTotalScratchBuffer_.Get(),
+                       exactFaceTotalScratchState_,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+
+        for (std::size_t buildOrdinal = 0; buildOrdinal < buildIndices.size(); ++buildOrdinal)
+        {
+            copyBuffer(readback.allocation.resource,
+                       readback.allocation.offset + buildOrdinal * readback.strideBytes,
+                       exactFaceTotalScratchBuffer_.Get(),
+                       static_cast<std::uint64_t>(buildIndices[buildOrdinal]) *
+                           static_cast<std::uint64_t>(kExactFaceTotalScratchSliceBytes),
+                       sizeof(std::uint32_t));
+        }
+        return readback;
+    }
+
     [[nodiscard]] ID3D12Resource* exactDescriptorScratchBuffer() const noexcept
     {
         return exactDescriptorScratchBuffer_.Get();
@@ -2732,6 +2777,11 @@ public:
     [[nodiscard]] std::size_t exactCompletionReadbackBytes(std::size_t buildCount) const noexcept
     {
         return buildCount * sizeof(ExactCompletionEntry);
+    }
+
+    [[nodiscard]] std::size_t exactFaceTotalsReadbackBytes(std::size_t buildCount) const noexcept
+    {
+        return buildCount * sizeof(std::uint32_t);
     }
 
     [[nodiscard]] const std::byte* readbackMappedData() const noexcept

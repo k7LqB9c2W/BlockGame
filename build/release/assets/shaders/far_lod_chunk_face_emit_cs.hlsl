@@ -94,7 +94,8 @@ static const uint kFaceSouth = 3u;
 static const uint kFaceEast = 4u;
 static const uint kFaceWest = 5u;
 static const uint kDrawRecordOverflowFlag = 0x80000000u;
-static const uint kDrawRecordFaceCountMask = 0x7fffffffu;
+static const uint kDrawRecordActiveBit = 0x40000000u;
+static const uint kDrawRecordFaceCountMask = 0x3fffffffu;
 static const uint kBlockGrass = 1u;
 static const uint kBlockSpruceLeaves = 8u;
 static const uint kBlockDarkOakLeaves = 12u;
@@ -528,7 +529,8 @@ void FarLodChunkFaceEmitMain(uint3 dispatchThreadId : SV_DispatchThreadID,
         record.indexCount = overflowed ? 0u : (totalFaces * 6u);
         record.firstIndexLocation = gIndexBase;
         record.baseVertex = (int)gVertexBase;
-        record.reserved = (totalFaces & kDrawRecordFaceCountMask) |
+        record.reserved = kDrawRecordActiveBit |
+                          (totalFaces & kDrawRecordFaceCountMask) |
                           (overflowed ? kDrawRecordOverflowFlag : 0u);
         gDrawRecords[gRecordIndex] = record;
     }

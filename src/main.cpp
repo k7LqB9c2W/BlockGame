@@ -1858,6 +1858,7 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
         << ",submit:" << profiling.exactGpuSubmitCpuMs
         << ",commit:" << profiling.exactGpuCommitCpuMs
         << ",wg:" << profiling.exactGpuWorldgenResolveMsLastCycle
+        << ",prepass_rb:" << profiling.exactGpuPrepassFaceTotalsReadbackMsLastCycle
         << ",alloc:" << profiling.exactGpuAllocatorSyncMsLastCycle
         << ",sweep:" << profiling.exactGpuPageSweepMsLastCycle
         << ",emit_wait:" << profiling.exactGpuEmitWaitMsLastCycle
@@ -2340,6 +2341,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.exactGpuCommitCpuStage);
     out << ",\"exact_gpu_worldgen_resolve\":";
     writeStageStatsJson(out, report.exactGpuWorldgenResolveStage);
+    out << ",\"exact_gpu_prepass_face_totals_readback\":";
+    writeStageStatsJson(out, report.exactGpuPrepassFaceTotalsReadbackStage);
     out << ",\"exact_gpu_allocator_sync\":";
     writeStageStatsJson(out, report.exactGpuAllocatorSyncStage);
     out << ",\"exact_gpu_page_sweep\":";
@@ -2581,6 +2584,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_gpu_submit_cpu_ms\":" << finalProfiling.exactGpuSubmitCpuMs
         << ",\"exact_gpu_commit_cpu_ms\":" << finalProfiling.exactGpuCommitCpuMs
         << ",\"exact_gpu_worldgen_resolve_ms\":" << finalProfiling.exactGpuWorldgenResolveMsLastCycle
+        << ",\"exact_gpu_prepass_face_totals_readback_ms\":"
+        << finalProfiling.exactGpuPrepassFaceTotalsReadbackMsLastCycle
         << ",\"exact_gpu_allocator_sync_ms\":" << finalProfiling.exactGpuAllocatorSyncMsLastCycle
         << ",\"exact_gpu_page_sweep_ms\":" << finalProfiling.exactGpuPageSweepMsLastCycle
         << ",\"exact_gpu_emit_wait_ms\":" << finalProfiling.exactGpuEmitWaitMsLastCycle

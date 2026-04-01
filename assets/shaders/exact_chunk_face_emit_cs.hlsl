@@ -442,8 +442,14 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
     {
         build = gBuildRecords[buildIndex];
     }
-    const bool validPageIndex =
+    const bool emitPhaseSubmitted =
         validBuildIndex &&
+        build.phase == kExactChunkAllocationPhaseEmitSubmitted;
+    const bool zeroFaceBuild =
+        emitPhaseSubmitted &&
+        build.requiredFaceCount == 0u;
+    const bool validPageIndex =
+        emitPhaseSubmitted &&
         build.pageIndex != 0xffffffffu &&
         build.pageIndex < allocatorState.pageCount;
     GpuExactAllocatorPageMetadata page = (GpuExactAllocatorPageMetadata)0;
@@ -452,10 +458,13 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         page = gPageMetadata[build.pageIndex];
     }
     const bool validEmitRecord =
-        validBuildIndex &&
-        build.phase == kExactChunkAllocationPhaseEmitSubmitted &&
+        emitPhaseSubmitted &&
+        build.requiredFaceCount > 0u &&
         validPageIndex &&
         build.recordIndex != 0xffffffffu &&
+        build.recordIndex < page.recordCapacity &&
+        build.reservedFaceCapacity >= build.requiredFaceCount &&
+        page.state == kChunkBufferPageStateOpenWritable &&
         allocatorState.blockFaceUvDescriptorIndex != 0xffffffffu &&
         build.centerVoxelSrvDescriptorIndex != 0xffffffffu &&
         build.haloSrvDescriptorIndex != 0xffffffffu &&
@@ -464,8 +473,35 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         page.drawRecordUavDescriptorIndex != 0xffffffffu &&
         page.drawRecordMetadataUavDescriptorIndex != 0xffffffffu;
 
-    if (!validEmitRecord)
+    if (!validEmitRecord && !zeroFaceBuild)
     {
+        return;
+    }
+
+    if (zeroFaceBuild)
+    {
+        if (planeIndex == 0u && groupThreadId.x == 0u)
+        {
+            GpuExactCompletionEntry completion;
+            completion.buildIndex = buildIndex;
+            completion.statusFlags =
+                build.statusFlags | kExactCompletionStatusCompletedBit | kExactCompletionStatusZeroFacesBit;
+            completion.requiredFaces = 0u;
+            completion.reservedFaceCapacity = build.reservedFaceCapacity;
+            completion.chunkWorldMinX = build.chunkWorldMinX;
+            completion.chunkWorldMinY = build.chunkWorldMinY;
+            completion.chunkWorldMinZ = build.chunkWorldMinZ;
+            completion.pageIndex = build.pageIndex;
+            completion.recordIndex = build.recordIndex;
+            completion.vertexBase = build.vertexBase;
+            completion.indexBase = build.indexBase;
+            completion.buildVersion = build.buildVersion;
+            completion.generationEpoch = build.generationEpoch;
+            completion.inputVersionLo = build.inputVersionLo;
+            completion.inputVersionHi = build.inputVersionHi;
+            completion.reserved0 = 0u;
+            gCompletionEntries[buildIndex] = completion;
+        }
         return;
     }
 
@@ -503,7 +539,8 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         record.indexCount = (totalFaces <= build.reservedFaceCapacity) ? (totalFaces * 6u) : 0u;
         record.firstIndexLocation = build.indexBase;
         record.baseVertex = int(build.vertexBase);
-        record.reserved = min(totalFaces, kExactDrawRecordFaceCountMask) |
+        record.reserved = kExactDrawRecordActiveBit |
+                          min(totalFaces, kExactDrawRecordFaceCountMask) |
                           ((totalFaces > build.reservedFaceCapacity) ? kExactDrawRecordOverflowFlag : 0u);
         drawRecords[build.recordIndex] = record;
 

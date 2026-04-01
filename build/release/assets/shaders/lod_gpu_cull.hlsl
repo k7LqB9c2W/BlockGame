@@ -8,6 +8,8 @@ cbuffer CullParams : register(b0)
     uint gDepthMipCount;
 };
 
+static const uint kExactDrawRecordActiveBit = 0x40000000u;
+
 struct GpuCullRecord
 {
     float4 boundsMin;
@@ -137,6 +139,10 @@ void LodCullMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const GpuCullRecord record = gRecords[recordIndex];
+    if ((record.reserved & kExactDrawRecordActiveBit) == 0u)
+    {
+        return;
+    }
     if (record.indexCount == 0u)
     {
         return;

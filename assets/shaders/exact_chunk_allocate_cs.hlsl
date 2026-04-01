@@ -76,7 +76,7 @@ bool reserveAllocationInPage(uint pageIndex,
                              inout GpuExactChunkAllocationRecord build)
 {
     if (page.usage != kChunkBufferPageUsageExactGpu ||
-        page.state == kChunkBufferPageStatePendingUploaded ||
+        page.state == kChunkBufferPageStateSealedPendingResident ||
         page.state == kChunkBufferPageStateRetiring)
     {
         return false;
@@ -87,9 +87,9 @@ bool reserveAllocationInPage(uint pageIndex,
         return false;
     }
 
-    if (page.state == kChunkBufferPageStateAvailable || page.state == kChunkBufferPageStateResident)
+    if (page.state == kChunkBufferPageStateFree || page.state == kChunkBufferPageStateResidentImmutable)
     {
-        page.state = kChunkBufferPageStatePendingOpen;
+        page.state = kChunkBufferPageStateOpenWritable;
     }
 
     build.requiredFaceCount = requiredFaces;
@@ -191,7 +191,7 @@ bool tryReserveFromFreePages(uint requiredFaces,
     }
 
     const bool reserved =
-        page.state == kChunkBufferPageStateAvailable &&
+        page.state == kChunkBufferPageStateFree &&
         reserveAllocationInPage(pageIndex,
                                 page,
                                 requiredFaces,
@@ -246,14 +246,14 @@ void ExactChunkAllocateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const uint requiredVertexCount = requiredFaces * 4u;
     const uint requiredIndexCount = requiredFaces * 6u;
-    bool reserved = tryReserveFromState(kChunkBufferPageStatePendingOpen,
+    bool reserved = tryReserveFromState(kChunkBufferPageStateOpenWritable,
                                         requiredFaces,
                                         requiredVertexCount,
                                         requiredIndexCount,
                                         build);
     if (!reserved)
     {
-        reserved = tryReserveFromState(kChunkBufferPageStateResident,
+        reserved = tryReserveFromState(kChunkBufferPageStateResidentImmutable,
                                        requiredFaces,
                                        requiredVertexCount,
                                        requiredIndexCount,

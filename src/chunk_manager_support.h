@@ -51,11 +51,12 @@ enum class JobType : std::uint8_t
 {
     Generate = 0,
     Mesh = 1,
-    WorldgenPagePrefetch = 2,
-    BulkShellOracle = 3
+    WorldgenPageDependency = 2,
+    StructureRegionDependency = 3,
+    BulkShellOracle = 4
 };
 
-inline constexpr std::size_t kJobTypeCount = 4;
+inline constexpr std::size_t kJobTypeCount = 5;
 
 enum class JobServiceClass : std::uint8_t
 {

@@ -560,6 +560,10 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats chunkReadyWaitUploadStage{};
     BenchmarkStageStats chunkReadyUploadToReadyStage{};
     BenchmarkStageStats chunkReadyGenerateAttempts{};
+    BenchmarkStageStats chunkDependencyWorldgenDeferrals{};
+    BenchmarkStageStats chunkDependencyStructureDeferrals{};
+    BenchmarkStageStats worldgenDependencyReadyToGenerate{};
+    BenchmarkStageStats structureDependencyReadyToGenerate{};
     BenchmarkStageStats chunkReadyStructureDeferralCount{};
     BenchmarkStageStats chunkReadyFirstStructureDeferralToReadyStage{};
     BenchmarkStageStats uploadQueueAgeStage{};
@@ -594,6 +598,8 @@ struct ChunkBenchmarkReport
     BenchmarkQueueDepthStats jobQueueDepth{};
     BenchmarkQueueDepthStats uploadQueueDepth{};
     BenchmarkQueueDepthStats columnPrefetchQueueDepth{};
+    BenchmarkQueueDepthStats worldgenDependencyQueueDepth{};
+    BenchmarkQueueDepthStats structureDependencyQueueDepth{};
     BenchmarkQueueDepthStats farBuildQueueDepth{};
     BenchmarkQueueDepthStats farUploadQueueDepth{};
     BenchmarkCacheStats climateCache{};

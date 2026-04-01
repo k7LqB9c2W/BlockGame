@@ -813,7 +813,7 @@ public:
             for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
             {
                 const std::shared_ptr<const StructureRegion> region =
-                    getOrBuildRegion(StructureRegionKey{regionX, regionZ});
+                    getOrBuildRegionBlocking(StructureRegionKey{regionX, regionZ});
                 if (!region)
                 {
                     continue;
@@ -914,7 +914,7 @@ public:
 
     [[nodiscard]] std::vector<StructureInstance> copyRegionInstances(const StructureRegionKey& key) const
     {
-        const std::shared_ptr<const StructureRegion> region = getOrBuildRegion(key);
+        const std::shared_ptr<const StructureRegion> region = getOrBuildRegionBlocking(key);
         if (!region)
         {
             return {};
@@ -924,7 +924,7 @@ public:
 
     [[nodiscard]] std::vector<StructureVoxelEdit> copyRegionVoxelEdits(const StructureRegionKey& key) const
     {
-        const std::shared_ptr<const StructureRegion> region = getOrBuildRegion(key);
+        const std::shared_ptr<const StructureRegion> region = getOrBuildRegionBlocking(key);
         if (!region)
         {
             return {};
@@ -950,7 +950,7 @@ public:
             for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
             {
                 const std::shared_ptr<const StructureRegion> region =
-                    getOrBuildRegion(StructureRegionKey{regionX, regionZ});
+                    getOrBuildRegionBlocking(StructureRegionKey{regionX, regionZ});
                 if (!region)
                 {
                     continue;
@@ -1050,7 +1050,7 @@ public:
             for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
             {
                 const std::shared_ptr<const StructureRegion> region =
-                    getOrBuildRegion(StructureRegionKey{regionX, regionZ});
+                    getOrBuildRegionBlocking(StructureRegionKey{regionX, regionZ});
                 if (!region)
                 {
                     continue;
@@ -1126,7 +1126,7 @@ public:
 
     [[nodiscard]] std::shared_ptr<const StructureRegion> warmRegion(const StructureRegionKey& key) const
     {
-        return getOrBuildRegion(key);
+        return getOrBuildRegionBlocking(key);
     }
 
     [[nodiscard]] bool isRegionReady(const StructureRegionKey& key) const
@@ -1151,7 +1151,7 @@ private:
         return it->second;
     }
 
-    [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegion(const StructureRegionKey& key) const
+    [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegionBlocking(const StructureRegionKey& key) const
     {
         std::shared_ptr<PendingStructureRegionBuild> pendingBuild;
         {

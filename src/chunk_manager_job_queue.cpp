@@ -395,11 +395,14 @@ JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
     case JobType::Generate:
         bias = 1;
         break;
-    case JobType::WorldgenPagePrefetch:
+    case JobType::WorldgenPageDependency:
         bias = 2;
         break;
-    case JobType::BulkShellOracle:
+    case JobType::StructureRegionDependency:
         bias = 3;
+        break;
+    case JobType::BulkShellOracle:
+        bias = 4;
         break;
     }
     const std::uint64_t sequence = nextSequence_++;
@@ -451,11 +454,13 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     const std::size_t totalWorkers = std::max<std::size_t>(workerConcurrency_, 1);
     const std::size_t generateIndex = jobTypeIndex(JobType::Generate);
     const std::size_t meshIndex = jobTypeIndex(JobType::Mesh);
-    const std::size_t prefetchIndex = jobTypeIndex(JobType::WorldgenPagePrefetch);
+    const std::size_t worldgenDependencyIndex = jobTypeIndex(JobType::WorldgenPageDependency);
+    const std::size_t structureDependencyIndex = jobTypeIndex(JobType::StructureRegionDependency);
     const std::size_t bulkShellIndex = jobTypeIndex(JobType::BulkShellOracle);
     const std::size_t generateBacklog = queues_[generateIndex].size();
     const std::size_t meshBacklog = queues_[meshIndex].size();
-    const std::size_t prefetchBacklog = queues_[prefetchIndex].size();
+    const std::size_t worldgenDependencyBacklog = queues_[worldgenDependencyIndex].size();
+    const std::size_t structureDependencyBacklog = queues_[structureDependencyIndex].size();
     const std::size_t bulkShellBacklog = queues_[bulkShellIndex].size();
     const bool generateInitialReadyTop =
         generateBacklog > 0 && queues_[generateIndex].top().lifecycleBias == 0;
@@ -468,29 +473,47 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         activeServiceCounts_[jobServiceClassIndex(JobServiceClass::LocalInteraction)];
     const bool playableBacklog = generateBacklog > 0 || meshBacklog > 0;
 
-    std::size_t prefetchTarget = 0;
-    if (prefetchBacklog > 0)
+    std::size_t worldgenDependencyTarget = 0;
+    if (worldgenDependencyBacklog > 0)
     {
-        prefetchTarget = 1;
+        worldgenDependencyTarget = 1;
         if (!playableBacklog)
         {
-            prefetchTarget = std::min<std::size_t>(prefetchBacklog, std::min<std::size_t>(totalWorkers, 4));
+            worldgenDependencyTarget =
+                std::min<std::size_t>(worldgenDependencyBacklog, std::min<std::size_t>(totalWorkers, 4));
         }
-        else if (totalWorkers >= 12 && prefetchBacklog > 512)
+        else if (totalWorkers >= 12 && worldgenDependencyBacklog > 512)
         {
-            prefetchTarget = 4;
+            worldgenDependencyTarget = 4;
         }
-        else if (totalWorkers >= 10 && prefetchBacklog > 128)
+        else if (totalWorkers >= 10 && worldgenDependencyBacklog > 128)
         {
-            prefetchTarget = 3;
+            worldgenDependencyTarget = 3;
         }
-        else if (totalWorkers >= 8 && prefetchBacklog > 256)
+        else if (totalWorkers >= 8 && worldgenDependencyBacklog > 256)
         {
-            prefetchTarget = 2;
+            worldgenDependencyTarget = 2;
         }
-        else if (latencySensitivePressure == 0 && totalWorkers >= 8 && prefetchBacklog > 1)
+        else if (latencySensitivePressure == 0 && totalWorkers >= 8 && worldgenDependencyBacklog > 1)
         {
-            prefetchTarget = 2;
+            worldgenDependencyTarget = 2;
+        }
+    }
+
+    std::size_t structureDependencyTarget = 0;
+    if (structureDependencyBacklog > 0)
+    {
+        structureDependencyTarget = 1;
+        if (!playableBacklog)
+        {
+            const std::size_t remainingCapacity =
+                (totalWorkers > worldgenDependencyTarget) ? (totalWorkers - worldgenDependencyTarget) : 0;
+            structureDependencyTarget =
+                std::min<std::size_t>(structureDependencyBacklog, std::min<std::size_t>(remainingCapacity, 2));
+        }
+        else if (latencySensitivePressure == 0 && totalWorkers >= 10 && structureDependencyBacklog > 1)
+        {
+            structureDependencyTarget = 2;
         }
     }
 
@@ -499,12 +522,13 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     {
         if (!playableBacklog)
         {
-            const std::size_t remainingCapacity = (totalWorkers > prefetchTarget)
-                ? (totalWorkers - prefetchTarget)
+            const std::size_t remainingCapacity =
+                (totalWorkers > worldgenDependencyTarget + structureDependencyTarget)
+                    ? (totalWorkers - worldgenDependencyTarget - structureDependencyTarget)
                 : 0;
             bulkShellTarget = std::min<std::size_t>(bulkShellBacklog, std::min<std::size_t>(remainingCapacity, 2));
         }
-        else if (totalWorkers >= 12 && prefetchBacklog < 256 && latencySensitivePressure == 0)
+        else if (totalWorkers >= 12 && worldgenDependencyBacklog < 256 && latencySensitivePressure == 0)
         {
             bulkShellTarget = 1;
         }
@@ -525,7 +549,7 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     }
     playableReserve = std::min(playableReserve, totalWorkers);
 
-    std::size_t supportTargetTotal = prefetchTarget + bulkShellTarget;
+    std::size_t supportTargetTotal = worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget;
     const std::size_t maxSupportWorkers = (totalWorkers > playableReserve)
         ? (totalWorkers - playableReserve)
         : 0;
@@ -537,12 +561,19 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         overflow -= bulkTrim;
         if (overflow > 0)
         {
-            prefetchTarget -= std::min(prefetchTarget, overflow);
+            const std::size_t structureTrim = std::min(structureDependencyTarget, overflow);
+            structureDependencyTarget -= structureTrim;
+            overflow -= structureTrim;
         }
-        supportTargetTotal = prefetchTarget + bulkShellTarget;
+        if (overflow > 0)
+        {
+            worldgenDependencyTarget -= std::min(worldgenDependencyTarget, overflow);
+        }
+        supportTargetTotal = worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget;
     }
 
-    targets[prefetchIndex] = prefetchTarget;
+    targets[worldgenDependencyIndex] = worldgenDependencyTarget;
+    targets[structureDependencyIndex] = structureDependencyTarget;
     targets[bulkShellIndex] = bulkShellTarget;
 
     const std::size_t playableWorkers = totalWorkers - supportTargetTotal;

@@ -2462,6 +2462,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.chunkReadyUploadToReadyStage);
     out << ",\"chunk_ready_generate_attempts\":";
     writeCountStatsJson(out, report.chunkReadyGenerateAttempts);
+    out << ",\"chunk_dependency_worldgen_deferrals\":";
+    writeCountStatsJson(out, report.chunkDependencyWorldgenDeferrals);
+    out << ",\"chunk_dependency_structure_deferrals\":";
+    writeCountStatsJson(out, report.chunkDependencyStructureDeferrals);
+    out << ",\"worldgen_dependency_ready_to_generate\":";
+    writeStageStatsJson(out, report.worldgenDependencyReadyToGenerate);
+    out << ",\"structure_dependency_ready_to_generate\":";
+    writeStageStatsJson(out, report.structureDependencyReadyToGenerate);
     out << ",\"chunk_ready_structure_deferral_count\":";
     writeCountStatsJson(out, report.chunkReadyStructureDeferralCount);
     out << ",\"chunk_ready_first_structure_deferral_to_ready\":";
@@ -2576,6 +2584,14 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     out << ",\"chunk_ready_retry_detail\":{"
         << "\"generate_attempts\":";
     writeCountStatsJson(out, report.chunkReadyGenerateAttempts);
+    out << ",\"worldgen_deferrals\":";
+    writeCountStatsJson(out, report.chunkDependencyWorldgenDeferrals);
+    out << ",\"structure_dependency_deferrals\":";
+    writeCountStatsJson(out, report.chunkDependencyStructureDeferrals);
+    out << ",\"worldgen_ready_to_generate\":";
+    writeStageStatsJson(out, report.worldgenDependencyReadyToGenerate);
+    out << ",\"structure_ready_to_generate\":";
+    writeStageStatsJson(out, report.structureDependencyReadyToGenerate);
     out << ",\"structure_deferral_count\":";
     writeCountStatsJson(out, report.chunkReadyStructureDeferralCount);
     out << ",\"first_structure_deferral_to_ready\":";
@@ -2596,6 +2612,10 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeQueueStatsJson(out, report.uploadQueueDepth);
     out << ",\"column_prefetch_backlog\":";
     writeQueueStatsJson(out, report.columnPrefetchQueueDepth);
+    out << ",\"worldgen_dependency_backlog\":";
+    writeQueueStatsJson(out, report.worldgenDependencyQueueDepth);
+    out << ",\"structure_dependency_backlog\":";
+    writeQueueStatsJson(out, report.structureDependencyQueueDepth);
     out << ",\"far_build_backlog\":";
     writeQueueStatsJson(out, report.farBuildQueueDepth);
     out << ",\"far_upload_backlog\":";

@@ -13,7 +13,7 @@ struct ShaderCompileSpec
     const char* target;
 };
 
-inline constexpr std::array<ShaderCompileSpec, 41> kBlockGameShaderCompileSpecs{{
+inline constexpr std::array<ShaderCompileSpec, 40> kBlockGameShaderCompileSpecs{{
     {"world_vs.hlsl", "main", "vs_5_0"},
     {"mob_vs.hlsl", "main", "vs_5_0"},
     {"block_outline_vs.hlsl", "main", "vs_5_0"},
@@ -53,7 +53,6 @@ inline constexpr std::array<ShaderCompileSpec, 41> kBlockGameShaderCompileSpecs{
     {"exact_chunk_light_cs.hlsl", "ExactChunkLightMain", "cs_6_6"},
     {"exact_chunk_face_count_cs.hlsl", "ExactChunkFaceCountMain", "cs_6_6"},
     {"exact_chunk_face_prefix_cs.hlsl", "ExactChunkFacePrefixMain", "cs_6_6"},
-    {"exact_chunk_allocate_cs.hlsl", "ExactChunkAllocateMain", "cs_6_6"},
     {"exact_chunk_face_emit_cs.hlsl", "ExactChunkFaceEmitMain", "cs_6_6"},
 }};
 

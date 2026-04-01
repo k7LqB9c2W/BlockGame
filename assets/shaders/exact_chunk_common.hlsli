@@ -161,45 +161,24 @@ struct GpuExactOverflowEntry
     uint reserved1;
 };
 
-struct GpuExactAllocatorState
+struct GpuExactEmitConfig
 {
     uint pageCount;
-    uint freePageCount;
     uint buildRecordCount;
     uint blockFaceUvDescriptorIndex;
+    uint reserved0;
 };
 
-struct GpuExactAllocatorPageMetadata
+struct GpuExactPageMetadata
 {
     uint pageIndex;
-    uint usage;
     uint state;
-    uint allocationLockWord;
     uint recordCapacity;
-    uint vertexCapacity;
-    uint indexCapacity;
     uint reserved0;
-    uint vertexCursor;
-    uint indexCursor;
-    uint recordCursor;
-    uint recordActiveCount;
-    uint residentChunks;
-    uint pendingChunks;
     uint vertexUavDescriptorIndex;
     uint indexUavDescriptorIndex;
     uint drawRecordUavDescriptorIndex;
     uint drawRecordMetadataUavDescriptorIndex;
-    uint pendingBatchIdLo;
-    uint pendingBatchIdHi;
-    uint uploadFenceValueLo;
-    uint uploadFenceValueHi;
-    uint retireFenceValueLo;
-    uint retireFenceValueHi;
-};
-
-struct GpuExactAllocatorFreePageEntry
-{
-    uint pageIndex;
 };
 
 struct GpuExactChunkAllocationRecord

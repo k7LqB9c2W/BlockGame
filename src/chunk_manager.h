@@ -297,7 +297,7 @@ struct ChunkProfilingSnapshot
     double exactGpuCommitCpuMs{0.0};
     double exactGpuWorldgenResolveMsLastCycle{0.0};
     double exactGpuPrepassFaceTotalsReadbackMsLastCycle{0.0};
-    double exactGpuAllocatorSyncMsLastCycle{0.0};
+    double exactGpuEmitMetadataSyncMsLastCycle{0.0};
     double exactGpuPageSweepMsLastCycle{0.0};
     double exactGpuEmitWaitMsLastCycle{0.0};
     double exactGpuEmitFenceLifetimeMsLastCycle{0.0};
@@ -381,8 +381,7 @@ struct ChunkProfilingSnapshot
     int exactGpuQueuedBuilds{0};
     int exactGpuPendingBuilds{0};
     int exactGpuWorldgenPageMissesLastCycle{0};
-    int exactGpuAllocatorDirtyPagesLastCycle{0};
-    int exactGpuAllocatorDirtyFreeSlotsLastCycle{0};
+    int exactGpuEmitMetadataDirtyPagesLastCycle{0};
     int exactGpuPageSweepPagesLastCycle{0};
     int exactGpuReadyForEmitBacklogBatchesLastCycle{0};
     int exactGpuReadyForEmitBacklogBuildsLastCycle{0};
@@ -394,7 +393,7 @@ struct ChunkProfilingSnapshot
     std::uint64_t exactGpuBuildsSubmitted{0};
     std::uint64_t exactGpuBuildsCommitted{0};
     std::uint64_t exactGpuMeshReplacements{0};
-    std::size_t exactGpuAllocatorUploadBytesLastCycle{0};
+    std::size_t exactGpuEmitMetadataUploadBytesLastCycle{0};
     double exactGpuBlockingEmitBatchAgeMsLastCycle{0.0};
     std::size_t pooledChunkCount{0};
     std::size_t pooledChunkBytes{0};
@@ -499,14 +498,13 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats exactGpuCommitCpuStage{};
     BenchmarkStageStats exactGpuWorldgenResolveStage{};
     BenchmarkStageStats exactGpuPrepassFaceTotalsReadbackStage{};
-    BenchmarkStageStats exactGpuAllocatorSyncStage{};
+    BenchmarkStageStats exactGpuEmitMetadataSyncStage{};
     BenchmarkStageStats exactGpuPageSweepStage{};
     BenchmarkStageStats exactGpuEmitWaitStage{};
     BenchmarkStageStats exactGpuEmitFenceLifetimeStage{};
     BenchmarkStageStats exactGpuWorldgenPageMisses{};
-    BenchmarkStageStats exactGpuAllocatorDirtyPages{};
-    BenchmarkStageStats exactGpuAllocatorDirtyFreeSlots{};
-    BenchmarkStageStats exactGpuAllocatorUploadBytes{};
+    BenchmarkStageStats exactGpuEmitMetadataDirtyPages{};
+    BenchmarkStageStats exactGpuEmitMetadataUploadBytes{};
     BenchmarkStageStats exactGpuPageSweepPages{};
     BenchmarkStageStats exactGpuReadyForEmitBacklogBatches{};
     BenchmarkStageStats exactGpuReadyForEmitBacklogBuilds{};

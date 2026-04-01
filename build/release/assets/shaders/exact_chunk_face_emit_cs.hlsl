@@ -8,9 +8,9 @@ cbuffer ExactChunkFaceEmitParams : register(b0)
     uint gReserved2;
 };
 
-StructuredBuffer<GpuExactAllocatorState> gAllocatorStateBuffer : register(t0);
+StructuredBuffer<GpuExactEmitConfig> gEmitConfigBuffer : register(t0);
 StructuredBuffer<GpuExactChunkAllocationRecord> gBuildRecords : register(t1);
-StructuredBuffer<GpuExactAllocatorPageMetadata> gPageMetadata : register(t2);
+StructuredBuffer<GpuExactPageMetadata> gPageMetadata : register(t2);
 StructuredBuffer<GpuExactColumnDescriptor> gColumnScratch : register(t3);
 StructuredBuffer<uint> gFaceCountScratch : register(t4);
 StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(t5);
@@ -434,9 +434,9 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         return;
     }
 
-    const GpuExactAllocatorState allocatorState = gAllocatorStateBuffer[0];
+    const GpuExactEmitConfig emitConfig = gEmitConfigBuffer[0];
     const uint buildIndex = gBatchBuildIndices[buildOrdinal];
-    const bool validBuildIndex = buildIndex < allocatorState.buildRecordCount;
+    const bool validBuildIndex = buildIndex < emitConfig.buildRecordCount;
     GpuExactChunkAllocationRecord build = (GpuExactChunkAllocationRecord)0;
     if (validBuildIndex)
     {
@@ -451,8 +451,8 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
     const bool validPageIndex =
         emitPhaseSubmitted &&
         build.pageIndex != 0xffffffffu &&
-        build.pageIndex < allocatorState.pageCount;
-    GpuExactAllocatorPageMetadata page = (GpuExactAllocatorPageMetadata)0;
+        build.pageIndex < emitConfig.pageCount;
+    GpuExactPageMetadata page = (GpuExactPageMetadata)0;
     if (validPageIndex)
     {
         page = gPageMetadata[build.pageIndex];
@@ -465,7 +465,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         build.recordIndex < page.recordCapacity &&
         build.reservedFaceCapacity >= build.requiredFaceCount &&
         page.state == kChunkBufferPageStateOpenWritable &&
-        allocatorState.blockFaceUvDescriptorIndex != 0xffffffffu &&
+        emitConfig.blockFaceUvDescriptorIndex != 0xffffffffu &&
         build.centerVoxelSrvDescriptorIndex != 0xffffffffu &&
         build.haloSrvDescriptorIndex != 0xffffffffu &&
         page.vertexUavDescriptorIndex != 0xffffffffu &&
@@ -510,7 +510,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
     StructuredBuffer<uint> haloVoxels =
         ResourceDescriptorHeap[NonUniformResourceIndex(build.haloSrvDescriptorIndex)];
     StructuredBuffer<GpuBlockFaceUv> blockFaceUvs =
-        ResourceDescriptorHeap[NonUniformResourceIndex(allocatorState.blockFaceUvDescriptorIndex)];
+        ResourceDescriptorHeap[NonUniformResourceIndex(emitConfig.blockFaceUvDescriptorIndex)];
     RWStructuredBuffer<WorldVertex> vertices =
         ResourceDescriptorHeap[NonUniformResourceIndex(page.vertexUavDescriptorIndex)];
     RWStructuredBuffer<uint> indices =

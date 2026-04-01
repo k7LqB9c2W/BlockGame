@@ -1854,11 +1854,27 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
         << " exact_replace=" << profiling.exactGpuMeshReplacements
         << " exact_qbuild=" << profiling.exactGpuQueuedBuilds
         << " exact_pbuild=" << profiling.exactGpuPendingBuilds
+        << " exact_cpu_ms={prep:" << profiling.exactGpuPrepareCpuMs
+        << ",submit:" << profiling.exactGpuSubmitCpuMs
+        << ",commit:" << profiling.exactGpuCommitCpuMs
+        << ",wg:" << profiling.exactGpuWorldgenResolveMsLastCycle
+        << ",alloc:" << profiling.exactGpuAllocatorSyncMsLastCycle
+        << ",sweep:" << profiling.exactGpuPageSweepMsLastCycle
+        << ",emit_wait:" << profiling.exactGpuEmitWaitMsLastCycle
+        << ",emit_fence:" << profiling.exactGpuEmitFenceLifetimeMsLastCycle << "}"
+        << " exact_batch={submit:" << profiling.exactGpuSubmitBatchBuildsLastCycle
+        << ",emit:" << profiling.exactGpuEmitBatchBuildsLastCycle << "}"
+        << " exact_wg_miss=" << profiling.exactGpuWorldgenPageMissesLastCycle
+        << " exact_alloc_dirty={pages:" << profiling.exactGpuAllocatorDirtyPagesLastCycle
+        << ",slots:" << profiling.exactGpuAllocatorDirtyFreeSlotsLastCycle
+        << ",kib:" << (static_cast<double>(profiling.exactGpuAllocatorUploadBytesLastCycle) / 1024.0) << "}"
+        << " exact_sweep_pages=" << profiling.exactGpuPageSweepPagesLastCycle
         << " exact_gpu_ms={synth:" << profiling.exactGpuSynthMs
         << ",stamp:" << profiling.exactGpuStampMs
         << ",light:" << profiling.exactGpuLightMs
         << ",count:" << profiling.exactGpuFaceCountMs
         << ",prefix:" << profiling.exactGpuFacePrefixMs
+        << ",allocate:" << profiling.exactGpuAllocateMs
         << ",emit:" << profiling.exactGpuFaceEmitMs
         << ",total:" << profiling.exactGpuTotalMs << "}"
         << " exact_mem_mib=" << (static_cast<double>(profiling.exactGpuTotalBytes) / (1024.0 * 1024.0))
@@ -2105,13 +2121,26 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
 
     const BenchmarkStageStats lodGpuCullStats = summarizeStageSamples(runtimeState.lodGpuCullMs);
     const BenchmarkStageStats lodIndirectBuildStats = summarizeStageSamples(runtimeState.lodIndirectBuildMs);
-    const BenchmarkStageStats exactGpuSynthStats = summarizeStageSamples(runtimeState.exactGpuSynthMs);
-    const BenchmarkStageStats exactGpuStampStats = summarizeStageSamples(runtimeState.exactGpuStampMs);
-    const BenchmarkStageStats exactGpuLightStats = summarizeStageSamples(runtimeState.exactGpuLightMs);
-    const BenchmarkStageStats exactGpuFaceCountStats = summarizeStageSamples(runtimeState.exactGpuFaceCountMs);
-    const BenchmarkStageStats exactGpuFacePrefixStats = summarizeStageSamples(runtimeState.exactGpuFacePrefixMs);
-    const BenchmarkStageStats exactGpuFaceEmitStats = summarizeStageSamples(runtimeState.exactGpuFaceEmitMs);
-    const BenchmarkStageStats exactGpuTotalStats = summarizeStageSamples(runtimeState.exactGpuTotalMs);
+    const auto chooseExactGpuStats = [](const BenchmarkStageStats& reportStats,
+                                        const std::vector<double>& sampledStats) -> BenchmarkStageStats
+    {
+        return reportStats.count > 0 ? reportStats : summarizeStageSamples(sampledStats);
+    };
+    const BenchmarkStageStats exactGpuSynthStats =
+        chooseExactGpuStats(report.exactGpuSynthStage, runtimeState.exactGpuSynthMs);
+    const BenchmarkStageStats exactGpuStampStats =
+        chooseExactGpuStats(report.exactGpuStampStage, runtimeState.exactGpuStampMs);
+    const BenchmarkStageStats exactGpuLightStats =
+        chooseExactGpuStats(report.exactGpuLightStage, runtimeState.exactGpuLightMs);
+    const BenchmarkStageStats exactGpuFaceCountStats =
+        chooseExactGpuStats(report.exactGpuFaceCountStage, runtimeState.exactGpuFaceCountMs);
+    const BenchmarkStageStats exactGpuFacePrefixStats =
+        chooseExactGpuStats(report.exactGpuFacePrefixStage, runtimeState.exactGpuFacePrefixMs);
+    const BenchmarkStageStats exactGpuAllocateStats = report.exactGpuAllocateStage;
+    const BenchmarkStageStats exactGpuFaceEmitStats =
+        chooseExactGpuStats(report.exactGpuFaceEmitStage, runtimeState.exactGpuFaceEmitMs);
+    const BenchmarkStageStats exactGpuTotalStats =
+        chooseExactGpuStats(report.exactGpuTotalStage, runtimeState.exactGpuTotalMs);
 
     out << "{";
     out << "\"schema_version\":2";
@@ -2291,6 +2320,8 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, exactGpuFaceCountStats);
     out << ",\"exact_gpu_face_prefix\":";
     writeStageStatsJson(out, exactGpuFacePrefixStats);
+    out << ",\"exact_gpu_allocate\":";
+    writeStageStatsJson(out, exactGpuAllocateStats);
     out << ",\"exact_gpu_face_emit\":";
     writeStageStatsJson(out, exactGpuFaceEmitStats);
     out << ",\"exact_gpu_total\":";
@@ -2301,6 +2332,30 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.exactGpuSubmitCpuStage);
     out << ",\"exact_gpu_commit_cpu\":";
     writeStageStatsJson(out, report.exactGpuCommitCpuStage);
+    out << ",\"exact_gpu_worldgen_resolve\":";
+    writeStageStatsJson(out, report.exactGpuWorldgenResolveStage);
+    out << ",\"exact_gpu_allocator_sync\":";
+    writeStageStatsJson(out, report.exactGpuAllocatorSyncStage);
+    out << ",\"exact_gpu_page_sweep\":";
+    writeStageStatsJson(out, report.exactGpuPageSweepStage);
+    out << ",\"exact_gpu_emit_wait\":";
+    writeStageStatsJson(out, report.exactGpuEmitWaitStage);
+    out << ",\"exact_gpu_emit_fence_lifetime\":";
+    writeStageStatsJson(out, report.exactGpuEmitFenceLifetimeStage);
+    out << ",\"exact_gpu_worldgen_page_misses\":";
+    writeCountStatsJson(out, report.exactGpuWorldgenPageMisses);
+    out << ",\"exact_gpu_allocator_dirty_pages\":";
+    writeCountStatsJson(out, report.exactGpuAllocatorDirtyPages);
+    out << ",\"exact_gpu_allocator_dirty_free_slots\":";
+    writeCountStatsJson(out, report.exactGpuAllocatorDirtyFreeSlots);
+    out << ",\"exact_gpu_allocator_upload_bytes\":";
+    writeCountStatsJson(out, report.exactGpuAllocatorUploadBytes);
+    out << ",\"exact_gpu_page_sweep_pages\":";
+    writeCountStatsJson(out, report.exactGpuPageSweepPages);
+    out << ",\"exact_gpu_submit_batch_builds\":";
+    writeCountStatsJson(out, report.exactGpuSubmitBatchBuilds);
+    out << ",\"exact_gpu_emit_batch_builds\":";
+    writeCountStatsJson(out, report.exactGpuEmitBatchBuilds);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
     out << ",\"chunk_ready_wait_generate\":";
@@ -2501,11 +2556,24 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_gpu_light_ms\":" << finalProfiling.exactGpuLightMs
         << ",\"exact_gpu_face_count_ms\":" << finalProfiling.exactGpuFaceCountMs
         << ",\"exact_gpu_face_prefix_ms\":" << finalProfiling.exactGpuFacePrefixMs
+        << ",\"exact_gpu_allocate_ms\":" << finalProfiling.exactGpuAllocateMs
         << ",\"exact_gpu_face_emit_ms\":" << finalProfiling.exactGpuFaceEmitMs
         << ",\"exact_gpu_total_ms\":" << finalProfiling.exactGpuTotalMs
         << ",\"exact_gpu_prepare_cpu_ms\":" << finalProfiling.exactGpuPrepareCpuMs
         << ",\"exact_gpu_submit_cpu_ms\":" << finalProfiling.exactGpuSubmitCpuMs
         << ",\"exact_gpu_commit_cpu_ms\":" << finalProfiling.exactGpuCommitCpuMs
+        << ",\"exact_gpu_worldgen_resolve_ms\":" << finalProfiling.exactGpuWorldgenResolveMsLastCycle
+        << ",\"exact_gpu_allocator_sync_ms\":" << finalProfiling.exactGpuAllocatorSyncMsLastCycle
+        << ",\"exact_gpu_page_sweep_ms\":" << finalProfiling.exactGpuPageSweepMsLastCycle
+        << ",\"exact_gpu_emit_wait_ms\":" << finalProfiling.exactGpuEmitWaitMsLastCycle
+        << ",\"exact_gpu_emit_fence_lifetime_ms\":" << finalProfiling.exactGpuEmitFenceLifetimeMsLastCycle
+        << ",\"exact_gpu_worldgen_page_misses_last_cycle\":" << finalProfiling.exactGpuWorldgenPageMissesLastCycle
+        << ",\"exact_gpu_allocator_dirty_pages_last_cycle\":" << finalProfiling.exactGpuAllocatorDirtyPagesLastCycle
+        << ",\"exact_gpu_allocator_dirty_free_slots_last_cycle\":" << finalProfiling.exactGpuAllocatorDirtyFreeSlotsLastCycle
+        << ",\"exact_gpu_allocator_upload_bytes_last_cycle\":" << finalProfiling.exactGpuAllocatorUploadBytesLastCycle
+        << ",\"exact_gpu_page_sweep_pages_last_cycle\":" << finalProfiling.exactGpuPageSweepPagesLastCycle
+        << ",\"exact_gpu_submit_batch_builds_last_cycle\":" << finalProfiling.exactGpuSubmitBatchBuildsLastCycle
+        << ",\"exact_gpu_emit_batch_builds_last_cycle\":" << finalProfiling.exactGpuEmitBatchBuildsLastCycle
         << ",\"lod_collect_ms\":" << finalProfiling.farCollectMsLastFrame
         << ",\"lod_upload_ms\":" << finalProfiling.farUploadMsLastFrame
         << ",\"structure_query_ms\":" << finalProfiling.structureQueryMs

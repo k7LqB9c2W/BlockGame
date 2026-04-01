@@ -244,8 +244,21 @@ public:
         double lightMs{0.0};
         double faceCountMs{0.0};
         double facePrefixMs{0.0};
+        double allocateMs{0.0};
         double faceEmitMs{0.0};
         double totalMs{0.0};
+    };
+
+    enum class ExactTimingPass : std::uint8_t
+    {
+        Synth = 0,
+        Stamp,
+        Light,
+        FaceCount,
+        FacePrefix,
+        Allocate,
+        FaceEmit,
+        Count,
     };
 
     struct ScratchAllocation
@@ -397,6 +410,10 @@ public:
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator{};
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList{};
         UINT64 fenceValue{0};
+        UINT exactTimestampSubmittedCount{0};
+        UINT exactTimingPassCount{0};
+        std::array<ExactTimingPass, static_cast<std::size_t>(ExactTimingPass::Count)> exactTimingPasses{};
+        bool exactTimingPending{false};
         bool reserved{false};
     };
 
@@ -432,6 +449,7 @@ public:
         for (std::uint32_t slotIndex = 0; slotIndex < kMaxInFlightSubmissionSlots; ++slotIndex)
         {
             SubmissionSlot& slot = submissionSlots_[slotIndex];
+            slot = {};
             throwIfFailedDx(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                                             IID_PPV_ARGS(&slot.allocator)),
                             "failed to create far lod compute allocator");
@@ -543,6 +561,9 @@ public:
             slot.commandList.Reset();
             slot.allocator.Reset();
             slot.fenceValue = 0;
+            slot.exactTimestampSubmittedCount = 0;
+            slot.exactTimingPassCount = 0;
+            slot.exactTimingPending = false;
             slot.reserved = false;
         }
         commandList_.Reset();
@@ -562,9 +583,7 @@ public:
         fenceValue_ = 0;
         exactTimestampFrequency_ = 0;
         exactTimestampCursor_ = 0;
-        exactTimestampSubmittedCount_ = 0;
-        exactTimestampPendingFenceValue_ = 0;
-        exactTimingPending_ = false;
+        exactTimingPassCount_ = 0;
         exactTimingCaptureActive_ = false;
         exactLastCompletedTimings_ = {};
         exactCompletionScratchState_ = D3D12_RESOURCE_STATE_COMMON;
@@ -707,30 +726,48 @@ public:
     void beginExactTimingBatch()
     {
         exactTimestampCursor_ = 0;
-        exactTimingCaptureActive_ = !exactTimingPending_;
-    }
-
-    void markExactTimingBegin()
-    {
-        if (!open_ || !exactTimingCaptureActive_ || exactTimestampQueryHeap_ == nullptr ||
-            exactTimestampCursor_ >= kExactTimestampQueryCount)
+        exactTimingPassCount_ = 0;
+        exactTimingCaptureActive_ = false;
+        if (!open_ || activeSubmissionSlotIndex_ >= kMaxInFlightSubmissionSlots)
         {
             return;
         }
 
-        commandList_->EndQuery(exactTimestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, exactTimestampCursor_++);
+        const SubmissionSlot& slot = submissionSlots_[activeSubmissionSlotIndex_];
+        exactTimingCaptureActive_ = !slot.exactTimingPending;
+    }
+
+    void markExactTimingBegin(ExactTimingPass pass)
+    {
+        if (!open_ || !exactTimingCaptureActive_ || exactTimestampQueryHeap_ == nullptr ||
+            exactTimestampCursor_ >= kExactTimestampQueriesPerSubmission ||
+            exactTimingPassCount_ >= exactTimingPassesCurrent_.size() ||
+            activeSubmissionSlotIndex_ >= kMaxInFlightSubmissionSlots)
+        {
+            return;
+        }
+
+        exactTimingPassesCurrent_[exactTimingPassCount_] = pass;
+        const UINT queryIndex =
+            activeSubmissionSlotIndex_ * kExactTimestampQueriesPerSubmission + exactTimestampCursor_++;
+        commandList_->EndQuery(exactTimestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
         hasCommands_ = true;
     }
 
     void markExactTimingEnd()
     {
         if (!open_ || !exactTimingCaptureActive_ || exactTimestampQueryHeap_ == nullptr ||
-            exactTimestampCursor_ >= kExactTimestampQueryCount)
+            exactTimestampCursor_ >= kExactTimestampQueriesPerSubmission ||
+            exactTimingPassCount_ >= exactTimingPassesCurrent_.size() ||
+            activeSubmissionSlotIndex_ >= kMaxInFlightSubmissionSlots)
         {
             return;
         }
 
-        commandList_->EndQuery(exactTimestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, exactTimestampCursor_++);
+        const UINT queryIndex =
+            activeSubmissionSlotIndex_ * kExactTimestampQueriesPerSubmission + exactTimestampCursor_++;
+        commandList_->EndQuery(exactTimestampQueryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
+        ++exactTimingPassCount_;
         hasCommands_ = true;
     }
 
@@ -2347,14 +2384,18 @@ public:
             if (exactTimingCaptureActive_ &&
                 exactTimestampQueryHeap_ != nullptr &&
                 exactTimestampReadbackBuffer_ != nullptr &&
-                exactTimestampCursor_ > 1)
+                exactTimestampCursor_ > 1 &&
+                activeSubmissionSlotIndex_ < kMaxInFlightSubmissionSlots)
             {
+                const UINT queryOffset = activeSubmissionSlotIndex_ * kExactTimestampQueriesPerSubmission;
+                const std::uint64_t readbackOffsetBytes =
+                    static_cast<std::uint64_t>(queryOffset) * sizeof(std::uint64_t);
                 commandList_->ResolveQueryData(exactTimestampQueryHeap_.Get(),
                                                D3D12_QUERY_TYPE_TIMESTAMP,
-                                               0,
+                                               queryOffset,
                                                exactTimestampCursor_,
                                                exactTimestampReadbackBuffer_.Get(),
-                                               0);
+                                               readbackOffsetBytes);
             }
         }
 
@@ -2368,12 +2409,17 @@ public:
             lastSubmittedFenceValue_ = fenceValue_;
             result.fenceValue = fenceValue_;
             result.submissionSlotIndex = activeSubmissionSlotIndex_;
-            submissionSlots_[activeSubmissionSlotIndex_].fenceValue = fenceValue_;
+            SubmissionSlot& slot = submissionSlots_[activeSubmissionSlotIndex_];
+            slot.fenceValue = fenceValue_;
             if (exactTimingCaptureActive_ && exactTimestampCursor_ > 1)
             {
-                exactTimestampPendingFenceValue_ = fenceValue_;
-                exactTimestampSubmittedCount_ = exactTimestampCursor_;
-                exactTimingPending_ = true;
+                slot.exactTimestampSubmittedCount = exactTimestampCursor_;
+                slot.exactTimingPassCount = exactTimingPassCount_;
+                for (UINT passIndex = 0; passIndex < exactTimingPassCount_; ++passIndex)
+                {
+                    slot.exactTimingPasses[passIndex] = exactTimingPassesCurrent_[passIndex];
+                }
+                slot.exactTimingPending = true;
             }
             if (chunkManagerDebugLoggingEnabled())
             {
@@ -2413,7 +2459,9 @@ public:
 
         SubmissionSlot& slot = submissionSlots_[slotIndex];
         slot.reserved = false;
-        if (slot.fenceValue != 0 && completedFenceValue() >= slot.fenceValue)
+        if (slot.fenceValue != 0 &&
+            completedFenceValue() >= slot.fenceValue &&
+            !slot.exactTimingPending)
         {
             slot.fenceValue = 0;
         }
@@ -2515,22 +2563,10 @@ public:
 
     [[nodiscard]] ExactPassTimings latestExactPassTimings()
     {
-        if (exactTimingPending_ &&
-            exactTimestampReadbackBuffer_ != nullptr &&
-            exactTimestampPendingFenceValue_ != 0 &&
-            completedFenceValue() >= exactTimestampPendingFenceValue_)
+        bool foundCompletedTimings = false;
+        ExactPassTimings completedTimings{};
+        if (exactTimestampReadbackBuffer_ != nullptr)
         {
-            std::array<std::uint64_t, kExactTimestampQueryCount> timestamps{};
-            void* mappedTimestamps = nullptr;
-            const D3D12_RANGE timestampRange{
-                0, static_cast<SIZE_T>(exactTimestampSubmittedCount_ * sizeof(std::uint64_t))};
-            throwIfFailedDx(exactTimestampReadbackBuffer_->Map(0, &timestampRange, &mappedTimestamps),
-                            "failed to map exact compute timestamp readback");
-            std::memcpy(timestamps.data(),
-                        mappedTimestamps,
-                        exactTimestampSubmittedCount_ * sizeof(std::uint64_t));
-            exactTimestampReadbackBuffer_->Unmap(0, nullptr);
-
             const auto timestampMs = [this](std::uint64_t begin, std::uint64_t end) -> double
             {
                 if (end <= begin || exactTimestampFrequency_ == 0)
@@ -2539,22 +2575,95 @@ public:
                 }
                 return static_cast<double>(end - begin) * 1000.0 / static_cast<double>(exactTimestampFrequency_);
             };
-
-            ExactPassTimings timings{};
-            for (UINT queryBase = 0; queryBase + 11u < exactTimestampSubmittedCount_; queryBase += 12u)
+            const UINT64 completedValue = completedFenceValue();
+            for (std::uint32_t slotIndex = 0; slotIndex < kMaxInFlightSubmissionSlots; ++slotIndex)
             {
-                timings.synthMs += timestampMs(timestamps[queryBase + 0u], timestamps[queryBase + 1u]);
-                timings.stampMs += timestampMs(timestamps[queryBase + 2u], timestamps[queryBase + 3u]);
-                timings.lightMs += timestampMs(timestamps[queryBase + 4u], timestamps[queryBase + 5u]);
-                timings.faceCountMs += timestampMs(timestamps[queryBase + 6u], timestamps[queryBase + 7u]);
-                timings.facePrefixMs += timestampMs(timestamps[queryBase + 8u], timestamps[queryBase + 9u]);
-                timings.faceEmitMs += timestampMs(timestamps[queryBase + 10u], timestamps[queryBase + 11u]);
-            }
-            timings.totalMs = timings.synthMs + timings.stampMs + timings.lightMs +
-                              timings.faceCountMs + timings.facePrefixMs + timings.faceEmitMs;
+                SubmissionSlot& slot = submissionSlots_[slotIndex];
+                if (!slot.exactTimingPending ||
+                    slot.exactTimestampSubmittedCount < 2u ||
+                    slot.fenceValue == 0 ||
+                    completedValue < slot.fenceValue)
+                {
+                    continue;
+                }
 
-            exactLastCompletedTimings_ = timings;
-            exactTimingPending_ = false;
+                std::array<std::uint64_t, kExactTimestampQueriesPerSubmission> timestamps{};
+                void* mappedTimestamps = nullptr;
+                const std::uint64_t slotOffsetBytes =
+                    static_cast<std::uint64_t>(slotIndex) *
+                    static_cast<std::uint64_t>(kExactTimestampQueriesPerSubmission) *
+                    sizeof(std::uint64_t);
+                const D3D12_RANGE timestampRange{
+                    static_cast<SIZE_T>(slotOffsetBytes),
+                    static_cast<SIZE_T>(slotOffsetBytes +
+                                        static_cast<std::uint64_t>(slot.exactTimestampSubmittedCount) * sizeof(std::uint64_t))};
+                throwIfFailedDx(exactTimestampReadbackBuffer_->Map(0, &timestampRange, &mappedTimestamps),
+                                "failed to map exact compute timestamp readback");
+                std::memcpy(timestamps.data(),
+                            static_cast<const std::byte*>(mappedTimestamps) + slotOffsetBytes,
+                            static_cast<std::size_t>(slot.exactTimestampSubmittedCount) * sizeof(std::uint64_t));
+                exactTimestampReadbackBuffer_->Unmap(0, nullptr);
+
+                for (UINT passIndex = 0; passIndex < slot.exactTimingPassCount; ++passIndex)
+                {
+                    const UINT queryBase = passIndex * kExactTimestampQueriesPerPass;
+                    if (queryBase + 1u >= slot.exactTimestampSubmittedCount)
+                    {
+                        break;
+                    }
+
+                    const double passMs = timestampMs(timestamps[queryBase], timestamps[queryBase + 1u]);
+                    switch (slot.exactTimingPasses[passIndex])
+                    {
+                    case ExactTimingPass::Synth:
+                        completedTimings.synthMs += passMs;
+                        break;
+                    case ExactTimingPass::Stamp:
+                        completedTimings.stampMs += passMs;
+                        break;
+                    case ExactTimingPass::Light:
+                        completedTimings.lightMs += passMs;
+                        break;
+                    case ExactTimingPass::FaceCount:
+                        completedTimings.faceCountMs += passMs;
+                        break;
+                    case ExactTimingPass::FacePrefix:
+                        completedTimings.facePrefixMs += passMs;
+                        break;
+                    case ExactTimingPass::Allocate:
+                        completedTimings.allocateMs += passMs;
+                        break;
+                    case ExactTimingPass::FaceEmit:
+                        completedTimings.faceEmitMs += passMs;
+                        break;
+                    case ExactTimingPass::Count:
+                    default:
+                        break;
+                    }
+                }
+
+                slot.exactTimingPending = false;
+                slot.exactTimestampSubmittedCount = 0;
+                slot.exactTimingPassCount = 0;
+                if (!slot.reserved && completedValue >= slot.fenceValue)
+                {
+                    slot.fenceValue = 0;
+                }
+                foundCompletedTimings = true;
+            }
+            completedTimings.totalMs =
+                completedTimings.synthMs +
+                completedTimings.stampMs +
+                completedTimings.lightMs +
+                completedTimings.faceCountMs +
+                completedTimings.facePrefixMs +
+                completedTimings.allocateMs +
+                completedTimings.faceEmitMs;
+        }
+
+        if (foundCompletedTimings)
+        {
+            exactLastCompletedTimings_ = completedTimings;
         }
 
         return exactLastCompletedTimings_;
@@ -2816,6 +2925,10 @@ private:
                 }
                 continue;
             }
+            if (slot.exactTimingPending)
+            {
+                continue;
+            }
 
             slot.reserved = true;
             submissionSlotCursor_ = (slotIndex + 1u) % kMaxInFlightSubmissionSlots;
@@ -2899,8 +3012,12 @@ private:
         kExactIndirectRootBufferAlignment;
     static constexpr std::uint32_t kMaxExactGpuBuildBatches = 512u;
     static constexpr std::uint32_t kMaxInFlightSubmissionSlots = 4u;
-    static constexpr UINT kExactTimestampQueriesPerBuild = 12u;
-    static constexpr UINT kExactTimestampQueryCount = kExactTimestampQueriesPerBuild * kMaxExactGpuBuildBatches;
+    static constexpr UINT kExactTimestampPassCount = static_cast<UINT>(ExactTimingPass::Count);
+    static constexpr UINT kExactTimestampQueriesPerPass = 2u;
+    static constexpr UINT kExactTimestampQueriesPerSubmission =
+        kExactTimestampPassCount * kExactTimestampQueriesPerPass;
+    static constexpr UINT kExactTimestampQueryCount =
+        kExactTimestampQueriesPerSubmission * kMaxInFlightSubmissionSlots;
     static constexpr UINT kDescriptorHeapPersistentDescriptorCount = 4096u;
     static constexpr UINT kDescriptorHeapSubmissionDescriptorCount = 8192u;
     static constexpr UINT kDescriptorHeapDescriptorCount =
@@ -3682,7 +3799,8 @@ private:
     std::uint32_t activeSubmissionSlotIndex_{std::numeric_limits<std::uint32_t>::max()};
     std::uint32_t submissionSlotCursor_{0};
     UINT exactTimestampCursor_{0};
-    UINT exactTimestampSubmittedCount_{0};
+    UINT exactTimingPassCount_{0};
+    std::array<ExactTimingPass, static_cast<std::size_t>(ExactTimingPass::Count)> exactTimingPassesCurrent_{};
     D3D12_RESOURCE_STATES exactFaceCountScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFaceDescriptorScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFacePrefixScratchState_{D3D12_RESOURCE_STATE_COMMON};
@@ -3692,8 +3810,6 @@ private:
     D3D12_RESOURCE_STATES exactOverflowEntryScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactCompletionScratchState_{D3D12_RESOURCE_STATE_COMMON};
     UINT64 exactTimestampFrequency_{0};
-    UINT64 exactTimestampPendingFenceValue_{0};
-    bool exactTimingPending_{false};
     bool exactTimingCaptureActive_{false};
     ExactPassTimings exactLastCompletedTimings_{};
     bool open_{false};

@@ -484,6 +484,10 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         {
             prefetchTarget = 3;
         }
+        else if (totalWorkers >= 8 && prefetchBacklog > 256)
+        {
+            prefetchTarget = 2;
+        }
         else if (latencySensitivePressure == 0 && totalWorkers >= 8 && prefetchBacklog > 1)
         {
             prefetchTarget = 2;

@@ -1,5 +1,7 @@
 ﻿# Repository Guidelines
-
+developer_instructions = '''
+Use `rtk` as the default wrapper for almost every shell command it supports, not just when the gain is obvious. Reach for plain commands for shell builtins or cases where wrapping would be awkward or incorrect, such as `cd`, `export`, `alias`, heredocs, raw shell control flow, commands that `rtk` does not support, and all `npm`/`npx` commands. Examples: default to `rtk git status`, `rtk ls`, `rtk find`, `rtk grep`, `rtk pytest`, `rtk vitest`, `rtk diff`, `rtk wc`, `rtk curl`, `rtk docker`, and `rtk kubectl`. Use plain `npm` and plain `npx`. If `rtk` would change semantics, hide information you need, or make the result less reliable for the task, use the normal command instead.
+'''
 ## Project Structure & Module Organization
 - `src/` holds gameplay logic, camera controls, chunk streaming, and the `main.cpp` entry point.
 - `include/` bundles third-party headers (GLFW, GLM, stb_image, glad) consumed by the MSVC build.

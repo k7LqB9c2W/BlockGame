@@ -2556,6 +2556,20 @@ public:
         return lastSubmittedFenceValue_;
     }
 
+    [[nodiscard]] std::uint32_t inFlightSubmissionCount() const noexcept
+    {
+        const UINT64 completedValue = completedFenceValue();
+        std::uint32_t count = 0u;
+        for (const SubmissionSlot& slot : submissionSlots_)
+        {
+            if (slot.fenceValue != 0 && completedValue < slot.fenceValue)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     [[nodiscard]] ID3D12Fence* fence() const noexcept
     {
         return fence_.Get();

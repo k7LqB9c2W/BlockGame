@@ -3172,6 +3172,35 @@ struct GpuExactDescriptorBuildParams
 };
 static_assert(sizeof(GpuExactDescriptorBuildParams) == 48u);
 
+struct GpuExactPrepassRecord
+{
+    std::int32_t chunkWorldMinX{0};
+    std::int32_t chunkWorldMinY{0};
+    std::int32_t chunkWorldMinZ{0};
+    std::uint32_t scratchSliceIndex{0};
+    std::uint32_t descriptorOffset{0};
+    std::uint32_t rebuildVoxelInputs{0};
+    std::uint32_t sparseVoxelCount{0};
+    std::uint32_t resolvedNeighborMask{0};
+    std::uint32_t closedNeighborMask{0};
+    std::uint32_t pendingNeighborMask{0};
+    std::uint32_t centerVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t centerVoxelUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t haloVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t haloVoxelUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t lightScratchVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t lightScratchVoxelUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t sparseVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborPosXVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborNegXVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborPosYVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborNegYVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborPosZVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborNegZVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t reserved0{0};
+};
+static_assert(sizeof(GpuExactPrepassRecord) == 96u);
+
 #include "chunk_manager_structure_registry.inl"
 
 struct MeshData
@@ -15727,6 +15756,10 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     {
         return static_cast<std::uint64_t>(buildCount) * sizeof(FarLodGpuContext::ExactChunkAllocationRecord);
     };
+    const auto exactPrepassRecordUploadBytes = [](std::size_t buildCount) -> std::uint64_t
+    {
+        return static_cast<std::uint64_t>(buildCount) * sizeof(GpuExactPrepassRecord);
+    };
     const auto exactBatchBuildIndexUploadBytes = [](std::size_t buildCount) -> std::uint64_t
     {
         return static_cast<std::uint64_t>(buildCount) * sizeof(std::uint32_t);
@@ -15912,6 +15945,22 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
 
     auto tryStageDescriptorInputs = [&](std::size_t buildIndex) -> bool
     {
+        const std::size_t candidateBuildCount = buildIndex + 1u;
+        const std::uint64_t requiredPrepassDescriptors =
+            static_cast<std::uint64_t>(candidateBuildCount) *
+            static_cast<std::uint64_t>(exactGpuContext_.exactPrepassDescriptorCountPerBuild());
+        if (requiredPrepassDescriptors > exactGpuContext_.descriptorCapacityPerSubmission())
+        {
+            return false;
+        }
+        const std::uint64_t requiredEmitDescriptors =
+            static_cast<std::uint64_t>(candidateBuildCount) *
+            static_cast<std::uint64_t>(exactGpuContext_.exactEmitInputDescriptorCountPerBuild());
+        if (requiredEmitDescriptors > exactGpuContext_.descriptorCapacityPerSubmission())
+        {
+            return false;
+        }
+
         PreparedExactGpuBuild& pending = preparedBuilds[buildIndex];
         Chunk& chunk = *pending.chunk;
         const ExactGpuWorldgenPageWindow pageWindow = exactGpuWorldgenPageWindowForChunk(chunk.coord);
@@ -15969,6 +16018,12 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         if (!appendExactUploadBytes(candidateCursor,
                                     exactBuildRecordUploadBytes(buildIndex + 1u),
                                     alignof(FarLodGpuContext::ExactChunkAllocationRecord)))
+        {
+            return false;
+        }
+        if (!appendExactUploadBytes(candidateCursor,
+                                    exactPrepassRecordUploadBytes(buildIndex + 1u),
+                                    alignof(GpuExactPrepassRecord)))
         {
             return false;
         }
@@ -16032,7 +16087,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     }
 
     std::vector<FarLodGpuContext::ScratchAllocation> prepassOwnedUploads{};
-    prepassOwnedUploads.reserve(3u + preparedBuilds.size());
+    prepassOwnedUploads.reserve(4u + preparedBuilds.size());
     FarLodGpuContext::ScratchAllocation pageUpload{};
     if (!stagedPages.empty())
     {
@@ -16211,62 +16266,119 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         exactGpuEmptyVoxelBufferState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
-    exactGpuContext_.beginExactTimingBatch();
+    const std::uint32_t batchBuildCount = static_cast<std::uint32_t>(stagedBuilds.size());
+    std::vector<GpuExactPrepassRecord> prepassRecords{};
+    prepassRecords.reserve(stagedBuilds.size());
+    std::vector<std::array<Chunk*, 6>> neighborChunksToRestoreByBuild(stagedBuilds.size());
+    std::vector<std::size_t> neighborRestoreCounts(stagedBuilds.size(), 0u);
+    const std::uint64_t completedExactGpuFenceValue = exactGpuContext_.completedFenceValue();
+    std::uint32_t maxSparseVoxelGroupsAcrossBatch = 0u;
+    constexpr std::uint32_t kClosedNeighborMask = 0u;
+
+    auto restoreResolvedNeighborStates = [&]()
+    {
+        for (std::size_t buildIndex = 0; buildIndex < neighborChunksToRestoreByBuild.size(); ++buildIndex)
+        {
+            restoreExactGpuNeighborStates(neighborChunksToRestoreByBuild[buildIndex],
+                                          neighborRestoreCounts[buildIndex]);
+            neighborRestoreCounts[buildIndex] = 0u;
+        }
+    };
 
     for (std::size_t buildIndex = 0; buildIndex < stagedBuilds.size(); ++buildIndex)
     {
         PendingExactGpuBuild& pending = stagedBuilds[buildIndex];
         Chunk& chunk = *pending.chunk;
-        const D3D12_GPU_VIRTUAL_ADDRESS descriptorAddress =
-            exactGpuContext_.exactDescriptorScratchAddress(pending.scratchSliceIndex);
-        if (pending.rebuildVoxelInputs)
-        {
-            if (chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-            {
-                exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
-                                            chunk.exactGpu.voxelState,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                chunk.exactGpu.voxelState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            }
-            exactGpuContext_.markExactTimingBegin();
-            exactGpuContext_.dispatchExactSynth(chunk.minWorldY,
-                                                descriptorAddress,
-                                                chunk.exactGpu.voxelBuffer.Get());
-            exactGpuContext_.markExactTimingEnd();
-            exactGpuContext_.uavBarrier(chunk.exactGpu.voxelBuffer.Get());
-
-            const std::uint32_t sparseVoxelCount =
-                static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
-            if (sparseVoxelCount > 0 && chunk.exactGpu.sparseVoxelBuffer != nullptr)
-            {
-                if (chunk.exactGpu.sparseVoxelState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-                {
-                    exactGpuContext_.transition(chunk.exactGpu.sparseVoxelBuffer.Get(),
-                                                chunk.exactGpu.sparseVoxelState,
-                                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                    chunk.exactGpu.sparseVoxelState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-                }
-                exactGpuContext_.markExactTimingBegin();
-                exactGpuContext_.dispatchExactStamp(sparseVoxelCount,
-                                                    chunk.exactGpu.sparseVoxelBuffer.Get(),
-                                                    chunk.exactGpu.voxelBuffer.Get());
-                exactGpuContext_.markExactTimingEnd();
-                exactGpuContext_.uavBarrier(chunk.exactGpu.voxelBuffer.Get());
-            }
-        }
-
         std::array<ID3D12Resource*, 6> neighborBuffers{};
         std::uint32_t resolvedNeighborMask = 0u;
         std::array<Chunk*, 6> neighborChunksToRestore{};
         std::size_t neighborRestoreCount = 0;
         resolveExactGpuNeighborState(chunk,
-                                     exactGpuContext_.completedFenceValue(),
+                                     completedExactGpuFenceValue,
                                      neighborBuffers,
                                      resolvedNeighborMask,
                                      pending.pendingNeighborMask,
                                      neighborChunksToRestore,
                                      neighborRestoreCount);
+        neighborChunksToRestoreByBuild[buildIndex] = neighborChunksToRestore;
+        neighborRestoreCounts[buildIndex] = neighborRestoreCount;
 
+        const std::uint32_t sparseVoxelCount = pending.rebuildVoxelInputs
+            ? static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size())
+            : 0u;
+        const FarLodGpuContext::ExactPrepassDescriptorIndices descriptorIndices =
+            exactGpuContext_.writeExactPrepassInputDescriptors(chunk.exactGpu.voxelBuffer.Get(),
+                                                               chunk.exactGpu.haloBuffer.Get(),
+                                                               chunk.exactGpu.lightScratchBuffer.Get(),
+                                                               chunk.exactGpu.sparseVoxelBuffer.Get(),
+                                                               sparseVoxelCount,
+                                                               neighborBuffers);
+        if (!descriptorIndices.valid())
+        {
+            exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+            restoreResolvedNeighborStates();
+            requeueRemainingStagedBuilds(0);
+            discardOpenSubmission();
+            recordSubmitStats(processedRequests);
+            return;
+        }
+
+        maxSparseVoxelGroupsAcrossBatch = std::max(maxSparseVoxelGroupsAcrossBatch, (sparseVoxelCount + 63u) / 64u);
+        prepassRecords.push_back(GpuExactPrepassRecord{
+            chunk.coord.x * kChunkSizeX,
+            chunk.minWorldY,
+            chunk.coord.z * kChunkSizeZ,
+            pending.scratchSliceIndex,
+            pending.scratchSliceIndex * kExactChunkColumnCount,
+            pending.rebuildVoxelInputs ? 1u : 0u,
+            sparseVoxelCount,
+            resolvedNeighborMask,
+            kClosedNeighborMask,
+            pending.pendingNeighborMask,
+            descriptorIndices.centerVoxelSrvDescriptorIndex,
+            descriptorIndices.centerVoxelUavDescriptorIndex,
+            descriptorIndices.haloVoxelSrvDescriptorIndex,
+            descriptorIndices.haloVoxelUavDescriptorIndex,
+            descriptorIndices.lightScratchVoxelSrvDescriptorIndex,
+            descriptorIndices.lightScratchVoxelUavDescriptorIndex,
+            descriptorIndices.sparseVoxelSrvDescriptorIndex,
+            descriptorIndices.neighborVoxelSrvDescriptorIndices[0],
+            descriptorIndices.neighborVoxelSrvDescriptorIndices[1],
+            descriptorIndices.neighborVoxelSrvDescriptorIndices[2],
+            descriptorIndices.neighborVoxelSrvDescriptorIndices[3],
+            descriptorIndices.neighborVoxelSrvDescriptorIndices[4],
+            descriptorIndices.neighborVoxelSrvDescriptorIndices[5],
+            0u});
+    }
+
+    const std::uint64_t prepassRecordBytes =
+        static_cast<std::uint64_t>(prepassRecords.size()) * sizeof(GpuExactPrepassRecord);
+    const FarLodGpuContext::ScratchAllocation prepassRecordUpload =
+        exactGpuContext_.allocateUpload(prepassRecordBytes, alignof(GpuExactPrepassRecord));
+    if (prepassRecordUpload.resource == nullptr || prepassRecordUpload.cpuPtr == nullptr)
+    {
+        exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+        restoreResolvedNeighborStates();
+        requeueRemainingStagedBuilds(0);
+        discardOpenSubmission();
+        recordSubmitStats(processedRequests);
+        return;
+    }
+    prepassOwnedUploads.push_back(prepassRecordUpload);
+    std::memcpy(prepassRecordUpload.cpuPtr,
+                prepassRecords.data(),
+                static_cast<std::size_t>(prepassRecordBytes));
+
+    for (PendingExactGpuBuild& pending : stagedBuilds)
+    {
+        Chunk& chunk = *pending.chunk;
+        if (pending.rebuildVoxelInputs && chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
+                                        chunk.exactGpu.voxelState,
+                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            chunk.exactGpu.voxelState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
         if (chunk.exactGpu.haloState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         {
             exactGpuContext_.transition(chunk.exactGpu.haloBuffer.Get(),
@@ -16274,20 +16386,27 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             chunk.exactGpu.haloState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
-        const std::uint32_t closedNeighborMask = 0u;
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactHaloCache(neighborBuffers[0],
-                                                neighborBuffers[1],
-                                                neighborBuffers[2],
-                                                neighborBuffers[3],
-                                                neighborBuffers[4],
-                                                neighborBuffers[5],
-                                                chunk.exactGpu.haloBuffer.Get(),
-                                                resolvedNeighborMask,
-                                                closedNeighborMask,
-                                                chunk.minWorldY);
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.uavBarrier(chunk.exactGpu.haloBuffer.Get());
+    }
+
+    exactGpuContext_.beginExactTimingBatch();
+    exactGpuContext_.markExactTimingBegin();
+    exactGpuContext_.dispatchExactSynthBatch(batchBuildCount, prepassRecordUpload.gpuAddress);
+    exactGpuContext_.markExactTimingEnd();
+    exactGpuContext_.uavBarrier(nullptr);
+
+    exactGpuContext_.markExactTimingBegin();
+    exactGpuContext_.dispatchExactStampBatch(batchBuildCount,
+                                             maxSparseVoxelGroupsAcrossBatch,
+                                             prepassRecordUpload.gpuAddress);
+    exactGpuContext_.markExactTimingEnd();
+    exactGpuContext_.uavBarrier(nullptr);
+
+    exactGpuContext_.dispatchExactHaloCacheBatch(batchBuildCount, prepassRecordUpload.gpuAddress);
+    exactGpuContext_.uavBarrier(nullptr);
+
+    for (PendingExactGpuBuild& pending : stagedBuilds)
+    {
+        Chunk& chunk = *pending.chunk;
         if (chunk.exactGpu.haloState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
         {
             exactGpuContext_.transition(chunk.exactGpu.haloBuffer.Get(),
@@ -16295,8 +16414,12 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             chunk.exactGpu.haloState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
-        restoreExactGpuNeighborStates(neighborChunksToRestore, neighborRestoreCount);
+    }
+    restoreResolvedNeighborStates();
 
+    for (PendingExactGpuBuild& pending : stagedBuilds)
+    {
+        Chunk& chunk = *pending.chunk;
         if (chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
         {
             exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
@@ -16311,18 +16434,18 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
+    }
 
-        const std::uint32_t lightClosedNeighborMask = 0u;
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactLight(descriptorAddress,
-                                            chunk.exactGpu.voxelBuffer.Get(),
-                                            chunk.exactGpu.haloBuffer.Get(),
-                                            chunk.exactGpu.lightScratchBuffer.Get(),
-                                            resolvedNeighborMask,
-                                            lightClosedNeighborMask,
-                                            kExactGpuLightPropagationPassCount);
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.uavBarrier(chunk.exactGpu.lightScratchBuffer.Get());
+    exactGpuContext_.markExactTimingBegin();
+    exactGpuContext_.dispatchExactLightBatch(batchBuildCount,
+                                             prepassRecordUpload.gpuAddress,
+                                             kExactGpuLightPropagationPassCount);
+    exactGpuContext_.markExactTimingEnd();
+    exactGpuContext_.uavBarrier(nullptr);
+
+    for (PendingExactGpuBuild& pending : stagedBuilds)
+    {
+        Chunk& chunk = *pending.chunk;
         if (chunk.exactGpu.lightScratchState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
         {
             exactGpuContext_.transition(chunk.exactGpu.lightScratchBuffer.Get(),
@@ -16332,20 +16455,17 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         }
         std::swap(chunk.exactGpu.voxelBuffer, chunk.exactGpu.lightScratchBuffer);
         std::swap(chunk.exactGpu.voxelState, chunk.exactGpu.lightScratchState);
-
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactFaceCount(chunk.exactGpu.voxelBuffer.Get(),
-                                                chunk.exactGpu.haloBuffer.Get(),
-                                                resolvedNeighborMask,
-                                                closedNeighborMask,
-                                                pending.scratchSliceIndex);
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.uavBarrier(nullptr);
-        exactGpuContext_.markExactTimingBegin();
-        exactGpuContext_.dispatchExactFacePrefix(pending.scratchSliceIndex);
-        exactGpuContext_.markExactTimingEnd();
-        exactGpuContext_.uavBarrier(nullptr);
     }
+
+    exactGpuContext_.markExactTimingBegin();
+    exactGpuContext_.dispatchExactFaceCountBatch(batchBuildCount, prepassRecordUpload.gpuAddress);
+    exactGpuContext_.markExactTimingEnd();
+    exactGpuContext_.uavBarrier(nullptr);
+
+    exactGpuContext_.markExactTimingBegin();
+    exactGpuContext_.dispatchExactFacePrefixBatch(batchBuildCount, prepassRecordUpload.gpuAddress);
+    exactGpuContext_.markExactTimingEnd();
+    exactGpuContext_.uavBarrier(nullptr);
 
     const FarLodGpuContext::FlushResult prepassFlushResult = exactGpuContext_.flush();
     exactLock.unlock();

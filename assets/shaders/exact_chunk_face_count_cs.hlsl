@@ -2,18 +2,26 @@
 
 cbuffer ExactChunkFaceCountParams : register(b0)
 {
+    uint gBatchBuildCount;
     uint gPlaneCount;
-    uint gVoxelCount;
     uint gDescriptorCount;
-    uint gResolvedNeighborMask;
-    uint gClosedNeighborMask;
     uint gReserved0;
 };
 
-StructuredBuffer<uint> gCenterVoxels : register(t0);
-StructuredBuffer<uint> gHaloVoxels : register(t1);
+StructuredBuffer<GpuExactPrepassRecord> gPrepassRecords : register(t0);
+StructuredBuffer<GpuExactColumnDescriptor> gDescriptorScratch : register(t1);
 RWStructuredBuffer<uint> gFaceCounts : register(u0);
 RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(u1);
+RWStructuredBuffer<uint> gFacePrefixScratch : register(u2);
+RWStructuredBuffer<uint> gFaceTotalScratch : register(u3);
+
+static const uint kExactIndirectRootBufferAlignment = 256u;
+static const uint kExactFaceCountScratchStride =
+    (((kExactChunkPlaneCount * 4u) + kExactIndirectRootBufferAlignment - 1u) / kExactIndirectRootBufferAlignment) *
+    (kExactIndirectRootBufferAlignment / 4u);
+static const uint kExactFaceDescriptorScratchStride =
+    (((kExactChunkFaceDescriptorCount * 16u) + kExactIndirectRootBufferAlignment - 1u) / kExactIndirectRootBufferAlignment) *
+    (kExactIndirectRootBufferAlignment / 16u);
 
 uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
 {
@@ -26,12 +34,16 @@ uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
     return bufferRef[voxelIndex(uint(x), uint(y), uint(z))];
 }
 
-uint sampleVoxelWithNeighbors(int x, int y, int z)
+uint sampleVoxelWithNeighbors(StructuredBuffer<uint> centerVoxels,
+                              StructuredBuffer<uint> haloVoxels,
+                              int x,
+                              int y,
+                              int z)
 {
     if (x >= 0 && y >= 0 && z >= 0 &&
         x < int(kExactChunkSize) && y < int(kExactChunkSize) && z < int(kExactChunkSize))
     {
-        return sampleVoxel(gCenterVoxels, x, y, z);
+        return sampleVoxel(centerVoxels, x, y, z);
     }
 
     uint seamBit = 0u;
@@ -70,7 +82,7 @@ uint sampleVoxelWithNeighbors(int x, int y, int z)
     {
         return encodeVoxel(kBlockAir, 0u, 0u);
     }
-    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
+    return sampleHaloVoxel(haloVoxels, seamBit, x, y, z);
 }
 
 void decodePlane(uint planeIndex, out uint axis, out bool positiveFace, out uint slice)
@@ -89,13 +101,23 @@ uint faceIdForAxis(uint axis, bool positiveFace)
 }
 
 [numthreads(64, 1, 1)]
-void ExactChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-    const uint planeIndex = dispatchThreadId.x;
-    if (planeIndex >= gPlaneCount)
+    const uint buildIndex = groupId.y;
+    const uint planeIndex = groupId.x * 64u + groupThreadId.x;
+    if (buildIndex >= gBatchBuildCount || planeIndex >= gPlaneCount)
     {
         return;
     }
+
+    const GpuExactPrepassRecord build = gPrepassRecords[buildIndex];
+    StructuredBuffer<uint> centerVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.lightScratchVoxelSrvDescriptorIndex)];
+    StructuredBuffer<uint> haloVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.haloVoxelSrvDescriptorIndex)];
+
+    const uint faceCountBase = build.scratchSliceIndex * kExactFaceCountScratchStride;
+    const uint faceDescriptorBase = build.scratchSliceIndex * kExactFaceDescriptorScratchStride;
 
     uint axis = 0u;
     bool positiveFace = true;
@@ -103,7 +125,7 @@ void ExactChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     decodePlane(planeIndex, axis, positiveFace, slice);
     const uint faceId = faceIdForAxis(axis, positiveFace);
     uint descriptorCount = 0u;
-    const uint descriptorBase = planeIndex * kExactChunkMaxDescriptorsPerPlane;
+    const uint descriptorPlaneBase = faceDescriptorBase + planeIndex * kExactChunkMaxDescriptorsPerPlane;
 
     [loop]
     for (uint b = 0u; b < kExactChunkSize; ++b)
@@ -155,17 +177,17 @@ void ExactChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                 continue;
             }
 
-            const uint owningBlock = voxelBlock(sampleVoxelWithNeighbors(owningX, owningY, owningZ));
+            const uint owningBlock = voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, owningX, owningY, owningZ));
             const uint neighborBlock = positiveFace
-                                           ? voxelBlock(sampleVoxelWithNeighbors(positiveX, positiveY, positiveZ))
-                                           : voxelBlock(sampleVoxelWithNeighbors(negativeX, negativeY, negativeZ));
+                                           ? voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, positiveX, positiveY, positiveZ))
+                                           : voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, negativeX, negativeY, negativeZ));
             if (!shouldRenderBlockFace(owningBlock, neighborBlock))
             {
                 continue;
             }
 
-            const uint descriptorIndex = descriptorBase + descriptorCount;
-            if (descriptorIndex < gDescriptorCount)
+            const uint descriptorIndex = descriptorPlaneBase + descriptorCount;
+            if (descriptorIndex < faceDescriptorBase + gDescriptorCount)
             {
                 GpuExactFaceDescriptor descriptor;
                 descriptor.packedLocal = packFaceLocal(uint(owningX), uint(owningY), uint(owningZ), faceId);
@@ -178,5 +200,5 @@ void ExactChunkFaceCountMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
     }
 
-    gFaceCounts[planeIndex] = descriptorCount;
+    gFaceCounts[faceCountBase + planeIndex] = descriptorCount;
 }

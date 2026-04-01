@@ -2,16 +2,18 @@
 
 cbuffer ExactChunkLightParams : register(b0)
 {
-    uint gVoxelCount;
-    uint gResolvedNeighborMask;
-    uint gClosedNeighborMask;
+    uint gBatchBuildCount;
     uint gPropagationPassCount;
+    uint gReserved0;
+    uint gReserved1;
 };
 
-StructuredBuffer<GpuExactColumnDescriptor> gColumns : register(t0);
-StructuredBuffer<uint> gCenterVoxels : register(t1);
-StructuredBuffer<uint> gHaloVoxels : register(t2);
-RWStructuredBuffer<uint> gDestVoxels : register(u0);
+StructuredBuffer<GpuExactPrepassRecord> gPrepassRecords : register(t0);
+StructuredBuffer<GpuExactColumnDescriptor> gDescriptorScratch : register(t1);
+RWStructuredBuffer<uint> gFaceCountScratch : register(u0);
+RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(u1);
+RWStructuredBuffer<uint> gFacePrefixScratch : register(u2);
+RWStructuredBuffer<uint> gFaceTotalScratch : register(u3);
 
 static const uint kVoxelPayloadMask = 0x0000FFFFu;
 static const uint kQueueFlag = 0x80000000u;
@@ -33,9 +35,9 @@ uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
     return bufferRef[voxelIndex(uint(x), uint(y), uint(z))];
 }
 
-uint sampleNeighborForSeed(uint seamBit, int x, int y, int z)
+uint sampleNeighborForSeed(StructuredBuffer<uint> haloVoxels, uint seamBit, int x, int y, int z)
 {
-    return sampleHaloVoxel(gHaloVoxels, seamBit, x, y, z);
+    return sampleHaloVoxel(haloVoxels, seamBit, x, y, z);
 }
 
 uint loadLitVoxel(uint index)
@@ -111,7 +113,7 @@ void enqueueVoxel(uint index)
     }
 }
 
-uint seedBoundaryLight(uint3 localPos, uint packedBase)
+uint seedBoundaryLight(StructuredBuffer<uint> haloVoxels, uint3 localPos, uint packedBase)
 {
     const uint blockId = voxelBlock(packedBase);
     if (isOpaqueForLighting(blockId))
@@ -125,7 +127,8 @@ uint seedBoundaryLight(uint3 localPos, uint packedBase)
 
     if (localPos.x == 0u)
     {
-        const uint neighbor = sampleNeighborForSeed(kExactNeighborNegXBit,
+        const uint neighbor = sampleNeighborForSeed(haloVoxels,
+                                                    kExactNeighborNegXBit,
                                                     int(kExactChunkSize) - 1,
                                                     int(localPos.y),
                                                     int(localPos.z));
@@ -134,7 +137,8 @@ uint seedBoundaryLight(uint3 localPos, uint packedBase)
     }
     if (localPos.x + 1u == kExactChunkSize)
     {
-        const uint neighbor = sampleNeighborForSeed(kExactNeighborPosXBit,
+        const uint neighbor = sampleNeighborForSeed(haloVoxels,
+                                                    kExactNeighborPosXBit,
                                                     0,
                                                     int(localPos.y),
                                                     int(localPos.z));
@@ -143,7 +147,8 @@ uint seedBoundaryLight(uint3 localPos, uint packedBase)
     }
     if (localPos.y == 0u)
     {
-        const uint neighbor = sampleNeighborForSeed(kExactNeighborNegYBit,
+        const uint neighbor = sampleNeighborForSeed(haloVoxels,
+                                                    kExactNeighborNegYBit,
                                                     int(localPos.x),
                                                     int(kExactChunkSize) - 1,
                                                     int(localPos.z));
@@ -152,7 +157,8 @@ uint seedBoundaryLight(uint3 localPos, uint packedBase)
     }
     if (localPos.y + 1u == kExactChunkSize)
     {
-        const uint neighbor = sampleNeighborForSeed(kExactNeighborPosYBit,
+        const uint neighbor = sampleNeighborForSeed(haloVoxels,
+                                                    kExactNeighborPosYBit,
                                                     int(localPos.x),
                                                     0,
                                                     int(localPos.z));
@@ -161,7 +167,8 @@ uint seedBoundaryLight(uint3 localPos, uint packedBase)
     }
     if (localPos.z == 0u)
     {
-        const uint neighbor = sampleNeighborForSeed(kExactNeighborNegZBit,
+        const uint neighbor = sampleNeighborForSeed(haloVoxels,
+                                                    kExactNeighborNegZBit,
                                                     int(localPos.x),
                                                     int(localPos.y),
                                                     int(kExactChunkSize) - 1);
@@ -170,7 +177,8 @@ uint seedBoundaryLight(uint3 localPos, uint packedBase)
     }
     if (localPos.z + 1u == kExactChunkSize)
     {
-        const uint neighbor = sampleNeighborForSeed(kExactNeighborPosZBit,
+        const uint neighbor = sampleNeighborForSeed(haloVoxels,
+                                                    kExactNeighborPosZBit,
                                                     int(localPos.x),
                                                     int(localPos.y),
                                                     0);
@@ -285,14 +293,28 @@ void propagateFromVoxel(uint sourceIndex)
 }
 
 [numthreads(16, 16, 1)]
-void ExactChunkLightMain(uint3 groupThreadId : SV_GroupThreadID)
+void ExactChunkLightMain(uint3 groupThreadId : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 {
-    const uint linearThreadIndex = groupThreadId.y * kExactChunkSize + groupThreadId.x;
+    const uint buildIndex = groupId.z;
+    if (buildIndex >= gBatchBuildCount || gPropagationPassCount == 0u)
+    {
+        return;
+    }
+
     if (groupThreadId.x >= kExactChunkSize || groupThreadId.y >= kExactChunkSize)
     {
         return;
     }
 
+    const GpuExactPrepassRecord build = gPrepassRecords[buildIndex];
+    StructuredBuffer<uint> centerVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.centerVoxelSrvDescriptorIndex)];
+    StructuredBuffer<uint> haloVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.haloVoxelSrvDescriptorIndex)];
+    RWStructuredBuffer<uint> destVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.lightScratchVoxelUavDescriptorIndex)];
+
+    const uint linearThreadIndex = groupThreadId.y * kExactChunkSize + groupThreadId.x;
     if (linearThreadIndex == 0u)
     {
         sFrontierQueue[kFrontierStateIndex] = 0u;
@@ -301,20 +323,15 @@ void ExactChunkLightMain(uint3 groupThreadId : SV_GroupThreadID)
 
     const uint localX = groupThreadId.x;
     const uint localZ = groupThreadId.y;
-    const uint descriptorIndex = columnIndex(localX, localZ);
-    const GpuExactColumnDescriptor column = gColumns[descriptorIndex];
+    const uint descriptorIndex = build.descriptorOffset + columnIndex(localX, localZ);
+    const GpuExactColumnDescriptor column = gDescriptorScratch[descriptorIndex];
     uint incomingSky = min(column.skyLightFromAbove, 15u);
 
     [loop]
     for (int localY = int(kExactChunkSize) - 1; localY >= 0; --localY)
     {
         const uint index = voxelIndex(localX, uint(localY), localZ);
-        if (index >= gVoxelCount)
-        {
-            continue;
-        }
-
-        const uint packed = gCenterVoxels[index];
+        const uint packed = centerVoxels[index];
         const uint blockId = voxelBlock(packed);
         const uint emission = blockEmissionForBlock(blockId);
         uint seededVoxel = encodeVoxel(blockId, 0u, emission);
@@ -326,7 +343,7 @@ void ExactChunkLightMain(uint3 groupThreadId : SV_GroupThreadID)
         {
             incomingSky = attenuateLight(incomingSky, skyAttenuationForBlock(blockId));
             seededVoxel = encodeVoxel(blockId, incomingSky, emission);
-            seededVoxel = seedBoundaryLight(uint3(localX, uint(localY), localZ), seededVoxel);
+            seededVoxel = seedBoundaryLight(haloVoxels, uint3(localX, uint(localY), localZ), seededVoxel);
         }
 
         sLitVoxels[index] = seededVoxel;
@@ -374,11 +391,6 @@ void ExactChunkLightMain(uint3 groupThreadId : SV_GroupThreadID)
     for (uint localY = 0u; localY < kExactChunkSize; ++localY)
     {
         const uint index = voxelIndex(localX, localY, localZ);
-        if (index >= gVoxelCount)
-        {
-            continue;
-        }
-
-        gDestVoxels[index] = loadLitVoxel(index);
+        destVoxels[index] = loadLitVoxel(index);
     }
 }

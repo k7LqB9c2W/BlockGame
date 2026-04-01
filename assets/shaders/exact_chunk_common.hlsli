@@ -116,6 +116,34 @@ struct GpuExactSparseVoxel
     uint reserved;
 };
 
+struct GpuExactPrepassRecord
+{
+    int chunkWorldMinX;
+    int chunkWorldMinY;
+    int chunkWorldMinZ;
+    uint scratchSliceIndex;
+    uint descriptorOffset;
+    uint rebuildVoxelInputs;
+    uint sparseVoxelCount;
+    uint resolvedNeighborMask;
+    uint closedNeighborMask;
+    uint pendingNeighborMask;
+    uint centerVoxelSrvDescriptorIndex;
+    uint centerVoxelUavDescriptorIndex;
+    uint haloVoxelSrvDescriptorIndex;
+    uint haloVoxelUavDescriptorIndex;
+    uint lightScratchVoxelSrvDescriptorIndex;
+    uint lightScratchVoxelUavDescriptorIndex;
+    uint sparseVoxelSrvDescriptorIndex;
+    uint neighborPosXVoxelSrvDescriptorIndex;
+    uint neighborNegXVoxelSrvDescriptorIndex;
+    uint neighborPosYVoxelSrvDescriptorIndex;
+    uint neighborNegYVoxelSrvDescriptorIndex;
+    uint neighborPosZVoxelSrvDescriptorIndex;
+    uint neighborNegZVoxelSrvDescriptorIndex;
+    uint reserved0;
+};
+
 struct GpuExactFaceDescriptor
 {
     uint packedLocal;

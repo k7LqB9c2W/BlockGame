@@ -2,25 +2,46 @@
 
 cbuffer ExactChunkStructureStampParams : register(b0)
 {
-    uint gSparseVoxelCount;
-    uint gVoxelCount;
+    uint gBatchBuildCount;
+    uint gMaxSparseVoxelGroups;
     uint gReserved0;
     uint gReserved1;
 };
 
-StructuredBuffer<GpuExactSparseVoxel> gSparseVoxels : register(t0);
-RWStructuredBuffer<uint> gVoxels : register(u0);
+StructuredBuffer<GpuExactPrepassRecord> gPrepassRecords : register(t0);
+StructuredBuffer<GpuExactColumnDescriptor> gDescriptorScratch : register(t1);
+RWStructuredBuffer<uint> gFaceCountScratch : register(u0);
+RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(u1);
+RWStructuredBuffer<uint> gFacePrefixScratch : register(u2);
+RWStructuredBuffer<uint> gFaceTotalScratch : register(u3);
 
 [numthreads(64, 1, 1)]
-void ExactChunkStructureStampMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+void ExactChunkStructureStampMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-    const uint sparseIndex = dispatchThreadId.x;
-    if (sparseIndex >= gSparseVoxelCount)
+    const uint buildIndex = groupId.y;
+    if (buildIndex >= gBatchBuildCount || groupId.x >= gMaxSparseVoxelGroups)
     {
         return;
     }
 
-    const GpuExactSparseVoxel edit = gSparseVoxels[sparseIndex];
+    const GpuExactPrepassRecord build = gPrepassRecords[buildIndex];
+    if (build.rebuildVoxelInputs == 0u || build.sparseVoxelCount == 0u)
+    {
+        return;
+    }
+
+    const uint sparseIndex = groupId.x * 64u + groupThreadId.x;
+    if (sparseIndex >= build.sparseVoxelCount)
+    {
+        return;
+    }
+
+    StructuredBuffer<GpuExactSparseVoxel> sparseVoxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.sparseVoxelSrvDescriptorIndex)];
+    RWStructuredBuffer<uint> voxels =
+        ResourceDescriptorHeap[NonUniformResourceIndex(build.centerVoxelUavDescriptorIndex)];
+
+    const GpuExactSparseVoxel edit = sparseVoxels[sparseIndex];
     const uint localX = decodeLocalX(edit.packedLocalPos);
     const uint localY = decodeLocalY(edit.packedLocalPos);
     const uint localZ = decodeLocalZ(edit.packedLocalPos);
@@ -30,14 +51,9 @@ void ExactChunkStructureStampMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const uint index = voxelIndex(localX, localY, localZ);
-    if (index >= gVoxelCount)
-    {
-        return;
-    }
-
-    const uint current = gVoxels[index];
+    const uint current = voxels[index];
     if ((edit.flags & 0x01u) != 0u || voxelBlock(current) == kBlockAir)
     {
-        gVoxels[index] = encodeVoxel(edit.block, voxelSkyLight(current), voxelBlockLight(current));
+        voxels[index] = encodeVoxel(edit.block, voxelSkyLight(current), voxelBlockLight(current));
     }
 }

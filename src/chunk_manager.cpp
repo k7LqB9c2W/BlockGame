@@ -580,6 +580,26 @@ struct ChunkBenchmarkMetrics
         commitPageStateStage.reset();
         commitReleaseStage.reset();
         generateBlocksMeshLockStage.reset();
+        generateBaseTerrainStateStage.reset();
+        generateStructureResolveStage.reset();
+        generateGpuInputPrepStage.reset();
+        generateCpuMaterializeStage.reset();
+        generatePublishStage.reset();
+        generateWorldgenPageMutexWaitStage.reset();
+        generateWorldgenPagePendingWaitStage.reset();
+        generateWorldgenPageBuildStage.reset();
+        generateWorldgenPageBuildSurfaceStage.reset();
+        generateWorldgenPageBuildPopulateStage.reset();
+        generateWorldgenPageAccessCalls.reset();
+        generateWorldgenPageUniqueKeys.reset();
+        generateWorldgenPageColdBuildCount.reset();
+        generateWorldgenPagePendingWaitCount.reset();
+        buildChunkCpuWarmPagesStage.reset();
+        buildChunkCpuDescribeColumnsStage.reset();
+        buildChunkCpuMaterializeColumnsStage.reset();
+        buildChunkCpuApplyStructureEditsStage.reset();
+        buildChunkCpuApplyPendingEditsStage.reset();
+        buildChunkCpuApplyOverlayStage.reset();
         uploadChunkMeshLockStage.reset();
         neighborhoodSnapshotLockStage.reset();
         skyLightCacheLockStage.reset();
@@ -602,6 +622,7 @@ struct ChunkBenchmarkMetrics
         exactGpuPrepareCpuStage.reset();
         exactGpuSubmitCpuStage.reset();
         exactGpuCommitCpuStage.reset();
+        exactGpuBuildQueueWaitStage.reset();
         exactGpuWorldgenResolveStage.reset();
         exactGpuPrepassFaceTotalsReadbackStage.reset();
         exactGpuEmitMetadataSyncStage.reset();
@@ -616,6 +637,8 @@ struct ChunkBenchmarkMetrics
         exactGpuReadyForEmitBacklogBuilds.reset();
         exactGpuComputeInFlightBeforeEmit.reset();
         exactGpuComputeInFlightAfterEmit.reset();
+        exactGpuBuildQueueDepthEnqueue.reset();
+        exactGpuBuildQueueDepthStart.reset();
         exactGpuBlockingEmitBatchAgeStage.reset();
         exactGpuBlockingEmitBatchBuilds.reset();
         exactGpuSubmitBatchBuilds.reset();
@@ -642,8 +665,12 @@ struct ChunkBenchmarkMetrics
         chunkReadyMeshStage.reset();
         chunkReadyWaitUploadStage.reset();
         chunkReadyUploadToReadyStage.reset();
+        chunkReadyGenerateAttempts.reset();
+        chunkReadyStructureDeferralCount.reset();
+        chunkReadyFirstStructureDeferralToReadyStage.reset();
         uploadQueueAgeStage.reset();
         structureQueryStage.reset();
+        generateDeferredStructureMissingRegions.reset();
         ensureVolumeColumnsVisited.reset();
         ensureVolumeCandidatesBuilt.reset();
         ensureVolumeExistingChunkSkips.reset();
@@ -723,6 +750,26 @@ struct ChunkBenchmarkMetrics
         report.commitPageStateStage = commitPageStateStage.snapshot();
         report.commitReleaseStage = commitReleaseStage.snapshot();
         report.generateBlocksMeshLockStage = generateBlocksMeshLockStage.snapshot();
+        report.generateBaseTerrainStateStage = generateBaseTerrainStateStage.snapshot();
+        report.generateStructureResolveStage = generateStructureResolveStage.snapshot();
+        report.generateGpuInputPrepStage = generateGpuInputPrepStage.snapshot();
+        report.generateCpuMaterializeStage = generateCpuMaterializeStage.snapshot();
+        report.generatePublishStage = generatePublishStage.snapshot();
+        report.generateWorldgenPageMutexWaitStage = generateWorldgenPageMutexWaitStage.snapshot();
+        report.generateWorldgenPagePendingWaitStage = generateWorldgenPagePendingWaitStage.snapshot();
+        report.generateWorldgenPageBuildStage = generateWorldgenPageBuildStage.snapshot();
+        report.generateWorldgenPageBuildSurfaceStage = generateWorldgenPageBuildSurfaceStage.snapshot();
+        report.generateWorldgenPageBuildPopulateStage = generateWorldgenPageBuildPopulateStage.snapshot();
+        report.generateWorldgenPageAccessCalls = generateWorldgenPageAccessCalls.snapshot();
+        report.generateWorldgenPageUniqueKeys = generateWorldgenPageUniqueKeys.snapshot();
+        report.generateWorldgenPageColdBuildCount = generateWorldgenPageColdBuildCount.snapshot();
+        report.generateWorldgenPagePendingWaitCount = generateWorldgenPagePendingWaitCount.snapshot();
+        report.buildChunkCpuWarmPagesStage = buildChunkCpuWarmPagesStage.snapshot();
+        report.buildChunkCpuDescribeColumnsStage = buildChunkCpuDescribeColumnsStage.snapshot();
+        report.buildChunkCpuMaterializeColumnsStage = buildChunkCpuMaterializeColumnsStage.snapshot();
+        report.buildChunkCpuApplyStructureEditsStage = buildChunkCpuApplyStructureEditsStage.snapshot();
+        report.buildChunkCpuApplyPendingEditsStage = buildChunkCpuApplyPendingEditsStage.snapshot();
+        report.buildChunkCpuApplyOverlayStage = buildChunkCpuApplyOverlayStage.snapshot();
         report.uploadChunkMeshLockStage = uploadChunkMeshLockStage.snapshot();
         report.neighborhoodSnapshotLockStage = neighborhoodSnapshotLockStage.snapshot();
         report.skyLightCacheLockStage = skyLightCacheLockStage.snapshot();
@@ -745,6 +792,7 @@ struct ChunkBenchmarkMetrics
         report.exactGpuPrepareCpuStage = exactGpuPrepareCpuStage.snapshot();
         report.exactGpuSubmitCpuStage = exactGpuSubmitCpuStage.snapshot();
         report.exactGpuCommitCpuStage = exactGpuCommitCpuStage.snapshot();
+        report.exactGpuBuildQueueWaitStage = exactGpuBuildQueueWaitStage.snapshot();
         report.exactGpuWorldgenResolveStage = exactGpuWorldgenResolveStage.snapshot();
         report.exactGpuPrepassFaceTotalsReadbackStage = exactGpuPrepassFaceTotalsReadbackStage.snapshot();
         report.exactGpuEmitMetadataSyncStage = exactGpuEmitMetadataSyncStage.snapshot();
@@ -759,6 +807,8 @@ struct ChunkBenchmarkMetrics
         report.exactGpuReadyForEmitBacklogBuilds = exactGpuReadyForEmitBacklogBuilds.snapshot();
         report.exactGpuComputeInFlightBeforeEmit = exactGpuComputeInFlightBeforeEmit.snapshot();
         report.exactGpuComputeInFlightAfterEmit = exactGpuComputeInFlightAfterEmit.snapshot();
+        report.exactGpuBuildQueueDepthEnqueue = exactGpuBuildQueueDepthEnqueue.snapshot();
+        report.exactGpuBuildQueueDepthStart = exactGpuBuildQueueDepthStart.snapshot();
         report.exactGpuBlockingEmitBatchAgeStage = exactGpuBlockingEmitBatchAgeStage.snapshot();
         report.exactGpuBlockingEmitBatchBuilds = exactGpuBlockingEmitBatchBuilds.snapshot();
         report.exactGpuSubmitBatchBuilds = exactGpuSubmitBatchBuilds.snapshot();
@@ -785,8 +835,13 @@ struct ChunkBenchmarkMetrics
         report.chunkReadyMeshStage = chunkReadyMeshStage.snapshot();
         report.chunkReadyWaitUploadStage = chunkReadyWaitUploadStage.snapshot();
         report.chunkReadyUploadToReadyStage = chunkReadyUploadToReadyStage.snapshot();
+        report.chunkReadyGenerateAttempts = chunkReadyGenerateAttempts.snapshot();
+        report.chunkReadyStructureDeferralCount = chunkReadyStructureDeferralCount.snapshot();
+        report.chunkReadyFirstStructureDeferralToReadyStage =
+            chunkReadyFirstStructureDeferralToReadyStage.snapshot();
         report.uploadQueueAgeStage = uploadQueueAgeStage.snapshot();
         report.structureQueryStage = structureQueryStage.snapshot();
+        report.generateDeferredStructureMissingRegions = generateDeferredStructureMissingRegions.snapshot();
         report.ensureVolumeColumnsVisited = ensureVolumeColumnsVisited.snapshot();
         report.ensureVolumeCandidatesBuilt = ensureVolumeCandidatesBuilt.snapshot();
         report.ensureVolumeExistingChunkSkips = ensureVolumeExistingChunkSkips.snapshot();
@@ -864,6 +919,26 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram commitPageStateStage{};
     AtomicLatencyHistogram commitReleaseStage{};
     AtomicLatencyHistogram generateBlocksMeshLockStage{};
+    AtomicLatencyHistogram generateBaseTerrainStateStage{};
+    AtomicLatencyHistogram generateStructureResolveStage{};
+    AtomicLatencyHistogram generateGpuInputPrepStage{};
+    AtomicLatencyHistogram generateCpuMaterializeStage{};
+    AtomicLatencyHistogram generatePublishStage{};
+    AtomicLatencyHistogram generateWorldgenPageMutexWaitStage{};
+    AtomicLatencyHistogram generateWorldgenPagePendingWaitStage{};
+    AtomicLatencyHistogram generateWorldgenPageBuildStage{};
+    AtomicLatencyHistogram generateWorldgenPageBuildSurfaceStage{};
+    AtomicLatencyHistogram generateWorldgenPageBuildPopulateStage{};
+    AtomicCountHistogram generateWorldgenPageAccessCalls{};
+    AtomicCountHistogram generateWorldgenPageUniqueKeys{};
+    AtomicCountHistogram generateWorldgenPageColdBuildCount{};
+    AtomicCountHistogram generateWorldgenPagePendingWaitCount{};
+    AtomicLatencyHistogram buildChunkCpuWarmPagesStage{};
+    AtomicLatencyHistogram buildChunkCpuDescribeColumnsStage{};
+    AtomicLatencyHistogram buildChunkCpuMaterializeColumnsStage{};
+    AtomicLatencyHistogram buildChunkCpuApplyStructureEditsStage{};
+    AtomicLatencyHistogram buildChunkCpuApplyPendingEditsStage{};
+    AtomicLatencyHistogram buildChunkCpuApplyOverlayStage{};
     AtomicLatencyHistogram uploadChunkMeshLockStage{};
     AtomicLatencyHistogram neighborhoodSnapshotLockStage{};
     AtomicLatencyHistogram skyLightCacheLockStage{};
@@ -886,6 +961,7 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram exactGpuPrepareCpuStage{};
     AtomicLatencyHistogram exactGpuSubmitCpuStage{};
     AtomicLatencyHistogram exactGpuCommitCpuStage{};
+    AtomicLatencyHistogram exactGpuBuildQueueWaitStage{};
     AtomicLatencyHistogram exactGpuWorldgenResolveStage{};
     AtomicLatencyHistogram exactGpuPrepassFaceTotalsReadbackStage{};
     AtomicLatencyHistogram exactGpuEmitMetadataSyncStage{};
@@ -900,6 +976,8 @@ struct ChunkBenchmarkMetrics
     AtomicCountHistogram exactGpuReadyForEmitBacklogBuilds{};
     AtomicCountHistogram exactGpuComputeInFlightBeforeEmit{};
     AtomicCountHistogram exactGpuComputeInFlightAfterEmit{};
+    AtomicCountHistogram exactGpuBuildQueueDepthEnqueue{};
+    AtomicCountHistogram exactGpuBuildQueueDepthStart{};
     AtomicLatencyHistogram exactGpuBlockingEmitBatchAgeStage{};
     AtomicCountHistogram exactGpuBlockingEmitBatchBuilds{};
     AtomicCountHistogram exactGpuSubmitBatchBuilds{};
@@ -926,8 +1004,12 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram chunkReadyMeshStage{};
     AtomicLatencyHistogram chunkReadyWaitUploadStage{};
     AtomicLatencyHistogram chunkReadyUploadToReadyStage{};
+    AtomicCountHistogram chunkReadyGenerateAttempts{};
+    AtomicCountHistogram chunkReadyStructureDeferralCount{};
+    AtomicLatencyHistogram chunkReadyFirstStructureDeferralToReadyStage{};
     AtomicLatencyHistogram uploadQueueAgeStage{};
     AtomicLatencyHistogram structureQueryStage{};
+    AtomicCountHistogram generateDeferredStructureMissingRegions{};
     AtomicCountHistogram ensureVolumeColumnsVisited{};
     AtomicCountHistogram ensureVolumeCandidatesBuilt{};
     AtomicCountHistogram ensureVolumeExistingChunkSkips{};
@@ -3573,6 +3655,9 @@ struct Chunk
         meshDoneTimestampMicros.store(0, std::memory_order_relaxed);
         uploadQueuedTimestampMicros.store(0, std::memory_order_relaxed);
         uploadStartTimestampMicros.store(0, std::memory_order_relaxed);
+        generateAttemptCount.store(0, std::memory_order_relaxed);
+        structureDeferredAttemptCount.store(0, std::memory_order_relaxed);
+        firstStructureDeferredTimestampMicros.store(0, std::memory_order_relaxed);
         requestQueuedByType.fill(0);
         requestActiveByType.fill(0);
         requestLatencySensitiveOutstanding = 0;
@@ -3669,6 +3754,9 @@ struct Chunk
     std::atomic<long long> meshDoneTimestampMicros{0};
     std::atomic<long long> uploadQueuedTimestampMicros{0};
     std::atomic<long long> uploadStartTimestampMicros{0};
+    std::atomic<std::uint32_t> generateAttemptCount{0};
+    std::atomic<std::uint32_t> structureDeferredAttemptCount{0};
+    std::atomic<long long> firstStructureDeferredTimestampMicros{0};
     std::array<std::uint16_t, kJobTypeCount> requestQueuedByType{};
     std::array<std::uint16_t, kJobTypeCount> requestActiveByType{};
     std::uint16_t requestLatencySensitiveOutstanding{0};
@@ -4310,6 +4398,7 @@ private:
         std::uint32_t buildVersion{0};
         std::uint32_t generationEpoch{0};
         std::uint64_t inputVersion{0};
+        std::uint64_t queuedTimestampMicros{0};
         bool rebuildVoxelInputs{false};
     };
 
@@ -4602,6 +4691,16 @@ private:
         std::exception_ptr exception{};
         bool ready{false};
     };
+    struct WorldgenPageAccessBenchmark
+    {
+        std::uint64_t mutexWaitMicros{0};
+        std::uint64_t pendingBuildWaitMicros{0};
+        std::uint64_t buildMicros{0};
+        std::uint64_t buildSurfaceMicros{0};
+        std::uint64_t buildPopulateMicros{0};
+        bool waitedOnPendingBuild{false};
+        bool builtColdPage{false};
+    };
     struct ExactGpuWorldgenPageWindow
     {
         glm::ivec2 minPageKey{0};
@@ -4627,7 +4726,9 @@ private:
     static void worldgenPageChunkColumnBounds(const glm::ivec2& pageKey,
                                               glm::ivec2& outMinColumn,
                                               glm::ivec2& outMaxColumn) noexcept;
-    [[nodiscard]] std::shared_ptr<const WorldgenPage> getOrBuildWorldgenPage(const glm::ivec2& pageKey) const;
+    [[nodiscard]] std::shared_ptr<const WorldgenPage> getOrBuildWorldgenPage(
+        const glm::ivec2& pageKey,
+        WorldgenPageAccessBenchmark* benchmark = nullptr) const;
     [[nodiscard]] std::shared_ptr<const WorldgenPage> tryGetWorldgenPage(const glm::ivec2& pageKey) const;
     void pinWorldgenWindow(const glm::ivec3& center, int horizontalRadius);
     void trimWorldgenPages();
@@ -13997,12 +14098,24 @@ ChunkManager::Impl::tryGetWorldgenPage(const glm::ivec2& pageKey) const
 }
 
 std::shared_ptr<const ChunkManager::Impl::WorldgenPage>
-ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
+ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey,
+                                           WorldgenPageAccessBenchmark* benchmark) const
 {
+    const bool benchmarkEnabled = benchmark != nullptr;
+    const auto phaseNow = [&]() -> SteadyClock::time_point
+    {
+        return benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    };
     std::shared_ptr<WorldgenPage> page;
     std::shared_ptr<PendingWorldgenPageBuild> pendingBuild;
     {
+        const SteadyClock::time_point lockWaitStart = phaseNow();
         std::unique_lock<std::mutex> lock(worldgenPageMutex_);
+        if (benchmarkEnabled)
+        {
+            benchmark->mutexWaitMicros += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - lockWaitStart).count());
+        }
         auto it = worldgenPages_.find(pageKey);
         if (it != worldgenPages_.end())
         {
@@ -14013,7 +14126,14 @@ ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
         if (pendingIt != pendingWorldgenPageBuilds_.end())
         {
             pendingBuild = pendingIt->second;
+            const SteadyClock::time_point pendingWaitStart = phaseNow();
             pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
+            if (benchmarkEnabled)
+            {
+                benchmark->waitedOnPendingBuild = true;
+                benchmark->pendingBuildWaitMicros += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - pendingWaitStart).count());
+            }
             if (pendingBuild->exception)
             {
                 std::rethrow_exception(pendingBuild->exception);
@@ -14025,7 +14145,13 @@ ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
         pendingWorldgenPageBuilds_.emplace(pageKey, pendingBuild);
     }
 
+    if (benchmarkEnabled)
+    {
+        benchmark->builtColdPage = true;
+    }
+
     std::exception_ptr buildException{};
+    const SteadyClock::time_point buildStart = phaseNow();
     try
     {
         if (!surfaceMap_ || !climateMap_)
@@ -14037,7 +14163,15 @@ ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
         page->key = pageKey;
         page->baseWorld = pageKey * WorldgenPage::kSize;
 
+        const SteadyClock::time_point surfaceBuildStart = phaseNow();
         const terrain::SurfaceFragment& surfaceFragment = surfaceMap_->getFragment(pageKey);
+        if (benchmarkEnabled)
+        {
+            benchmark->buildSurfaceMicros += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - surfaceBuildStart).count());
+        }
+
+        const SteadyClock::time_point populateStart = phaseNow();
         for (int localZ = 0; localZ < WorldgenPage::kSize; ++localZ)
         {
             for (int localX = 0; localX < WorldgenPage::kSize; ++localX)
@@ -14091,10 +14225,21 @@ ChunkManager::Impl::getOrBuildWorldgenPage(const glm::ivec2& pageKey) const
                 page->gpuColumns[index] = packGpuWorldgenPageColumn(worldgenColumn);
             }
         }
+        if (benchmarkEnabled)
+        {
+            benchmark->buildPopulateMicros += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - populateStart).count());
+        }
     }
     catch (...)
     {
         buildException = std::current_exception();
+    }
+
+    if (benchmarkEnabled)
+    {
+        benchmark->buildMicros += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - buildStart).count());
     }
 
     {
@@ -14249,6 +14394,7 @@ bool ChunkManager::Impl::computeChunkBaseTerrainState(
     std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& highestSolidWorlds,
     bool& outAnyBaseTerrain) const
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     highestSolidWorlds.fill(ColumnManager::kNoHeight);
     outAnyBaseTerrain = false;
 
@@ -14262,6 +14408,37 @@ bool ChunkManager::Impl::computeChunkBaseTerrainState(
     std::array<WorldgenColumnValue, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)> worldgenColumns{};
     const int baseWorldX = chunkCoord.x * kChunkSizeX;
     const int baseWorldZ = chunkCoord.z * kChunkSizeZ;
+    std::uint64_t worldgenPageMutexWaitMicros = 0u;
+    std::uint64_t worldgenPagePendingWaitMicros = 0u;
+    std::uint64_t worldgenPageBuildMicros = 0u;
+    std::uint64_t worldgenPageBuildSurfaceMicros = 0u;
+    std::uint64_t worldgenPageBuildPopulateMicros = 0u;
+    std::uint32_t worldgenPageAccessCalls = 0u;
+    std::uint32_t worldgenPageUniqueKeys = 0u;
+    std::uint32_t worldgenPageColdBuilds = 0u;
+    std::uint32_t worldgenPagePendingWaits = 0u;
+    std::vector<glm::ivec2> uniqueWorldgenPageKeys{};
+    if (benchmarkEnabled)
+    {
+        uniqueWorldgenPageKeys.reserve(8);
+    }
+    const auto recordWorldgenPageStats = [&]()
+    {
+        if (!benchmarkEnabled)
+        {
+            return;
+        }
+
+        benchmarkMetrics_.generateWorldgenPageMutexWaitStage.recordMicros(worldgenPageMutexWaitMicros);
+        benchmarkMetrics_.generateWorldgenPagePendingWaitStage.recordMicros(worldgenPagePendingWaitMicros);
+        benchmarkMetrics_.generateWorldgenPageBuildStage.recordMicros(worldgenPageBuildMicros);
+        benchmarkMetrics_.generateWorldgenPageBuildSurfaceStage.recordMicros(worldgenPageBuildSurfaceMicros);
+        benchmarkMetrics_.generateWorldgenPageBuildPopulateStage.recordMicros(worldgenPageBuildPopulateMicros);
+        benchmarkMetrics_.generateWorldgenPageAccessCalls.record(worldgenPageAccessCalls);
+        benchmarkMetrics_.generateWorldgenPageUniqueKeys.record(worldgenPageUniqueKeys);
+        benchmarkMetrics_.generateWorldgenPageColdBuildCount.record(worldgenPageColdBuilds);
+        benchmarkMetrics_.generateWorldgenPagePendingWaitCount.record(worldgenPagePendingWaits);
+    };
 
     for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
     {
@@ -14269,10 +14446,35 @@ bool ChunkManager::Impl::computeChunkBaseTerrainState(
         {
             const int sampleWorldX = baseWorldX + sampleX;
             const int sampleWorldZ = baseWorldZ + sampleZ;
+            const glm::ivec2 pageKey = worldgenPageKeyForWorld(sampleWorldX, sampleWorldZ);
+            WorldgenPageAccessBenchmark accessBenchmark{};
+            if (benchmarkEnabled)
+            {
+                ++worldgenPageAccessCalls;
+                const auto uniqueIt = std::find(uniqueWorldgenPageKeys.begin(),
+                                                uniqueWorldgenPageKeys.end(),
+                                                pageKey);
+                if (uniqueIt == uniqueWorldgenPageKeys.end())
+                {
+                    uniqueWorldgenPageKeys.push_back(pageKey);
+                    ++worldgenPageUniqueKeys;
+                }
+            }
             const std::shared_ptr<const WorldgenPage> page =
-                getOrBuildWorldgenPage(worldgenPageKeyForWorld(sampleWorldX, sampleWorldZ));
+                getOrBuildWorldgenPage(pageKey, benchmarkEnabled ? &accessBenchmark : nullptr);
+            if (benchmarkEnabled)
+            {
+                worldgenPageMutexWaitMicros += accessBenchmark.mutexWaitMicros;
+                worldgenPagePendingWaitMicros += accessBenchmark.pendingBuildWaitMicros;
+                worldgenPageBuildMicros += accessBenchmark.buildMicros;
+                worldgenPageBuildSurfaceMicros += accessBenchmark.buildSurfaceMicros;
+                worldgenPageBuildPopulateMicros += accessBenchmark.buildPopulateMicros;
+                worldgenPageColdBuilds += accessBenchmark.builtColdPage ? 1u : 0u;
+                worldgenPagePendingWaits += accessBenchmark.waitedOnPendingBuild ? 1u : 0u;
+            }
             if (!page)
             {
+                recordWorldgenPageStats();
                 return false;
             }
 
@@ -14281,6 +14483,7 @@ bool ChunkManager::Impl::computeChunkBaseTerrainState(
             worldgenColumns[sampleIndex(sampleX + 1, sampleZ + 1)] = page->column(localPageX, localPageZ);
         }
     }
+    recordWorldgenPageStats();
 
     auto computeNeighborAverage = [&](int localX, int localZ) noexcept
     {
@@ -15548,6 +15751,7 @@ void ChunkManager::Impl::commitPendingChunkUploads()
 
 void ChunkManager::Impl::queueChunkForExactGpuBuild(const std::shared_ptr<Chunk>& chunk, std::uint32_t buildVersion)
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     if (!chunk ||
         shouldStop_.load(std::memory_order_acquire) ||
         device_ == nullptr ||
@@ -15572,14 +15776,22 @@ void ChunkManager::Impl::queueChunkForExactGpuBuild(const std::shared_ptr<Chunk>
     request.buildVersion = buildVersion;
     request.generationEpoch = chunk->generationEpoch.load(std::memory_order_acquire);
     request.inputVersion = chunk->exactGpuInputsVersion.load(std::memory_order_acquire);
+    request.queuedTimestampMicros = benchmarkEnabled ? steadyMicrosNow() : 0u;
     request.rebuildVoxelInputs =
         chunk->exactGpuInputsDirty.load(std::memory_order_acquire) ||
         !chunk->exactGpuResident.load(std::memory_order_acquire) ||
         chunk->exactGpu.voxelBuffer == nullptr;
-    storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros, steadyMicrosNow());
+    storeFirstBenchmarkTimestamp(chunk->uploadQueuedTimestampMicros,
+                                 request.queuedTimestampMicros != 0u ? request.queuedTimestampMicros
+                                                                     : steadyMicrosNow());
 
     std::lock_guard<std::mutex> lock(pendingExactGpuBuildMutex_);
     pendingExactGpuBuildQueue_.push_back(std::move(request));
+    if (benchmarkEnabled)
+    {
+        benchmarkMetrics_.exactGpuBuildQueueDepthEnqueue.record(
+            static_cast<std::uint64_t>(pendingExactGpuBuildQueue_.size()));
+    }
     wakeExactGpuWorker();
 }
 
@@ -16107,7 +16319,13 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                  prepared.buildVersion,
                                  prepared.generationEpoch,
                                  prepared.inputVersion,
+                                 benchmarkEnabled ? steadyMicrosNow() : 0u,
                                  prepared.rebuildVoxelInputs});
+        if (benchmarkEnabled)
+        {
+            benchmarkMetrics_.exactGpuBuildQueueDepthEnqueue.record(
+                static_cast<std::uint64_t>(pendingExactGpuBuildQueue_.size()));
+        }
     };
 
     auto requeueRemainingPreparedBuilds = [&](std::size_t beginIndex)
@@ -16140,7 +16358,13 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                  pending.buildVersion,
                                  pending.generationEpoch,
                                  pending.inputVersion,
+                                 benchmarkEnabled ? steadyMicrosNow() : 0u,
                                  pending.rebuildVoxelInputs});
+        if (benchmarkEnabled)
+        {
+            benchmarkMetrics_.exactGpuBuildQueueDepthEnqueue.record(
+                static_cast<std::uint64_t>(pendingExactGpuBuildQueue_.size()));
+        }
     };
 
     auto requeueRemainingStagedBuilds = [&](std::size_t beginIndex)
@@ -16231,10 +16455,12 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     {
         ExactGpuBuildRequest request{};
         bool haveRequest = false;
+        std::size_t queueDepthOnStart = 0u;
         {
             std::lock_guard<std::mutex> lock(pendingExactGpuBuildMutex_);
             if (!pendingExactGpuBuildQueue_.empty())
             {
+                queueDepthOnStart = pendingExactGpuBuildQueue_.size();
                 request = pendingExactGpuBuildQueue_.front();
                 pendingExactGpuBuildQueue_.pop_front();
                 haveRequest = true;
@@ -16243,6 +16469,16 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         if (!haveRequest)
         {
             break;
+        }
+        if (benchmarkEnabled)
+        {
+            benchmarkMetrics_.exactGpuBuildQueueDepthStart.record(static_cast<std::uint64_t>(queueDepthOnStart));
+            const std::uint64_t queueWaitEndMicros = steadyMicrosNow();
+            if (request.queuedTimestampMicros > 0u && queueWaitEndMicros > request.queuedTimestampMicros)
+            {
+                benchmarkMetrics_.exactGpuBuildQueueWaitStage.recordMicros(
+                    queueWaitEndMicros - request.queuedTimestampMicros);
+            }
         }
         processedRequests = true;
         if (!request.chunk)
@@ -17106,7 +17342,13 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                 pending.buildVersion,
                 pending.generationEpoch,
                 pending.inputVersion,
+                benchmarkMetrics_.isEnabled() ? steadyMicrosNow() : 0u,
                 pending.rebuildVoxelInputs});
+            if (benchmarkMetrics_.isEnabled())
+            {
+                benchmarkMetrics_.exactGpuBuildQueueDepthEnqueue.record(
+                    static_cast<std::uint64_t>(pendingExactGpuBuildQueue_.size()));
+            }
         };
         const auto releaseBatchScratchSlices = [&](PendingExactGpuBatch& batch)
         {
@@ -20751,6 +20993,8 @@ void ChunkManager::Impl::noteChunkReadyLatency(Chunk& chunk)
     const std::uint64_t meshDoneMicros = loadBenchmarkTimestamp(chunk.meshDoneTimestampMicros);
     const std::uint64_t uploadQueuedMicros = loadBenchmarkTimestamp(chunk.uploadQueuedTimestampMicros);
     const std::uint64_t uploadStartMicros = loadBenchmarkTimestamp(chunk.uploadStartTimestampMicros);
+    const std::uint64_t firstStructureDeferredMicros =
+        loadBenchmarkTimestamp(chunk.firstStructureDeferredTimestampMicros);
 
     auto recordStage = [&](AtomicLatencyHistogram& stage, std::uint64_t beginMicros, std::uint64_t endMicros)
     {
@@ -20770,6 +21014,13 @@ void ChunkManager::Impl::noteChunkReadyLatency(Chunk& chunk)
     const std::uint64_t uploadWaitStartMicros = uploadQueuedMicros != 0 ? uploadQueuedMicros : meshDoneMicros;
     recordStage(benchmarkMetrics_.chunkReadyWaitUploadStage, uploadWaitStartMicros, uploadStartMicros);
     recordStage(benchmarkMetrics_.chunkReadyUploadToReadyStage, uploadStartMicros, readyMicros);
+    benchmarkMetrics_.chunkReadyGenerateAttempts.record(
+        chunk.generateAttemptCount.load(std::memory_order_relaxed));
+    benchmarkMetrics_.chunkReadyStructureDeferralCount.record(
+        chunk.structureDeferredAttemptCount.load(std::memory_order_relaxed));
+    recordStage(benchmarkMetrics_.chunkReadyFirstStructureDeferralToReadyStage,
+                firstStructureDeferredMicros,
+                readyMicros);
 }
 
 
@@ -21237,24 +21488,48 @@ void stampStructureInstanceIntoTarget(const StructureInstance& instance, WriteBl
 bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generationEpoch)
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    if (benchmarkEnabled)
+    {
+        chunk.generateAttemptCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    const auto phaseNow = [&]() -> SteadyClock::time_point
+    {
+        return benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    };
+    const auto recordPhase = [&](AtomicLatencyHistogram& stage,
+                                 const SteadyClock::time_point& start,
+                                 const SteadyClock::time_point& end)
+    {
+        if (!benchmarkEnabled || end <= start)
+        {
+            return;
+        }
+
+        stage.recordMicros(static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()));
+    };
     const bool localAuthoritative = shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
     std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> highestSolidWorlds{};
     bool anyBaseTerrain = false;
+    const auto baseTerrainStart = phaseNow();
     if (!computeChunkBaseTerrainState(chunk.coord,
                                       chunk.minWorldY,
                                       chunk.maxWorldY,
                                       highestSolidWorlds,
                                       anyBaseTerrain))
     {
+        recordPhase(benchmarkMetrics_.generateBaseTerrainStateStage, baseTerrainStart, phaseNow());
         return false;
     }
+    recordPhase(benchmarkMetrics_.generateBaseTerrainStateStage, baseTerrainStart, phaseNow());
     for (std::size_t i = 0; i < highestSolidWorlds.size(); ++i)
     {
         columnResults[i].highestSolidWorld = highestSolidWorlds[i];
         columnResults[i].wroteSolid = highestSolidWorlds[i] != ColumnManager::kNoHeight;
     }
 
+    const auto structureResolveStart = phaseNow();
     std::vector<StructureVoxelEdit> structureVoxelEdits;
     if (localAuthoritative)
     {
@@ -21278,16 +21553,30 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
                                                            minWorldZ + kChunkSizeZ - 1),
                                                 0,
                                                 missingStructureRegions);
+            if (benchmarkEnabled)
+            {
+                chunk.structureDeferredAttemptCount.fetch_add(1, std::memory_order_relaxed);
+                storeFirstBenchmarkTimestamp(chunk.firstStructureDeferredTimestampMicros, steadyMicrosNow());
+            }
             requestColumnHeightPrefetch({chunk.coord.x, chunk.coord.z},
                                         ColumnHeightPrefetchPriority::Critical,
                                         false,
                                         true);
             flushReadyDeferredStructureChunks();
+            recordPhase(benchmarkMetrics_.generateStructureResolveStage, structureResolveStart, phaseNow());
+            if (benchmarkEnabled)
+            {
+                benchmarkMetrics_.generateDeferredStructureMissingRegions.record(
+                    static_cast<std::uint64_t>(missingStructureRegions.size()));
+            }
             return false;
         }
 
         clearDeferredStructureChunkBuild(chunk.coord);
     }
+    recordPhase(benchmarkMetrics_.generateStructureResolveStage, structureResolveStart, phaseNow());
+
+    const auto gpuInputPrepStart = phaseNow();
     const std::vector<PendingStructureEdit> pendingStructureEditsForGpu = copyPendingStructureEdits(chunk.coord);
     std::vector<BlockEditOverlayEntry> blockOverlayEntriesForGpu;
     {
@@ -21357,8 +21646,11 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
             1u,
             0u});
     }
+    recordPhase(benchmarkMetrics_.generateGpuInputPrepStage, gpuInputPrepStart, phaseNow());
 
     const auto meshLockStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    std::uint64_t publishMicros = 0u;
+    const auto firstPublishStart = phaseNow();
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         const bool staleGeneration =
@@ -21377,6 +21669,12 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
 
             if (benchmarkEnabled)
             {
+                publishMicros += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - firstPublishStart).count());
+                if (publishMicros > 0u)
+                {
+                    benchmarkMetrics_.generatePublishStage.recordMicros(publishMicros);
+                }
                 const auto lockMicros =
                     std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - meshLockStart).count();
                 benchmarkMetrics_.generateBlocksMeshLockStage.recordMicros(static_cast<std::uint64_t>(lockMicros));
@@ -21397,11 +21695,19 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
             chunk.releaseCpuData();
         }
     }
+    if (benchmarkEnabled)
+    {
+        publishMicros += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - firstPublishStart).count());
+    }
 
     if (localAuthoritative)
     {
+        const auto cpuMaterializeStart = phaseNow();
         buildChunkCpuBlocks(chunk, scratch, true, columnResults, &pendingEdits);
+        recordPhase(benchmarkMetrics_.generateCpuMaterializeStage, cpuMaterializeStart, phaseNow());
 
+        const auto secondPublishStart = phaseNow();
         std::lock_guard<std::mutex> lock(chunk.meshMutex);
         const bool staleGeneration =
             chunk.generationEpoch.load(std::memory_order_acquire) != generationEpoch ||
@@ -21419,6 +21725,12 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
 
             if (benchmarkEnabled)
             {
+                publishMicros += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - secondPublishStart).count());
+                if (publishMicros > 0u)
+                {
+                    benchmarkMetrics_.generatePublishStage.recordMicros(publishMicros);
+                }
                 const auto lockMicros =
                     std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - meshLockStart).count();
                 benchmarkMetrics_.generateBlocksMeshLockStage.recordMicros(static_cast<std::uint64_t>(lockMicros));
@@ -21430,6 +21742,11 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
         chunk.blocks = std::move(scratch.blocks);
         chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
         chunk.lastDenseFrameTouched = updateFrameIndex_;
+        if (benchmarkEnabled)
+        {
+            publishMicros += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - secondPublishStart).count());
+        }
     }
 
     if (benchmarkEnabled)
@@ -21439,12 +21756,22 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
         benchmarkMetrics_.generateBlocksMeshLockStage.recordMicros(static_cast<std::uint64_t>(lockMicros));
     }
 
+    const auto publishTailStart = phaseNow();
     const glm::ivec2 column{chunk.coord.x, chunk.coord.z};
     columnManager_.updateChunkHeights(chunk.coord, highestSolidWorlds);
     mergePredictedColumnHeight(column,
                                columnManager_.highestSolidBlock(column.x * kChunkSizeX + kChunkSizeX / 2,
                                                                column.y * kChunkSizeZ + kChunkSizeZ / 2));
     markSkyLightColumnDirty({chunk.coord.x, chunk.coord.z});
+    if (benchmarkEnabled)
+    {
+        publishMicros += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(phaseNow() - publishTailStart).count());
+        if (publishMicros > 0u)
+        {
+            benchmarkMetrics_.generatePublishStage.recordMicros(publishMicros);
+        }
+    }
     return true;
 }
 
@@ -21611,7 +21938,27 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& columnResults,
     std::vector<PendingStructureEdit>* consumedPendingEdits)
 {
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const auto phaseNow = [&]() -> SteadyClock::time_point
+    {
+        return benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    };
+    const auto recordPhase = [&](AtomicLatencyHistogram& stage,
+                                 const SteadyClock::time_point& start,
+                                 const SteadyClock::time_point& end)
+    {
+        if (!benchmarkEnabled || end <= start)
+        {
+            return;
+        }
+
+        stage.recordMicros(static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()));
+    };
+
+    const auto warmPagesStart = phaseNow();
     warmWorldgenPagesForChunk(chunk.coord);
+    recordPhase(benchmarkMetrics_.buildChunkCpuWarmPagesStage, warmPagesStart, phaseNow());
 
     std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
     std::vector<StructureVoxelEdit> structureVoxelEdits;
@@ -21627,6 +21974,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
 
     if (terrainGenerator_)
     {
+        const auto describeColumnsStart = phaseNow();
         terrainGenerator_->describeChunkColumns(chunk.coord,
                                                chunk.minWorldY,
                                                chunk.maxWorldY,
@@ -21635,6 +21983,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
                                                kChunkSizeZ,
                                                columnDescriptors,
                                                columnResults);
+        recordPhase(benchmarkMetrics_.buildChunkCpuDescribeColumnsStage, describeColumnsStart, phaseNow());
     }
 
     auto setBlockDirect = [&](int localX, int localY, int localZ, BlockId block)
@@ -21651,6 +22000,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     };
     if (terrainGenerator_)
     {
+        const auto materializeColumnsStart = phaseNow();
         terrainGenerator_->materializeChunkColumns(chunk.minWorldY,
                                                    chunk.maxWorldY,
                                                    kChunkSizeX,
@@ -21658,6 +22008,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
                                                    kChunkSizeZ,
                                                    columnDescriptors,
                                                    setBlockDirect);
+        recordPhase(benchmarkMetrics_.buildChunkCpuMaterializeColumnsStage, materializeColumnsStart, phaseNow());
     }
 
     for (std::size_t i = 0; i < columnResults.size(); ++i)
@@ -21665,6 +22016,7 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
         scratch.highestSolidWorlds[i] = columnDescriptors[i].highestSolidWorld;
     }
 
+    const auto applyStructureEditsStart = phaseNow();
     if (!haveStoredStructureEdits)
     {
         structureVoxelEdits = queryStructureVoxelEditsForChunk(chunk.coord);
@@ -21683,7 +22035,9 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
                               edit.block,
                               edit.replaceSolid);
     }
+    recordPhase(benchmarkMetrics_.buildChunkCpuApplyStructureEditsStage, applyStructureEditsStart, phaseNow());
 
+    const auto applyPendingEditsStart = phaseNow();
     std::vector<PendingStructureEdit> pendingEdits = includePendingStructureEdits
         ? takePendingStructureEdits(chunk.coord)
         : copyPendingStructureEdits(chunk.coord);
@@ -21691,8 +22045,11 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     {
         scratch.setWorldBlock(edit.worldPos.x, edit.worldPos.y, edit.worldPos.z, edit.block, edit.replaceSolid);
     }
+    recordPhase(benchmarkMetrics_.buildChunkCpuApplyPendingEditsStage, applyPendingEditsStart, phaseNow());
 
+    const auto applyOverlayStart = phaseNow();
     applyBlockEditOverlay(scratch, chunk.coord);
+    recordPhase(benchmarkMetrics_.buildChunkCpuApplyOverlayStage, applyOverlayStart, phaseNow());
 
     if (consumedPendingEdits != nullptr)
     {

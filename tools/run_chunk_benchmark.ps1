@@ -318,6 +318,27 @@ $acceptanceView = foreach ($scenario in $scenarioObjects) {
         relight_sky_above_chunk_scans_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.sky_above_chunk_scans.p95 } else { $null }
         vertical_radius_delta_avg = if ($scenario.relight_detail) { $scenario.relight_detail.vertical_radius_delta.avg } else { $null }
         vertical_radius_delta_p95 = if ($scenario.relight_detail) { $scenario.relight_detail.vertical_radius_delta.p95 } else { $null }
+        generation_base_terrain_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.base_terrain_state.avg_ms } else { $null }
+        generation_structure_resolve_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.structure_resolve.avg_ms } else { $null }
+        generation_gpu_input_prep_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.gpu_input_prep.avg_ms } else { $null }
+        generation_cpu_materialize_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.cpu_materialize.avg_ms } else { $null }
+        generation_publish_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.publish.avg_ms } else { $null }
+        generation_worldgen_page_mutex_wait_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_mutex_wait.avg_ms } else { $null }
+        generation_worldgen_page_pending_wait_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_pending_wait.avg_ms } else { $null }
+        generation_worldgen_page_build_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_build.avg_ms } else { $null }
+        generation_worldgen_page_build_surface_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_build_surface.avg_ms } else { $null }
+        generation_worldgen_page_build_populate_avg_ms = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_build_populate.avg_ms } else { $null }
+        generation_worldgen_page_access_calls_avg = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_access_calls.avg } else { $null }
+        generation_worldgen_page_unique_keys_avg = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_unique_keys.avg } else { $null }
+        generation_worldgen_page_cold_build_count_avg = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_cold_build_count.avg } else { $null }
+        generation_worldgen_page_pending_wait_count_avg = if ($scenario.generation_detail) { $scenario.generation_detail.worldgen_page_pending_wait_count.avg } else { $null }
+        exact_gpu_build_queue_wait_avg_ms = if ($scenario.exact_gpu_feed_in) { $scenario.exact_gpu_feed_in.build_queue_wait.avg_ms } else { $null }
+        exact_gpu_queue_depth_enqueue_avg = if ($scenario.exact_gpu_feed_in) { $scenario.exact_gpu_feed_in.queue_depth_enqueue.avg } else { $null }
+        exact_gpu_queue_depth_start_avg = if ($scenario.exact_gpu_feed_in) { $scenario.exact_gpu_feed_in.queue_depth_start.avg } else { $null }
+        deferred_structure_missing_regions_avg = if ($scenario.generation_detail) { $scenario.generation_detail.deferred_structure_missing_regions.avg } else { $null }
+        chunk_ready_generate_attempts_avg = if ($scenario.chunk_ready_retry_detail) { $scenario.chunk_ready_retry_detail.generate_attempts.avg } else { $null }
+        chunk_ready_structure_deferral_count_avg = if ($scenario.chunk_ready_retry_detail) { $scenario.chunk_ready_retry_detail.structure_deferral_count.avg } else { $null }
+        chunk_ready_first_structure_deferral_to_ready_avg_ms = if ($scenario.chunk_ready_retry_detail) { $scenario.chunk_ready_retry_detail.first_structure_deferral_to_ready.avg_ms } else { $null }
         lod_ready_tiles = if ($hasLodReadyTiles) { $finalProfiling.lod_ready_tiles } else { $null }
         lod_active_tiles = if ($hasLodActiveTiles) { $finalProfiling.lod_active_tiles } else { $null }
         lod_tiles_built_last_update = if ($hasLodBuiltTiles) { $finalProfiling.lod_tiles_built_last_update } else { $null }
@@ -394,6 +415,42 @@ foreach ($scenario in $scenarioObjects) {
             $scenario.stages.chunk_ready_wait_upload.avg_ms,
             $scenario.stages.chunk_ready_upload_to_ready.avg_ms))
     }
+    if ($scenario.generation_detail) {
+        $summaryLines.Add(("  generation_focus_avg_ms base_terrain={0:F2} structure_resolve={1:F2} gpu_input_prep={2:F2} cpu_materialize={3:F2} publish={4:F2}" -f `
+            $scenario.generation_detail.base_terrain_state.avg_ms,
+            $scenario.generation_detail.structure_resolve.avg_ms,
+            $scenario.generation_detail.gpu_input_prep.avg_ms,
+            $scenario.generation_detail.cpu_materialize.avg_ms,
+            $scenario.generation_detail.publish.avg_ms))
+        $summaryLines.Add(("  cpu_block_build_avg_ms warm_pages={0:F2} describe_columns={1:F2} materialize_columns={2:F2} apply_structure={3:F2} apply_pending={4:F2} apply_overlay={5:F2}" -f `
+            $scenario.generation_detail.cpu_warm_pages.avg_ms,
+            $scenario.generation_detail.cpu_describe_columns.avg_ms,
+            $scenario.generation_detail.cpu_materialize_columns.avg_ms,
+            $scenario.generation_detail.cpu_apply_structure_edits.avg_ms,
+            $scenario.generation_detail.cpu_apply_pending_edits.avg_ms,
+            $scenario.generation_detail.cpu_apply_overlay.avg_ms))
+        $summaryLines.Add(("  worldgen_page_avg_ms mutex_wait={0:F2} pending_wait={1:F2} build={2:F2} build_surface={3:F2} build_populate={4:F2}" -f `
+            $scenario.generation_detail.worldgen_page_mutex_wait.avg_ms,
+            $scenario.generation_detail.worldgen_page_pending_wait.avg_ms,
+            $scenario.generation_detail.worldgen_page_build.avg_ms,
+            $scenario.generation_detail.worldgen_page_build_surface.avg_ms,
+            $scenario.generation_detail.worldgen_page_build_populate.avg_ms))
+        $summaryLines.Add(("  worldgen_page_avg_counts access_calls={0:F2} unique_keys={1:F2} cold_builds={2:F2} pending_waits={3:F2}" -f `
+            $scenario.generation_detail.worldgen_page_access_calls.avg,
+            $scenario.generation_detail.worldgen_page_unique_keys.avg,
+            $scenario.generation_detail.worldgen_page_cold_build_count.avg,
+            $scenario.generation_detail.worldgen_page_pending_wait_count.avg))
+        $summaryLines.Add(("  structure_deferral missing_regions_avg={0:F2} missing_regions_p95={1:F2} samples={2}" -f `
+            $scenario.generation_detail.deferred_structure_missing_regions.avg,
+            $scenario.generation_detail.deferred_structure_missing_regions.p95,
+            $scenario.generation_detail.deferred_structure_missing_regions.samples))
+    }
+    if ($scenario.chunk_ready_retry_detail) {
+        $summaryLines.Add(("  chunk_ready_retry avg_attempts={0:F2} structure_deferrals={1:F2} first_deferral_to_ready_ms={2:F2}" -f `
+            $scenario.chunk_ready_retry_detail.generate_attempts.avg,
+            $scenario.chunk_ready_retry_detail.structure_deferral_count.avg,
+            $scenario.chunk_ready_retry_detail.first_structure_deferral_to_ready.avg_ms))
+    }
     $summaryLines.Add(("  relight_avg_ms={0:F2} upload_backlog avg={1:F2} p95={2:F2}" -f `
         $scenario.stages.relight.avg_ms,
         $scenario.queues.upload_backlog.avg_depth,
@@ -414,6 +471,12 @@ foreach ($scenario in $scenarioObjects) {
                 $scenario.stages.exact_gpu_submit_cpu.avg_ms,
                 $scenario.stages.exact_gpu_commit_cpu.avg_ms))
         }
+    }
+    if ($scenario.exact_gpu_feed_in) {
+        $summaryLines.Add(("  exact_gpu_feed_in_avg_ms queue_wait={0:F2} queue_depth_enqueue={1:F2} queue_depth_start={2:F2}" -f `
+            $scenario.exact_gpu_feed_in.build_queue_wait.avg_ms,
+            $scenario.exact_gpu_feed_in.queue_depth_enqueue.avg,
+            $scenario.exact_gpu_feed_in.queue_depth_start.avg))
     }
     if ($scenario.queues.column_prefetch_backlog) {
         $summaryLines.Add(("  column_prefetch_backlog avg={0:F2} p95={1:F2}" -f `

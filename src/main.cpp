@@ -1840,6 +1840,7 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
     out << " phase=" << streamingPhaseName(streamingStatus.phase)
         << " ready=" << streamingStatus.exactReadyChunks
         << " required=" << streamingStatus.exactRequiredChunks
+        << " replanning=" << (streamingStatus.exactPlanReplanning ? 1 : 0)
         << " exact_pct=" << exactPercent
         << " pending_uploads=" << streamingStatus.exactPendingUploads
         << " exact_pending=" << profiling.exactChunksPending
@@ -2763,6 +2764,7 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeJsonEscaped(out, streamingPhaseName(streamingStatus.phase));
     out << ",\"exact_ready_chunks\":" << streamingStatus.exactReadyChunks
         << ",\"exact_required_chunks\":" << streamingStatus.exactRequiredChunks
+        << ",\"exact_plan_replanning\":" << (streamingStatus.exactPlanReplanning ? "true" : "false")
         << ",\"exact_pending_uploads\":" << streamingStatus.exactPendingUploads
         << ",\"far_active_tiles\":" << streamingStatus.farActiveTiles
         << ",\"far_dirty_tiles\":" << streamingStatus.farDirtyTiles
@@ -4334,7 +4336,12 @@ int runGame()
                 loadingStream << "Loading world...\n";
                 loadingStream << phaseName << '\n';
                 loadingStream << "Exact bubble: " << streamingStatus.exactReadyChunks
-                              << " / " << streamingStatus.exactRequiredChunks << '\n';
+                              << " / " << streamingStatus.exactRequiredChunks;
+                if (streamingStatus.exactPlanReplanning)
+                {
+                    loadingStream << " (replanning)";
+                }
+                loadingStream << '\n';
                 loadingStream << "Pending exact GPU builds: " << streamingStatus.exactPendingUploads << '\n';
                 if (chunkManager.totalRenderDistanceChunks() > chunkManager.exactRenderDistanceChunks())
                 {
@@ -4437,7 +4444,10 @@ int runGame()
                 const auto updateExactFillCompletion = [&]()
                 {
                     const ChunkProfilingSnapshot benchmarkProfiling = chunkManager.sampleProfilingSnapshot();
-                    if (streamingStatus.exactRequiredChunks == benchmarkState.lastExactRequiredChunks)
+                    const bool committedDenominatorStable =
+                        !streamingStatus.exactPlanReplanning &&
+                        streamingStatus.exactRequiredChunks == benchmarkState.lastExactRequiredChunks;
+                    if (committedDenominatorStable)
                     {
                         benchmarkState.exactRequiredStableSeconds += frameTime;
                     }
@@ -4451,6 +4461,7 @@ int runGame()
                         benchmarkState.elapsedSeconds >=
                             (360.0 / std::max(1.0, benchmarkConfig.sweepDegreesPerSecond));
                     const bool discoverySettled =
+                        !streamingStatus.exactPlanReplanning &&
                         benchmarkState.exactRequiredStableSeconds >= 5.0 &&
                         benchmarkProfiling.exactChunksPending == 0 &&
                         benchmarkProfiling.uploadQueueDepth == 0 &&
@@ -4459,6 +4470,7 @@ int runGame()
                         benchmarkConfig.scenario == BenchmarkScenarioKind::StationaryExactFill &&
                         streamingStatus.exactReadyChunks >= benchmarkConfig.targetExactReadyChunks &&
                         streamingStatus.exactPendingUploads == 0 &&
+                        !streamingStatus.exactPlanReplanning &&
                         benchmarkProfiling.uploadQueueDepth == 0;
                     const bool fullExactReady =
                         benchmarkConfig.scenario != BenchmarkScenarioKind::StationaryExactFill &&
@@ -4466,6 +4478,7 @@ int runGame()
                         streamingStatus.exactRequiredChunks > 0 &&
                         streamingStatus.exactReadyChunks >= streamingStatus.exactRequiredChunks &&
                         streamingStatus.exactPendingUploads == 0 &&
+                        !streamingStatus.exactPlanReplanning &&
                         discoverySettled;
                     if (benchmarkState.fullExactReadySeconds < 0.0 &&
                         (fullExactReady || stationaryExactReady))
@@ -5126,6 +5139,10 @@ int runGame()
                            << " totalTarget=" << renderSettings.totalChunks
                            << " lod="
                            << (renderSettings.totalChunks > renderSettings.exactChunks ? "cpu_lod_active" : "exact_only");
+            if (streamingStatus.exactPlanReplanning)
+            {
+                snapshotStream << " plan=replanning";
+            }
             if (renderSettings.totalChunks > renderSettings.exactChunks)
             {
                 snapshotStream << " lodTiles=" << streamingStatus.farReadyTiles << "/" << streamingStatus.farActiveTiles
@@ -5482,11 +5499,12 @@ int runGame()
                         streamingStatus.exactRequiredChunks,
                         renderSettings.totalChunks,
                         lodActive ? "active" : "off");
-            ImGui::Text("Exact bubble: %d/%d ready (%.0f%%) | pending uploads %d",
+            ImGui::Text("Exact bubble: %d/%d ready (%.0f%%) | pending uploads %d | plan %s",
                         streamingStatus.exactReadyChunks,
                         streamingStatus.exactRequiredChunks,
                         exactPercent,
-                        streamingStatus.exactPendingUploads);
+                        streamingStatus.exactPendingUploads,
+                        streamingStatus.exactPlanReplanning ? "replanning" : "committed");
             if (lodActive)
             {
                 ImGui::Text("LOD tiles: %d/%d ready (%.0f%%) | queued %d | pending upload %d | dirty %d",

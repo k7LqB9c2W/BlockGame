@@ -618,6 +618,7 @@ struct StreamingStatusSnapshot
     StreamingPhase phase{StreamingPhase::SteadyState};
     int exactReadyChunks{0};
     int exactRequiredChunks{0};
+    bool exactPlanReplanning{false};
     int exactPendingUploads{0};
     int farActiveTiles{0};
     int farDirtyTiles{0};

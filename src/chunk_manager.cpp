@@ -4313,7 +4313,7 @@ private:
     [[nodiscard]] JobServiceClass highestQueuedWorldgenDependencyServiceClass() const noexcept;
     [[nodiscard]] JobServiceClass highestQueuedStructureRegionDependencyServiceClass() const noexcept;
     void refillBulkShellOracleJobs();
-    void stopStartupExactCensus();
+    void stopExactPlanBuild();
     struct WorldgenPage;
     void warmReadyWorldgenPageColumns(const glm::ivec2& pageKey,
                                       const std::shared_ptr<const WorldgenPage>& page,
@@ -4663,6 +4663,76 @@ private:
         ColumnChunkIntervals occupiedIntervals{};
         ColumnChunkIntervals maybeIntervals{};
         int highestOccupiedChunkY{-1};
+        bool supportComplete{true};
+    };
+    struct ExactWindowKey
+    {
+        glm::ivec2 centerColumn{0};
+        int cameraChunkY{0};
+        int exactRadius{0};
+        int visibleRadius{0};
+        int preloadRadius{0};
+        int verticalRadius{0};
+
+        bool operator==(const ExactWindowKey& other) const noexcept
+        {
+            return centerColumn == other.centerColumn &&
+                   cameraChunkY == other.cameraChunkY &&
+                   exactRadius == other.exactRadius &&
+                   visibleRadius == other.visibleRadius &&
+                   preloadRadius == other.preloadRadius &&
+                   verticalRadius == other.verticalRadius;
+        }
+    };
+    struct ExactWindowKeyHasher
+    {
+        std::size_t operator()(const ExactWindowKey& key) const noexcept
+        {
+            std::size_t hash = std::hash<int>{}(key.centerColumn.x);
+            hash ^= std::hash<int>{}(key.centerColumn.y) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<int>{}(key.cameraChunkY) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<int>{}(key.exactRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<int>{}(key.visibleRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<int>{}(key.preloadRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<int>{}(key.verticalRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            return hash;
+        }
+    };
+    struct PlannedChunkEntry
+    {
+        bool countedExact{false};
+        bool countedVisible{false};
+        bool forceResident{false};
+        bool required{true};
+    };
+    struct ColumnPlanSummary
+    {
+        ColumnChunkIntervals playerBand{};
+        ColumnChunkIntervals requiredIntervals{};
+        ColumnSlabOccupancy occupancy{};
+        bool supportComplete{false};
+    };
+    enum class ExactWindowPlanStatus : std::uint8_t
+    {
+        Idle = 0,
+        Building,
+        Ready,
+        Failed
+    };
+    struct ExactWindowPlan
+    {
+        ExactWindowKey key{};
+        std::uint64_t generation{0};
+        ExactWindowPlanStatus status{ExactWindowPlanStatus::Idle};
+        int exactRequiredCount{0};
+        int visibleRequiredCount{0};
+        std::unordered_map<glm::ivec3, PlannedChunkEntry, ChunkHasher> requiredChunks{};
+        std::unordered_map<glm::ivec2, ColumnPlanSummary, ColumnHasher> columnSummaries{};
+    };
+    struct ExactPlanSnapshot
+    {
+        std::shared_ptr<const ExactWindowPlan> activePlan{};
+        bool replanning{false};
     };
     struct BulkShellOracleBatch
     {
@@ -4832,11 +4902,36 @@ private:
     void trimWorldgenPages();
     void warmWorldgenPagesForChunk(const glm::ivec3& chunkCoord) const;
     void warmWorldgenPagesForColumn(const glm::ivec2& column) const;
-    void primeStartupExactCensus(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
-    void runStartupExactCensus(const glm::ivec3& center,
-                               int horizontalRadius,
-                               int cameraWorldY,
-                               std::uint64_t generation);
+    void requestExactWindowPlan(const ExactWindowKey& key);
+    void tryCommitReadyExactPlan(const ExactWindowKey& key);
+    [[nodiscard]] ExactPlanSnapshot activePlanSnapshot() const;
+    [[nodiscard]] std::shared_ptr<ExactWindowPlan> buildExactWindowPlan(const ExactWindowKey& key,
+                                                                        std::uint64_t generation) const;
+    void launchExactWindowPlanBuild(const ExactWindowKey& key, std::uint64_t generation);
+    void applyPlanDiff(const std::shared_ptr<const ExactWindowPlan>& oldPlan,
+                       const std::shared_ptr<const ExactWindowPlan>& newPlan);
+    void updateExactPlanState(const glm::ivec3& center,
+                              int visibleRadius,
+                              int preloadRadius,
+                              int verticalRadius,
+                              int exactMetricRadius);
+    void updatePlayerSafetyOverlay(const glm::ivec3& center,
+                                   const std::shared_ptr<const ExactWindowPlan>& activePlan,
+                                   const ExactWindowKey& desiredKey,
+                                   bool replanning);
+    void markPlanDirtyColumn(const glm::ivec2& column) const;
+    void markPlanDirtyWorldgenPage(const glm::ivec2& pageKey) const;
+    void markPlanDirtyStructureRegion(const StructureRegionKey& key) const;
+    void markActiveWindowReplanNeeded(const char* reason = nullptr) const;
+    [[nodiscard]] bool windowContainsColumn(const ExactWindowKey& key,
+                                            const glm::ivec2& column,
+                                            int margin = 0) const noexcept;
+    [[nodiscard]] bool windowOverlapsWorldgenPage(const ExactWindowKey& key,
+                                                  const glm::ivec2& pageKey,
+                                                  int marginChunks = 0) const noexcept;
+    [[nodiscard]] bool windowOverlapsStructureRegion(const ExactWindowKey& key,
+                                                     const StructureRegionKey& regionKey,
+                                                     int marginChunks = 0) const noexcept;
     ColumnSlabOccupancy buildColumnSlabOccupancy(const glm::ivec2& column) const;
     ColumnSlabOccupancy cachedColumnSlabOccupancy(const glm::ivec2& column) const;
     bool tryGetCachedColumnSlabOccupancy(const glm::ivec2& column, ColumnSlabOccupancy& out) const;
@@ -4910,6 +5005,7 @@ private:
         bool forceResident{false};
         bool countedVisible{false};
         bool countedExact{false};
+        std::uint64_t planGeneration{0};
         std::uint64_t version{1};
     };
     struct FrontierChunkLifecycleState
@@ -5421,7 +5517,7 @@ private:
     std::mutex pendingExactGpuBuildsMutex_;
     std::mutex exactGpuExecutionMutex_;
     std::thread exactGpuWorkerThread_;
-    std::thread startupExactCensusThread_;
+    std::thread exactPlanBuildThread_;
     mutable std::mutex exactGpuWorkerMutex_;
     std::condition_variable exactGpuWorkerCondition_;
     mutable std::mutex exactGpuStatsMutex_;
@@ -5497,13 +5593,24 @@ private:
     glm::ivec3 streamingFrontierDispatchOrigin_{0};
     glm::vec2 streamingFrontierDispatchForwardXZ_{0.0f, -1.0f};
     std::uint64_t streamingFrontierDispatchPriorityEpoch_{1};
+    std::unordered_set<glm::ivec3, ChunkHasher> playerSafetyOverlayCoords_{};
     mutable std::mutex predictedColumnMutex_;
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     mutable std::mutex columnSlabOccupancyMutex_;
     mutable std::unordered_map<glm::ivec2, ColumnSlabOccupancy, ColumnHasher> columnSlabOccupancyCache_{};
-    mutable std::mutex startupStructureColumnSpanMutex_;
-    mutable std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher>
-        startupStructureColumnSpans_{};
+    mutable std::mutex exactPlanMutex_;
+    std::shared_ptr<const ExactWindowPlan> activeExactPlan_{};
+    std::shared_ptr<const ExactWindowPlan> pendingExactPlan_{};
+    ExactWindowKey pendingExactPlanKey_{};
+    bool pendingExactPlanKeyValid_{false};
+    ExactWindowPlanStatus pendingExactPlanStatus_{ExactWindowPlanStatus::Idle};
+    std::uint64_t nextExactPlanGeneration_{1};
+    mutable bool activeWindowReplanNeeded_{false};
+    mutable std::unordered_set<glm::ivec2, ColumnHasher> dirtyPlanColumns_{};
+    mutable std::unordered_set<glm::ivec2, ColumnHasher> dirtyPlanPages_{};
+    mutable std::unordered_set<StructureRegionKey, StructureRegionKeyHasher> dirtyPlanRegions_{};
+    mutable std::string activeWindowReplanReason_{};
+    std::atomic<int> exactPlanSupportBuildDepth_{0};
     mutable std::mutex columnHeightPrefetchMutex_;
     mutable std::priority_queue<WorldgenPageDependencyRequest,
                                 std::vector<WorldgenPageDependencyRequest>,
@@ -5649,9 +5756,6 @@ private:
     int lastBacklogSteps_{0};
     bool startupEnabled_{true};
     StartupStreamingState startupState_{};
-    std::atomic<std::uint64_t> startupExactCensusGeneration_{0};
-    std::atomic<int> startupExactCensusRequiredChunks_{0};
-    std::atomic<bool> startupExactCensusRequiredReady_{false};
     mutable std::mutex schedulingPriorityMutex_;
     glm::ivec3 schedulingPriorityOrigin_{0};
     glm::vec3 schedulingPriorityForward_{0.0f, 0.0f, -1.0f};
@@ -5840,7 +5944,7 @@ ChunkManager::Impl::Impl(unsigned seed)
 ChunkManager::Impl::~Impl()
 {
     setRenderSynchronization(nullptr, 0);
-    stopStartupExactCensus();
+    stopExactPlanBuild();
     stopWorkerThreads();
     stopExactGpuWorkerThread();
     farTerrainManager_.shutdown();
@@ -6471,37 +6575,36 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         ? std::max(verticalRadius, computeVerticalRadius(centerChunk, exactMetricRadius, clampedWorldY))
         : verticalRadius;
     const int frontierRadius = std::max(preloadTargetViewDistance, exactMetricRadius);
+    const ExactWindowKey currentExactWindowKey{
+        {centerChunk.x, centerChunk.z},
+        centerChunk.y,
+        exactMetricRadius,
+        targetViewDistance_,
+        frontierRadius,
+        frontierVerticalRadius};
     const auto frontierRefreshStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
-    refreshStreamingFrontier(centerChunk,
-                             targetViewDistance_,
-                             frontierRadius,
-                             frontierVerticalRadius,
-                             exactMetricRadius);
+    updateExactPlanState(centerChunk,
+                         currentExactWindowKey.visibleRadius,
+                         currentExactWindowKey.preloadRadius,
+                         currentExactWindowKey.verticalRadius,
+                         currentExactWindowKey.exactRadius);
     if (benchmarkEnabled)
     {
         ensureVolumeMsLastFrame_ +=
             std::chrono::duration<double, std::milli>(SteadyClock::now() - frontierRefreshStart).count();
     }
     const FrontierCoverage frontierCoverage = streamingFrontierCoverageSnapshot();
+    const ExactPlanSnapshot exactPlanSnapshot = activePlanSnapshot();
     VisibleChunkCoverage visibleCoverage{};
     visibleCoverage.ready = frontierCoverage.visibleReady;
-    visibleCoverage.required = frontierCoverage.visibleRequired;
+    visibleCoverage.required = exactPlanSnapshot.activePlan ? exactPlanSnapshot.activePlan->visibleRequiredCount : 0;
     visibleCoverage.missing = std::max(0, visibleCoverage.required - visibleCoverage.ready);
     visibleCoverage.protectedReady = visibleCoverage.ready;
     visibleCoverage.protectedRequired = visibleCoverage.required;
     visibleCoverage.protectedMissing = visibleCoverage.missing;
     VisibleChunkCoverage metricCoverage{};
     metricCoverage.ready = frontierCoverage.exactReady;
-    metricCoverage.required = frontierCoverage.exactRequired;
-    if (exactOnly &&
-        startupEnabled_ &&
-        startupState_.preloadStarted &&
-        startupState_.phase != StreamingPhase::SteadyState &&
-        startupExactCensusRequiredReady_.load(std::memory_order_acquire))
-    {
-        metricCoverage.required = std::max(metricCoverage.required,
-                                           startupExactCensusRequiredChunks_.load(std::memory_order_acquire));
-    }
+    metricCoverage.required = exactPlanSnapshot.activePlan ? exactPlanSnapshot.activePlan->exactRequiredCount : 0;
     metricCoverage.missing = std::max(0, metricCoverage.required - metricCoverage.ready);
     const int missingChunks = visibleCoverage.missing;
     stationaryExactFillModeActive_ =
@@ -6780,6 +6883,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (startupEnabled_ && startupState_.preloadStarted)
     {
         const bool exactOnlyMode = renderSettings_.totalChunks <= renderSettings_.exactChunks;
+        const bool exactPlanCommittedForCurrentWindow =
+            exactPlanSnapshot.activePlan != nullptr &&
+            exactPlanSnapshot.activePlan->key == currentExactWindowKey &&
+            !exactPlanSnapshot.replanning;
         const bool nearReady = missingChunks == 0;
         const bool nearReleaseReady =
             visibleCoverage.required > 0 &&
@@ -6792,6 +6899,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             static_cast<std::int64_t>(metricCoverage.ready) * 100 >=
                 static_cast<std::int64_t>(metricCoverage.required) * 95;
         const bool exactReleaseReady =
+            exactPlanCommittedForCurrentWindow &&
             uploadReady &&
             (exactOnlyMode
                  ? ((targetViewDistance_ < renderSettings_.exactChunks) ? nearReleaseReady : exactCoverageMostlyReady)
@@ -7176,7 +7284,11 @@ ColumnSample ChunkManager::Impl::sampleColumnAt(const glm::vec3& worldPos,
 
 void ChunkManager::Impl::clear()
 {
-    stopStartupExactCensus();
+    stopExactPlanBuild();
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        activeExactPlan_.reset();
+    }
     while (true)
     {
         std::vector<glm::ivec3> coords;
@@ -7287,10 +7399,6 @@ void ChunkManager::Impl::clear()
     {
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(startupStructureColumnSpanMutex_);
-        startupStructureColumnSpans_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(worldgenPageMutex_);
@@ -8174,6 +8282,11 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     }
     lastCenterChunk_ = startupState_.spawnChunk;
     schedulingPriorityOrigin_ = startupState_.spawnChunk;
+    stopExactPlanBuild();
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        activeExactPlan_.reset();
+    }
     stopBulkShellOracle();
     resetStreamingFrontier();
     farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
@@ -8181,9 +8294,26 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     if (renderSettings_.totalChunks <= renderSettings_.exactChunks)
     {
         pinWorldgenWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
-        primeStartupExactCensus(startupState_.spawnChunk,
-                                renderSettings_.exactChunks,
-                                std::max(static_cast<int>(std::floor(spawnPos.y)), 0));
+        const int spawnWorldY = std::max(static_cast<int>(std::floor(spawnPos.y)), 0);
+        const int exactMetricRadius = renderSettings_.exactChunks;
+        const int preloadRadius =
+            std::max(std::clamp(targetViewDistance_ + hiddenExactPreloadBufferChunks(renderSettings_),
+                                1,
+                                kMaxExactRenderDistanceChunks),
+                     exactMetricRadius);
+        const int verticalRadius = std::max(computeVerticalRadius(startupState_.spawnChunk,
+                                                                  targetViewDistance_,
+                                                                  spawnWorldY),
+                                            computeVerticalRadius(startupState_.spawnChunk,
+                                                                  exactMetricRadius,
+                                                                  spawnWorldY));
+        requestExactWindowPlan(ExactWindowKey{
+            {startupState_.spawnChunk.x, startupState_.spawnChunk.z},
+            startupState_.spawnChunk.y,
+            exactMetricRadius,
+            targetViewDistance_,
+            preloadRadius,
+            verticalRadius});
     }
 }
 
@@ -8234,8 +8364,10 @@ bool ChunkManager::Impl::startupEnabled() const noexcept
 StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() const noexcept
 {
     StreamingStatusSnapshot snapshot{};
+    const ExactPlanSnapshot exactPlan = activePlanSnapshot();
     snapshot.phase = streamingPhase();
     snapshot.playerReleaseReady = playerReleaseReady();
+    snapshot.exactPlanReplanning = exactPlan.replanning;
     snapshot.exactPendingUploads = static_cast<int>(std::min<std::size_t>(
         estimatePendingExactGpuBuilds(),
         static_cast<std::size_t>(std::numeric_limits<int>::max())));
@@ -8248,7 +8380,15 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
     snapshot.exactReadyChunks = cachedExactReadyChunks_;
     snapshot.exactRequiredChunks = cachedExactRequiredChunks_;
 
-    if (snapshot.playerReleaseReady)
+    if (!exactPlan.activePlan && exactPlan.replanning)
+    {
+        snapshot.blockingReason = "planning exact window";
+    }
+    else if (snapshot.exactPlanReplanning)
+    {
+        snapshot.blockingReason = "replanning exact window";
+    }
+    else if (snapshot.playerReleaseReady)
     {
         snapshot.blockingReason = "ready";
     }
@@ -8888,15 +9028,22 @@ void ChunkManager::Impl::stopBulkShellOracle()
     bulkShellOracleBatch_.reset();
 }
 
-void ChunkManager::Impl::stopStartupExactCensus()
+void ChunkManager::Impl::stopExactPlanBuild()
 {
-    startupExactCensusGeneration_.fetch_add(1, std::memory_order_acq_rel);
-    startupExactCensusRequiredReady_.store(false, std::memory_order_release);
-    startupExactCensusRequiredChunks_.store(0, std::memory_order_release);
-    if (startupExactCensusThread_.joinable())
+    if (exactPlanBuildThread_.joinable())
     {
-        startupExactCensusThread_.join();
+        exactPlanBuildThread_.join();
     }
+
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    pendingExactPlan_.reset();
+    pendingExactPlanKeyValid_ = false;
+    pendingExactPlanStatus_ = ExactWindowPlanStatus::Idle;
+    activeWindowReplanNeeded_ = false;
+    dirtyPlanColumns_.clear();
+    dirtyPlanPages_.clear();
+    dirtyPlanRegions_.clear();
+    activeWindowReplanReason_.clear();
 }
 
 void ChunkManager::Impl::stopWorkerThreads()
@@ -11527,6 +11674,7 @@ void ChunkManager::Impl::precomputeFullRadiusWorldgenPageWindow(const glm::ivec3
     }
 }
 
+#if 0
 void ChunkManager::Impl::primeStartupExactCensus(const glm::ivec3& center,
                                                  int horizontalRadius,
                                                  int cameraWorldY)
@@ -12290,6 +12438,459 @@ void ChunkManager::Impl::runStartupExactCensus(const glm::ivec3& center,
     startupExactCensusRequiredChunks_.store(exactRequiredChunks.load(std::memory_order_relaxed),
                                             std::memory_order_release);
     startupExactCensusRequiredReady_.store(true, std::memory_order_release);
+}
+
+#endif
+
+bool ChunkManager::Impl::windowContainsColumn(const ExactWindowKey& key,
+                                              const glm::ivec2& column,
+                                              int margin) const noexcept
+{
+    const int effectiveRadius = std::max(key.preloadRadius + margin, 0);
+    return std::abs(column.x - key.centerColumn.x) <= effectiveRadius &&
+           std::abs(column.y - key.centerColumn.y) <= effectiveRadius;
+}
+
+bool ChunkManager::Impl::windowOverlapsWorldgenPage(const ExactWindowKey& key,
+                                                    const glm::ivec2& pageKey,
+                                                    int marginChunks) const noexcept
+{
+    glm::ivec2 minColumn{0};
+    glm::ivec2 maxColumn{0};
+    worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
+    const int minWindowX = key.centerColumn.x - key.preloadRadius - 1 - marginChunks;
+    const int maxWindowX = key.centerColumn.x + key.preloadRadius + 1 + marginChunks;
+    const int minWindowZ = key.centerColumn.y - key.preloadRadius - 1 - marginChunks;
+    const int maxWindowZ = key.centerColumn.y + key.preloadRadius + 1 + marginChunks;
+    return !(maxColumn.x < minWindowX || minColumn.x > maxWindowX ||
+             maxColumn.y < minWindowZ || minColumn.y > maxWindowZ);
+}
+
+bool ChunkManager::Impl::windowOverlapsStructureRegion(const ExactWindowKey& key,
+                                                       const StructureRegionKey& regionKey,
+                                                       int marginChunks) const noexcept
+{
+    const int minWorldX = regionKey.regionX * kStructureRegionSize - kMaxStructureHorizontalRadius;
+    const int maxWorldX = (regionKey.regionX + 1) * kStructureRegionSize - 1 + kMaxStructureHorizontalRadius;
+    const int minWorldZ = regionKey.regionZ * kStructureRegionSize - kMaxStructureHorizontalRadius;
+    const int maxWorldZ = (regionKey.regionZ + 1) * kStructureRegionSize - 1 + kMaxStructureHorizontalRadius;
+    const int minChunkX = floorDiv(minWorldX, kChunkSizeX);
+    const int maxChunkX = floorDiv(maxWorldX, kChunkSizeX);
+    const int minChunkZ = floorDiv(minWorldZ, kChunkSizeZ);
+    const int maxChunkZ = floorDiv(maxWorldZ, kChunkSizeZ);
+    const int minWindowX = key.centerColumn.x - key.preloadRadius - 1 - marginChunks;
+    const int maxWindowX = key.centerColumn.x + key.preloadRadius + 1 + marginChunks;
+    const int minWindowZ = key.centerColumn.y - key.preloadRadius - 1 - marginChunks;
+    const int maxWindowZ = key.centerColumn.y + key.preloadRadius + 1 + marginChunks;
+    return !(maxChunkX < minWindowX || minChunkX > maxWindowX ||
+             maxChunkZ < minWindowZ || minChunkZ > maxWindowZ);
+}
+
+void ChunkManager::Impl::markPlanDirtyColumn(const glm::ivec2& column) const
+{
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    dirtyPlanColumns_.insert(column);
+    const bool overlapsActive = activeExactPlan_ && windowContainsColumn(activeExactPlan_->key, column, 1);
+    const bool overlapsPending = pendingExactPlanKeyValid_ && windowContainsColumn(pendingExactPlanKey_, column, 1);
+    if (overlapsActive || overlapsPending)
+    {
+        activeWindowReplanNeeded_ = true;
+        if (activeWindowReplanReason_.empty())
+        {
+            activeWindowReplanReason_ = "column_dirty";
+        }
+    }
+}
+
+void ChunkManager::Impl::markPlanDirtyWorldgenPage(const glm::ivec2& pageKey) const
+{
+    if (exactPlanSupportBuildDepth_.load(std::memory_order_acquire) > 0)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    dirtyPlanPages_.insert(pageKey);
+    const bool overlapsActive = activeExactPlan_ && windowOverlapsWorldgenPage(activeExactPlan_->key, pageKey, 0);
+    const bool overlapsPending =
+        pendingExactPlanKeyValid_ && windowOverlapsWorldgenPage(pendingExactPlanKey_, pageKey, 0);
+    if (overlapsActive || overlapsPending)
+    {
+        activeWindowReplanNeeded_ = true;
+        if (activeWindowReplanReason_.empty())
+        {
+            activeWindowReplanReason_ = "worldgen_page_dirty";
+        }
+    }
+}
+
+void ChunkManager::Impl::markPlanDirtyStructureRegion(const StructureRegionKey& key) const
+{
+    if (exactPlanSupportBuildDepth_.load(std::memory_order_acquire) > 0)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    dirtyPlanRegions_.insert(key);
+    const bool overlapsActive =
+        activeExactPlan_ && windowOverlapsStructureRegion(activeExactPlan_->key, key, 0);
+    const bool overlapsPending =
+        pendingExactPlanKeyValid_ && windowOverlapsStructureRegion(pendingExactPlanKey_, key, 0);
+    if (overlapsActive || overlapsPending)
+    {
+        activeWindowReplanNeeded_ = true;
+        if (activeWindowReplanReason_.empty())
+        {
+            activeWindowReplanReason_ = "structure_region_dirty";
+        }
+    }
+}
+
+void ChunkManager::Impl::markActiveWindowReplanNeeded(const char* reason) const
+{
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    activeWindowReplanNeeded_ = true;
+    if (reason != nullptr && reason[0] != '\0' && activeWindowReplanReason_.empty())
+    {
+        activeWindowReplanReason_ = reason;
+    }
+}
+
+ChunkManager::Impl::ExactPlanSnapshot ChunkManager::Impl::activePlanSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    return ExactPlanSnapshot{
+        activeExactPlan_,
+        pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)};
+}
+
+void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowKey& key, std::uint64_t generation)
+{
+    exactPlanBuildThread_ = std::thread(
+        [this, key, generation]()
+        {
+            try
+            {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                std::shared_ptr<ExactWindowPlan> plan = buildExactWindowPlan(key, generation);
+                std::lock_guard<std::mutex> lock(exactPlanMutex_);
+                if (!pendingExactPlanKeyValid_ ||
+                    pendingExactPlanStatus_ != ExactWindowPlanStatus::Building ||
+                    !(pendingExactPlanKey_ == key))
+                {
+                    return;
+                }
+
+                pendingExactPlan_ = plan;
+                pendingExactPlanStatus_ = plan ? plan->status : ExactWindowPlanStatus::Failed;
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> lock(exactPlanMutex_);
+                if (pendingExactPlanKeyValid_ &&
+                    pendingExactPlanStatus_ == ExactWindowPlanStatus::Building &&
+                    pendingExactPlanKey_ == key)
+                {
+                    pendingExactPlan_.reset();
+                    pendingExactPlanStatus_ = ExactWindowPlanStatus::Failed;
+                }
+            }
+        });
+}
+
+void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
+{
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    bool joinCompletedThread = false;
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        const bool sameActive = activeExactPlan_ && activeExactPlan_->key == key;
+        const bool samePendingKey = pendingExactPlanKeyValid_ && pendingExactPlanKey_ == key;
+        if (samePendingKey &&
+            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+             pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready))
+        {
+            return;
+        }
+        if (sameActive && !activeWindowReplanNeeded_)
+        {
+            return;
+        }
+        if (exactPlanBuildThread_.joinable() && pendingExactPlanStatus_ == ExactWindowPlanStatus::Building)
+        {
+            return;
+        }
+
+        joinCompletedThread = exactPlanBuildThread_.joinable();
+        pendingExactPlan_.reset();
+        pendingExactPlanKey_ = key;
+        pendingExactPlanKeyValid_ = true;
+        pendingExactPlanStatus_ = ExactWindowPlanStatus::Building;
+        generation = nextExactPlanGeneration_++;
+        activeWindowReplanNeeded_ = false;
+        dirtyPlanColumns_.clear();
+        dirtyPlanPages_.clear();
+        dirtyPlanRegions_.clear();
+        activeWindowReplanReason_.clear();
+    }
+
+    if (joinCompletedThread)
+    {
+        exactPlanBuildThread_.join();
+    }
+
+    launchExactWindowPlanBuild(key, generation);
+}
+
+void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
+{
+    std::shared_ptr<const ExactWindowPlan> oldPlan{};
+    std::shared_ptr<const ExactWindowPlan> newPlan{};
+    bool shouldJoin = false;
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        if (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_)
+        {
+            shouldJoin = exactPlanBuildThread_.joinable();
+            if (pendingExactPlan_->key == key)
+            {
+                oldPlan = activeExactPlan_;
+                activeExactPlan_ = pendingExactPlan_;
+                newPlan = activeExactPlan_;
+            }
+            pendingExactPlan_.reset();
+            pendingExactPlanKeyValid_ = false;
+            pendingExactPlanStatus_ = ExactWindowPlanStatus::Idle;
+        }
+        else if (pendingExactPlanStatus_ == ExactWindowPlanStatus::Failed)
+        {
+            shouldJoin = exactPlanBuildThread_.joinable();
+            pendingExactPlan_.reset();
+            pendingExactPlanKeyValid_ = false;
+            pendingExactPlanStatus_ = ExactWindowPlanStatus::Idle;
+        }
+    }
+
+    if (shouldJoin)
+    {
+        exactPlanBuildThread_.join();
+    }
+
+    if (newPlan)
+    {
+        applyPlanDiff(oldPlan, newPlan);
+    }
+}
+
+std::shared_ptr<ChunkManager::Impl::ExactWindowPlan>
+ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key, std::uint64_t generation) const
+{
+    auto plan = std::make_shared<ExactWindowPlan>();
+    plan->key = key;
+    plan->generation = generation;
+    plan->status = ExactWindowPlanStatus::Building;
+    struct PlannerSupportBuildScope
+    {
+        std::atomic<int>& depth;
+        explicit PlannerSupportBuildScope(std::atomic<int>& inDepth) : depth(inDepth)
+        {
+            depth.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~PlannerSupportBuildScope()
+        {
+            depth.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    } plannerSupportBuildScope(const_cast<ChunkManager::Impl*>(this)->exactPlanSupportBuildDepth_);
+
+    if (key.preloadRadius <= 0 || shouldStop_.load(std::memory_order_acquire) || !surfaceMap_ || !climateMap_)
+    {
+        plan->status = ExactWindowPlanStatus::Ready;
+        return plan;
+    }
+
+    const int preloadRadius = std::max(key.preloadRadius, 0);
+    const int preloadMinChunkX = key.centerColumn.x - preloadRadius;
+    const int preloadMaxChunkX = key.centerColumn.x + preloadRadius;
+    const int preloadMinChunkZ = key.centerColumn.y - preloadRadius;
+    const int preloadMaxChunkZ = key.centerColumn.y + preloadRadius;
+    const int analysisMinChunkX = preloadMinChunkX - 1;
+    const int analysisMaxChunkX = preloadMaxChunkX + 1;
+    const int analysisMinChunkZ = preloadMinChunkZ - 1;
+    const int analysisMaxChunkZ = preloadMaxChunkZ + 1;
+    const int analysisMinWorldX = analysisMinChunkX * kChunkSizeX - 1;
+    const int analysisMaxWorldX = (analysisMaxChunkX + 1) * kChunkSizeX;
+    const int analysisMinWorldZ = analysisMinChunkZ * kChunkSizeZ - 1;
+    const int analysisMaxWorldZ = (analysisMaxChunkZ + 1) * kChunkSizeZ;
+    const glm::ivec2 minAnalysisPage = worldgenPageKeyForWorld(analysisMinWorldX, analysisMinWorldZ);
+    const glm::ivec2 maxAnalysisPage = worldgenPageKeyForWorld(analysisMaxWorldX, analysisMaxWorldZ);
+    const glm::ivec2 cameraColumn = key.centerColumn;
+
+    std::vector<StructureRegionKey> structureRegionKeys;
+    appendStructureRegionKeysForWorldBounds(analysisMinChunkX * kChunkSizeX,
+                                            (analysisMaxChunkX + 1) * kChunkSizeX - 1,
+                                            analysisMinChunkZ * kChunkSizeZ,
+                                            (analysisMaxChunkZ + 1) * kChunkSizeZ - 1,
+                                            structureRegionKeys);
+    std::sort(structureRegionKeys.begin(),
+              structureRegionKeys.end(),
+              [](const StructureRegionKey& lhs, const StructureRegionKey& rhs)
+              {
+                  if (lhs.regionX != rhs.regionX)
+                  {
+                      return lhs.regionX < rhs.regionX;
+                  }
+                  return lhs.regionZ < rhs.regionZ;
+              });
+    structureRegionKeys.erase(std::unique(structureRegionKeys.begin(),
+                                          structureRegionKeys.end(),
+                                          [](const StructureRegionKey& lhs, const StructureRegionKey& rhs)
+                                          {
+                                              return lhs.regionX == rhs.regionX && lhs.regionZ == rhs.regionZ;
+                                          }),
+                              structureRegionKeys.end());
+
+    std::unordered_set<glm::ivec2, ColumnHasher> requiredPageKeySet{};
+    for (int pageZ = minAnalysisPage.y; pageZ <= maxAnalysisPage.y; ++pageZ)
+    {
+        for (int pageX = minAnalysisPage.x; pageX <= maxAnalysisPage.x; ++pageX)
+        {
+            requiredPageKeySet.insert({pageX, pageZ});
+        }
+    }
+    for (const StructureRegionKey& regionKey : structureRegionKeys)
+    {
+        const std::vector<glm::ivec2> regionPageKeys = collectRegionWorldgenPageKeys(regionKey);
+        requiredPageKeySet.insert(regionPageKeys.begin(), regionPageKeys.end());
+    }
+
+    std::vector<glm::ivec2> requiredPageKeys(requiredPageKeySet.begin(), requiredPageKeySet.end());
+    const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn(cameraColumn);
+    std::sort(requiredPageKeys.begin(),
+              requiredPageKeys.end(),
+              [centerPage](const glm::ivec2& lhs, const glm::ivec2& rhs)
+              {
+                  const int lhsDistance = std::max(std::abs(lhs.x - centerPage.x), std::abs(lhs.y - centerPage.y));
+                  const int rhsDistance = std::max(std::abs(rhs.x - centerPage.x), std::abs(rhs.y - centerPage.y));
+                  if (lhsDistance != rhsDistance)
+                  {
+                      return lhsDistance < rhsDistance;
+                  }
+                  if (lhs.x != rhs.x)
+                  {
+                      return lhs.x < rhs.x;
+                  }
+                  return lhs.y < rhs.y;
+              });
+
+    for (const glm::ivec2& pageKey : requiredPageKeys)
+    {
+        if (!tryGetReadyWorldgenPage(pageKey) && !getOrBuildWorldgenPageBlocking(pageKey))
+        {
+            plan->status = ExactWindowPlanStatus::Failed;
+            return plan;
+        }
+    }
+
+    for (const StructureRegionKey& regionKey : structureRegionKeys)
+    {
+        if (tryGetReadyRegion(regionKey))
+        {
+            continue;
+        }
+
+        std::shared_ptr<StructureRegion> region = buildStructureRegionFromReadyPages(regionKey);
+        if (!region)
+        {
+            plan->status = ExactWindowPlanStatus::Failed;
+            return plan;
+        }
+        const_cast<ChunkManager::Impl*>(this)->structureRegistry_.publishReady(regionKey, region);
+    }
+
+    plan->columnSummaries.reserve(static_cast<std::size_t>((preloadRadius * 2 + 1) * (preloadRadius * 2 + 1)));
+    for (int chunkZ = preloadMinChunkZ; chunkZ <= preloadMaxChunkZ; ++chunkZ)
+    {
+        for (int chunkX = preloadMinChunkX; chunkX <= preloadMaxChunkX; ++chunkX)
+        {
+            const glm::ivec2 column{chunkX, chunkZ};
+            const int horizontalDistance =
+                std::max(std::abs(chunkX - key.centerColumn.x), std::abs(chunkZ - key.centerColumn.y));
+            const bool countedVisible = horizontalDistance <= key.visibleRadius;
+            const bool countedExact = horizontalDistance <= key.exactRadius;
+            const ColumnSlabOccupancy occupancy = buildColumnSlabOccupancy(column);
+            const ColumnChunkIntervals playerBand =
+                playerBandIntervalsForColumn(column, cameraColumn, key.cameraChunkY, key.verticalRadius);
+            ColumnChunkIntervals requiredIntervals{};
+            mergeColumnChunkIntervals(requiredIntervals, playerBand);
+            if (!playerBand.empty())
+            {
+                mergeColumnChunkIntervals(requiredIntervals, occupancy.occupiedIntervals);
+            }
+            else
+            {
+                mergeColumnChunkIntervals(requiredIntervals, occupancy.surfaceShellIntervals);
+                mergeColumnChunkIntervals(requiredIntervals, occupancy.waterIntervals);
+                mergeColumnChunkIntervals(requiredIntervals, occupancy.structureIntervals);
+                mergeColumnChunkIntervals(requiredIntervals, occupancy.editIntervals);
+            }
+            mergeColumnChunkIntervals(requiredIntervals, occupancy.maybeIntervals);
+
+            plan->columnSummaries.emplace(column,
+                                          ColumnPlanSummary{
+                                              playerBand,
+                                              requiredIntervals,
+                                              occupancy,
+                                              occupancy.supportComplete});
+
+            if (requiredIntervals.empty())
+            {
+                continue;
+            }
+
+            for (int chunkY = requiredIntervals.minChunkY(); chunkY <= requiredIntervals.maxChunkY(); ++chunkY)
+            {
+                if (!chunkYWithinIntervals(chunkY, requiredIntervals))
+                {
+                    continue;
+                }
+
+                const bool forceResident = chunkYWithinIntervals(chunkY, playerBand);
+                const bool required =
+                    forceResident ||
+                    !occupancy.supportComplete ||
+                    classifyColumnSlab(occupancy, chunkY) != ColumnSlabOccupancyState::DefinitelyEmpty;
+                if (!required)
+                {
+                    continue;
+                }
+
+                plan->requiredChunks.emplace(glm::ivec3{chunkX, chunkY, chunkZ},
+                                             PlannedChunkEntry{
+                                                 countedExact,
+                                                 countedVisible,
+                                                 forceResident,
+                                                 true});
+                if (countedExact)
+                {
+                    ++plan->exactRequiredCount;
+                }
+                if (countedVisible)
+                {
+                    ++plan->visibleRequiredCount;
+                }
+            }
+        }
+    }
+
+    plan->status = ExactWindowPlanStatus::Ready;
+    return plan;
 }
 
 void ChunkManager::Impl::refillWorldgenPageDependencyJobs()
@@ -13381,6 +13982,7 @@ void ChunkManager::Impl::resetStreamingFrontier() noexcept
     streamingFrontierDirtyAllColumns_ = false;
     streamingFrontierColumns_.clear();
     streamingFrontierDemands_.clear();
+    playerSafetyOverlayCoords_.clear();
     streamingFrontierDispatchQueue_ = {};
     streamingFrontierCenter_ = glm::ivec3{0};
     streamingFrontierVisibleRadius_ = 0;
@@ -13547,6 +14149,209 @@ void ChunkManager::Impl::syncStreamingFrontierDemandFromRegistry(const glm::ivec
     FrontierDemandState state = FrontierDemandState::Missing;
     (void)tryGetStreamingChunkLifecycleState(coord, state);
     setStreamingFrontierDemandState(coord, state);
+}
+
+void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPlan>& oldPlan,
+                                       const std::shared_ptr<const ExactWindowPlan>& newPlan)
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+
+    const std::uint64_t newGeneration = newPlan ? newPlan->generation : 0;
+    if (newPlan)
+    {
+        for (const auto& [coord, entry] : newPlan->requiredChunks)
+        {
+            if (!entry.required)
+            {
+                continue;
+            }
+
+            auto demandIt = streamingFrontierDemands_.find(coord);
+            if (demandIt == streamingFrontierDemands_.end())
+            {
+                FrontierChunkDemand demand{};
+                demand.forceResident = entry.forceResident;
+                demand.countedVisible = entry.countedVisible;
+                demand.countedExact = entry.countedExact;
+                demand.planGeneration = newGeneration;
+                auto stateIt = streamingChunkLifecycleStates_.find(coord);
+                if (stateIt != streamingChunkLifecycleStates_.end())
+                {
+                    demand.state = stateIt->second.state;
+                }
+                auto [insertIt, inserted] = streamingFrontierDemands_.emplace(coord, demand);
+                (void)inserted;
+                demandIt = insertIt;
+                if (demandIt->second.state == FrontierDemandState::Missing)
+                {
+                    queueStreamingFrontierDispatchEntryLocked(coord, demandIt->second);
+                }
+                continue;
+            }
+
+            FrontierChunkDemand& demand = demandIt->second;
+            const bool flagsChanged =
+                demand.forceResident != entry.forceResident ||
+                demand.countedVisible != entry.countedVisible ||
+                demand.countedExact != entry.countedExact ||
+                demand.planGeneration != newGeneration;
+            demand.forceResident = entry.forceResident;
+            demand.countedVisible = entry.countedVisible;
+            demand.countedExact = entry.countedExact;
+            demand.planGeneration = newGeneration;
+            if (flagsChanged)
+            {
+                ++demand.version;
+                if (demand.state == FrontierDemandState::Missing)
+                {
+                    queueStreamingFrontierDispatchEntryLocked(coord, demand);
+                }
+            }
+        }
+    }
+
+    for (auto it = streamingFrontierDemands_.begin(); it != streamingFrontierDemands_.end();)
+    {
+        FrontierChunkDemand& demand = it->second;
+        const bool planBacked = demand.planGeneration != 0;
+        if (!planBacked || demand.planGeneration == newGeneration)
+        {
+            ++it;
+            continue;
+        }
+        it = streamingFrontierDemands_.erase(it);
+    }
+
+    streamingFrontierVisibleRequired_ = newPlan ? newPlan->visibleRequiredCount : 0;
+    streamingFrontierExactRequired_ = newPlan ? newPlan->exactRequiredCount : 0;
+    streamingFrontierVisibleReady_ = 0;
+    streamingFrontierExactReady_ = 0;
+    for (const auto& [coord, demand] : streamingFrontierDemands_)
+    {
+        (void)coord;
+        if (demand.state != FrontierDemandState::Ready)
+        {
+            continue;
+        }
+        if (demand.countedVisible)
+        {
+            ++streamingFrontierVisibleReady_;
+        }
+        if (demand.countedExact)
+        {
+            ++streamingFrontierExactReady_;
+        }
+    }
+
+    (void)oldPlan;
+}
+
+void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
+                                                   const std::shared_ptr<const ExactWindowPlan>& activePlan,
+                                                   const ExactWindowKey& desiredKey,
+                                                   bool replanning)
+{
+    std::unordered_set<glm::ivec3, ChunkHasher> desiredOverlay{};
+    if (replanning)
+    {
+        const int horizontalRadius = localInteractionHorizontalRadius();
+        const int verticalRadius = localInteractionVerticalRadius();
+        desiredOverlay.reserve(static_cast<std::size_t>((horizontalRadius * 2 + 1) *
+                                                        (horizontalRadius * 2 + 1) *
+                                                        (verticalRadius * 2 + 1)));
+        for (int dx = -horizontalRadius; dx <= horizontalRadius; ++dx)
+        {
+            for (int dz = -horizontalRadius; dz <= horizontalRadius; ++dz)
+            {
+                for (int dy = -verticalRadius; dy <= verticalRadius; ++dy)
+                {
+                    const glm::ivec3 coord{center.x + dx, std::max(0, center.y + dy), center.z + dz};
+                    const bool alreadyPlanned =
+                        activePlan &&
+                        activePlan->key == desiredKey &&
+                        activePlan->requiredChunks.find(coord) != activePlan->requiredChunks.end();
+                    if (!alreadyPlanned)
+                    {
+                        desiredOverlay.insert(coord);
+                    }
+                }
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    for (auto it = playerSafetyOverlayCoords_.begin(); it != playerSafetyOverlayCoords_.end();)
+    {
+        if (desiredOverlay.find(*it) != desiredOverlay.end())
+        {
+            ++it;
+            continue;
+        }
+
+        auto demandIt = streamingFrontierDemands_.find(*it);
+        if (demandIt != streamingFrontierDemands_.end() && demandIt->second.planGeneration == 0)
+        {
+            streamingFrontierDemands_.erase(demandIt);
+        }
+        it = playerSafetyOverlayCoords_.erase(it);
+    }
+
+    for (const glm::ivec3& coord : desiredOverlay)
+    {
+        if (playerSafetyOverlayCoords_.insert(coord).second)
+        {
+            auto demandIt = streamingFrontierDemands_.find(coord);
+            if (demandIt == streamingFrontierDemands_.end())
+            {
+                FrontierChunkDemand demand{};
+                demand.forceResident = true;
+                demand.planGeneration = 0;
+                auto stateIt = streamingChunkLifecycleStates_.find(coord);
+                if (stateIt != streamingChunkLifecycleStates_.end())
+                {
+                    demand.state = stateIt->second.state;
+                }
+                auto [insertIt, inserted] = streamingFrontierDemands_.emplace(coord, demand);
+                (void)inserted;
+                demandIt = insertIt;
+            }
+
+            if (demandIt->second.planGeneration == 0)
+            {
+                demandIt->second.forceResident = true;
+                if (demandIt->second.state == FrontierDemandState::Missing)
+                {
+                    ++demandIt->second.version;
+                    queueStreamingFrontierDispatchEntryLocked(coord, demandIt->second);
+                }
+            }
+        }
+    }
+}
+
+void ChunkManager::Impl::updateExactPlanState(const glm::ivec3& center,
+                                              int visibleRadius,
+                                              int preloadRadius,
+                                              int verticalRadius,
+                                              int exactMetricRadius)
+{
+    const ExactWindowKey desiredKey{
+        {center.x, center.z},
+        center.y,
+        exactMetricRadius,
+        visibleRadius,
+        preloadRadius,
+        verticalRadius};
+    tryCommitReadyExactPlan(desiredKey);
+    requestExactWindowPlan(desiredKey);
+    tryCommitReadyExactPlan(desiredKey);
+    const ExactPlanSnapshot snapshot = activePlanSnapshot();
+    updatePlayerSafetyOverlay(center,
+                              snapshot.activePlan,
+                              desiredKey,
+                              snapshot.replanning ||
+                                  !snapshot.activePlan ||
+                                  !(snapshot.activePlan->key == desiredKey));
 }
 
 void ChunkManager::Impl::refreshStreamingFrontier(const glm::ivec3& center,
@@ -14125,16 +14930,7 @@ int ChunkManager::Impl::dispatchStreamingFrontierGenerateJobs(const glm::ivec3& 
         }
         else
         {
-            FrontierDemandState lifecycleState = FrontierDemandState::Missing;
-            if (tryGetStreamingChunkLifecycleState(entry.coord, lifecycleState))
-            {
-                syncStreamingFrontierDemandFromRegistry(entry.coord);
-            }
-            else
-            {
-                syncStreamingFrontierDemandFromRegistry(entry.coord);
-                invalidateStreamingFrontierColumn(column);
-            }
+            syncStreamingFrontierDemandFromRegistry(entry.coord);
         }
     }
 
@@ -14932,7 +15728,7 @@ void ChunkManager::Impl::mergePredictedColumnHeight(const glm::ivec2& column, in
         }
     }
 
-    invalidateStreamingFrontierColumn(column);
+    markPlanDirtyColumn(column);
 }
 
 void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const
@@ -14953,7 +15749,7 @@ void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::i
         }
     }
 
-    invalidateStreamingFrontierColumn(column);
+    markPlanDirtyColumn(column);
 }
 
 void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) const
@@ -14962,7 +15758,7 @@ void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) con
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.erase(column);
     }
-    invalidateStreamingFrontierColumn(column);
+    markPlanDirtyColumn(column);
 }
 
 void ChunkManager::Impl::noteRecentEdit(const char* kind,
@@ -15815,6 +16611,8 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
     {
         refillStructureRegionDependencyJobs();
     }
+
+    markPlanDirtyWorldgenPage(pageKey);
 }
 
 void ChunkManager::Impl::publishWorldgenPageFailure(const glm::ivec2& pageKey, std::exception_ptr error)
@@ -15902,6 +16700,7 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
     }
 
     structureRegistry_.publishReady(key, region);
+    markPlanDirtyStructureRegion(key);
     for (const auto& [affectedColumn, span] : region->chunkColumnSpans)
     {
         if (span.valid())
@@ -16396,21 +17195,15 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
         }
     }
 
-    const StructureChunkColumnSpan structureSpan = structureRegistry_.queryChunkColumnSpanReady(column);
+    bool allStructureRegionsReady = true;
+    const StructureChunkColumnSpan structureSpan =
+        structureRegistry_.queryChunkColumnSpanReady(column, &allStructureRegionsReady);
     if (structureSpan.valid())
     {
         occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, structureSpan.maxChunkY);
         addColumnChunkInterval(occupancy.structureIntervals, structureSpan.minChunkY, structureSpan.maxChunkY);
     }
-    {
-        std::lock_guard<std::mutex> lock(startupStructureColumnSpanMutex_);
-        auto it = startupStructureColumnSpans_.find(column);
-        if (it != startupStructureColumnSpans_.end() && it->second.valid())
-        {
-            occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, it->second.maxChunkY);
-            addColumnChunkInterval(occupancy.structureIntervals, it->second.minChunkY, it->second.maxChunkY);
-        }
-    }
+    occupancy.supportComplete = allStructureRegionsReady;
 
     {
         std::lock_guard<std::mutex> lock(pendingStructureMutex_);
@@ -16520,7 +17313,7 @@ void ChunkManager::Impl::invalidateColumnSlabOccupancy(const glm::ivec2& column)
         std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
         columnSlabOccupancyCache_.erase(column);
     }
-    invalidateStreamingFrontierColumn(column);
+    markPlanDirtyColumn(column);
 }
 
 void ChunkManager::Impl::invalidateAllColumnSlabOccupancy() const
@@ -16529,7 +17322,7 @@ void ChunkManager::Impl::invalidateAllColumnSlabOccupancy() const
         std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
         columnSlabOccupancyCache_.clear();
     }
-    invalidateAllStreamingFrontierColumns();
+    markActiveWindowReplanNeeded("all_column_occupancy_dirty");
 }
 
 void ChunkManager::Impl::updateMovementEnvelopeState(const glm::ivec3& center,
@@ -16936,14 +17729,17 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
         return EnsureChunkAsyncResult::NoAction;
     }
 
-    if (!forceResident)
     {
-        ColumnSlabOccupancy occupancy{};
-        if (tryGetCachedColumnSlabOccupancy({coord.x, coord.z}, occupancy) &&
-            classifyColumnSlab(occupancy, coord.y) == ColumnSlabOccupancyState::DefinitelyEmpty)
+        std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+        if (streamingFrontierDemands_.find(coord) == streamingFrontierDemands_.end())
         {
             return EnsureChunkAsyncResult::NoAction;
         }
+    }
+
+    if (!forceResident)
+    {
+        // Runtime execution authority comes from committed plan membership, not from occupancy pruning.
     }
 
     try

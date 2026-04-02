@@ -367,6 +367,54 @@ struct StructureRegion
     std::unordered_map<glm::ivec3, StructureChunkVoxelSpan, ChunkHasher> chunkVoxelSpans{};
 };
 
+inline void appendStructureRegionKeysForWorldBounds(int minWorldX,
+                                                    int maxWorldX,
+                                                    int minWorldZ,
+                                                    int maxWorldZ,
+                                                    std::vector<StructureRegionKey>& out)
+{
+    const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const std::size_t additionalKeys =
+        static_cast<std::size_t>(std::max(maxRegionX - minRegionX + 1, 0)) *
+        static_cast<std::size_t>(std::max(maxRegionZ - minRegionZ + 1, 0));
+    out.reserve(out.size() + additionalKeys);
+
+    for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+    {
+        for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+        {
+            out.push_back(StructureRegionKey{regionX, regionZ});
+        }
+    }
+}
+
+[[nodiscard]] inline std::vector<StructureRegionKey> collectStructureRegionKeysForChunk(const glm::ivec3& chunkCoord)
+{
+    const int minWorldX = chunkCoord.x * kChunkSizeX;
+    const int maxWorldX = minWorldX + kChunkSizeX - 1;
+    const int minWorldZ = chunkCoord.z * kChunkSizeZ;
+    const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+
+    std::vector<StructureRegionKey> keys;
+    appendStructureRegionKeysForWorldBounds(minWorldX, maxWorldX, minWorldZ, maxWorldZ, keys);
+    return keys;
+}
+
+[[nodiscard]] inline std::vector<StructureRegionKey> collectStructureRegionKeysForColumn(const glm::ivec2& chunkColumn)
+{
+    const int minWorldX = chunkColumn.x * kChunkSizeX;
+    const int maxWorldX = minWorldX + kChunkSizeX - 1;
+    const int minWorldZ = chunkColumn.y * kChunkSizeZ;
+    const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
+
+    std::vector<StructureRegionKey> keys;
+    appendStructureRegionKeysForWorldBounds(minWorldX, maxWorldX, minWorldZ, maxWorldZ, keys);
+    return keys;
+}
+
 using StructureSampleColumnFn = std::function<ColumnSample(int worldX, int worldZ)>;
 using StructureSurfaceBlockFn = std::function<BlockId(int worldX, int worldZ, const ColumnSample&)>;
 using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
@@ -717,49 +765,15 @@ struct StructureRegistryProfilingSnapshot
     double averageQueryMs{0.0};
 };
 
-struct PendingStructureRegionBuild
-{
-    std::condition_variable readyCondition{};
-    std::shared_ptr<const StructureRegion> region{};
-    std::exception_ptr exception{};
-    bool ready{false};
-};
-
 class StructureRegistry
 {
 public:
-    using SampleColumnFn = std::function<ColumnSample(int worldX, int worldZ)>;
-    using SurfaceBlockFn = std::function<BlockId(int worldX, int worldZ, const ColumnSample&)>;
-    using DensityFn = std::function<float(int worldX, int worldZ)>;
-
     StructureRegistry() = default;
-
-    StructureRegistry(SampleColumnFn sampleColumnFn,
-                      SurfaceBlockFn surfaceBlockFn,
-                      DensityFn densityFn)
-        : sampleColumnFn_(std::move(sampleColumnFn)),
-          surfaceBlockFn_(std::move(surfaceBlockFn)),
-          densityFn_(std::move(densityFn))
-    {
-    }
-
-    void configure(SampleColumnFn sampleColumnFn,
-                   SurfaceBlockFn surfaceBlockFn,
-                   DensityFn densityFn)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        sampleColumnFn_ = std::move(sampleColumnFn);
-        surfaceBlockFn_ = std::move(surfaceBlockFn);
-        densityFn_ = std::move(densityFn);
-        regions_.clear();
-        pendingBuilds_.clear();
-    }
 
     void clear()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         regions_.clear();
-        pendingBuilds_.clear();
     }
 
     void setProfilingEnabled(bool enabled) noexcept
@@ -801,51 +815,7 @@ public:
                                                        const glm::ivec3& queryMax,
                                                        int lodLevel = 0) const
     {
-        const SteadyClock::time_point queryStart = SteadyClock::now();
-        std::vector<StructureInstance> result;
-        const int minRegionX = floorDiv(queryMin.x - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionX = floorDiv(queryMax.x + kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int minRegionZ = floorDiv(queryMin.z - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionZ = floorDiv(queryMax.z + kMaxStructureHorizontalRadius, kStructureRegionSize);
-
-        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
-        {
-            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
-            {
-                const std::shared_ptr<const StructureRegion> region =
-                    getOrBuildRegionBlocking(StructureRegionKey{regionX, regionZ});
-                if (!region)
-                {
-                    continue;
-                }
-
-                std::vector<const StructureInstance*> candidates;
-                region->bvh.query(queryMin, queryMax, region->instances, candidates);
-                for (const StructureInstance* candidate : candidates)
-                {
-                    if (candidate == nullptr)
-                    {
-                        continue;
-                    }
-                    if (lodLevel > 0 && candidate->maxLodLevel < lodLevel)
-                    {
-                        continue;
-                    }
-                    result.push_back(*candidate);
-                }
-            }
-        }
-
-        if (profilingEnabled_.load(std::memory_order_acquire))
-        {
-            queryCount_.fetch_add(1, std::memory_order_relaxed);
-            const auto elapsedMicros =
-                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
-            totalQueryMicros_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedMicros, 0)),
-                                        std::memory_order_relaxed);
-        }
-
-        return result;
+        return queryReady(queryMin, queryMax, lodLevel);
     }
 
     [[nodiscard]] std::vector<StructureInstance> queryReady(const glm::ivec3& queryMin,
@@ -857,41 +827,38 @@ public:
         const SteadyClock::time_point queryStart = SteadyClock::now();
         bool allRegionsReady = true;
         std::vector<StructureInstance> result;
-        const int minRegionX = floorDiv(queryMin.x - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionX = floorDiv(queryMax.x + kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int minRegionZ = floorDiv(queryMin.z - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionZ = floorDiv(queryMax.z + kMaxStructureHorizontalRadius, kStructureRegionSize);
-
-        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        std::vector<StructureRegionKey> regionKeys;
+        appendStructureRegionKeysForWorldBounds(queryMin.x, queryMax.x, queryMin.z, queryMax.z, regionKeys);
+        for (const StructureRegionKey& key : regionKeys)
         {
-            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
+            if (!region)
             {
-                const StructureRegionKey key{regionX, regionZ};
-                const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
-                if (!region)
+                allRegionsReady = false;
+                if (outMissingRegions != nullptr)
                 {
-                    allRegionsReady = false;
-                    if (outMissingRegions != nullptr)
-                    {
-                        outMissingRegions->push_back(key);
-                    }
+                    outMissingRegions->push_back(key);
+                }
+                if (profilingEnabled_.load(std::memory_order_acquire))
+                {
+                    cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+                }
+                continue;
+            }
+
+            std::vector<const StructureInstance*> candidates;
+            region->bvh.query(queryMin, queryMax, region->instances, candidates);
+            for (const StructureInstance* candidate : candidates)
+            {
+                if (candidate == nullptr)
+                {
                     continue;
                 }
-
-                std::vector<const StructureInstance*> candidates;
-                region->bvh.query(queryMin, queryMax, region->instances, candidates);
-                for (const StructureInstance* candidate : candidates)
+                if (lodLevel > 0 && candidate->maxLodLevel < lodLevel)
                 {
-                    if (candidate == nullptr)
-                    {
-                        continue;
-                    }
-                    if (lodLevel > 0 && candidate->maxLodLevel < lodLevel)
-                    {
-                        continue;
-                    }
-                    result.push_back(*candidate);
+                    continue;
                 }
+                result.push_back(*candidate);
             }
         }
 
@@ -914,7 +881,7 @@ public:
 
     [[nodiscard]] std::vector<StructureInstance> copyRegionInstances(const StructureRegionKey& key) const
     {
-        const std::shared_ptr<const StructureRegion> region = getOrBuildRegionBlocking(key);
+        const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
         if (!region)
         {
             return {};
@@ -924,7 +891,7 @@ public:
 
     [[nodiscard]] std::vector<StructureVoxelEdit> copyRegionVoxelEdits(const StructureRegionKey& key) const
     {
-        const std::shared_ptr<const StructureRegion> region = getOrBuildRegionBlocking(key);
+        const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
         if (!region)
         {
             return {};
@@ -934,46 +901,7 @@ public:
 
     [[nodiscard]] StructureChunkColumnSpan queryChunkColumnSpan(const glm::ivec2& chunkColumn) const
     {
-        const SteadyClock::time_point queryStart = SteadyClock::now();
-        StructureChunkColumnSpan merged{};
-        const int minWorldX = chunkColumn.x * kChunkSizeX;
-        const int maxWorldX = minWorldX + kChunkSizeX - 1;
-        const int minWorldZ = chunkColumn.y * kChunkSizeZ;
-        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
-        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
-
-        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
-        {
-            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
-            {
-                const std::shared_ptr<const StructureRegion> region =
-                    getOrBuildRegionBlocking(StructureRegionKey{regionX, regionZ});
-                if (!region)
-                {
-                    continue;
-                }
-
-                const auto it = region->chunkColumnSpans.find(chunkColumn);
-                if (it != region->chunkColumnSpans.end() && it->second.valid())
-                {
-                    merged.include(it->second.minChunkY, it->second.maxChunkY);
-                }
-            }
-        }
-
-        if (profilingEnabled_.load(std::memory_order_acquire))
-        {
-            queryCount_.fetch_add(1, std::memory_order_relaxed);
-            const auto elapsedMicros =
-                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - queryStart).count();
-            totalQueryMicros_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedMicros, 0)),
-                                        std::memory_order_relaxed);
-        }
-
-        return merged;
+        return queryChunkColumnSpanReady(chunkColumn);
     }
 
     [[nodiscard]] StructureChunkColumnSpan queryChunkColumnSpanReady(const glm::ivec2& chunkColumn,
@@ -983,36 +911,28 @@ public:
         const SteadyClock::time_point queryStart = SteadyClock::now();
         bool allRegionsReady = true;
         StructureChunkColumnSpan merged{};
-        const int minWorldX = chunkColumn.x * kChunkSizeX;
-        const int maxWorldX = minWorldX + kChunkSizeX - 1;
-        const int minWorldZ = chunkColumn.y * kChunkSizeZ;
-        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
-        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
-
-        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        const std::vector<StructureRegionKey> regionKeys = collectStructureRegionKeysForColumn(chunkColumn);
+        for (const StructureRegionKey& key : regionKeys)
         {
-            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
+            if (!region)
             {
-                const StructureRegionKey key{regionX, regionZ};
-                const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
-                if (!region)
+                allRegionsReady = false;
+                if (outMissingRegions != nullptr)
                 {
-                    allRegionsReady = false;
-                    if (outMissingRegions != nullptr)
-                    {
-                        outMissingRegions->push_back(key);
-                    }
-                    continue;
+                    outMissingRegions->push_back(key);
                 }
+                if (profilingEnabled_.load(std::memory_order_acquire))
+                {
+                    cacheMisses_.fetch_add(1, std::memory_order_relaxed);
+                }
+                continue;
+            }
 
-                const auto it = region->chunkColumnSpans.find(chunkColumn);
-                if (it != region->chunkColumnSpans.end() && it->second.valid())
-                {
-                    merged.include(it->second.minChunkY, it->second.maxChunkY);
-                }
+            const auto it = region->chunkColumnSpans.find(chunkColumn);
+            if (it != region->chunkColumnSpans.end() && it->second.valid())
+            {
+                merged.include(it->second.minChunkY, it->second.maxChunkY);
             }
         }
 
@@ -1035,41 +955,7 @@ public:
 
     [[nodiscard]] std::vector<StructureVoxelEdit> queryChunkVoxelEdits(const glm::ivec3& chunkCoord) const
     {
-        std::vector<StructureVoxelEdit> result;
-        const int minWorldX = chunkCoord.x * kChunkSizeX;
-        const int maxWorldX = minWorldX + kChunkSizeX - 1;
-        const int minWorldZ = chunkCoord.z * kChunkSizeZ;
-        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
-        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
-
-        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
-        {
-            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
-            {
-                const std::shared_ptr<const StructureRegion> region =
-                    getOrBuildRegionBlocking(StructureRegionKey{regionX, regionZ});
-                if (!region)
-                {
-                    continue;
-                }
-
-                const auto spanIt = region->chunkVoxelSpans.find(chunkCoord);
-                if (spanIt == region->chunkVoxelSpans.end() || !spanIt->second.valid())
-                {
-                    continue;
-                }
-
-                const StructureChunkVoxelSpan span = spanIt->second;
-                result.insert(result.end(),
-                              region->voxelEdits.begin() + span.offset,
-                              region->voxelEdits.begin() + span.offset + span.count);
-            }
-        }
-
-        return result;
+        return queryChunkVoxelEditsReady(chunkCoord);
     }
 
     [[nodiscard]] std::vector<StructureVoxelEdit> queryChunkVoxelEditsReady(const glm::ivec3& chunkCoord,
@@ -1078,42 +964,34 @@ public:
     {
         bool allRegionsReady = true;
         std::vector<StructureVoxelEdit> result;
-        const int minWorldX = chunkCoord.x * kChunkSizeX;
-        const int maxWorldX = minWorldX + kChunkSizeX - 1;
-        const int minWorldZ = chunkCoord.z * kChunkSizeZ;
-        const int maxWorldZ = minWorldZ + kChunkSizeZ - 1;
-        const int minRegionX = floorDiv(minWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionX = floorDiv(maxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int minRegionZ = floorDiv(minWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
-        const int maxRegionZ = floorDiv(maxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
-
-        for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+        const std::vector<StructureRegionKey> regionKeys = collectStructureRegionKeysForChunk(chunkCoord);
+        for (const StructureRegionKey& key : regionKeys)
         {
-            for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+            const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
+            if (!region)
             {
-                const StructureRegionKey key{regionX, regionZ};
-                const std::shared_ptr<const StructureRegion> region = tryGetReadyRegion(key);
-                if (!region)
+                allRegionsReady = false;
+                if (outMissingRegions != nullptr)
                 {
-                    allRegionsReady = false;
-                    if (outMissingRegions != nullptr)
-                    {
-                        outMissingRegions->push_back(key);
-                    }
-                    continue;
+                    outMissingRegions->push_back(key);
                 }
-
-                const auto spanIt = region->chunkVoxelSpans.find(chunkCoord);
-                if (spanIt == region->chunkVoxelSpans.end() || !spanIt->second.valid())
+                if (profilingEnabled_.load(std::memory_order_acquire))
                 {
-                    continue;
+                    cacheMisses_.fetch_add(1, std::memory_order_relaxed);
                 }
-
-                const StructureChunkVoxelSpan span = spanIt->second;
-                result.insert(result.end(),
-                              region->voxelEdits.begin() + span.offset,
-                              region->voxelEdits.begin() + span.offset + span.count);
+                continue;
             }
+
+            const auto spanIt = region->chunkVoxelSpans.find(chunkCoord);
+            if (spanIt == region->chunkVoxelSpans.end() || !spanIt->second.valid())
+            {
+                continue;
+            }
+
+            const StructureChunkVoxelSpan span = spanIt->second;
+            result.insert(result.end(),
+                          region->voxelEdits.begin() + span.offset,
+                          region->voxelEdits.begin() + span.offset + span.count);
         }
 
         if (outAllRegionsReady != nullptr)
@@ -1124,18 +1002,12 @@ public:
         return result;
     }
 
-    [[nodiscard]] std::shared_ptr<const StructureRegion> warmRegion(const StructureRegionKey& key) const
-    {
-        return getOrBuildRegionBlocking(key);
-    }
-
     [[nodiscard]] bool isRegionReady(const StructureRegionKey& key) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return regions_.find(key) != regions_.end();
     }
 
-private:
     [[nodiscard]] std::shared_ptr<const StructureRegion> tryGetReadyRegion(const StructureRegionKey& key) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1151,97 +1023,28 @@ private:
         return it->second;
     }
 
-    [[nodiscard]] std::shared_ptr<const StructureRegion> getOrBuildRegionBlocking(const StructureRegionKey& key) const
+    void publishReady(const StructureRegionKey& key, const std::shared_ptr<StructureRegion>& region)
     {
-        std::shared_ptr<PendingStructureRegionBuild> pendingBuild;
+        if (!region)
         {
-            std::unique_lock<std::mutex> lock(mutex_);
-            const auto it = regions_.find(key);
-            if (it != regions_.end())
-            {
-                if (profilingEnabled_.load(std::memory_order_acquire))
-                {
-                    cacheHits_.fetch_add(1, std::memory_order_relaxed);
-                }
-                return it->second;
-            }
-
-            auto pendingIt = pendingBuilds_.find(key);
-            if (pendingIt != pendingBuilds_.end())
-            {
-                pendingBuild = pendingIt->second;
-                pendingBuild->readyCondition.wait(lock, [&pendingBuild]() { return pendingBuild->ready; });
-                if (pendingBuild->exception)
-                {
-                    std::rethrow_exception(pendingBuild->exception);
-                }
-                return pendingBuild->region;
-            }
-
-            if (!sampleColumnFn_ || !surfaceBlockFn_ || !densityFn_)
-            {
-                return {};
-            }
-
-            if (profilingEnabled_.load(std::memory_order_acquire))
-            {
-                cacheMisses_.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            pendingBuild = std::make_shared<PendingStructureRegionBuild>();
-            pendingBuilds_.emplace(key, pendingBuild);
+            return;
         }
 
-        std::shared_ptr<StructureRegion> builtRegion;
-        std::exception_ptr buildException{};
-        try
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto [it, inserted] = regions_.emplace(key, region);
+        if (!inserted)
         {
-            builtRegion = std::make_shared<StructureRegion>(buildRegion(key));
+            it->second = region;
         }
-        catch (...)
+        if (inserted && profilingEnabled_.load(std::memory_order_acquire))
         {
-            buildException = std::current_exception();
+            regionsBuilt_.fetch_add(1, std::memory_order_relaxed);
         }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!buildException)
-            {
-                const auto [it, inserted] = regions_.emplace(key, builtRegion);
-                if (inserted && profilingEnabled_.load(std::memory_order_acquire))
-                {
-                    regionsBuilt_.fetch_add(1, std::memory_order_relaxed);
-                }
-                pendingBuild->region = it->second;
-            }
-            pendingBuild->exception = buildException;
-            pendingBuild->ready = true;
-            pendingBuilds_.erase(key);
-        }
-        pendingBuild->readyCondition.notify_all();
-
-        if (buildException)
-        {
-            std::rethrow_exception(buildException);
-        }
-
-        return pendingBuild->region;
     }
 
-    [[nodiscard]] StructureRegion buildRegion(const StructureRegionKey& key) const
-    {
-        return buildStructureRegionData(key, sampleColumnFn_, surfaceBlockFn_, densityFn_);
-    }
-
+private:
     mutable std::mutex mutex_;
     mutable std::unordered_map<StructureRegionKey, std::shared_ptr<StructureRegion>, StructureRegionKeyHasher> regions_{};
-    mutable std::unordered_map<StructureRegionKey,
-                               std::shared_ptr<PendingStructureRegionBuild>,
-                               StructureRegionKeyHasher>
-        pendingBuilds_{};
-    SampleColumnFn sampleColumnFn_{};
-    SurfaceBlockFn surfaceBlockFn_{};
-    DensityFn densityFn_{};
     std::atomic<bool> profilingEnabled_{false};
     mutable std::atomic<std::uint64_t> cacheHits_{0};
     mutable std::atomic<std::uint64_t> cacheMisses_{0};

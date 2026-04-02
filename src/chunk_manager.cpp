@@ -6934,7 +6934,12 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                 static_cast<std::int64_t>(visibleCoverage.required) * 98;
         const bool uploadReady = estimateInitialReadyUploadQueueSize() <= 8;
         const bool exactReady = nearReady && uploadReady;
-        const bool exactCoverageMostlyReady =
+        const bool schedulingCoverageMostlyReady =
+            protectedCoverageReady &&
+            visibleCoverage.required > 0 &&
+            static_cast<std::int64_t>(visibleCoverage.ready) * 100 >=
+                static_cast<std::int64_t>(visibleCoverage.required) * 95;
+        const bool configuredCoverageMostlyReady =
             protectedCoverageReady &&
             metricCoverage.required > 0 &&
             static_cast<std::int64_t>(metricCoverage.ready) * 100 >=
@@ -6942,12 +6947,14 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         const bool exactRampReady =
             exactCoverageCommittedForCurrentWindow &&
             uploadReady &&
-            (exactOnlyMode ? exactCoverageMostlyReady : nearReleaseReady);
+            (exactOnlyMode ? schedulingCoverageMostlyReady : nearReleaseReady);
         const bool exactReleaseReady =
             exactCoverageCommittedForCurrentWindow &&
             uploadReady &&
             (exactOnlyMode
-                 ? ((targetViewDistance_ < renderSettings_.exactChunks) ? nearReleaseReady : exactCoverageMostlyReady)
+                 ? ((targetViewDistance_ < renderSettings_.exactChunks)
+                        ? nearReleaseReady
+                        : configuredCoverageMostlyReady)
                  : nearReleaseReady);
         switch (startupState_.phase)
         {

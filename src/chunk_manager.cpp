@@ -5051,6 +5051,8 @@ private:
         int visibleReady{0};
         int exactRequired{0};
         int exactReady{0};
+        int protectedRequired{0};
+        int protectedReady{0};
     };
     StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
     void resetStreamingFrontier() noexcept;
@@ -6547,7 +6549,14 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     ensureVolumeColumnCapSkipsLastFrame_ = 0;
 
     const auto missingScanStart = std::chrono::steady_clock::now();
-    const int exactMetricRadius = needsFullExactCoverageMetrics ? renderSettings_.exactChunks : targetViewDistance_;
+    const bool startupScopedExactWindow =
+        exactOnly &&
+        startupEnabled_ &&
+        startupState_.preloadStarted &&
+        startupState_.phase != StreamingPhase::SteadyState;
+    const int exactMetricRadius = startupScopedExactWindow
+        ? targetViewDistance_
+        : (needsFullExactCoverageMetrics ? renderSettings_.exactChunks : targetViewDistance_);
     const int frontierVerticalRadius = needsFullExactCoverageMetrics
         ? std::max(verticalRadius, computeVerticalRadius(centerChunk, exactMetricRadius, clampedWorldY))
         : verticalRadius;
@@ -6576,9 +6585,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     visibleCoverage.ready = frontierCoverage.visibleReady;
     visibleCoverage.required = exactPlanSnapshot.activePlan ? exactPlanSnapshot.activePlan->visibleRequiredCount : 0;
     visibleCoverage.missing = std::max(0, visibleCoverage.required - visibleCoverage.ready);
-    visibleCoverage.protectedReady = visibleCoverage.ready;
-    visibleCoverage.protectedRequired = visibleCoverage.required;
-    visibleCoverage.protectedMissing = visibleCoverage.missing;
+    visibleCoverage.protectedReady = frontierCoverage.protectedReady;
+    visibleCoverage.protectedRequired = frontierCoverage.protectedRequired;
+    visibleCoverage.protectedMissing =
+        std::max(0, visibleCoverage.protectedRequired - visibleCoverage.protectedReady);
     VisibleChunkCoverage metricCoverage{};
     metricCoverage.ready = frontierCoverage.exactReady;
     metricCoverage.required = exactPlanSnapshot.activePlan ? exactPlanSnapshot.activePlan->exactRequiredCount : 0;
@@ -6606,7 +6616,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                         std::memory_order_release);
     if (exactOnly)
     {
-        requestFullRadiusWorldgenPageDiscovery(centerChunk, renderSettings_.exactChunks);
+        requestFullRadiusWorldgenPageDiscovery(centerChunk, currentExactWindowKey.preloadRadius);
     }
     refillWorldgenPageDependencyJobs();
     refillBulkShellOracleJobs();
@@ -6865,13 +6875,17 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             exactPlanSnapshot.activePlan->key == currentExactWindowKey &&
             !exactPlanSnapshot.replanning;
         const bool nearReady = missingChunks == 0;
+        const bool protectedCoverageReady =
+            visibleCoverage.protectedRequired <= 0 || visibleCoverage.protectedMissing == 0;
         const bool nearReleaseReady =
+            protectedCoverageReady &&
             visibleCoverage.required > 0 &&
             static_cast<std::int64_t>(visibleCoverage.ready) * 100 >=
-                static_cast<std::int64_t>(visibleCoverage.required) * 99;
+                static_cast<std::int64_t>(visibleCoverage.required) * 98;
         const bool uploadReady = estimateInitialReadyUploadQueueSize() <= 8;
         const bool exactReady = nearReady && uploadReady;
         const bool exactCoverageMostlyReady =
+            protectedCoverageReady &&
             metricCoverage.required > 0 &&
             static_cast<std::int64_t>(metricCoverage.ready) * 100 >=
                 static_cast<std::int64_t>(metricCoverage.required) * 95;
@@ -8272,18 +8286,15 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     {
         pinWorldgenWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
         const int spawnWorldY = std::max(static_cast<int>(std::floor(spawnPos.y)), 0);
-        const int exactMetricRadius = renderSettings_.exactChunks;
+        const int exactMetricRadius = targetViewDistance_;
         const int preloadRadius =
             std::max(std::clamp(targetViewDistance_ + hiddenExactPreloadBufferChunks(renderSettings_),
                                 1,
                                 kMaxExactRenderDistanceChunks),
                      exactMetricRadius);
-        const int verticalRadius = std::max(computeVerticalRadius(startupState_.spawnChunk,
-                                                                  targetViewDistance_,
-                                                                  spawnWorldY),
-                                            computeVerticalRadius(startupState_.spawnChunk,
-                                                                  exactMetricRadius,
-                                                                  spawnWorldY));
+        const int verticalRadius = computeVerticalRadius(startupState_.spawnChunk,
+                                                         std::max(preloadRadius, exactMetricRadius),
+                                                         spawnWorldY);
         requestExactWindowPlan(ExactWindowKey{
             {startupState_.spawnChunk.x, startupState_.spawnChunk.z},
             startupState_.spawnChunk.y,
@@ -13751,11 +13762,27 @@ void ChunkManager::Impl::clearStreamingChunkLifecycleStates() noexcept
 ChunkManager::Impl::FrontierCoverage ChunkManager::Impl::streamingFrontierCoverageSnapshot() const noexcept
 {
     std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
-    return FrontierCoverage{
+    FrontierCoverage coverage{
         streamingFrontierVisibleRequired_,
         streamingFrontierVisibleReady_,
         streamingFrontierExactRequired_,
         streamingFrontierExactReady_};
+    for (const auto& [coord, demand] : streamingFrontierDemands_)
+    {
+        (void)coord;
+        if (!demand.forceResident)
+        {
+            continue;
+        }
+
+        ++coverage.protectedRequired;
+        if (demand.state == FrontierDemandState::Ready)
+        {
+            ++coverage.protectedReady;
+        }
+    }
+
+    return coverage;
 }
 
 void ChunkManager::Impl::setStreamingFrontierDemandState(const glm::ivec3& coord, FrontierDemandState state)
@@ -15041,7 +15068,20 @@ void ChunkManager::Impl::mergePredictedColumnHeight(const glm::ivec2& column, in
         }
     }
 
+    bool suppressPendingPlanDirty = false;
     if (changed)
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        // Background support warmup can improve derived column-height hints while a plan for this
+        // same window is building. Let that pending build finish instead of invalidating it.
+        suppressPendingPlanDirty =
+            exactPlanSupportBuildDepth_.load(std::memory_order_acquire) > 0 &&
+            pendingExactPlanKeyValid_ &&
+            pendingExactPlanStatus_ == ExactWindowPlanStatus::Building &&
+            windowContainsColumn(pendingExactPlanKey_, column, 1);
+    }
+
+    if (changed && !suppressPendingPlanDirty)
     {
         markPlanDirtyColumn(column);
     }

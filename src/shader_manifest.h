@@ -13,11 +13,13 @@ struct ShaderCompileSpec
     const char* target;
 };
 
-inline constexpr std::array<ShaderCompileSpec, 40> kBlockGameShaderCompileSpecs{{
+inline constexpr std::array<ShaderCompileSpec, 45> kBlockGameShaderCompileSpecs{{
     {"world_vs.hlsl", "main", "vs_5_0"},
     {"mob_vs.hlsl", "main", "vs_5_0"},
     {"block_outline_vs.hlsl", "main", "vs_5_0"},
     {"shadow_vs.hlsl", "main", "vs_5_0"},
+    {"exact_world_vs.hlsl", "main", "vs_5_0"},
+    {"exact_shadow_vs.hlsl", "main", "vs_5_0"},
     {"shadow_ps.hlsl", "main", "ps_5_0"},
     {"world_near_ps.hlsl", "main", "ps_5_0"},
     {"world_far_ps.hlsl", "main", "ps_5_0"},
@@ -26,6 +28,8 @@ inline constexpr std::array<ShaderCompileSpec, 40> kBlockGameShaderCompileSpecs{
     {"depth_pyramid.hlsl", "DepthPyramidMain", "cs_5_0"},
     {"lod_gpu_cull.hlsl", "LodCullMain", "cs_5_0"},
     {"lod_gpu_cull.hlsl", "LodIndirectBuildMain", "cs_5_0"},
+    {"exact_gpu_cull.hlsl", "ExactCullMain", "cs_5_0"},
+    {"exact_gpu_cull.hlsl", "ExactIndirectBuildMain", "cs_5_0"},
     {"fullscreen_vs.hlsl", "main", "vs_5_0"},
     {"base_sky_ps.hlsl", "main", "ps_5_0"},
     {"clouds_vs.hlsl", "main", "vs_5_0"},
@@ -51,6 +55,7 @@ inline constexpr std::array<ShaderCompileSpec, 40> kBlockGameShaderCompileSpecs{
     {"exact_chunk_structure_stamp_cs.hlsl", "ExactChunkStructureStampMain", "cs_6_6"},
     {"exact_chunk_halo_cache_cs.hlsl", "ExactChunkHaloCacheMain", "cs_6_6"},
     {"exact_chunk_light_cs.hlsl", "ExactChunkLightMain", "cs_6_6"},
+    {"exact_chunk_seam_export_cs.hlsl", "ExactChunkSeamExportMain", "cs_6_6"},
     {"exact_chunk_face_count_cs.hlsl", "ExactChunkFaceCountMain", "cs_6_6"},
     {"exact_chunk_face_prefix_cs.hlsl", "ExactChunkFacePrefixMain", "cs_6_6"},
     {"exact_chunk_face_emit_cs.hlsl", "ExactChunkFaceEmitMain", "cs_6_6"},

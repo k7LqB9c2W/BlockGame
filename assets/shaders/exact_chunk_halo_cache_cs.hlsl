@@ -15,20 +15,20 @@ RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(u1)
 RWStructuredBuffer<uint> gFacePrefixScratch : register(u2);
 RWStructuredBuffer<uint> gFaceTotalScratch : register(u3);
 
-uint sampleVoxelFromDescriptor(uint descriptorIndex, uint x, uint y, uint z)
+uint sampleSeamVoxelFromDescriptor(uint descriptorIndex, uint faceIndex, uint u, uint v)
 {
-    StructuredBuffer<uint> neighborVoxels = ResourceDescriptorHeap[NonUniformResourceIndex(descriptorIndex)];
-    return neighborVoxels[voxelIndex(x, y, z)];
+    StructuredBuffer<uint> seamVoxels = ResourceDescriptorHeap[NonUniformResourceIndex(descriptorIndex)];
+    return seamVoxels[haloFaceVoxelIndex(faceIndex, u, v)];
 }
 
 uint neighborDescriptorIndexForFace(GpuExactPrepassRecord build, uint faceIndex)
 {
-    if (faceIndex == kExactHaloFacePosX) return build.neighborPosXVoxelSrvDescriptorIndex;
-    if (faceIndex == kExactHaloFaceNegX) return build.neighborNegXVoxelSrvDescriptorIndex;
-    if (faceIndex == kExactHaloFacePosY) return build.neighborPosYVoxelSrvDescriptorIndex;
-    if (faceIndex == kExactHaloFaceNegY) return build.neighborNegYVoxelSrvDescriptorIndex;
-    if (faceIndex == kExactHaloFacePosZ) return build.neighborPosZVoxelSrvDescriptorIndex;
-    return build.neighborNegZVoxelSrvDescriptorIndex;
+    if (faceIndex == kExactHaloFacePosX) return build.neighborPosXSeamSrvDescriptorIndex;
+    if (faceIndex == kExactHaloFaceNegX) return build.neighborNegXSeamSrvDescriptorIndex;
+    if (faceIndex == kExactHaloFacePosY) return build.neighborPosYSeamSrvDescriptorIndex;
+    if (faceIndex == kExactHaloFaceNegY) return build.neighborNegYSeamSrvDescriptorIndex;
+    if (faceIndex == kExactHaloFacePosZ) return build.neighborPosZSeamSrvDescriptorIndex;
+    return build.neighborNegZSeamSrvDescriptorIndex;
 }
 
 uint seamBitForFace(uint faceIndex)
@@ -41,29 +41,14 @@ uint seamBitForFace(uint faceIndex)
     return kExactNeighborNegZBit;
 }
 
-uint sampleFaceNeighborVoxel(uint descriptorIndex, uint faceIndex, uint u, uint v)
+uint oppositeSeamFaceIndex(uint faceIndex)
 {
-    if (faceIndex == kExactHaloFacePosX)
-    {
-        return sampleVoxelFromDescriptor(descriptorIndex, 0u, v, u);
-    }
-    if (faceIndex == kExactHaloFaceNegX)
-    {
-        return sampleVoxelFromDescriptor(descriptorIndex, kExactChunkSize - 1u, v, u);
-    }
-    if (faceIndex == kExactHaloFacePosY)
-    {
-        return sampleVoxelFromDescriptor(descriptorIndex, u, 0u, v);
-    }
-    if (faceIndex == kExactHaloFaceNegY)
-    {
-        return sampleVoxelFromDescriptor(descriptorIndex, u, kExactChunkSize - 1u, v);
-    }
-    if (faceIndex == kExactHaloFacePosZ)
-    {
-        return sampleVoxelFromDescriptor(descriptorIndex, u, v, 0u);
-    }
-    return sampleVoxelFromDescriptor(descriptorIndex, u, v, kExactChunkSize - 1u);
+    if (faceIndex == kExactHaloFacePosX) return kExactHaloFaceNegX;
+    if (faceIndex == kExactHaloFaceNegX) return kExactHaloFacePosX;
+    if (faceIndex == kExactHaloFacePosY) return kExactHaloFaceNegY;
+    if (faceIndex == kExactHaloFaceNegY) return kExactHaloFacePosY;
+    if (faceIndex == kExactHaloFacePosZ) return kExactHaloFaceNegZ;
+    return kExactHaloFacePosZ;
 }
 
 uint defaultHaloVoxel(GpuExactPrepassRecord build, uint faceIndex, uint u, uint v)
@@ -115,7 +100,7 @@ void ExactChunkHaloCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if ((build.resolvedNeighborMask & seamBit) != 0u)
     {
         const uint neighborDescriptorIndex = neighborDescriptorIndexForFace(build, faceIndex);
-        packedVoxel = sampleFaceNeighborVoxel(neighborDescriptorIndex, faceIndex, u, v);
+        packedVoxel = sampleSeamVoxelFromDescriptor(neighborDescriptorIndex, oppositeSeamFaceIndex(faceIndex), u, v);
     }
     else if ((build.closedNeighborMask & seamBit) != 0u)
     {

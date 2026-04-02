@@ -211,6 +211,33 @@ struct ChunkRenderBatch
     std::uint32_t debugPageIndex{0};
 };
 
+struct ExactChunkRenderBatch
+{
+    struct GpuCullRecord
+    {
+        static constexpr std::uint32_t kReservedActiveBit = 1u << 30u;
+        static constexpr std::uint32_t kReservedOverflowBit = 1u << 31u;
+        static constexpr std::uint32_t kReservedFaceCountMask = kReservedActiveBit - 1u;
+
+        glm::vec4 boundsMin{0.0f};
+        glm::vec4 boundsMax{0.0f};
+        std::uint32_t faceCount{0};
+        std::uint32_t faceOffset{0};
+        std::uint32_t reserved0{0};
+        std::uint32_t reserved{0};
+    };
+
+    ID3D12Resource* faceDescriptorBuffer{nullptr};
+    ID3D12Resource* drawRecordBuffer{nullptr};
+    ID3D12Resource* drawRecordMetadataBuffer{nullptr};
+    std::vector<std::uint32_t> faceOffsets;
+    std::vector<std::uint32_t> faceCounts;
+    std::vector<std::uint32_t> recordIndices;
+    std::uint32_t gpuCullRecordCount{0};
+    bool supportsGpuCull{false};
+    std::uint32_t debugPageIndex{0};
+};
+
 struct MobRenderBatch
 {
     std::vector<MobVertex> vertices;
@@ -224,8 +251,11 @@ struct WorldRenderData
     glm::ivec3 highlightedBlock{0};
     bool hasHighlight{false};
     std::vector<ChunkRenderBatch> nearBatches;
+    std::vector<ExactChunkRenderBatch> exactNearBatches;
     std::vector<ChunkRenderBatch> farBatches;
     std::vector<MobRenderBatch> mobBatches;
+    ID3D12Resource* exactBlockUvBuffer{nullptr};
+    std::uint32_t exactBlockUvCount{0};
 };
 
 struct RenderDistanceSettings

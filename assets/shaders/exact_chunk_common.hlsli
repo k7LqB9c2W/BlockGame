@@ -136,21 +136,26 @@ struct GpuExactPrepassRecord
     uint lightScratchVoxelSrvDescriptorIndex;
     uint lightScratchVoxelUavDescriptorIndex;
     uint sparseVoxelSrvDescriptorIndex;
-    uint neighborPosXVoxelSrvDescriptorIndex;
-    uint neighborNegXVoxelSrvDescriptorIndex;
-    uint neighborPosYVoxelSrvDescriptorIndex;
-    uint neighborNegYVoxelSrvDescriptorIndex;
-    uint neighborPosZVoxelSrvDescriptorIndex;
-    uint neighborNegZVoxelSrvDescriptorIndex;
+    uint seamVoxelUavDescriptorIndex;
+    uint neighborPosXSeamSrvDescriptorIndex;
+    uint neighborNegXSeamSrvDescriptorIndex;
+    uint neighborPosYSeamSrvDescriptorIndex;
+    uint neighborNegYSeamSrvDescriptorIndex;
+    uint neighborPosZSeamSrvDescriptorIndex;
+    uint neighborNegZSeamSrvDescriptorIndex;
     uint reserved0;
 };
 
 struct GpuExactFaceDescriptor
 {
     uint packedLocal;
+    uint blockFaceUvIndex;
+    uint packedLighting0;
+    uint packedLighting1;
+    uint packedLighting2;
+    uint packedLighting3;
     uint reserved0;
     uint reserved1;
-    uint reserved2;
 };
 
 struct GpuExactOverflowEntry
@@ -175,10 +180,10 @@ struct GpuExactPageMetadata
     uint state;
     uint recordCapacity;
     uint reserved0;
-    uint vertexUavDescriptorIndex;
-    uint indexUavDescriptorIndex;
+    uint faceDescriptorUavDescriptorIndex;
     uint drawRecordUavDescriptorIndex;
     uint drawRecordMetadataUavDescriptorIndex;
+    uint reserved1;
 };
 
 struct GpuExactChunkAllocationRecord
@@ -193,16 +198,16 @@ struct GpuExactChunkAllocationRecord
     uint requiredFaceCount;
     uint pageIndex;
     uint recordIndex;
-    uint vertexBase;
-    uint indexBase;
+    uint faceBase;
     uint reservedFaceCapacity;
     uint centerVoxelSrvDescriptorIndex;
     uint haloSrvDescriptorIndex;
     uint reserved0;
+    uint reserved1;
     uint inputVersionLo;
     uint inputVersionHi;
-    uint reserved1;
     uint reserved2;
+    uint reserved3;
 };
 
 struct GpuExactDrawRecordMetadata
@@ -213,8 +218,7 @@ struct GpuExactDrawRecordMetadata
     uint pageIndex;
     uint recordIndex;
     uint buildIndex;
-    uint vertexBase;
-    uint indexBase;
+    uint faceBase;
     uint faceCount;
     uint statusFlags;
     uint buildVersion;
@@ -223,6 +227,7 @@ struct GpuExactDrawRecordMetadata
     uint inputVersionHi;
     uint reserved0;
     uint reserved1;
+    uint reserved2;
 };
 
 struct GpuExactCompletionEntry
@@ -236,13 +241,13 @@ struct GpuExactCompletionEntry
     int chunkWorldMinZ;
     uint pageIndex;
     uint recordIndex;
-    uint vertexBase;
-    uint indexBase;
+    uint faceBase;
     uint buildVersion;
     uint generationEpoch;
     uint inputVersionLo;
     uint inputVersionHi;
     uint reserved0;
+    uint reserved1;
 };
 
 struct GpuBlockFaceUv

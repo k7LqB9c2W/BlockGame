@@ -27,6 +27,16 @@ static const uint kExactFaceCountScratchStride =
     (kExactIndirectRootBufferAlignment / 4u);
 static const uint kExactFacePrefixScratchStride = kExactFaceCountScratchStride;
 
+struct GpuExactDrawRecord
+{
+    float4 boundsMin;
+    float4 boundsMax;
+    uint faceCount;
+    uint faceOffset;
+    uint reserved0;
+    uint reserved;
+};
+
 uint sampleVoxel(StructuredBuffer<uint> bufferRef, int x, int y, int z)
 {
     if (x < 0 || y < 0 || z < 0 ||
@@ -468,8 +478,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         emitConfig.blockFaceUvDescriptorIndex != 0xffffffffu &&
         build.centerVoxelSrvDescriptorIndex != 0xffffffffu &&
         build.haloSrvDescriptorIndex != 0xffffffffu &&
-        page.vertexUavDescriptorIndex != 0xffffffffu &&
-        page.indexUavDescriptorIndex != 0xffffffffu &&
+        page.faceDescriptorUavDescriptorIndex != 0xffffffffu &&
         page.drawRecordUavDescriptorIndex != 0xffffffffu &&
         page.drawRecordMetadataUavDescriptorIndex != 0xffffffffu;
 
@@ -493,13 +502,13 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             completion.chunkWorldMinZ = build.chunkWorldMinZ;
             completion.pageIndex = build.pageIndex;
             completion.recordIndex = build.recordIndex;
-            completion.vertexBase = build.vertexBase;
-            completion.indexBase = build.indexBase;
+            completion.faceBase = build.faceBase;
             completion.buildVersion = build.buildVersion;
             completion.generationEpoch = build.generationEpoch;
             completion.inputVersionLo = build.inputVersionLo;
             completion.inputVersionHi = build.inputVersionHi;
             completion.reserved0 = 0u;
+            completion.reserved1 = 0u;
             gCompletionEntries[buildIndex] = completion;
         }
         return;
@@ -511,11 +520,9 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         ResourceDescriptorHeap[NonUniformResourceIndex(build.haloSrvDescriptorIndex)];
     StructuredBuffer<GpuBlockFaceUv> blockFaceUvs =
         ResourceDescriptorHeap[NonUniformResourceIndex(emitConfig.blockFaceUvDescriptorIndex)];
-    RWStructuredBuffer<WorldVertex> vertices =
-        ResourceDescriptorHeap[NonUniformResourceIndex(page.vertexUavDescriptorIndex)];
-    RWStructuredBuffer<uint> indices =
-        ResourceDescriptorHeap[NonUniformResourceIndex(page.indexUavDescriptorIndex)];
-    RWStructuredBuffer<GpuCullRecord> drawRecords =
+    RWStructuredBuffer<GpuExactFaceDescriptor> faceDescriptors =
+        ResourceDescriptorHeap[NonUniformResourceIndex(page.faceDescriptorUavDescriptorIndex)];
+    RWStructuredBuffer<GpuExactDrawRecord> drawRecords =
         ResourceDescriptorHeap[NonUniformResourceIndex(page.drawRecordUavDescriptorIndex)];
     RWStructuredBuffer<GpuExactDrawRecordMetadata> drawRecordMetadata =
         ResourceDescriptorHeap[NonUniformResourceIndex(page.drawRecordMetadataUavDescriptorIndex)];
@@ -530,15 +537,15 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             statusFlags |= kExactCompletionStatusZeroFacesBit;
         }
 
-        GpuCullRecord record;
+        GpuExactDrawRecord record;
         record.boundsMin = float4(float(build.chunkWorldMinX), float(build.chunkWorldMinY), float(build.chunkWorldMinZ), 1.0f);
         record.boundsMax = float4(float(build.chunkWorldMinX + int(kExactChunkSize)),
                                   float(build.chunkWorldMinY + int(kExactChunkSize)),
                                   float(build.chunkWorldMinZ + int(kExactChunkSize)),
                                   1.0f);
-        record.indexCount = (totalFaces <= build.reservedFaceCapacity) ? (totalFaces * 6u) : 0u;
-        record.firstIndexLocation = build.indexBase;
-        record.baseVertex = int(build.vertexBase);
+        record.faceCount = (totalFaces <= build.reservedFaceCapacity) ? totalFaces : 0u;
+        record.faceOffset = build.faceBase;
+        record.reserved0 = 0u;
         record.reserved = kExactDrawRecordActiveBit |
                           min(totalFaces, kExactDrawRecordFaceCountMask) |
                           ((totalFaces > build.reservedFaceCapacity) ? kExactDrawRecordOverflowFlag : 0u);
@@ -564,8 +571,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         metadata.pageIndex = build.pageIndex;
         metadata.recordIndex = build.recordIndex;
         metadata.buildIndex = buildIndex;
-        metadata.vertexBase = build.vertexBase;
-        metadata.indexBase = build.indexBase;
+        metadata.faceBase = build.faceBase;
         metadata.faceCount = totalFaces;
         metadata.statusFlags = statusFlags;
         metadata.buildVersion = build.buildVersion;
@@ -574,6 +580,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         metadata.inputVersionHi = build.inputVersionHi;
         metadata.reserved0 = 0u;
         metadata.reserved1 = 0u;
+        metadata.reserved2 = 0u;
         drawRecordMetadata[build.recordIndex] = metadata;
 
         GpuExactCompletionEntry completion;
@@ -586,13 +593,13 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         completion.chunkWorldMinZ = build.chunkWorldMinZ;
         completion.pageIndex = build.pageIndex;
         completion.recordIndex = build.recordIndex;
-        completion.vertexBase = build.vertexBase;
-        completion.indexBase = build.indexBase;
+        completion.faceBase = build.faceBase;
         completion.buildVersion = build.buildVersion;
         completion.generationEpoch = build.generationEpoch;
         completion.inputVersionLo = build.inputVersionLo;
         completion.inputVersionHi = build.inputVersionHi;
         completion.reserved0 = 0u;
+        completion.reserved1 = 0u;
         gCompletionEntries[buildIndex] = completion;
     }
 
@@ -620,18 +627,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         const uint materialFlags = materialFlagsForFace(blockId, faceId, column);
         const uint alphaCutoutLightingFlag = isAlphaCutoutBlock(blockId) ? kLightingFlagAlphaCutoutBit : 0u;
         const uint faceIndex = faceBase + localIndex;
-        const uint localVertexOffset = faceIndex * 4u;
-        const uint vertexIndex = build.vertexBase + localVertexOffset;
-        const uint indexIndex = build.indexBase + faceIndex * 6u;
-
-        float3 p0;
-        float3 p1;
-        float3 p2;
-        float3 p3;
-        float3 normal;
-        faceVertices(chunkWorldMin, uint3(localX, localY, localZ), faceId, p0, p1, p2, p3, normal);
-
-        const GpuBlockFaceUv uv = blockFaceUvs[blockId * 6u + faceId];
+        const uint blockFaceUvIndex = blockId * 6u + faceId;
         const int cornerUSigns[4] = {-1, 1, 1, -1};
         const int cornerVSigns[4] = {-1, -1, 1, 1};
         uint cornerLighting[4];
@@ -645,23 +641,11 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
                                                     cornerUSigns[i],
                                                     cornerVSigns[i]);
         }
-        int3 outwardUnused;
-        int3 sideU;
-        int3 sideV;
-        float3 normalUnused;
-        faceVectors(faceId, outwardUnused, sideU, sideV, normalUnused);
-        const float3 quadCenter = 0.25f * (p0 + p1 + p2 + p3);
-        const float3 uAxis = float3(sideU);
-        const float3 vAxis = float3(sideV);
-        const float3 positions[4] = {p0, p1, p2, p3};
         uint vertexLighting[4];
         [unroll]
         for (uint i = 0u; i < 4u; ++i)
         {
-            const float3 offset = positions[i] - quadCenter;
-            const int uSign = dot(offset, uAxis) >= 0.0f ? 1 : -1;
-            const int vSign = dot(offset, vAxis) >= 0.0f ? 1 : -1;
-            vertexLighting[i] = cornerLighting[cornerIndexForSigns(uSign, vSign)];
+            vertexLighting[i] = cornerLighting[i];
         }
         const int diagonal02 =
             lightingMetricFromPackedVertex(vertexLighting[0]) +
@@ -670,60 +654,25 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             lightingMetricFromPackedVertex(vertexLighting[1]) +
             lightingMetricFromPackedVertex(vertexLighting[3]);
         const bool flipDiagonal = diagonal13 > diagonal02;
+        const uint flipBit = flipDiagonal ? (1u << 31u) : 0u;
 
-        WorldVertex v0;
-        v0.position = p0;
-        v0.normal = normal;
-        v0.tileCoord = projectTileCoord(faceId, p0);
-        v0.atlasBase = uv.base;
-        v0.atlasSize = uv.size;
-        v0.lightingData =
+        GpuExactFaceDescriptor finalDescriptor;
+        finalDescriptor.packedLocal = descriptor.packedLocal | flipBit;
+        finalDescriptor.blockFaceUvIndex = blockFaceUvIndex;
+        finalDescriptor.packedLighting0 =
             ((vertexLighting[0] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
-
-        WorldVertex v1 = v0;
-        v1.position = p1;
-        v1.tileCoord = projectTileCoord(faceId, p1);
-        v1.lightingData =
+        finalDescriptor.packedLighting1 =
             ((vertexLighting[1] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
-
-        WorldVertex v2 = v0;
-        v2.position = p2;
-        v2.tileCoord = projectTileCoord(faceId, p2);
-        v2.lightingData =
+        finalDescriptor.packedLighting2 =
             ((vertexLighting[2] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
-
-        WorldVertex v3 = v0;
-        v3.position = p3;
-        v3.tileCoord = projectTileCoord(faceId, p3);
-        v3.lightingData =
+        finalDescriptor.packedLighting3 =
             ((vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
-
-        vertices[vertexIndex + 0u] = v0;
-        vertices[vertexIndex + 1u] = v1;
-        vertices[vertexIndex + 2u] = v2;
-        vertices[vertexIndex + 3u] = v3;
-
-        if (flipDiagonal)
-        {
-            indices[indexIndex + 0u] = localVertexOffset + 0u;
-            indices[indexIndex + 1u] = localVertexOffset + 1u;
-            indices[indexIndex + 2u] = localVertexOffset + 3u;
-            indices[indexIndex + 3u] = localVertexOffset + 1u;
-            indices[indexIndex + 4u] = localVertexOffset + 2u;
-            indices[indexIndex + 5u] = localVertexOffset + 3u;
-        }
-        else
-        {
-            indices[indexIndex + 0u] = localVertexOffset + 0u;
-            indices[indexIndex + 1u] = localVertexOffset + 1u;
-            indices[indexIndex + 2u] = localVertexOffset + 2u;
-            indices[indexIndex + 3u] = localVertexOffset + 0u;
-            indices[indexIndex + 4u] = localVertexOffset + 2u;
-            indices[indexIndex + 5u] = localVertexOffset + 3u;
-        }
+        finalDescriptor.reserved0 = 0u;
+        finalDescriptor.reserved1 = 0u;
+        faceDescriptors[build.faceBase + faceIndex] = finalDescriptor;
     }
 }

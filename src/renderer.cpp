@@ -1546,16 +1546,26 @@ void Renderer::createFrameResources()
         frame.farCullCountUpload.Reset();
         frame.farCullIndirectArgs.Reset();
         frame.farCullVisibleCountReadback.Reset();
+        frame.exactCullVisibleIndices.Reset();
+        frame.exactCullVisibleCount.Reset();
+        frame.exactCullCountUpload.Reset();
+        frame.exactCullIndirectArgs.Reset();
         frame.farCullRecordsUploadMapped = nullptr;
         frame.farCullCountUploadMapped = nullptr;
         frame.farCullVisibleCountReadbackMapped = nullptr;
+        frame.exactCullCountUploadMapped = nullptr;
         frame.farCullRecordCapacityBytes = 0;
         frame.farCullVisibleIndexCapacityBytes = 0;
         frame.farCullIndirectCapacityBytes = 0;
+        frame.exactCullVisibleIndexCapacityBytes = 0;
+        frame.exactCullIndirectCapacityBytes = 0;
         frame.farCullRecordsState = D3D12_RESOURCE_STATE_COPY_DEST;
         frame.farCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         frame.farCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
         frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        frame.exactCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        frame.exactCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
+        frame.exactCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         frame.farCullVisibleCountReadbackEntryCount = 0;
         frame.fenceValue = 0;
     }
@@ -1588,9 +1598,20 @@ void Renderer::destroyFrameResources()
         frame.farCullCountUpload.Reset();
         frame.farCullIndirectArgs.Reset();
         frame.farCullVisibleCountReadback.Reset();
+        if (frame.exactCullCountUpload != nullptr)
+        {
+            frame.exactCullCountUpload->Unmap(0, nullptr);
+        }
+        frame.exactCullCountUploadMapped = nullptr;
+        frame.exactCullVisibleIndices.Reset();
+        frame.exactCullVisibleCount.Reset();
+        frame.exactCullCountUpload.Reset();
+        frame.exactCullIndirectArgs.Reset();
         frame.farCullRecordCapacityBytes = 0;
         frame.farCullVisibleIndexCapacityBytes = 0;
         frame.farCullIndirectCapacityBytes = 0;
+        frame.exactCullVisibleIndexCapacityBytes = 0;
+        frame.exactCullIndirectCapacityBytes = 0;
         frame.farCullVisibleCountReadbackEntryCount = 0;
         frame.mappedConstants = nullptr;
         frame.constantBuffer.Reset();
@@ -1763,6 +1784,91 @@ void Renderer::ensureFarCullBuffers(FrameResource& frame,
                                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         frame.farCullIndirectCapacityBytes = nextIndirectCapacity;
         frame.farCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+}
+
+void Renderer::ensureExactCullBuffers(FrameResource& frame,
+                                      std::uint64_t visibleIndexBytes,
+                                      std::uint64_t indirectBytes)
+{
+    const auto nextCapacity = [](std::uint64_t requiredBytes) noexcept
+    {
+        std::uint64_t capacity = 4096;
+        while (capacity < requiredBytes)
+        {
+            capacity *= 2;
+        }
+        return capacity;
+    };
+
+    auto createBuffer = [this](const char* label,
+                               D3D12_HEAP_TYPE heapType,
+                               std::uint64_t sizeInBytes,
+                               D3D12_RESOURCE_STATES initialState,
+                               D3D12_RESOURCE_FLAGS flags) -> Microsoft::WRL::ComPtr<ID3D12Resource>
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        const D3D12_HEAP_PROPERTIES heap = heapProps(heapType);
+        D3D12_RESOURCE_DESC desc = bufferDesc(std::max<std::uint64_t>(sizeInBytes, 4u));
+        desc.Flags = flags;
+        throwIfFailed(device_->CreateCommittedResource(&heap,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &desc,
+                                                       initialState,
+                                                       nullptr,
+                                                       IID_PPV_ARGS(&resource)),
+                      std::string("failed to create reusable exact cull buffer '") + label + "'");
+        const char* labelText = label;
+        std::wstring wideLabel;
+        while (*labelText != '\0')
+        {
+            wideLabel.push_back(static_cast<wchar_t>(*labelText));
+            ++labelText;
+        }
+        setResourceDebugName(resource.Get(), wideLabel);
+        return resource;
+    };
+
+    if (frame.exactCullVisibleIndexCapacityBytes < visibleIndexBytes)
+    {
+        const std::uint64_t nextVisibleIndexCapacity = nextCapacity(visibleIndexBytes);
+        frame.exactCullVisibleIndices = createBuffer("exactCullVisibleIndices",
+                                                     D3D12_HEAP_TYPE_DEFAULT,
+                                                     nextVisibleIndexCapacity,
+                                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        frame.exactCullVisibleCount = createBuffer("exactCullVisibleCount",
+                                                   D3D12_HEAP_TYPE_DEFAULT,
+                                                   sizeof(std::uint32_t),
+                                                   D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (frame.exactCullCountUpload != nullptr)
+        {
+            frame.exactCullCountUpload->Unmap(0, nullptr);
+        }
+        frame.exactCullCountUpload = createBuffer("exactCullCountUpload",
+                                                  D3D12_HEAP_TYPE_UPLOAD,
+                                                  sizeof(std::uint32_t),
+                                                  D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                  D3D12_RESOURCE_FLAG_NONE);
+        throwIfFailed(frame.exactCullCountUpload->Map(0, nullptr,
+                                                      reinterpret_cast<void**>(&frame.exactCullCountUploadMapped)),
+                      "failed to map reusable exact cull count upload buffer");
+        frame.exactCullVisibleIndexCapacityBytes = nextVisibleIndexCapacity;
+        frame.exactCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        frame.exactCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+
+    if (frame.exactCullIndirectCapacityBytes < indirectBytes)
+    {
+        const std::uint64_t nextIndirectCapacity = nextCapacity(indirectBytes);
+        frame.exactCullIndirectArgs = createBuffer("exactCullIndirectArgs",
+                                                   D3D12_HEAP_TYPE_DEFAULT,
+                                                   nextIndirectCapacity,
+                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        frame.exactCullIndirectCapacityBytes = nextIndirectCapacity;
+        frame.exactCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
 }
 
@@ -2005,6 +2111,102 @@ void Renderer::createPipelines()
                                                IID_PPV_ARGS(&worldRootSignature_)),
                   "failed to create world root signature");
 
+    std::array<D3D12_ROOT_PARAMETER, 6> exactShadowRootParams{};
+    exactShadowRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    exactShadowRootParams[0].Descriptor.ShaderRegister = 0;
+    exactShadowRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactShadowRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    exactShadowRootParams[1].Constants.ShaderRegister = 1;
+    exactShadowRootParams[1].Constants.Num32BitValues = 1;
+    exactShadowRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactShadowRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    exactShadowRootParams[2].Descriptor.ShaderRegister = 0;
+    exactShadowRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactShadowRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    exactShadowRootParams[3].Descriptor.ShaderRegister = 1;
+    exactShadowRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactShadowRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    exactShadowRootParams[4].Descriptor.ShaderRegister = 2;
+    exactShadowRootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactShadowRootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    exactShadowRootParams[5].DescriptorTable.NumDescriptorRanges = 1;
+    exactShadowRootParams[5].DescriptorTable.pDescriptorRanges = &shadowAtlasRange;
+    exactShadowRootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC exactShadowRootDesc{};
+    exactShadowRootDesc.NumParameters = static_cast<UINT>(exactShadowRootParams.size());
+    exactShadowRootDesc.pParameters = exactShadowRootParams.data();
+    exactShadowRootDesc.NumStaticSamplers = 1;
+    exactShadowRootDesc.pStaticSamplers = &shadowSampler;
+    exactShadowRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    serializedRoot.Reset();
+    errors.Reset();
+    throwIfFailed(D3D12SerializeRootSignature(&exactShadowRootDesc,
+                                              D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &serializedRoot,
+                                              &errors),
+                  "failed to serialize exact shadow root signature");
+    throwIfFailed(device_->CreateRootSignature(0,
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&exactShadowRootSignature_)),
+                  "failed to create exact shadow root signature");
+
+    std::array<D3D12_ROOT_PARAMETER, 9> exactWorldRootParams{};
+    exactWorldRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    exactWorldRootParams[0].Descriptor.ShaderRegister = 0;
+    exactWorldRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    exactWorldRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    exactWorldRootParams[1].Constants.ShaderRegister = 1;
+    exactWorldRootParams[1].Constants.Num32BitValues = 1;
+    exactWorldRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactWorldRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    exactWorldRootParams[2].Descriptor.ShaderRegister = 0;
+    exactWorldRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactWorldRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    exactWorldRootParams[3].Descriptor.ShaderRegister = 1;
+    exactWorldRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactWorldRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    exactWorldRootParams[4].Descriptor.ShaderRegister = 2;
+    exactWorldRootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    exactWorldRootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    exactWorldRootParams[5].DescriptorTable.NumDescriptorRanges = 1;
+    exactWorldRootParams[5].DescriptorTable.pDescriptorRanges = &worldAtlasRange;
+    exactWorldRootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    exactWorldRootParams[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    exactWorldRootParams[6].DescriptorTable.NumDescriptorRanges = 1;
+    exactWorldRootParams[6].DescriptorTable.pDescriptorRanges = &worldAerialRange;
+    exactWorldRootParams[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    exactWorldRootParams[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    exactWorldRootParams[7].DescriptorTable.NumDescriptorRanges = 1;
+    exactWorldRootParams[7].DescriptorTable.pDescriptorRanges = &worldShadowRange;
+    exactWorldRootParams[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    exactWorldRootParams[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    exactWorldRootParams[8].DescriptorTable.NumDescriptorRanges = 1;
+    exactWorldRootParams[8].DescriptorTable.pDescriptorRanges = &worldSkyBackgroundRange;
+    exactWorldRootParams[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC exactWorldRootDesc{};
+    exactWorldRootDesc.NumParameters = static_cast<UINT>(exactWorldRootParams.size());
+    exactWorldRootDesc.pParameters = exactWorldRootParams.data();
+    exactWorldRootDesc.NumStaticSamplers = static_cast<UINT>(worldSamplers.size());
+    exactWorldRootDesc.pStaticSamplers = worldSamplers.data();
+    exactWorldRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    serializedRoot.Reset();
+    errors.Reset();
+    throwIfFailed(D3D12SerializeRootSignature(&exactWorldRootDesc,
+                                              D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &serializedRoot,
+                                              &errors),
+                  "failed to serialize exact world root signature");
+    throwIfFailed(device_->CreateRootSignature(0,
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&exactWorldRootSignature_)),
+                  "failed to create exact world root signature");
+
     D3D12_DESCRIPTOR_RANGE fullscreenRange0{};
     fullscreenRange0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     fullscreenRange0.NumDescriptors = 1;
@@ -2063,12 +2265,16 @@ void Renderer::createPipelines()
 
     Microsoft::WRL::ComPtr<ID3DBlob> worldVs =
         loadShaderBytecode(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> exactWorldVs =
+        loadShaderBytecode(shaderPath("exact_world_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> mobVs =
         loadShaderBytecode(shaderPath("mob_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> blockOutlineVs =
         loadShaderBytecode(shaderPath("block_outline_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> shadowVs =
         loadShaderBytecode(shaderPath("shadow_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> exactShadowVs =
+        loadShaderBytecode(shaderPath("exact_shadow_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> shadowPs =
         loadShaderBytecode(shaderPath("shadow_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
@@ -2085,6 +2291,10 @@ void Renderer::createPipelines()
           loadShaderBytecode(shaderPath("lod_gpu_cull.hlsl"), "LodCullMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> lodIndirectCs =
           loadShaderBytecode(shaderPath("lod_gpu_cull.hlsl"), "LodIndirectBuildMain", "cs_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> exactCullCs =
+          loadShaderBytecode(shaderPath("exact_gpu_cull.hlsl"), "ExactCullMain", "cs_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> exactIndirectCs =
+          loadShaderBytecode(shaderPath("exact_gpu_cull.hlsl"), "ExactIndirectBuildMain", "cs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> fullscreenVs =
           loadShaderBytecode(shaderPath("fullscreen_vs.hlsl"), "main", "vs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> baseSkyPs =
@@ -2142,6 +2352,14 @@ void Renderer::createPipelines()
     throwIfFailed(device_->CreateGraphicsPipelineState(&shadowPso, IID_PPV_ARGS(&shadowPipelineState_)),
                   "failed to create shadow pipeline");
 
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC exactShadowPso = shadowPso;
+    exactShadowPso.InputLayout = {nullptr, 0};
+    exactShadowPso.pRootSignature = exactShadowRootSignature_.Get();
+    exactShadowPso.VS = {exactShadowVs->GetBufferPointer(), exactShadowVs->GetBufferSize()};
+    throwIfFailed(device_->CreateGraphicsPipelineState(&exactShadowPso,
+                                                       IID_PPV_ARGS(&exactShadowPipelineState_)),
+                  "failed to create exact shadow pipeline");
+
     D3D12_GRAPHICS_PIPELINE_STATE_DESC worldPso{};
     worldPso.InputLayout = {inputLayout.data(), static_cast<UINT>(inputLayout.size())};
     worldPso.pRootSignature = worldRootSignature_.Get();
@@ -2163,6 +2381,14 @@ void Renderer::createPipelines()
     worldPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&nearPipelineState_)),
                   "failed to create near pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC exactWorldPso = worldPso;
+    exactWorldPso.InputLayout = {nullptr, 0};
+    exactWorldPso.pRootSignature = exactWorldRootSignature_.Get();
+    exactWorldPso.VS = {exactWorldVs->GetBufferPointer(), exactWorldVs->GetBufferSize()};
+    throwIfFailed(device_->CreateGraphicsPipelineState(&exactWorldPso,
+                                                       IID_PPV_ARGS(&exactNearPipelineState_)),
+                  "failed to create exact near pipeline");
 
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
@@ -2207,6 +2433,25 @@ void Renderer::createPipelines()
                                                     nullptr,
                                                     IID_PPV_ARGS(&drawIndexedCommandSignature_)),
                     "failed to create draw indexed command signature");
+
+      std::array<D3D12_INDIRECT_ARGUMENT_DESC, 2> exactDrawArguments{};
+      exactDrawArguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+      exactDrawArguments[0].Constant.RootParameterIndex = 1;
+      exactDrawArguments[0].Constant.DestOffsetIn32BitValues = 0;
+      exactDrawArguments[0].Constant.Num32BitValuesToSet = 1;
+      exactDrawArguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+      D3D12_COMMAND_SIGNATURE_DESC exactDrawSignature{};
+      exactDrawSignature.ByteStride = sizeof(std::uint32_t) + sizeof(D3D12_DRAW_ARGUMENTS);
+      exactDrawSignature.NumArgumentDescs = static_cast<UINT>(exactDrawArguments.size());
+      exactDrawSignature.pArgumentDescs = exactDrawArguments.data();
+      throwIfFailed(device_->CreateCommandSignature(&exactDrawSignature,
+                                                    exactWorldRootSignature_.Get(),
+                                                    IID_PPV_ARGS(&exactWorldDrawCommandSignature_)),
+                    "failed to create exact world draw command signature");
+      throwIfFailed(device_->CreateCommandSignature(&exactDrawSignature,
+                                                    exactShadowRootSignature_.Get(),
+                                                    IID_PPV_ARGS(&exactShadowDrawCommandSignature_)),
+                    "failed to create exact shadow draw command signature");
 
       auto createComputeRootSignature = [this](const D3D12_ROOT_SIGNATURE_DESC& desc,
                                                Microsoft::WRL::ComPtr<ID3D12RootSignature>& rootSignature,
@@ -2300,6 +2545,50 @@ void Renderer::createPipelines()
       lodIndirectPso.CS = {lodIndirectCs->GetBufferPointer(), lodIndirectCs->GetBufferSize()};
       throwIfFailed(device_->CreateComputePipelineState(&lodIndirectPso, IID_PPV_ARGS(&lodIndirectPipelineState_)),
                     "failed to create lod indirect pipeline");
+
+      std::array<D3D12_ROOT_PARAMETER, 5> exactCullRootParams{};
+      exactCullRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      exactCullRootParams[0].Constants.ShaderRegister = 0;
+      exactCullRootParams[0].Constants.Num32BitValues = 44;
+      exactCullRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      exactCullRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+      exactCullRootParams[1].DescriptorTable.pDescriptorRanges = &depthPyramidSrvRange;
+      exactCullRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      exactCullRootParams[2].Descriptor.ShaderRegister = 1;
+      exactCullRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      exactCullRootParams[3].Descriptor.ShaderRegister = 0;
+      exactCullRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      exactCullRootParams[4].Descriptor.ShaderRegister = 1;
+      D3D12_ROOT_SIGNATURE_DESC exactCullRootDesc{};
+      exactCullRootDesc.NumParameters = static_cast<UINT>(exactCullRootParams.size());
+      exactCullRootDesc.pParameters = exactCullRootParams.data();
+      createComputeRootSignature(exactCullRootDesc, exactCullRootSignature_, "exact cull root signature");
+
+      D3D12_COMPUTE_PIPELINE_STATE_DESC exactCullPso{};
+      exactCullPso.pRootSignature = exactCullRootSignature_.Get();
+      exactCullPso.CS = {exactCullCs->GetBufferPointer(), exactCullCs->GetBufferSize()};
+      throwIfFailed(device_->CreateComputePipelineState(&exactCullPso, IID_PPV_ARGS(&exactCullPipelineState_)),
+                    "failed to create exact cull pipeline");
+
+      std::array<D3D12_ROOT_PARAMETER, 4> exactIndirectRootParams{};
+      exactIndirectRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      exactIndirectRootParams[0].Descriptor.ShaderRegister = 1;
+      exactIndirectRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      exactIndirectRootParams[1].Descriptor.ShaderRegister = 2;
+      exactIndirectRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      exactIndirectRootParams[2].Descriptor.ShaderRegister = 2;
+      exactIndirectRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      exactIndirectRootParams[3].Descriptor.ShaderRegister = 1;
+      D3D12_ROOT_SIGNATURE_DESC exactIndirectRootDesc{};
+      exactIndirectRootDesc.NumParameters = static_cast<UINT>(exactIndirectRootParams.size());
+      exactIndirectRootDesc.pParameters = exactIndirectRootParams.data();
+      createComputeRootSignature(exactIndirectRootDesc, exactIndirectRootSignature_, "exact indirect root signature");
+
+      D3D12_COMPUTE_PIPELINE_STATE_DESC exactIndirectPso{};
+      exactIndirectPso.pRootSignature = exactIndirectRootSignature_.Get();
+      exactIndirectPso.CS = {exactIndirectCs->GetBufferPointer(), exactIndirectCs->GetBufferSize()};
+      throwIfFailed(device_->CreateComputePipelineState(&exactIndirectPso, IID_PPV_ARGS(&exactIndirectPipelineState_)),
+                    "failed to create exact indirect pipeline");
 
       D3D12_GRAPHICS_PIPELINE_STATE_DESC baseSkyPso{};
       baseSkyPso.pRootSignature = fullscreenRootSignature_.Get();
@@ -3162,6 +3451,190 @@ void Renderer::renderWorldBatchGpuCull(const ChunkRenderBatch& batch,
     }
 }
 
+void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
+                                       const glm::mat4& viewProj,
+                                       ID3D12PipelineState* pipelineState,
+                                       ID3D12RootSignature* rootSignature,
+                                       D3D12_GPU_VIRTUAL_ADDRESS constantsGpuAddress,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv,
+                                       ID3D12Resource* exactBlockUvBuffer,
+                                       bool shadowPass)
+{
+    if (batch.drawRecordBuffer == nullptr ||
+        batch.faceDescriptorBuffer == nullptr ||
+        batch.drawRecordMetadataBuffer == nullptr ||
+        batch.gpuCullRecordCount == 0u ||
+        !depthPyramid_ ||
+        pipelineState == nullptr ||
+        rootSignature == nullptr ||
+        !exactCullRootSignature_ ||
+        !exactCullPipelineState_ ||
+        !exactIndirectRootSignature_ ||
+        !exactIndirectPipelineState_ ||
+        !exactWorldDrawCommandSignature_ ||
+        !exactShadowDrawCommandSignature_ ||
+        exactBlockUvBuffer == nullptr)
+    {
+        return;
+    }
+
+    FrameResource& frame = frameResources_[currentBackBufferIndex_];
+    const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
+    const std::uint64_t visibleIndexBytes =
+        std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u);
+    const std::uint64_t indirectBytes =
+        std::max<std::uint64_t>(recordCount * (sizeof(std::uint32_t) + sizeof(D3D12_DRAW_ARGUMENTS)), 4u);
+    if (frame.exactCullVisibleIndexCapacityBytes < visibleIndexBytes ||
+        frame.exactCullIndirectCapacityBytes < indirectBytes)
+    {
+        throwRenderError("exact cull buffers were not pre-sized before batch recording");
+    }
+
+    ID3D12Resource* visibleIndices = frame.exactCullVisibleIndices.Get();
+    ID3D12Resource* visibleCount = frame.exactCullVisibleCount.Get();
+    ID3D12Resource* countUpload = frame.exactCullCountUpload.Get();
+    ID3D12Resource* indirectArgs = frame.exactCullIndirectArgs.Get();
+    if (visibleIndices == nullptr ||
+        visibleCount == nullptr ||
+        countUpload == nullptr ||
+        indirectArgs == nullptr ||
+        frame.exactCullCountUploadMapped == nullptr)
+    {
+        throw std::runtime_error("Renderer: failed to prepare reusable exact cull buffers");
+    }
+
+    const std::uint32_t zeroValue = 0u;
+    std::memcpy(frame.exactCullCountUploadMapped, &zeroValue, sizeof(zeroValue));
+
+    std::array<D3D12_RESOURCE_BARRIER, 3> preCopyBarriers{};
+    UINT preCopyBarrierCount = 0;
+    if (frame.exactCullVisibleCountState != D3D12_RESOURCE_STATE_COPY_DEST)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(visibleCount, frame.exactCullVisibleCountState, D3D12_RESOURCE_STATE_COPY_DEST);
+        frame.exactCullVisibleCountState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    if (frame.exactCullVisibleIndicesState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(visibleIndices,
+                              frame.exactCullVisibleIndicesState,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        frame.exactCullVisibleIndicesState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (frame.exactCullIndirectArgsState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        preCopyBarriers[preCopyBarrierCount++] =
+            transitionBarrier(indirectArgs,
+                              frame.exactCullIndirectArgsState,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        frame.exactCullIndirectArgsState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (preCopyBarrierCount > 0)
+    {
+        commandList_->ResourceBarrier(preCopyBarrierCount, preCopyBarriers.data());
+    }
+
+    commandList_->CopyBufferRegion(visibleCount, 0, countUpload, 0, sizeof(std::uint32_t));
+    const D3D12_RESOURCE_BARRIER setupBarrier =
+        transitionBarrier(visibleCount, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    commandList_->ResourceBarrier(1, &setupBarrier);
+    frame.exactCullVisibleCountState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    struct CullRootConstants
+    {
+        glm::mat4 viewProj{1.0f};
+        glm::vec4 frustumPlanes[6]{};
+        UINT recordCount{0};
+        UINT depthWidth{0};
+        UINT depthHeight{0};
+        UINT depthMipCount{0};
+    } constants{};
+    constants.viewProj = viewProj;
+    const std::array<FrustumPlane, 6> frustumPlanes = extractFrustumPlanes(viewProj);
+    for (std::size_t i = 0; i < frustumPlanes.size(); ++i)
+    {
+        constants.frustumPlanes[i] = frustumPlanes[i].equation;
+    }
+    constants.recordCount = static_cast<UINT>(recordCount);
+    constants.depthWidth = static_cast<UINT>(std::max(width_, 1));
+    constants.depthHeight = static_cast<UINT>(std::max(height_, 1));
+    constants.depthMipCount = depthPyramidMipCount_;
+
+    const UINT dispatchGroups = static_cast<UINT>((recordCount + 63u) / 64u);
+    commandList_->SetComputeRootSignature(exactCullRootSignature_.Get());
+    commandList_->SetPipelineState(exactCullPipelineState_.Get());
+    commandList_->SetComputeRoot32BitConstants(0, 44, &constants, 0);
+    commandList_->SetComputeRootDescriptorTable(1, depthPyramidSrvGpu_);
+    commandList_->SetComputeRootShaderResourceView(2, batch.drawRecordBuffer->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(3, visibleIndices->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(4, visibleCount->GetGPUVirtualAddress());
+    commandList_->Dispatch(dispatchGroups, 1, 1);
+
+    std::array<D3D12_RESOURCE_BARRIER, 3> cullBarriers{};
+    cullBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    cullBarriers[0].UAV.pResource = visibleIndices;
+    cullBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    cullBarriers[1].UAV.pResource = visibleCount;
+    cullBarriers[2] = transitionBarrier(visibleIndices,
+                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    commandList_->ResourceBarrier(static_cast<UINT>(cullBarriers.size()), cullBarriers.data());
+    frame.exactCullVisibleIndicesState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    commandList_->SetComputeRootSignature(exactIndirectRootSignature_.Get());
+    commandList_->SetPipelineState(exactIndirectPipelineState_.Get());
+    commandList_->SetComputeRootShaderResourceView(0, batch.drawRecordBuffer->GetGPUVirtualAddress());
+    commandList_->SetComputeRootShaderResourceView(1, visibleIndices->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(2, indirectArgs->GetGPUVirtualAddress());
+    commandList_->SetComputeRootUnorderedAccessView(3, visibleCount->GetGPUVirtualAddress());
+    commandList_->Dispatch(dispatchGroups, 1, 1);
+
+    std::array<D3D12_RESOURCE_BARRIER, 4> indirectBarriers{};
+    indirectBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    indirectBarriers[0].UAV.pResource = indirectArgs;
+    indirectBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    indirectBarriers[1].UAV.pResource = visibleCount;
+    indirectBarriers[2] = transitionBarrier(indirectArgs,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    indirectBarriers[3] = transitionBarrier(visibleCount,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    commandList_->ResourceBarrier(static_cast<UINT>(indirectBarriers.size()), indirectBarriers.data());
+    frame.exactCullIndirectArgsState = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    frame.exactCullVisibleCountState = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+
+    commandList_->SetGraphicsRootSignature(rootSignature);
+    commandList_->SetPipelineState(pipelineState);
+    commandList_->SetGraphicsRootConstantBufferView(0, constantsGpuAddress);
+    commandList_->SetGraphicsRootShaderResourceView(2, batch.faceDescriptorBuffer->GetGPUVirtualAddress());
+    commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
+    commandList_->SetGraphicsRootShaderResourceView(4, exactBlockUvBuffer->GetGPUVirtualAddress());
+    if (shadowPass)
+    {
+        commandList_->SetGraphicsRootDescriptorTable(5, atlasSrv);
+    }
+    else
+    {
+        commandList_->SetGraphicsRootDescriptorTable(5, atlasSrv);
+        commandList_->SetGraphicsRootDescriptorTable(6, aerialPerspectiveSrv);
+        commandList_->SetGraphicsRootDescriptorTable(7, shadowSrv);
+        commandList_->SetGraphicsRootDescriptorTable(8, skyBackgroundSrv);
+    }
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->ExecuteIndirect(shadowPass ? exactShadowDrawCommandSignature_.Get()
+                                             : exactWorldDrawCommandSignature_.Get(),
+                                  static_cast<UINT>(recordCount),
+                                  indirectArgs,
+                                  0,
+                                  visibleCount,
+                                  0);
+}
+
 std::string Renderer::collectDebugMessages() const
 {
     return collectRendererInfoQueueMessages();
@@ -3545,9 +4018,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     if (environment.debug.worldPassEnabled)
     {
         bool shouldUseGpuWorldCull = false;
+        bool shouldUseExactGpuCull = false;
         std::uint64_t maxRecordBytes = 0;
         std::uint64_t maxVisibleIndexBytes = 0;
         std::uint64_t maxIndirectBytes = 0;
+        std::uint64_t maxExactVisibleIndexBytes = 0;
+        std::uint64_t maxExactIndirectBytes = 0;
         auto accumulateCullBuffers = [&](const ChunkRenderBatch& batch)
         {
             if (!batch.supportsGpuCull ||
@@ -3566,9 +4042,30 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             maxIndirectBytes = std::max(maxIndirectBytes,
                                         std::max<std::uint64_t>(recordCount * sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), 4u));
         };
+        auto accumulateExactCullBuffers = [&](const ExactChunkRenderBatch& batch)
+        {
+            if (!batch.supportsGpuCull ||
+                batch.drawRecordBuffer == nullptr ||
+                batch.gpuCullRecordCount == 0)
+            {
+                return;
+            }
+
+            shouldUseExactGpuCull = true;
+            const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
+            maxExactVisibleIndexBytes = std::max(maxExactVisibleIndexBytes,
+                                                 std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u));
+            maxExactIndirectBytes = std::max(
+                maxExactIndirectBytes,
+                std::max<std::uint64_t>(recordCount * (sizeof(std::uint32_t) + sizeof(D3D12_DRAW_ARGUMENTS)), 4u));
+        };
         for (const ChunkRenderBatch& batch : renderData.nearBatches)
         {
             accumulateCullBuffers(batch);
+        }
+        for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
+        {
+            accumulateExactCullBuffers(batch);
         }
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
@@ -3598,10 +4095,17 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             }
         }
 
-        if (shouldUseGpuWorldCull && maxRecordBytes > 0)
+        if ((shouldUseGpuWorldCull && maxRecordBytes > 0) || shouldUseExactGpuCull)
         {
             FrameResource& frame = frameResources_[currentBackBufferIndex_];
-            ensureFarCullBuffers(frame, maxRecordBytes, maxVisibleIndexBytes, maxIndirectBytes);
+            if (shouldUseGpuWorldCull && maxRecordBytes > 0)
+            {
+                ensureFarCullBuffers(frame, maxRecordBytes, maxVisibleIndexBytes, maxIndirectBytes);
+            }
+            if (shouldUseExactGpuCull)
+            {
+                ensureExactCullBuffers(frame, maxExactVisibleIndexBytes, maxExactIndirectBytes);
+            }
             buildDepthPyramid();
         }
 
@@ -3624,6 +4128,54 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                     atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
                                     shadowMapSrvGpu_,
                                     skyBackgroundSrvGpu_);
+        }
+
+        commandList_->SetGraphicsRootSignature(exactWorldRootSignature_.Get());
+        commandList_->SetPipelineState(exactNearPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        commandList_->SetGraphicsRootShaderResourceView(4, renderData.exactBlockUvBuffer != nullptr
+                                                               ? renderData.exactBlockUvBuffer->GetGPUVirtualAddress()
+                                                               : 0);
+        commandList_->SetGraphicsRootDescriptorTable(5, atlasTexture.srvGpu);
+        commandList_->SetGraphicsRootDescriptorTable(6, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(7, shadowMapSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(8, skyBackgroundSrvGpu_);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
+        {
+            if (batch.supportsGpuCull &&
+                batch.drawRecordBuffer != nullptr &&
+                batch.gpuCullRecordCount > 0)
+            {
+                renderExactBatchGpuCull(batch,
+                                        viewProj,
+                                        exactNearPipelineState_.Get(),
+                                        exactWorldRootSignature_.Get(),
+                                        worldCb,
+                                        atlasTexture.srvGpu,
+                                        atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                                        shadowMapSrvGpu_,
+                                        skyBackgroundSrvGpu_,
+                                        renderData.exactBlockUvBuffer,
+                                        false);
+                continue;
+            }
+
+            if (batch.faceCounts.empty() ||
+                batch.faceDescriptorBuffer == nullptr ||
+                batch.drawRecordMetadataBuffer == nullptr ||
+                renderData.exactBlockUvBuffer == nullptr)
+            {
+                continue;
+            }
+
+            commandList_->SetGraphicsRootShaderResourceView(2, batch.faceDescriptorBuffer->GetGPUVirtualAddress());
+            commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
+            for (std::size_t i = 0; i < batch.faceCounts.size(); ++i)
+            {
+                commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
+                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, batch.faceOffsets[i]);
+            }
         }
 
         std::size_t farBatchCount = 0;
@@ -3824,7 +4376,8 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
                                            1.0f,
                                            0.0f);
 
-    if (!shadowMap_ || renderData.nearBatches.empty())
+    if (!shadowMap_ ||
+        (renderData.nearBatches.empty() && renderData.exactNearBatches.empty()))
     {
         return;
     }
@@ -3922,6 +4475,34 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
         for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
         {
             commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+        }
+    }
+
+    if (renderData.exactBlockUvBuffer != nullptr)
+    {
+        commandList_->SetGraphicsRootSignature(exactShadowRootSignature_.Get());
+        commandList_->SetPipelineState(exactShadowPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, shadowCbAddress);
+        commandList_->SetGraphicsRootShaderResourceView(4, renderData.exactBlockUvBuffer->GetGPUVirtualAddress());
+        commandList_->SetGraphicsRootDescriptorTable(5, atlasTexture.srvGpu);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
+        {
+            if (batch.faceCounts.empty() ||
+                batch.faceDescriptorBuffer == nullptr ||
+                batch.drawRecordMetadataBuffer == nullptr)
+            {
+                continue;
+            }
+
+            commandList_->SetGraphicsRootShaderResourceView(2, batch.faceDescriptorBuffer->GetGPUVirtualAddress());
+            commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
+            for (std::size_t i = 0; i < batch.faceCounts.size(); ++i)
+            {
+                commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
+                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, batch.faceOffsets[i]);
+            }
         }
     }
 

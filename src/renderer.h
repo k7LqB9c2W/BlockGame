@@ -239,13 +239,20 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> farCullCountUpload;
         Microsoft::WRL::ComPtr<ID3D12Resource> farCullIndirectArgs;
         Microsoft::WRL::ComPtr<ID3D12Resource> farCullVisibleCountReadback;
+        Microsoft::WRL::ComPtr<ID3D12Resource> exactCullVisibleIndices;
+        Microsoft::WRL::ComPtr<ID3D12Resource> exactCullVisibleCount;
+        Microsoft::WRL::ComPtr<ID3D12Resource> exactCullCountUpload;
+        Microsoft::WRL::ComPtr<ID3D12Resource> exactCullIndirectArgs;
         std::byte* mappedConstants{nullptr};
         std::byte* farCullRecordsUploadMapped{nullptr};
         std::byte* farCullCountUploadMapped{nullptr};
         std::byte* farCullVisibleCountReadbackMapped{nullptr};
+        std::byte* exactCullCountUploadMapped{nullptr};
         std::uint64_t farCullRecordCapacityBytes{0};
         std::uint64_t farCullVisibleIndexCapacityBytes{0};
         std::uint64_t farCullIndirectCapacityBytes{0};
+        std::uint64_t exactCullVisibleIndexCapacityBytes{0};
+        std::uint64_t exactCullIndirectCapacityBytes{0};
         std::uint32_t farCullVisibleCountReadbackEntryCount{0};
         std::array<std::uint32_t, kFarCullVisibleCountReadbackMaxEntries> farCullVisibleCountReadbackPageIndices{};
         std::array<std::uint32_t, kFarCullVisibleCountReadbackMaxEntries> farCullVisibleCountReadbackRecordCounts{};
@@ -253,6 +260,9 @@ private:
         D3D12_RESOURCE_STATES farCullVisibleIndicesState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         D3D12_RESOURCE_STATES farCullVisibleCountState{D3D12_RESOURCE_STATE_COPY_DEST};
         D3D12_RESOURCE_STATES farCullIndirectArgsState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        D3D12_RESOURCE_STATES exactCullVisibleIndicesState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        D3D12_RESOURCE_STATES exactCullVisibleCountState{D3D12_RESOURCE_STATE_COPY_DEST};
+        D3D12_RESOURCE_STATES exactCullIndirectArgsState{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         UINT64 fenceValue{0};
     };
 
@@ -306,6 +316,9 @@ private:
                               std::uint64_t recordBytes,
                               std::uint64_t visibleIndexBytes,
                               std::uint64_t indirectBytes);
+    void ensureExactCullBuffers(FrameResource& frame,
+                                std::uint64_t visibleIndexBytes,
+                                std::uint64_t indirectBytes);
     void writePendingScreenshot(const std::filesystem::path& path);
     void buildDepthPyramid();
     void renderWorldBatchGpuCull(const ChunkRenderBatch& batch,
@@ -316,6 +329,17 @@ private:
                                  D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
                                  D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
                                  D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv);
+    void renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
+                                 const glm::mat4& viewProj,
+                                 ID3D12PipelineState* pipelineState,
+                                 ID3D12RootSignature* rootSignature,
+                                 D3D12_GPU_VIRTUAL_ADDRESS constantsGpuAddress,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv,
+                                 ID3D12Resource* exactBlockUvBuffer,
+                                 bool shadowPass);
     void renderShadowMap(const WorldRenderData& renderData,
                          const LoadedTexture& atlasTexture,
                          const glm::mat4& view,
@@ -356,19 +380,29 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> shadowRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> worldRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactShadowRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactWorldRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> fullscreenRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> depthPyramidRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> lodCullRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> lodIndirectRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactCullRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactIndirectRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactShadowPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactNearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mobPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> blockOutlinePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> depthPyramidPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> lodCullPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> lodIndirectPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactCullPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactIndirectPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactWorldDrawCommandSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> exactShadowDrawCommandSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> backgroundCloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;

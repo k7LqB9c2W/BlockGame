@@ -3307,15 +3307,16 @@ struct GpuExactPrepassRecord
     std::uint32_t lightScratchVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
     std::uint32_t lightScratchVoxelUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
     std::uint32_t sparseVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
-    std::uint32_t neighborPosXVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
-    std::uint32_t neighborNegXVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
-    std::uint32_t neighborPosYVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
-    std::uint32_t neighborNegYVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
-    std::uint32_t neighborPosZVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
-    std::uint32_t neighborNegZVoxelSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t seamVoxelUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborPosXSeamSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborNegXSeamSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborPosYSeamSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborNegYSeamSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborPosZSeamSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+    std::uint32_t neighborNegZSeamSrvDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
     std::uint32_t reserved0{0};
 };
-static_assert(sizeof(GpuExactPrepassRecord) == 96u);
+static_assert(sizeof(GpuExactPrepassRecord) == 100u);
 
 #include "chunk_manager_structure_registry.inl"
 
@@ -3534,32 +3535,36 @@ struct Chunk
         Microsoft::WRL::ComPtr<ID3D12Resource> voxelBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> haloBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> lightScratchBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> seamBuffer;
         D3D12_RESOURCE_STATES columnState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES sparseVoxelState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES voxelState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES haloState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES lightScratchState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES seamState{D3D12_RESOURCE_STATE_COMMON};
         std::uint32_t sparseVoxelCapacity{0};
         UINT64 readyFenceValue{0};
 
         void releaseTransient() noexcept
         {
+            columnBuffer.Reset();
             sparseVoxelBuffer.Reset();
+            voxelBuffer.Reset();
+            haloBuffer.Reset();
+            lightScratchBuffer.Reset();
+            columnState = D3D12_RESOURCE_STATE_COMMON;
             sparseVoxelState = D3D12_RESOURCE_STATE_COMMON;
+            voxelState = D3D12_RESOURCE_STATE_COMMON;
+            haloState = D3D12_RESOURCE_STATE_COMMON;
+            lightScratchState = D3D12_RESOURCE_STATE_COMMON;
             sparseVoxelCapacity = 0;
         }
 
         void reset() noexcept
         {
             releaseTransient();
-            columnBuffer.Reset();
-            voxelBuffer.Reset();
-            haloBuffer.Reset();
-            lightScratchBuffer.Reset();
-            columnState = D3D12_RESOURCE_STATE_COMMON;
-            voxelState = D3D12_RESOURCE_STATE_COMMON;
-            haloState = D3D12_RESOURCE_STATE_COMMON;
-            lightScratchState = D3D12_RESOURCE_STATE_COMMON;
+            seamBuffer.Reset();
+            seamState = D3D12_RESOURCE_STATE_COMMON;
             readyFenceValue = 0;
         }
     };
@@ -3634,6 +3639,8 @@ struct Chunk
         exactGpuReadyVersion.store(0, std::memory_order_relaxed);
         exactGpuHaloDirty.store(false, std::memory_order_relaxed);
         exactGpuRecordIndex.store(std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
+        exactGpuFaceOffset.store(0, std::memory_order_relaxed);
+        exactGpuFaceCount.store(0, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident = false;
         lastDenseFrameTouched = 0;
@@ -3733,6 +3740,8 @@ struct Chunk
     std::atomic<std::uint64_t> exactGpuReadyVersion{0};
     std::atomic<bool> exactGpuHaloDirty{false};
     std::atomic<std::uint32_t> exactGpuRecordIndex{std::numeric_limits<std::uint32_t>::max()};
+    std::atomic<std::uint32_t> exactGpuFaceOffset{0};
+    std::atomic<std::uint32_t> exactGpuFaceCount{0};
     std::atomic<std::uint8_t> exactGpuPendingNeighborMask{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     bool cpuDataResident{false};
@@ -4306,6 +4315,7 @@ private:
 
         Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> faceDescriptorBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> drawRecordBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> drawRecordMetadataBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> vertexUploadBuffer;
@@ -4316,13 +4326,16 @@ private:
         std::byte* mappedIndexData{nullptr};
         D3D12_RESOURCE_STATES vertexState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES indexState{D3D12_RESOURCE_STATE_COMMON};
+        D3D12_RESOURCE_STATES faceDescriptorState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES drawRecordState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES drawRecordMetadataState{D3D12_RESOURCE_STATE_COMMON};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
+        std::size_t faceCapacity{0};
         std::size_t recordCapacity{0};
         std::size_t vertexCursor{0};
         std::size_t indexCursor{0};
+        std::size_t faceCursor{0};
         std::size_t recordCursor{0};
         std::size_t recordActiveCount{0};
         std::size_t residentChunks{0};
@@ -4337,6 +4350,7 @@ private:
         UINT64 pendingBatchId{0};
         UINT64 uploadFenceValue{0};
         UINT64 retireFenceValue{0};
+        std::uint32_t exactFaceDescriptorUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
         std::uint32_t exactVertexUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
         std::uint32_t exactIndexUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
         std::uint32_t exactDrawRecordUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
@@ -4358,6 +4372,7 @@ private:
         std::uint32_t pageIndex{kInvalidChunkBufferPage};
         std::size_t vertexOffset{0};
         std::size_t indexOffset{0};
+        std::size_t faceOffset{0};
         std::uint32_t recordIndex{std::numeric_limits<std::uint32_t>::max()};
     };
 
@@ -6171,9 +6186,18 @@ bool ChunkManager::Impl::ensureChunkExactGpuBuildResourcesLocked(Chunk& chunk)
                                                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_COMMON;
     }
+    if (chunk.exactGpu.seamBuffer == nullptr)
+    {
+        chunk.exactGpu.seamBuffer = createDefaultBuffer(device_.Get(),
+                                                        haloBytes,
+                                                        D3D12_RESOURCE_STATE_COMMON,
+                                                        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        chunk.exactGpu.seamState = D3D12_RESOURCE_STATE_COMMON;
+    }
 
     return chunk.exactGpu.voxelBuffer != nullptr &&
            chunk.exactGpu.haloBuffer != nullptr &&
+           chunk.exactGpu.seamBuffer != nullptr &&
            chunk.exactGpu.lightScratchBuffer != nullptr &&
            (sparseVoxelCount == 0 || chunk.exactGpu.sparseVoxelBuffer != nullptr);
 }
@@ -7101,6 +7125,8 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     WorldRenderData renderData;
     renderData.highlightedBlock = highlightedBlock_;
     renderData.hasHighlight = hasHighlight_;
+    renderData.exactBlockUvBuffer = exactGpuBlockUvBuffer_.Get();
+    renderData.exactBlockUvCount = exactGpuBlockUvCount_;
     farTerrainManager_.setVisibility(frustum, lastCameraPosition_);
     const int exactDrawRadiusChunks = preloadExactDrawRadiusChunks(
         std::max(targetViewDistance_ + hiddenExactPreloadBufferChunks(renderSettings_), targetViewDistance_),
@@ -7125,9 +7151,29 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         const std::size_t pageCount = bufferPages_.size();
         renderData.nearBatches.resize(pageCount);
+        renderData.exactNearBatches.resize(pageCount);
         exactGpuResidentPages.assign(pageCount, false);
         for (std::size_t i = 0; i < pageCount; ++i)
         {
+            if (bufferPages_[i].usage == ChunkBufferPageUsage::ExactGpu)
+            {
+                const bool residentExactPage =
+                    bufferPages_[i].state == ChunkBufferPageState::ResidentImmutable;
+                exactGpuResidentPages[i] = residentExactPage;
+                renderData.exactNearBatches[i].faceDescriptorBuffer = bufferPages_[i].faceDescriptorBuffer.Get();
+                renderData.exactNearBatches[i].drawRecordBuffer = bufferPages_[i].drawRecordBuffer.Get();
+                renderData.exactNearBatches[i].drawRecordMetadataBuffer =
+                    bufferPages_[i].drawRecordMetadataBuffer.Get();
+                renderData.exactNearBatches[i].gpuCullRecordCount =
+                    residentExactPage ? static_cast<std::uint32_t>(bufferPages_[i].recordActiveCount) : 0u;
+                renderData.exactNearBatches[i].supportsGpuCull =
+                    residentExactPage &&
+                    renderData.exactNearBatches[i].drawRecordBuffer != nullptr &&
+                    renderData.exactNearBatches[i].gpuCullRecordCount > 0u;
+                renderData.exactNearBatches[i].debugPageIndex = static_cast<std::uint32_t>(i);
+                continue;
+            }
+
             renderData.nearBatches[i].vertexBufferView = bufferPages_[i].vertexView;
             renderData.nearBatches[i].indexBufferView = bufferPages_[i].indexView;
             renderData.nearBatches[i].gpuCullRecordBuffer = bufferPages_[i].drawRecordBuffer.Get();
@@ -7137,19 +7183,6 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
                 renderData.nearBatches[i].gpuCullRecordBuffer != nullptr &&
                 renderData.nearBatches[i].gpuCullRecordCount > 0;
             renderData.nearBatches[i].debugPageIndex = static_cast<std::uint32_t>(i);
-
-            if (bufferPages_[i].usage == ChunkBufferPageUsage::ExactGpu)
-            {
-                const bool residentExactPage =
-                    bufferPages_[i].state == ChunkBufferPageState::ResidentImmutable;
-                exactGpuResidentPages[i] = residentExactPage;
-                if (!residentExactPage)
-                {
-                    renderData.nearBatches[i].gpuCullRecordBuffer = nullptr;
-                    renderData.nearBatches[i].gpuCullRecordCount = 0u;
-                    renderData.nearBatches[i].supportsGpuCull = false;
-                }
-            }
         }
     }
     std::vector<bool> exactGpuPageVisible(renderData.nearBatches.size(), false);
@@ -7211,7 +7244,18 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             {
                 continue;
             }
+            const std::uint32_t faceCount = chunkPtr->exactGpuFaceCount.load(std::memory_order_acquire);
+            const std::uint32_t faceOffset = chunkPtr->exactGpuFaceOffset.load(std::memory_order_acquire);
+            const std::uint32_t recordIndex = chunkPtr->exactGpuRecordIndex.load(std::memory_order_acquire);
+            if (faceCount == 0u || recordIndex == kInvalidExactGpuDrawRecordIndex)
+            {
+                continue;
+            }
             exactGpuPageVisible[pageIndex] = true;
+            ExactChunkRenderBatch& batch = renderData.exactNearBatches[pageIndex];
+            batch.faceOffsets.push_back(faceOffset);
+            batch.faceCounts.push_back(faceCount);
+            batch.recordIndices.push_back(recordIndex);
             continue;
         }
 
@@ -7233,13 +7277,20 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
                                   renderData.nearBatches.end(),
                                   [&exactGpuPageVisible](const ChunkRenderBatch& batch)
                                   {
-                                      const bool exactGpuVisible =
-                                          batch.debugPageIndex < exactGpuPageVisible.size() &&
-                                          exactGpuPageVisible[batch.debugPageIndex];
-                                      return batch.indexCounts.empty() &&
-                                             (!exactGpuVisible || batch.gpuCullRecordCount == 0);
+                                      return batch.indexCounts.empty();
                                   });
     renderData.nearBatches.erase(emptyIt, renderData.nearBatches.end());
+    auto exactEmptyIt = std::remove_if(renderData.exactNearBatches.begin(),
+                                       renderData.exactNearBatches.end(),
+                                       [&exactGpuPageVisible](const ExactChunkRenderBatch& batch)
+                                       {
+                                           const bool exactGpuVisible =
+                                               batch.debugPageIndex < exactGpuPageVisible.size() &&
+                                               exactGpuPageVisible[batch.debugPageIndex];
+                                           return batch.faceCounts.empty() &&
+                                                  (!exactGpuVisible || batch.gpuCullRecordCount == 0u);
+                                       });
+    renderData.exactNearBatches.erase(exactEmptyIt, renderData.exactNearBatches.end());
     renderData.farBatches = farTerrainManager_.buildRenderBatches(frustum);
 
     return renderData;
@@ -9974,6 +10025,10 @@ std::string ChunkManager::Impl::summarizeChunkBufferPagesLocked() const
             totals.bytes +=
                 static_cast<std::uint64_t>(page.recordCapacity * sizeof(FarLodGpuContext::ExactDrawRecordMetadata));
         }
+        if (page.faceDescriptorBuffer != nullptr)
+        {
+            totals.bytes += static_cast<std::uint64_t>(page.faceCapacity * 32u);
+        }
         if (page.vertexUploadBuffer != nullptr)
         {
             totals.bytes += static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex));
@@ -10104,8 +10159,7 @@ FarLodGpuContext::ExactPageGpuMetadata ChunkManager::Impl::buildExactGpuPageMeta
     metadata.pageIndex = pageIndex;
     metadata.state = static_cast<std::uint32_t>(page.state);
     metadata.recordCapacity = static_cast<std::uint32_t>(page.recordCapacity);
-    metadata.vertexUavDescriptorIndex = page.exactVertexUavDescriptorIndex;
-    metadata.indexUavDescriptorIndex = page.exactIndexUavDescriptorIndex;
+    metadata.faceDescriptorUavDescriptorIndex = page.exactFaceDescriptorUavDescriptorIndex;
     metadata.drawRecordUavDescriptorIndex = page.exactDrawRecordUavDescriptorIndex;
     metadata.drawRecordMetadataUavDescriptorIndex = page.exactDrawRecordMetadataUavDescriptorIndex;
     return metadata;
@@ -10197,8 +10251,7 @@ void ChunkManager::Impl::updateExactGpuChunkAllocationRecord(const PendingExactG
     record.requiredFaceCount = requiredFaceCount;
     record.pageIndex = pending.allocation.pageIndex;
     record.recordIndex = pending.allocation.recordIndex;
-    record.vertexBase = static_cast<std::uint32_t>(pending.allocation.vertexOffset);
-    record.indexBase = static_cast<std::uint32_t>(pending.allocation.indexOffset);
+    record.faceBase = static_cast<std::uint32_t>(pending.allocation.faceOffset);
     record.reservedFaceCapacity = reservedFaceCapacity;
     record.centerVoxelSrvDescriptorIndex = centerVoxelSrvDescriptorIndex;
     record.haloSrvDescriptorIndex = haloSrvDescriptorIndex;
@@ -10533,69 +10586,67 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
 {
     static constexpr std::size_t kDefaultVertexCapacity = 65536;
     static constexpr std::size_t kDefaultIndexCapacity = 98304;
+    static constexpr std::size_t kDefaultExactFaceCapacity = 16384;
 
     ChunkBufferPage page;
     page.usage = usage;
-    page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
-    page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
     if (usage == ChunkBufferPageUsage::ExactGpu)
     {
-        const std::size_t minReservedVertexCount =
-            static_cast<std::size_t>(kExactGpuInitialFaceCapacity) * 4u;
-        const std::size_t minReservedIndexCount =
-            static_cast<std::size_t>(kExactGpuInitialFaceCapacity) * 6u;
-        page.recordCapacity = std::max<std::size_t>(
-            1,
-            std::min(page.vertexCapacity / minReservedVertexCount,
-                     page.indexCapacity / minReservedIndexCount));
+        page.faceCapacity = std::max(nextPowerOfTwo(std::max<std::size_t>(vertexCount, 1u)),
+                                     kDefaultExactFaceCapacity);
+        page.recordCapacity = std::max<std::size_t>(1u, page.faceCapacity / kExactGpuInitialFaceCapacity);
     }
     else
     {
+        page.vertexCapacity = std::max(nextPowerOfTwo(vertexCount), kDefaultVertexCapacity);
+        page.indexCapacity = std::max(nextPowerOfTwo(indexCount), kDefaultIndexCapacity);
         page.recordCapacity = std::max<std::size_t>(
             1,
             std::min(page.vertexCapacity / 4u, page.indexCapacity / 6u));
+        page.vertexBuffer = createDefaultBuffer(device_.Get(),
+                                                static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
+                                                D3D12_RESOURCE_STATE_COMMON,
+                                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        page.indexBuffer = createDefaultBuffer(device_.Get(),
+                                               static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
+                                               D3D12_RESOURCE_STATE_COMMON,
+                                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     }
-    page.vertexBuffer = createDefaultBuffer(device_.Get(),
-                                            static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex)),
-                                            D3D12_RESOURCE_STATE_COMMON,
-                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    page.indexBuffer = createDefaultBuffer(device_.Get(),
-                                           static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t)),
-                                           D3D12_RESOURCE_STATE_COMMON,
-                                           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     page.drawRecordBuffer = createDefaultBuffer(device_.Get(),
-                                                static_cast<std::uint64_t>(page.recordCapacity * sizeof(ChunkRenderBatch::GpuCullRecord)),
+                                                static_cast<std::uint64_t>(
+                                                    page.recordCapacity *
+                                                    ((usage == ChunkBufferPageUsage::ExactGpu)
+                                                         ? sizeof(ExactChunkRenderBatch::GpuCullRecord)
+                                                         : sizeof(ChunkRenderBatch::GpuCullRecord))),
                                                 D3D12_RESOURCE_STATE_COMMON,
                                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     if (usage == ChunkBufferPageUsage::ExactGpu)
     {
+        page.faceDescriptorBuffer = createDefaultBuffer(
+            device_.Get(),
+            static_cast<std::uint64_t>(page.faceCapacity * 32u),
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         page.drawRecordMetadataBuffer = createDefaultBuffer(
             device_.Get(),
             static_cast<std::uint64_t>(page.recordCapacity * sizeof(FarLodGpuContext::ExactDrawRecordMetadata)),
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        page.exactVertexUavDescriptorIndex = exactGpuContext_.allocatePersistentDescriptorRange(4u);
-        page.exactIndexUavDescriptorIndex = page.exactVertexUavDescriptorIndex + 1u;
-        page.exactDrawRecordUavDescriptorIndex = page.exactVertexUavDescriptorIndex + 2u;
-        page.exactDrawRecordMetadataUavDescriptorIndex = page.exactVertexUavDescriptorIndex + 3u;
+        page.exactFaceDescriptorUavDescriptorIndex = exactGpuContext_.allocatePersistentDescriptorRange(3u);
+        page.exactDrawRecordUavDescriptorIndex = page.exactFaceDescriptorUavDescriptorIndex + 1u;
+        page.exactDrawRecordMetadataUavDescriptorIndex = page.exactFaceDescriptorUavDescriptorIndex + 2u;
         exactGpuContext_.writePersistentStructuredUavDescriptor(
-            page.exactVertexUavDescriptorIndex,
-            page.vertexBuffer.Get(),
+            page.exactFaceDescriptorUavDescriptorIndex,
+            page.faceDescriptorBuffer.Get(),
             0,
-            static_cast<std::uint32_t>(page.vertexCapacity),
-            static_cast<std::uint32_t>(sizeof(Vertex)));
-        exactGpuContext_.writePersistentStructuredUavDescriptor(
-            page.exactIndexUavDescriptorIndex,
-            page.indexBuffer.Get(),
-            0,
-            static_cast<std::uint32_t>(page.indexCapacity),
-            static_cast<std::uint32_t>(sizeof(std::uint32_t)));
+            static_cast<std::uint32_t>(page.faceCapacity),
+            32u);
         exactGpuContext_.writePersistentStructuredUavDescriptor(
             page.exactDrawRecordUavDescriptorIndex,
             page.drawRecordBuffer.Get(),
             0,
             static_cast<std::uint32_t>(page.recordCapacity),
-            static_cast<std::uint32_t>(sizeof(ChunkRenderBatch::GpuCullRecord)));
+            static_cast<std::uint32_t>(sizeof(ExactChunkRenderBatch::GpuCullRecord)));
         exactGpuContext_.writePersistentStructuredUavDescriptor(
             page.exactDrawRecordMetadataUavDescriptorIndex,
             page.drawRecordMetadataBuffer.Get(),
@@ -10620,20 +10671,26 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
         std::ostringstream stream;
         const std::uint64_t vertexBytes = static_cast<std::uint64_t>(page.vertexCapacity * sizeof(Vertex));
         const std::uint64_t indexBytes = static_cast<std::uint64_t>(page.indexCapacity * sizeof(std::uint32_t));
+        const std::uint64_t faceDescriptorBytes = static_cast<std::uint64_t>(page.faceCapacity * 32u);
         const std::uint64_t recordBytes =
-            static_cast<std::uint64_t>(page.recordCapacity * sizeof(ChunkRenderBatch::GpuCullRecord));
+            static_cast<std::uint64_t>(
+                page.recordCapacity *
+                ((usage == ChunkBufferPageUsage::ExactGpu)
+                     ? sizeof(ExactChunkRenderBatch::GpuCullRecord)
+                     : sizeof(ChunkRenderBatch::GpuCullRecord)));
         const std::uint64_t metadataBytes =
             (page.drawRecordMetadataBuffer != nullptr)
                 ? static_cast<std::uint64_t>(page.recordCapacity * sizeof(FarLodGpuContext::ExactDrawRecordMetadata))
                 : 0u;
         stream << "exact upload page created"
                << " usage=" << chunkBufferPageUsageLabel(page.usage)
+               << " faceCapacity=" << page.faceCapacity
                << " vertexCapacity=" << page.vertexCapacity
                << " indexCapacity=" << page.indexCapacity
                << " recordCapacity=" << page.recordCapacity
                << " totalPageMiB="
                << std::fixed << std::setprecision(2)
-               << (static_cast<double>(vertexBytes + indexBytes + recordBytes + metadataBytes +
+               << (static_cast<double>(vertexBytes + indexBytes + faceDescriptorBytes + recordBytes + metadataBytes +
                                        ((page.vertexUploadBuffer != nullptr) ? vertexBytes : 0u) +
                                        ((page.indexUploadBuffer != nullptr) ? indexBytes : 0u)) /
                    (1024.0 * 1024.0));
@@ -10647,10 +10704,12 @@ void ChunkManager::Impl::resetChunkBufferPage(ChunkBufferPage& page) noexcept
 {
     page.vertexCursor = 0;
     page.indexCursor = 0;
+    page.faceCursor = 0;
     page.recordCursor = 0;
     page.recordActiveCount = 0;
     page.vertexState = D3D12_RESOURCE_STATE_COMMON;
     page.indexState = D3D12_RESOURCE_STATE_COMMON;
+    page.faceDescriptorState = D3D12_RESOURCE_STATE_COMMON;
     page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
     page.drawRecordMetadataState = D3D12_RESOURCE_STATE_COMMON;
     page.residentChunks = 0;
@@ -10849,15 +10908,12 @@ void ChunkManager::Impl::transitionExactPageToWritable(std::uint32_t pageIndex, 
     (void)pageIndex;
     assert(page.usage == ChunkBufferPageUsage::ExactGpu);
     assert(page.state == ChunkBufferPageState::OpenWritable);
-    if (page.vertexBuffer != nullptr)
+    if (page.faceDescriptorBuffer != nullptr)
     {
-        exactGpuContext_.transition(page.vertexBuffer.Get(), page.vertexState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        page.vertexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    }
-    if (page.indexBuffer != nullptr)
-    {
-        exactGpuContext_.transition(page.indexBuffer.Get(), page.indexState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        page.indexState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        exactGpuContext_.transition(page.faceDescriptorBuffer.Get(),
+                                    page.faceDescriptorState,
+                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        page.faceDescriptorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
     if (page.drawRecordBuffer != nullptr)
     {
@@ -10880,15 +10936,12 @@ void ChunkManager::Impl::transitionExactPageToResident(std::uint32_t pageIndex, 
     (void)pageIndex;
     assert(page.usage == ChunkBufferPageUsage::ExactGpu);
     assert(page.state == ChunkBufferPageState::SealedPendingResident);
-    if (page.vertexBuffer != nullptr)
+    if (page.faceDescriptorBuffer != nullptr)
     {
-        exactGpuContext_.transition(page.vertexBuffer.Get(), page.vertexState, D3D12_RESOURCE_STATE_COMMON);
-        page.vertexState = D3D12_RESOURCE_STATE_COMMON;
-    }
-    if (page.indexBuffer != nullptr)
-    {
-        exactGpuContext_.transition(page.indexBuffer.Get(), page.indexState, D3D12_RESOURCE_STATE_COMMON);
-        page.indexState = D3D12_RESOURCE_STATE_COMMON;
+        exactGpuContext_.transition(page.faceDescriptorBuffer.Get(),
+                                    page.faceDescriptorState,
+                                    D3D12_RESOURCE_STATE_COMMON);
+        page.faceDescriptorState = D3D12_RESOURCE_STATE_COMMON;
     }
     if (page.drawRecordBuffer != nullptr)
     {
@@ -10939,8 +10992,7 @@ ChunkManager::Impl::ChunkBufferPage* ChunkManager::Impl::acquireOrCreateOpenExac
         ChunkBufferPage& page = bufferPages_[candidateIndex];
         if (page.usage != ChunkBufferPageUsage::ExactGpu ||
             page.state != ChunkBufferPageState::Free ||
-            page.vertexCapacity < minVertexCount ||
-            page.indexCapacity < minIndexCount ||
+            page.faceCapacity < minVertexCount ||
             page.recordCapacity == 0u)
         {
             continue;
@@ -11000,16 +11052,14 @@ bool ChunkManager::Impl::reserveExactOutputRange(const glm::ivec3& chunkCoord,
 
     ExactReservationShard& shard = exactReservationShards_[exactReservationShardIndexForChunk(chunkCoord)];
     std::lock_guard<std::mutex> shardLock(shard.mutex);
-    const std::size_t requiredVertexCount = static_cast<std::size_t>(requiredFaceCount) * 4u;
-    const std::size_t requiredIndexCount = static_cast<std::size_t>(requiredFaceCount) * 6u;
     std::size_t attemptsRemaining = shard.openPageIndices.size() + 1u;
     while (attemptsRemaining-- > 0u)
     {
         std::uint32_t openPageIndex = kInvalidChunkBufferPage;
         ChunkBufferPage* openPage = acquireOrCreateOpenExactPage(
             shard,
-            requiredVertexCount,
-            requiredIndexCount,
+            requiredFaceCount,
+            requiredFaceCount,
             uploadBatchId,
             openPageIndex);
         if (openPage == nullptr)
@@ -11017,8 +11067,7 @@ bool ChunkManager::Impl::reserveExactOutputRange(const glm::ivec3& chunkCoord,
             return false;
         }
 
-        if (openPage->vertexCursor + requiredVertexCount > openPage->vertexCapacity ||
-            openPage->indexCursor + requiredIndexCount > openPage->indexCapacity ||
+        if (openPage->faceCursor + requiredFaceCount > openPage->faceCapacity ||
             openPage->recordCursor + 1u > openPage->recordCapacity)
         {
             requestSealExactPage(openPageIndex, ExactPageSealReason::Capacity);
@@ -11026,17 +11075,14 @@ bool ChunkManager::Impl::reserveExactOutputRange(const glm::ivec3& chunkCoord,
         }
 
         allocation.pageIndex = openPageIndex;
-        allocation.vertexOffset = openPage->vertexCursor;
-        allocation.indexOffset = openPage->indexCursor;
+        allocation.faceOffset = openPage->faceCursor;
         allocation.recordIndex = static_cast<std::uint32_t>(openPage->recordCursor);
         openPage->allocatorShard = static_cast<std::uint32_t>(exactReservationShardIndexForChunk(chunkCoord));
-        openPage->vertexCursor += requiredVertexCount;
-        openPage->indexCursor += requiredIndexCount;
+        openPage->faceCursor += requiredFaceCount;
         ++openPage->recordCursor;
         ++openPage->pendingChunks;
         openPage->lastReservationAt = SteadyClock::now();
-        if (openPage->vertexCursor == openPage->vertexCapacity ||
-            openPage->indexCursor == openPage->indexCapacity ||
+        if (openPage->faceCursor == openPage->faceCapacity ||
             openPage->recordCursor == openPage->recordCapacity)
         {
             requestSealExactPage(openPageIndex, ExactPageSealReason::Capacity);
@@ -11309,6 +11355,10 @@ void ChunkManager::Impl::releasePendingExactBuildAllocation(PendingExactGpuBuild
                 {
                     ++page.inactiveResidentRecordCount;
                     noteExactGpuPageMetadataChange(pending.allocation.pageIndex);
+                    handledPersistentReservation = true;
+                }
+                else if (page.state == ChunkBufferPageState::Free)
+                {
                     handledPersistentReservation = true;
                 }
             }
@@ -13877,6 +13927,8 @@ void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
         chunk.indexCount.store(0, std::memory_order_relaxed);
         chunk.vertexOffset.store(0, std::memory_order_relaxed);
         chunk.indexOffset.store(0, std::memory_order_relaxed);
+        chunk.exactGpuFaceOffset.store(0, std::memory_order_relaxed);
+        chunk.exactGpuFaceCount.store(0, std::memory_order_relaxed);
         return;
     }
 
@@ -13891,6 +13943,8 @@ void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
     chunk.indexCount.store(0, std::memory_order_release);
     chunk.vertexOffset.store(0, std::memory_order_release);
     chunk.indexOffset.store(0, std::memory_order_release);
+    chunk.exactGpuFaceOffset.store(0, std::memory_order_release);
+    chunk.exactGpuFaceCount.store(0, std::memory_order_release);
     chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_release);
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
@@ -18691,17 +18745,17 @@ void ChunkManager::Impl::resolveExactGpuNeighborState(
 
     auto rememberNeighborForRestore = [&](Chunk& neighbor)
     {
-        if (neighbor.exactGpu.voxelBuffer == nullptr)
+        if (neighbor.exactGpu.seamBuffer == nullptr)
         {
             return;
         }
 
-        if (neighbor.exactGpu.voxelState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        if (neighbor.exactGpu.seamState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
         {
-            exactGpuContext_.transition(neighbor.exactGpu.voxelBuffer.Get(),
-                                        neighbor.exactGpu.voxelState,
+            exactGpuContext_.transition(neighbor.exactGpu.seamBuffer.Get(),
+                                        neighbor.exactGpu.seamState,
                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            neighbor.exactGpu.voxelState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            neighbor.exactGpu.seamState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
 
         const bool alreadyQueued =
@@ -18726,7 +18780,7 @@ void ChunkManager::Impl::resolveExactGpuNeighborState(
         }
 
         Chunk& neighbor = *it->second;
-        if (neighbor.exactGpu.voxelBuffer == nullptr ||
+        if (neighbor.exactGpu.seamBuffer == nullptr ||
             neighbor.exactGpu.readyFenceValue == 0 ||
             completedExactGpuFenceValue < neighbor.exactGpu.readyFenceValue ||
             neighbor.exactGpuBuildInFlight.load(std::memory_order_acquire))
@@ -18744,7 +18798,7 @@ void ChunkManager::Impl::resolveExactGpuNeighborState(
         if (Chunk* readyNeighbor = lookupReadyNeighbor(neighborCoord))
         {
             rememberNeighborForRestore(*readyNeighbor);
-            neighborBuffers[neighborIndex] = readyNeighbor->exactGpu.voxelBuffer.Get();
+            neighborBuffers[neighborIndex] = readyNeighbor->exactGpu.seamBuffer.Get();
             resolvedNeighborMask |= seamBit;
             continue;
         }
@@ -18779,8 +18833,8 @@ void ChunkManager::Impl::restoreExactGpuNeighborStates(const std::array<Chunk*, 
     {
         Chunk* neighborChunk = neighborChunksToRestore[restoreIndex];
         if (neighborChunk == nullptr ||
-            neighborChunk->exactGpu.voxelBuffer == nullptr ||
-            neighborChunk->exactGpu.voxelState == D3D12_RESOURCE_STATE_COMMON)
+            neighborChunk->exactGpu.seamBuffer == nullptr ||
+            neighborChunk->exactGpu.seamState == D3D12_RESOURCE_STATE_COMMON)
         {
             if (neighborChunk != nullptr)
             {
@@ -18789,10 +18843,10 @@ void ChunkManager::Impl::restoreExactGpuNeighborStates(const std::array<Chunk*, 
             continue;
         }
 
-        exactGpuContext_.transition(neighborChunk->exactGpu.voxelBuffer.Get(),
-                                    neighborChunk->exactGpu.voxelState,
+        exactGpuContext_.transition(neighborChunk->exactGpu.seamBuffer.Get(),
+                                    neighborChunk->exactGpu.seamState,
                                     D3D12_RESOURCE_STATE_COMMON);
-        neighborChunk->exactGpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+        neighborChunk->exactGpu.seamState = D3D12_RESOURCE_STATE_COMMON;
         neighborChunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
     }
 }
@@ -19586,6 +19640,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             exactGpuContext_.writeExactPrepassInputDescriptors(chunk.exactGpu.voxelBuffer.Get(),
                                                                chunk.exactGpu.haloBuffer.Get(),
                                                                chunk.exactGpu.lightScratchBuffer.Get(),
+                                                               chunk.exactGpu.seamBuffer.Get(),
                                                                chunk.exactGpu.sparseVoxelBuffer.Get(),
                                                                sparseVoxelCount,
                                                                neighborBuffers);
@@ -19618,12 +19673,13 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             descriptorIndices.lightScratchVoxelSrvDescriptorIndex,
             descriptorIndices.lightScratchVoxelUavDescriptorIndex,
             descriptorIndices.sparseVoxelSrvDescriptorIndex,
-            descriptorIndices.neighborVoxelSrvDescriptorIndices[0],
-            descriptorIndices.neighborVoxelSrvDescriptorIndices[1],
-            descriptorIndices.neighborVoxelSrvDescriptorIndices[2],
-            descriptorIndices.neighborVoxelSrvDescriptorIndices[3],
-            descriptorIndices.neighborVoxelSrvDescriptorIndices[4],
-            descriptorIndices.neighborVoxelSrvDescriptorIndices[5],
+            descriptorIndices.seamVoxelUavDescriptorIndex,
+            descriptorIndices.neighborSeamSrvDescriptorIndices[0],
+            descriptorIndices.neighborSeamSrvDescriptorIndices[1],
+            descriptorIndices.neighborSeamSrvDescriptorIndices[2],
+            descriptorIndices.neighborSeamSrvDescriptorIndices[3],
+            descriptorIndices.neighborSeamSrvDescriptorIndices[4],
+            descriptorIndices.neighborSeamSrvDescriptorIndices[5],
             0u});
     }
 
@@ -19728,6 +19784,28 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
                                         chunk.exactGpu.lightScratchState,
                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             chunk.exactGpu.lightScratchState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
+        if (chunk.exactGpu.seamState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            exactGpuContext_.transition(chunk.exactGpu.seamBuffer.Get(),
+                                        chunk.exactGpu.seamState,
+                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            chunk.exactGpu.seamState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+    }
+
+    exactGpuContext_.dispatchExactSeamExportBatch(batchBuildCount, prepassRecordUpload.gpuAddress);
+    exactGpuContext_.uavBarrier(nullptr);
+
+    for (PendingExactGpuBuild& pending : stagedBuilds)
+    {
+        Chunk& chunk = *pending.chunk;
+        if (chunk.exactGpu.seamState != D3D12_RESOURCE_STATE_COMMON)
+        {
+            exactGpuContext_.transition(chunk.exactGpu.seamBuffer.Get(),
+                                        chunk.exactGpu.seamState,
+                                        D3D12_RESOURCE_STATE_COMMON);
+            chunk.exactGpu.seamState = D3D12_RESOURCE_STATE_COMMON;
         }
         std::swap(chunk.exactGpu.voxelBuffer, chunk.exactGpu.lightScratchBuffer);
         std::swap(chunk.exactGpu.voxelState, chunk.exactGpu.lightScratchState);
@@ -19866,7 +19944,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     if (it != chunks_.end() && it->second)
                     {
                         const Chunk& neighbor = *it->second;
-                        ready = neighbor.exactGpu.voxelBuffer != nullptr &&
+                        ready = neighbor.exactGpu.seamBuffer != nullptr &&
                                 neighbor.exactGpu.readyFenceValue != 0 &&
                                 completedGpuFenceValue >= neighbor.exactGpu.readyFenceValue &&
                                 !neighbor.exactGpuBuildInFlight.load(std::memory_order_acquire);
@@ -19912,8 +19990,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
         {
             return completion.pageIndex == pending.allocation.pageIndex &&
                    completion.recordIndex == pending.allocation.recordIndex &&
-                   static_cast<std::size_t>(completion.vertexBase) == pending.allocation.vertexOffset &&
-                   static_cast<std::size_t>(completion.indexBase) == pending.allocation.indexOffset &&
+                   static_cast<std::size_t>(completion.faceBase) == pending.allocation.faceOffset &&
                    completion.reservedFaceCapacity == pending.faceCapacity;
         };
         const auto requeueBuildRequest = [&](PendingExactGpuBuild& pending, bool emittedRecordWritten)
@@ -20515,11 +20592,16 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     const std::size_t oldVertexCount = chunk.vertexCount.load(std::memory_order_acquire);
                     const std::size_t oldIndexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
                     const std::uint32_t oldRecordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
+                    const std::uint32_t oldFaceOffset = chunk.exactGpuFaceOffset.load(std::memory_order_acquire);
+                    const std::uint32_t oldFaceCount = chunk.exactGpuFaceCount.load(std::memory_order_acquire);
                     chunk.bufferPageIndex.store(pending.allocation.pageIndex, std::memory_order_release);
                     chunk.vertexOffset.store(pending.allocation.vertexOffset, std::memory_order_release);
                     chunk.indexOffset.store(pending.allocation.indexOffset, std::memory_order_release);
                     chunk.vertexCount.store(0, std::memory_order_release);
                     chunk.indexCount.store(0, std::memory_order_release);
+                    chunk.exactGpuFaceOffset.store(static_cast<std::uint32_t>(pending.allocation.faceOffset),
+                                                   std::memory_order_release);
+                    chunk.exactGpuFaceCount.store(completion.requiredFaces, std::memory_order_release);
                     chunk.exactGpuRecordIndex.store(pending.allocation.recordIndex, std::memory_order_release);
                     chunk.exactGpuResident.store(true, std::memory_order_release);
                     chunk.exactGpuPendingNeighborMask.store(pending.pendingNeighborMask, std::memory_order_release);
@@ -20577,6 +20659,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                                     oldIndexOffset,
                                                     oldIndexCount,
                                                     true);
+                        (void)oldFaceOffset;
+                        (void)oldFaceCount;
                     }
 
                     setStreamingChunkLifecycleState(chunk.coord, FrontierDemandState::Meshing);

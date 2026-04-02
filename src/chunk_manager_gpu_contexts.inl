@@ -306,10 +306,10 @@ public:
         std::uint32_t state{0};
         std::uint32_t recordCapacity{0};
         std::uint32_t reserved0{0};
-        std::uint32_t vertexUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
-        std::uint32_t indexUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t faceDescriptorUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
         std::uint32_t drawRecordUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
         std::uint32_t drawRecordMetadataUavDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t reserved1{0};
     };
 
     struct ExactChunkAllocationRecord
@@ -324,16 +324,16 @@ public:
         std::uint32_t requiredFaceCount{0};
         std::uint32_t pageIndex{0};
         std::uint32_t recordIndex{0};
-        std::uint32_t vertexBase{0};
-        std::uint32_t indexBase{0};
+        std::uint32_t faceBase{0};
         std::uint32_t reservedFaceCapacity{0};
         std::uint32_t centerVoxelSrvDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
         std::uint32_t haloSrvDescriptorIndex{std::numeric_limits<std::uint32_t>::max()};
         std::uint32_t reserved0{0};
+        std::uint32_t reserved1{0};
         std::uint32_t inputVersionLo{0};
         std::uint32_t inputVersionHi{0};
-        std::uint32_t reserved1{0};
         std::uint32_t reserved2{0};
+        std::uint32_t reserved3{0};
     };
 
     struct ExactDrawRecordMetadata
@@ -344,8 +344,7 @@ public:
         std::uint32_t pageIndex{0};
         std::uint32_t recordIndex{0};
         std::uint32_t buildIndex{0};
-        std::uint32_t vertexBase{0};
-        std::uint32_t indexBase{0};
+        std::uint32_t faceBase{0};
         std::uint32_t faceCount{0};
         std::uint32_t statusFlags{0};
         std::uint32_t buildVersion{0};
@@ -354,6 +353,7 @@ public:
         std::uint32_t inputVersionHi{0};
         std::uint32_t reserved0{0};
         std::uint32_t reserved1{0};
+        std::uint32_t reserved2{0};
     };
 
     struct ExactCompletionEntry
@@ -367,13 +367,13 @@ public:
         std::int32_t chunkWorldMinZ{0};
         std::uint32_t pageIndex{0};
         std::uint32_t recordIndex{0};
-        std::uint32_t vertexBase{0};
-        std::uint32_t indexBase{0};
+        std::uint32_t faceBase{0};
         std::uint32_t buildVersion{0};
         std::uint32_t generationEpoch{0};
         std::uint32_t inputVersionLo{0};
         std::uint32_t inputVersionHi{0};
         std::uint32_t reserved0{0};
+        std::uint32_t reserved1{0};
     };
 
     static constexpr std::uint32_t kInvalidDescriptorIndex = std::numeric_limits<std::uint32_t>::max();
@@ -497,6 +497,7 @@ public:
         exactStampPipelineState_.Reset();
         exactHaloCachePipelineState_.Reset();
         exactLightPipelineState_.Reset();
+        exactSeamExportPipelineState_.Reset();
         exactFaceCountPipelineState_.Reset();
         exactFacePrefixPipelineState_.Reset();
         exactFaceEmitPipelineState_.Reset();
@@ -527,6 +528,7 @@ public:
         exactStampShader_.Reset();
         exactHaloCacheShader_.Reset();
         exactLightShader_.Reset();
+        exactSeamExportShader_.Reset();
         exactFaceCountShader_.Reset();
         exactFacePrefixShader_.Reset();
         exactFaceEmitShader_.Reset();
@@ -2203,6 +2205,30 @@ public:
         hasCommands_ = true;
     }
 
+    void dispatchExactSeamExportBatch(std::uint32_t batchBuildCount,
+                                      D3D12_GPU_VIRTUAL_ADDRESS prepassRecordAddress)
+    {
+        if (batchBuildCount == 0u)
+        {
+            return;
+        }
+
+        const std::array<std::uint32_t, 4> constants{
+            batchBuildCount,
+            0u,
+            0u,
+            0u};
+        if (!prepareExactPrepassDispatch(exactSeamExportPipelineState_.Get(), prepassRecordAddress, constants))
+        {
+            return;
+        }
+
+        commandList_->Dispatch((kExactChunkSize + 7u) / 8u,
+                               (kExactChunkSize + 7u) / 8u,
+                               kExactChunkHaloFaceCount * batchBuildCount);
+        hasCommands_ = true;
+    }
+
     void dispatchExactFaceCountBatch(std::uint32_t batchBuildCount,
                                      D3D12_GPU_VIRTUAL_ADDRESS prepassRecordAddress)
     {
@@ -2503,6 +2529,7 @@ public:
                exactStampPipelineState_ != nullptr &&
                exactHaloCachePipelineState_ != nullptr &&
                exactLightPipelineState_ != nullptr &&
+               exactSeamExportPipelineState_ != nullptr &&
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
@@ -2759,7 +2786,8 @@ public:
         std::uint32_t lightScratchVoxelSrvDescriptorIndex{kInvalidDescriptorIndex};
         std::uint32_t lightScratchVoxelUavDescriptorIndex{kInvalidDescriptorIndex};
         std::uint32_t sparseVoxelSrvDescriptorIndex{kInvalidDescriptorIndex};
-        std::array<std::uint32_t, 6> neighborVoxelSrvDescriptorIndices{
+        std::uint32_t seamVoxelUavDescriptorIndex{kInvalidDescriptorIndex};
+        std::array<std::uint32_t, 6> neighborSeamSrvDescriptorIndices{
             kInvalidDescriptorIndex,
             kInvalidDescriptorIndex,
             kInvalidDescriptorIndex,
@@ -2774,7 +2802,8 @@ public:
                    haloVoxelSrvDescriptorIndex != kInvalidDescriptorIndex &&
                    haloVoxelUavDescriptorIndex != kInvalidDescriptorIndex &&
                    lightScratchVoxelSrvDescriptorIndex != kInvalidDescriptorIndex &&
-                   lightScratchVoxelUavDescriptorIndex != kInvalidDescriptorIndex;
+                   lightScratchVoxelUavDescriptorIndex != kInvalidDescriptorIndex &&
+                   seamVoxelUavDescriptorIndex != kInvalidDescriptorIndex;
         }
     };
 
@@ -2808,12 +2837,16 @@ public:
         ID3D12Resource* centerVoxelBuffer,
         ID3D12Resource* haloBuffer,
         ID3D12Resource* lightScratchBuffer,
+        ID3D12Resource* seamBuffer,
         ID3D12Resource* sparseVoxelBuffer,
         std::uint32_t sparseVoxelCount,
-        const std::array<ID3D12Resource*, 6>& neighborVoxelBuffers)
+        const std::array<ID3D12Resource*, 6>& neighborSeamBuffers)
     {
         ExactPrepassDescriptorIndices indices{};
-        if (centerVoxelBuffer == nullptr || haloBuffer == nullptr || lightScratchBuffer == nullptr)
+        if (centerVoxelBuffer == nullptr ||
+            haloBuffer == nullptr ||
+            lightScratchBuffer == nullptr ||
+            seamBuffer == nullptr)
         {
             return indices;
         }
@@ -2858,13 +2891,18 @@ public:
                                      0,
                                      std::max(sparseVoxelCount, 1u),
                                      kExactChunkSparseVoxelStrideBytes);
-        for (std::uint32_t neighborIndex = 0; neighborIndex < static_cast<std::uint32_t>(neighborVoxelBuffers.size());
+        writeStructuredUavDescriptor(descriptorIndex + 7u,
+                                     seamBuffer,
+                                     0,
+                                     kExactChunkHaloVoxelCount,
+                                     kExactChunkPackedVoxelStrideBytes);
+        for (std::uint32_t neighborIndex = 0; neighborIndex < static_cast<std::uint32_t>(neighborSeamBuffers.size());
              ++neighborIndex)
         {
-            writeStructuredSrvDescriptor(descriptorIndex + 7u + neighborIndex,
-                                         neighborVoxelBuffers[neighborIndex],
+            writeStructuredSrvDescriptor(descriptorIndex + 8u + neighborIndex,
+                                         neighborSeamBuffers[neighborIndex],
                                          0,
-                                         kExactChunkVoxelCount,
+                                         kExactChunkHaloVoxelCount,
                                          kExactChunkPackedVoxelStrideBytes);
         }
 
@@ -2875,11 +2913,12 @@ public:
         indices.lightScratchVoxelSrvDescriptorIndex = descriptorIndex + 4u;
         indices.lightScratchVoxelUavDescriptorIndex = descriptorIndex + 5u;
         indices.sparseVoxelSrvDescriptorIndex = descriptorIndex + 6u;
+        indices.seamVoxelUavDescriptorIndex = descriptorIndex + 7u;
         for (std::uint32_t neighborIndex = 0;
-             neighborIndex < static_cast<std::uint32_t>(indices.neighborVoxelSrvDescriptorIndices.size());
+             neighborIndex < static_cast<std::uint32_t>(indices.neighborSeamSrvDescriptorIndices.size());
              ++neighborIndex)
         {
-            indices.neighborVoxelSrvDescriptorIndices[neighborIndex] = descriptorIndex + 7u + neighborIndex;
+            indices.neighborSeamSrvDescriptorIndices[neighborIndex] = descriptorIndex + 8u + neighborIndex;
         }
         return indices;
     }
@@ -2975,7 +3014,7 @@ private:
     static constexpr std::uint32_t kExactChunkColumnDescriptorStrideBytes = 64u;
     static constexpr std::uint32_t kExactChunkSparseVoxelStrideBytes = 16u;
     static constexpr std::uint32_t kExactChunkPackedVoxelStrideBytes = 4u;
-    static constexpr std::uint32_t kExactChunkFaceDescriptorStrideBytes = 16u;
+    static constexpr std::uint32_t kExactChunkFaceDescriptorStrideBytes = 32u;
     static constexpr std::uint32_t kWorldgenPageSize = 64u;
     static constexpr std::uint32_t kWorldgenPageColumnCount = kWorldgenPageSize * kWorldgenPageSize;
     static constexpr std::uint32_t kExactWorldgenPageColumnStrideBytes = 32u;
@@ -3019,7 +3058,7 @@ private:
         kReadbackScratchSizeBytes / kMaxInFlightSubmissionSlots;
     static constexpr UINT kDescriptorHeapDescriptorsPerSubmission =
         kDescriptorHeapSubmissionDescriptorCount / kMaxInFlightSubmissionSlots;
-    static constexpr UINT kExactPrepassDescriptorCountPerBuild = 13u;
+    static constexpr UINT kExactPrepassDescriptorCountPerBuild = 14u;
     static constexpr UINT kExactEmitInputDescriptorCountPerBuild = 2u;
 
     void createExactResources()
@@ -3217,6 +3256,8 @@ private:
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_halo_cache_cs.hlsl").string(), "ExactChunkHaloCacheMain", "cs_6_6");
         exactLightShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_light_cs.hlsl").string(), "ExactChunkLightMain", "cs_6_6");
+        exactSeamExportShader_ =
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_seam_export_cs.hlsl").string(), "ExactChunkSeamExportMain", "cs_6_6");
         exactFaceCountShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_count_cs.hlsl").string(), "ExactChunkFaceCountMain", "cs_6_6");
         exactFacePrefixShader_ =
@@ -3637,6 +3678,13 @@ private:
                                                             IID_PPV_ARGS(&exactLightPipelineState_)),
                         "failed to create exact chunk light pipeline");
 
+        D3D12_COMPUTE_PIPELINE_STATE_DESC exactSeamExportPso{};
+        exactSeamExportPso.pRootSignature = exactPrepassRootSignature_.Get();
+        exactSeamExportPso.CS = {exactSeamExportShader_->GetBufferPointer(), exactSeamExportShader_->GetBufferSize()};
+        throwIfFailedDx(device_->CreateComputePipelineState(&exactSeamExportPso,
+                                                            IID_PPV_ARGS(&exactSeamExportPipelineState_)),
+                        "failed to create exact chunk seam export pipeline");
+
         D3D12_COMPUTE_PIPELINE_STATE_DESC exactFaceCountPso{};
         exactFaceCountPso.pRootSignature = exactPrepassRootSignature_.Get();
         exactFaceCountPso.CS = {exactFaceCountShader_->GetBufferPointer(), exactFaceCountShader_->GetBufferSize()};
@@ -3702,6 +3750,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> exactStampShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactHaloCacheShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactLightShader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> exactSeamExportShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceCountShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFacePrefixShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceEmitShader_;
@@ -3733,6 +3782,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactStampPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactHaloCachePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactLightPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactSeamExportPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFacePrefixPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceEmitPipelineState_;

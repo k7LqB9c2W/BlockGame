@@ -298,7 +298,6 @@ struct ChunkProfilingSnapshot
     double exactGpuWorldgenResolveMsLastCycle{0.0};
     double exactGpuPrepassFaceTotalsReadbackMsLastCycle{0.0};
     double exactGpuEmitMetadataSyncMsLastCycle{0.0};
-    double exactGpuPageSweepMsLastCycle{0.0};
     double exactGpuEmitWaitMsLastCycle{0.0};
     double exactGpuEmitFenceLifetimeMsLastCycle{0.0};
     double structureQueryMs{0.0};
@@ -382,7 +381,6 @@ struct ChunkProfilingSnapshot
     int exactGpuPendingBuilds{0};
     int exactGpuWorldgenPageMissesLastCycle{0};
     int exactGpuEmitMetadataDirtyPagesLastCycle{0};
-    int exactGpuPageSweepPagesLastCycle{0};
     int exactGpuReadyForEmitBacklogBatchesLastCycle{0};
     int exactGpuReadyForEmitBacklogBuildsLastCycle{0};
     int exactGpuComputeInFlightBeforeEmitLastCycle{0};
@@ -520,13 +518,11 @@ struct ChunkBenchmarkReport
     BenchmarkStageStats exactGpuWorldgenResolveStage{};
     BenchmarkStageStats exactGpuPrepassFaceTotalsReadbackStage{};
     BenchmarkStageStats exactGpuEmitMetadataSyncStage{};
-    BenchmarkStageStats exactGpuPageSweepStage{};
     BenchmarkStageStats exactGpuEmitWaitStage{};
     BenchmarkStageStats exactGpuEmitFenceLifetimeStage{};
     BenchmarkStageStats exactGpuWorldgenPageMisses{};
     BenchmarkStageStats exactGpuEmitMetadataDirtyPages{};
     BenchmarkStageStats exactGpuEmitMetadataUploadBytes{};
-    BenchmarkStageStats exactGpuPageSweepPages{};
     BenchmarkStageStats exactGpuReadyForEmitBacklogBatches{};
     BenchmarkStageStats exactGpuReadyForEmitBacklogBuilds{};
     BenchmarkStageStats exactGpuComputeInFlightBeforeEmit{};

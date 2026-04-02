@@ -1861,7 +1861,6 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
         << ",wg:" << profiling.exactGpuWorldgenResolveMsLastCycle
         << ",prepass_rb:" << profiling.exactGpuPrepassFaceTotalsReadbackMsLastCycle
         << ",emit_meta:" << profiling.exactGpuEmitMetadataSyncMsLastCycle
-        << ",sweep:" << profiling.exactGpuPageSweepMsLastCycle
         << ",emit_wait:" << profiling.exactGpuEmitWaitMsLastCycle
         << ",emit_fence:" << profiling.exactGpuEmitFenceLifetimeMsLastCycle << "}"
         << " exact_batch={submit:" << profiling.exactGpuSubmitBatchBuildsLastCycle
@@ -1875,7 +1874,6 @@ void appendBenchmarkProgressLog(const BenchmarkConfig& config,
         << ",compute_after:" << profiling.exactGpuComputeInFlightAfterEmitLastCycle
         << ",blocking_age:" << profiling.exactGpuBlockingEmitBatchAgeMsLastCycle
         << ",blocking_builds:" << profiling.exactGpuBlockingEmitBatchBuildsLastCycle << "}"
-        << " exact_sweep_pages=" << profiling.exactGpuPageSweepPagesLastCycle
         << " exact_gpu_ms={synth:" << profiling.exactGpuSynthMs
         << ",stamp:" << profiling.exactGpuStampMs
         << ",light:" << profiling.exactGpuLightMs
@@ -2387,8 +2385,6 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, report.exactGpuPrepassFaceTotalsReadbackStage);
     out << ",\"exact_gpu_emit_metadata_sync\":";
     writeStageStatsJson(out, report.exactGpuEmitMetadataSyncStage);
-    out << ",\"exact_gpu_page_sweep\":";
-    writeStageStatsJson(out, report.exactGpuPageSweepStage);
     out << ",\"exact_gpu_emit_wait\":";
     writeStageStatsJson(out, report.exactGpuEmitWaitStage);
     out << ",\"exact_gpu_emit_fence_lifetime\":";
@@ -2399,8 +2395,6 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeCountStatsJson(out, report.exactGpuEmitMetadataDirtyPages);
     out << ",\"exact_gpu_emit_metadata_upload_bytes\":";
     writeCountStatsJson(out, report.exactGpuEmitMetadataUploadBytes);
-    out << ",\"exact_gpu_page_sweep_pages\":";
-    writeCountStatsJson(out, report.exactGpuPageSweepPages);
     out << ",\"exact_gpu_ready_for_emit_backlog_batches\":";
     writeCountStatsJson(out, report.exactGpuReadyForEmitBacklogBatches);
     out << ",\"exact_gpu_ready_for_emit_backlog_builds\":";
@@ -2715,13 +2709,11 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_gpu_prepass_face_totals_readback_ms\":"
         << finalProfiling.exactGpuPrepassFaceTotalsReadbackMsLastCycle
         << ",\"exact_gpu_emit_metadata_sync_ms\":" << finalProfiling.exactGpuEmitMetadataSyncMsLastCycle
-        << ",\"exact_gpu_page_sweep_ms\":" << finalProfiling.exactGpuPageSweepMsLastCycle
         << ",\"exact_gpu_emit_wait_ms\":" << finalProfiling.exactGpuEmitWaitMsLastCycle
         << ",\"exact_gpu_emit_fence_lifetime_ms\":" << finalProfiling.exactGpuEmitFenceLifetimeMsLastCycle
         << ",\"exact_gpu_worldgen_page_misses_last_cycle\":" << finalProfiling.exactGpuWorldgenPageMissesLastCycle
         << ",\"exact_gpu_emit_metadata_dirty_pages_last_cycle\":" << finalProfiling.exactGpuEmitMetadataDirtyPagesLastCycle
         << ",\"exact_gpu_emit_metadata_upload_bytes_last_cycle\":" << finalProfiling.exactGpuEmitMetadataUploadBytesLastCycle
-        << ",\"exact_gpu_page_sweep_pages_last_cycle\":" << finalProfiling.exactGpuPageSweepPagesLastCycle
         << ",\"exact_gpu_ready_for_emit_backlog_batches_last_cycle\":" << finalProfiling.exactGpuReadyForEmitBacklogBatchesLastCycle
         << ",\"exact_gpu_ready_for_emit_backlog_builds_last_cycle\":" << finalProfiling.exactGpuReadyForEmitBacklogBuildsLastCycle
         << ",\"exact_gpu_compute_in_flight_before_emit_last_cycle\":" << finalProfiling.exactGpuComputeInFlightBeforeEmitLastCycle

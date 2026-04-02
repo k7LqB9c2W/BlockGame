@@ -627,13 +627,11 @@ struct ChunkBenchmarkMetrics
         exactGpuWorldgenResolveStage.reset();
         exactGpuPrepassFaceTotalsReadbackStage.reset();
         exactGpuEmitMetadataSyncStage.reset();
-        exactGpuPageSweepStage.reset();
         exactGpuEmitWaitStage.reset();
         exactGpuEmitFenceLifetimeStage.reset();
         exactGpuWorldgenPageMisses.reset();
         exactGpuEmitMetadataDirtyPages.reset();
         exactGpuEmitMetadataUploadBytes.reset();
-        exactGpuPageSweepPages.reset();
         exactGpuReadyForEmitBacklogBatches.reset();
         exactGpuReadyForEmitBacklogBuilds.reset();
         exactGpuComputeInFlightBeforeEmit.reset();
@@ -803,13 +801,11 @@ struct ChunkBenchmarkMetrics
         report.exactGpuWorldgenResolveStage = exactGpuWorldgenResolveStage.snapshot();
         report.exactGpuPrepassFaceTotalsReadbackStage = exactGpuPrepassFaceTotalsReadbackStage.snapshot();
         report.exactGpuEmitMetadataSyncStage = exactGpuEmitMetadataSyncStage.snapshot();
-        report.exactGpuPageSweepStage = exactGpuPageSweepStage.snapshot();
         report.exactGpuEmitWaitStage = exactGpuEmitWaitStage.snapshot();
         report.exactGpuEmitFenceLifetimeStage = exactGpuEmitFenceLifetimeStage.snapshot();
         report.exactGpuWorldgenPageMisses = exactGpuWorldgenPageMisses.snapshot();
         report.exactGpuEmitMetadataDirtyPages = exactGpuEmitMetadataDirtyPages.snapshot();
         report.exactGpuEmitMetadataUploadBytes = exactGpuEmitMetadataUploadBytes.snapshot();
-        report.exactGpuPageSweepPages = exactGpuPageSweepPages.snapshot();
         report.exactGpuReadyForEmitBacklogBatches = exactGpuReadyForEmitBacklogBatches.snapshot();
         report.exactGpuReadyForEmitBacklogBuilds = exactGpuReadyForEmitBacklogBuilds.snapshot();
         report.exactGpuComputeInFlightBeforeEmit = exactGpuComputeInFlightBeforeEmit.snapshot();
@@ -978,13 +974,11 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram exactGpuWorldgenResolveStage{};
     AtomicLatencyHistogram exactGpuPrepassFaceTotalsReadbackStage{};
     AtomicLatencyHistogram exactGpuEmitMetadataSyncStage{};
-    AtomicLatencyHistogram exactGpuPageSweepStage{};
     AtomicLatencyHistogram exactGpuEmitWaitStage{};
     AtomicLatencyHistogram exactGpuEmitFenceLifetimeStage{};
     AtomicCountHistogram exactGpuWorldgenPageMisses{};
     AtomicCountHistogram exactGpuEmitMetadataDirtyPages{};
     AtomicCountHistogram exactGpuEmitMetadataUploadBytes{};
-    AtomicCountHistogram exactGpuPageSweepPages{};
     AtomicCountHistogram exactGpuReadyForEmitBacklogBatches{};
     AtomicCountHistogram exactGpuReadyForEmitBacklogBuilds{};
     AtomicCountHistogram exactGpuComputeInFlightBeforeEmit{};
@@ -4296,6 +4290,7 @@ private:
     void exactGpuWorkerThreadFunction();
     void wakeExactGpuWorker();
     [[nodiscard]] bool exactGpuWorkerHasPendingWork();
+    [[nodiscard]] bool exactGpuWorkerNeedsLifecycleMaintenance();
     void startBulkShellOracle(const glm::ivec3& center, int horizontalRadius);
     void stopBulkShellOracle();
     bool acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
@@ -4403,6 +4398,14 @@ private:
         std::uint32_t exactIndexUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
         std::uint32_t exactDrawRecordUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
         std::uint32_t exactDrawRecordMetadataUavDescriptorIndex{FarLodGpuContext::kInvalidDescriptorIndex};
+        std::unordered_set<glm::ivec3, ChunkHasher> exactChunkMembers{};
+        std::vector<glm::ivec3> exactPendingPublishCoords{};
+        std::size_t exactChunkMemberCount{0};
+        std::size_t exactPendingPublishCount{0};
+        bool sealRequestedQueued{false};
+        bool sealedPendingResidentQueued{false};
+        bool readyToResidentQueued{false};
+        bool residentQueued{false};
         ChunkBufferPageState state{ChunkBufferPageState::Free};
         ChunkBufferPageUsage usage{ChunkBufferPageUsage::CpuUpload};
     };
@@ -4506,6 +4509,14 @@ private:
     static constexpr std::size_t kExactReservationShardSoftOpenPageLimit = 2u;
     static constexpr auto kExactOpenPageIdleSealTimeout = std::chrono::milliseconds(250);
 
+    enum class ExactPageSealReason : std::uint8_t
+    {
+        Capacity = 0,
+        AllocatorBackpressure,
+        Idle,
+        Abandonment
+    };
+
     struct ExactReservationShard
     {
         std::mutex mutex{};
@@ -4558,7 +4569,12 @@ private:
     [[nodiscard]] bool ensureExactGpuFreePageReserve(std::size_t minFreePageCount);
     [[nodiscard]] std::size_t exactReservationShardIndexForChunk(const glm::ivec3& chunkCoord) const noexcept;
     [[nodiscard]] static bool shouldSealExactOpenPageForAbandonment(const ChunkBufferPage& page) noexcept;
+    void addChunkToExactPageMembers(std::uint32_t pageIndex, const glm::ivec3& coord);
+    void removeChunkFromExactPageMembers(std::uint32_t pageIndex, const glm::ivec3& coord);
+    void queueChunkForExactPagePublish(std::uint32_t pageIndex, const glm::ivec3& coord);
+    [[nodiscard]] std::vector<glm::ivec3> drainExactPagePublishList(std::uint32_t pageIndex);
     void requestExactPageLifecycleSeals();
+    void drainSealRequestedExactPages();
     void transitionExactPageToWritable(std::uint32_t pageIndex, ChunkBufferPage& page);
     void transitionExactPageToResident(std::uint32_t pageIndex, ChunkBufferPage& page);
     [[nodiscard]] ChunkBufferPage* acquireOrCreateOpenExactPage(ExactReservationShard& shard,
@@ -4571,8 +4587,9 @@ private:
                                                UINT64 uploadBatchId,
                                                ChunkAllocation& allocation,
                                                std::uint32_t& reservedFaceCapacity);
-    void requestSealExactPage(std::uint32_t pageIndex);
-    void collectSealedExactPages(UINT64 completedGpuFenceValue);
+    void requestSealExactPageLocked(std::uint32_t pageIndex, ExactPageSealReason reason);
+    void requestSealExactPage(std::uint32_t pageIndex, ExactPageSealReason reason);
+    void advanceExactPageResidencyQueues(UINT64 completedGpuFenceValue);
     void releasePendingExactBuildAllocation(PendingExactGpuBuild& pending, bool emittedRecordWritten);
     ChunkAllocation acquireChunkAllocation(std::size_t vertexCount,
                                            std::size_t indexCount,
@@ -5534,6 +5551,11 @@ private:
     std::vector<ChunkBufferPage> bufferPages_;
     mutable std::mutex bufferPageMutex_;
     std::array<ExactReservationShard, kExactReservationShardCount> exactReservationShards_{};
+    std::size_t freeExactGpuPageCount_{0};
+    std::deque<std::uint32_t> sealRequestedPageIndices_{};
+    std::deque<std::uint32_t> sealedPendingResidentPageIndices_{};
+    std::deque<std::uint32_t> readyToResidentPageIndices_{};
+    std::deque<std::uint32_t> residentPageIndices_{};
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> dxgiAdapter_;
     UploadContext uploadContext_{};
@@ -5587,13 +5609,11 @@ private:
     double exactGpuWorldgenResolveMsLastCycle_{0.0};
     double exactGpuPrepassFaceTotalsReadbackMsLastCycle_{0.0};
     double exactGpuEmitMetadataSyncMsLastCycle_{0.0};
-    double exactGpuPageSweepMsLastCycle_{0.0};
     double exactGpuEmitWaitMsLastCycle_{0.0};
     double exactGpuEmitFenceLifetimeMsLastCycle_{0.0};
     double exactGpuBlockingEmitBatchAgeMsLastCycle_{0.0};
     int exactGpuWorldgenPageMissesLastCycle_{0};
     int exactGpuEmitMetadataDirtyPagesLastCycle_{0};
-    int exactGpuPageSweepPagesLastCycle_{0};
     int exactGpuReadyForEmitBacklogBatchesLastCycle_{0};
     int exactGpuReadyForEmitBacklogBuildsLastCycle_{0};
     int exactGpuComputeInFlightBeforeEmitLastCycle_{0};
@@ -6158,17 +6178,7 @@ bool ChunkManager::Impl::ensureExactGpuFreePageReserve(std::size_t minFreePageCo
     }
 
     std::lock_guard<std::mutex> lock(bufferPageMutex_);
-    std::size_t freeExactPageCount = 0u;
-    for (const ChunkBufferPage& page : bufferPages_)
-    {
-        if (page.usage == ChunkBufferPageUsage::ExactGpu &&
-            page.state == ChunkBufferPageState::Free)
-        {
-            ++freeExactPageCount;
-        }
-    }
-
-    while (freeExactPageCount < minFreePageCount)
+    while (freeExactGpuPageCount_ < minFreePageCount)
     {
         ChunkBufferPage reservePage{};
         try
@@ -6183,7 +6193,7 @@ bool ChunkManager::Impl::ensureExactGpuFreePageReserve(std::size_t minFreePageCo
         bufferPages_.push_back(std::move(reservePage));
         noteExactGpuEmitConfigRefresh();
         noteExactGpuPageMetadataChange(static_cast<std::uint32_t>(bufferPages_.size() - 1u));
-        ++freeExactPageCount;
+        ++freeExactGpuPageCount_;
     }
 
     return true;
@@ -7417,10 +7427,19 @@ void ChunkManager::Impl::clear()
     renderFenceValue_ = 0;
     {
         std::lock_guard<std::mutex> lock(bufferPageMutex_);
+        freeExactGpuPageCount_ = 0;
+        sealRequestedPageIndices_.clear();
+        sealedPendingResidentPageIndices_.clear();
+        readyToResidentPageIndices_.clear();
+        residentPageIndices_.clear();
         for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
         {
             ChunkBufferPage& page = bufferPages_[pageIndex];
             resetChunkBufferPage(page);
+            if (page.usage == ChunkBufferPageUsage::ExactGpu)
+            {
+                ++freeExactGpuPageCount_;
+            }
             noteExactGpuPageMetadataChange(pageIndex);
         }
     }
@@ -8651,7 +8670,6 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         snapshot.exactGpuWorldgenResolveMsLastCycle = exactGpuWorldgenResolveMsLastCycle_;
         snapshot.exactGpuPrepassFaceTotalsReadbackMsLastCycle = exactGpuPrepassFaceTotalsReadbackMsLastCycle_;
         snapshot.exactGpuEmitMetadataSyncMsLastCycle = exactGpuEmitMetadataSyncMsLastCycle_;
-        snapshot.exactGpuPageSweepMsLastCycle = exactGpuPageSweepMsLastCycle_;
         snapshot.exactGpuEmitWaitMsLastCycle = exactGpuEmitWaitMsLastCycle_;
         snapshot.exactGpuSynthMs = lastExactGpuPassTimings_.synthMs;
         snapshot.exactGpuStampMs = lastExactGpuPassTimings_.stampMs;
@@ -8663,7 +8681,6 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         snapshot.exactGpuTotalMs = lastExactGpuPassTimings_.totalMs;
         snapshot.exactGpuWorldgenPageMissesLastCycle = exactGpuWorldgenPageMissesLastCycle_;
         snapshot.exactGpuEmitMetadataDirtyPagesLastCycle = exactGpuEmitMetadataDirtyPagesLastCycle_;
-        snapshot.exactGpuPageSweepPagesLastCycle = exactGpuPageSweepPagesLastCycle_;
         snapshot.exactGpuReadyForEmitBacklogBatchesLastCycle = exactGpuReadyForEmitBacklogBatchesLastCycle_;
         snapshot.exactGpuReadyForEmitBacklogBuildsLastCycle = exactGpuReadyForEmitBacklogBuildsLastCycle_;
         snapshot.exactGpuComputeInFlightBeforeEmitLastCycle = exactGpuComputeInFlightBeforeEmitLastCycle_;
@@ -8855,13 +8872,11 @@ void ChunkManager::Impl::resetBenchmarkMetrics()
         exactGpuWorldgenResolveMsLastCycle_ = 0.0;
         exactGpuPrepassFaceTotalsReadbackMsLastCycle_ = 0.0;
         exactGpuEmitMetadataSyncMsLastCycle_ = 0.0;
-        exactGpuPageSweepMsLastCycle_ = 0.0;
         exactGpuEmitWaitMsLastCycle_ = 0.0;
         exactGpuEmitFenceLifetimeMsLastCycle_ = 0.0;
         exactGpuBlockingEmitBatchAgeMsLastCycle_ = 0.0;
         exactGpuWorldgenPageMissesLastCycle_ = 0;
         exactGpuEmitMetadataDirtyPagesLastCycle_ = 0;
-        exactGpuPageSweepPagesLastCycle_ = 0;
         exactGpuReadyForEmitBacklogBatchesLastCycle_ = 0;
         exactGpuReadyForEmitBacklogBuildsLastCycle_ = 0;
         exactGpuComputeInFlightBeforeEmitLastCycle_ = 0;
@@ -9275,19 +9290,23 @@ void ChunkManager::Impl::exactGpuWorkerThreadFunction()
 
         std::unique_lock<std::mutex> waitLock(exactGpuWorkerMutex_);
         const bool hasPendingWork = exactGpuWorkerHasPendingWork();
-        if (!hasPendingWork)
+        const bool needsLifecycleMaintenance = exactGpuWorkerNeedsLifecycleMaintenance();
+        if (!hasPendingWork && !needsLifecycleMaintenance)
         {
             exactGpuWorkerCondition_.wait(waitLock,
                                           [this]
                                           {
                                               return shouldStop_.load(std::memory_order_acquire) ||
                                                      exactGpuWorkerStopRequested_.load(std::memory_order_acquire) ||
-                                                     exactGpuWorkerHasPendingWork();
+                                                     exactGpuWorkerHasPendingWork() ||
+                                                     exactGpuWorkerNeedsLifecycleMaintenance();
                                           });
             continue;
         }
 
-        exactGpuWorkerCondition_.wait_for(waitLock, std::chrono::milliseconds(1));
+        exactGpuWorkerCondition_.wait_for(waitLock,
+                                          hasPendingWork ? std::chrono::milliseconds(1)
+                                                         : std::chrono::milliseconds(16));
     }
 }
 
@@ -10758,7 +10777,96 @@ void ChunkManager::Impl::resetChunkBufferPage(ChunkBufferPage& page) noexcept
     page.pendingBatchId = 0;
     page.uploadFenceValue = 0;
     page.retireFenceValue = 0;
+    page.exactChunkMembers.clear();
+    page.exactPendingPublishCoords.clear();
+    page.exactChunkMemberCount = 0;
+    page.exactPendingPublishCount = 0;
+    page.sealRequestedQueued = false;
+    page.sealedPendingResidentQueued = false;
+    page.readyToResidentQueued = false;
+    page.residentQueued = false;
     page.state = ChunkBufferPageState::Free;
+}
+
+void ChunkManager::Impl::addChunkToExactPageMembers(std::uint32_t pageIndex, const glm::ivec3& coord)
+{
+    if (pageIndex >= bufferPages_.size())
+    {
+        return;
+    }
+
+    ChunkBufferPage& page = bufferPages_[pageIndex];
+    if (page.usage != ChunkBufferPageUsage::ExactGpu)
+    {
+        return;
+    }
+
+    page.exactChunkMembers.insert(coord);
+    page.exactChunkMemberCount = page.exactChunkMembers.size();
+}
+
+void ChunkManager::Impl::removeChunkFromExactPageMembers(std::uint32_t pageIndex, const glm::ivec3& coord)
+{
+    if (pageIndex >= bufferPages_.size())
+    {
+        return;
+    }
+
+    ChunkBufferPage& page = bufferPages_[pageIndex];
+    if (page.usage != ChunkBufferPageUsage::ExactGpu)
+    {
+        return;
+    }
+
+    page.exactChunkMembers.erase(coord);
+    page.exactChunkMemberCount = page.exactChunkMembers.size();
+    page.exactPendingPublishCoords.erase(
+        std::remove(page.exactPendingPublishCoords.begin(), page.exactPendingPublishCoords.end(), coord),
+        page.exactPendingPublishCoords.end());
+    page.exactPendingPublishCount = page.exactPendingPublishCoords.size();
+}
+
+void ChunkManager::Impl::queueChunkForExactPagePublish(std::uint32_t pageIndex, const glm::ivec3& coord)
+{
+    if (pageIndex >= bufferPages_.size())
+    {
+        return;
+    }
+
+    ChunkBufferPage& page = bufferPages_[pageIndex];
+    if (page.usage != ChunkBufferPageUsage::ExactGpu ||
+        !page.exactChunkMembers.contains(coord))
+    {
+        return;
+    }
+
+    const auto it = std::find(page.exactPendingPublishCoords.begin(),
+                              page.exactPendingPublishCoords.end(),
+                              coord);
+    if (it == page.exactPendingPublishCoords.end())
+    {
+        page.exactPendingPublishCoords.push_back(coord);
+        page.exactPendingPublishCount = page.exactPendingPublishCoords.size();
+    }
+}
+
+std::vector<glm::ivec3> ChunkManager::Impl::drainExactPagePublishList(std::uint32_t pageIndex)
+{
+    if (pageIndex >= bufferPages_.size())
+    {
+        return {};
+    }
+
+    ChunkBufferPage& page = bufferPages_[pageIndex];
+    if (page.usage != ChunkBufferPageUsage::ExactGpu || page.exactPendingPublishCoords.empty())
+    {
+        return {};
+    }
+
+    std::vector<glm::ivec3> publishCoords = std::move(page.exactPendingPublishCoords);
+    page.exactPendingPublishCoords.clear();
+    page.exactPendingPublishCount = 0;
+    return publishCoords;
 }
 
 std::size_t ChunkManager::Impl::exactReservationShardIndexForChunk(const glm::ivec3& chunkCoord) const noexcept
@@ -10783,14 +10891,6 @@ bool ChunkManager::Impl::shouldSealExactOpenPageForAbandonment(const ChunkBuffer
 void ChunkManager::Impl::requestExactPageLifecycleSeals()
 {
     const SteadyClock::time_point now = SteadyClock::now();
-    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
-    const bool startupExactWindowActive =
-        startupEnabled_ &&
-        startupState_.preloadStarted &&
-        startupState_.phase != StreamingPhase::SteadyState;
-    const bool aggressiveSealForExactProgress =
-        exactOnly &&
-        (startupExactWindowActive || lastMissingChunks_ > 0);
     for (ExactReservationShard& shard : exactReservationShards_)
     {
         std::lock_guard<std::mutex> shardLock(shard.mutex);
@@ -10833,18 +10933,12 @@ void ChunkManager::Impl::requestExactPageLifecycleSeals()
                 continue;
             }
 
-            if (aggressiveSealForExactProgress)
-            {
-                page.sealRequested = true;
-                continue;
-            }
-
             const bool idleTooLong =
                 page.lastReservationAt != SteadyClock::time_point{} &&
                 now - page.lastReservationAt >= kExactOpenPageIdleSealTimeout;
             if (idleTooLong)
             {
-                page.sealRequested = true;
+                requestSealExactPageLocked(pageIndex, ExactPageSealReason::Idle);
             }
         }
 
@@ -10855,7 +10949,7 @@ void ChunkManager::Impl::requestExactPageLifecycleSeals()
             {
                 if (openPages[i] < bufferPages_.size())
                 {
-                    bufferPages_[openPages[i]].sealRequested = true;
+                    requestSealExactPageLocked(openPages[i], ExactPageSealReason::AllocatorBackpressure);
                 }
             }
         }
@@ -10969,6 +11063,10 @@ ChunkManager::Impl::ChunkBufferPage* ChunkManager::Impl::acquireOrCreateOpenExac
         page.state = ChunkBufferPageState::OpenWritable;
         page.pendingBatchId = uploadBatchId;
         page.allocatorShard = static_cast<std::uint32_t>(&shard - exactReservationShards_.data());
+        if (freeExactGpuPageCount_ > 0)
+        {
+            --freeExactGpuPageCount_;
+        }
         pageIndex = candidateIndex;
         shard.openPageIndices.push_back(pageIndex);
         noteExactGpuPageMetadataChange(pageIndex);
@@ -11035,7 +11133,7 @@ bool ChunkManager::Impl::reserveExactOutputRange(const glm::ivec3& chunkCoord,
             openPage->indexCursor + requiredIndexCount > openPage->indexCapacity ||
             openPage->recordCursor + 1u > openPage->recordCapacity)
         {
-            requestSealExactPage(openPageIndex);
+            requestSealExactPage(openPageIndex, ExactPageSealReason::Capacity);
             continue;
         }
 
@@ -11053,7 +11151,7 @@ bool ChunkManager::Impl::reserveExactOutputRange(const glm::ivec3& chunkCoord,
             openPage->indexCursor == openPage->indexCapacity ||
             openPage->recordCursor == openPage->recordCapacity)
         {
-            openPage->sealRequested = true;
+            requestSealExactPage(openPageIndex, ExactPageSealReason::Capacity);
         }
         reservedFaceCapacity = requiredFaceCount;
         noteExactGpuPageMetadataChange(openPageIndex);
@@ -11063,9 +11161,17 @@ bool ChunkManager::Impl::reserveExactOutputRange(const glm::ivec3& chunkCoord,
     return false;
 }
 
-void ChunkManager::Impl::requestSealExactPage(std::uint32_t pageIndex)
+void ChunkManager::Impl::requestSealExactPageLocked(std::uint32_t pageIndex, ExactPageSealReason reason)
 {
-    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+    switch (reason)
+    {
+    case ExactPageSealReason::Capacity:
+    case ExactPageSealReason::AllocatorBackpressure:
+    case ExactPageSealReason::Idle:
+    case ExactPageSealReason::Abandonment:
+        break;
+    }
+
     if (pageIndex >= bufferPages_.size())
     {
         return;
@@ -11078,42 +11184,109 @@ void ChunkManager::Impl::requestSealExactPage(std::uint32_t pageIndex)
     }
 
     page.sealRequested = true;
+    if (!page.sealRequestedQueued)
+    {
+        sealRequestedPageIndices_.push_back(pageIndex);
+        page.sealRequestedQueued = true;
+    }
 }
 
-void ChunkManager::Impl::collectSealedExactPages(UINT64 completedGpuFenceValue)
+void ChunkManager::Impl::requestSealExactPage(std::uint32_t pageIndex, ExactPageSealReason reason)
 {
-    std::vector<std::uint32_t> candidatePageIndices;
+    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+    requestSealExactPageLocked(pageIndex, reason);
+}
+
+void ChunkManager::Impl::drainSealRequestedExactPages()
+{
+    std::array<std::unique_lock<std::mutex>, kExactReservationShardCount> shardLocks{};
+    for (std::size_t shardIndex = 0; shardIndex < kExactReservationShardCount; ++shardIndex)
     {
-        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-        for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
-        {
-            ChunkBufferPage& page = bufferPages_[pageIndex];
-            if (page.usage != ChunkBufferPageUsage::ExactGpu)
-            {
-                continue;
-            }
-
-            if (page.state == ChunkBufferPageState::OpenWritable && page.sealRequested)
-            {
-                page.state = ChunkBufferPageState::SealedPendingResident;
-                page.pendingBatchId = 0;
-                noteExactGpuPageMetadataChange(pageIndex);
-            }
-
-            if (page.state != ChunkBufferPageState::SealedPendingResident ||
-                page.pendingChunks > 0 ||
-                (page.lastWriteFenceValue != 0 && completedGpuFenceValue < page.lastWriteFenceValue))
-            {
-                continue;
-            }
-
-            candidatePageIndices.push_back(pageIndex);
-        }
+        shardLocks[shardIndex] = std::unique_lock<std::mutex>(exactReservationShards_[shardIndex].mutex);
     }
 
-    if (candidatePageIndices.empty())
+    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+    while (!sealRequestedPageIndices_.empty())
     {
-        return;
+        const std::uint32_t pageIndex = sealRequestedPageIndices_.front();
+        sealRequestedPageIndices_.pop_front();
+        if (pageIndex >= bufferPages_.size())
+        {
+            continue;
+        }
+
+        ChunkBufferPage& page = bufferPages_[pageIndex];
+        page.sealRequestedQueued = false;
+        if (page.usage != ChunkBufferPageUsage::ExactGpu ||
+            page.state != ChunkBufferPageState::OpenWritable ||
+            !page.sealRequested)
+        {
+            continue;
+        }
+
+        ExactReservationShard& shard = exactReservationShards_[page.allocatorShard];
+        shard.openPageIndices.erase(std::remove(shard.openPageIndices.begin(),
+                                                shard.openPageIndices.end(),
+                                                pageIndex),
+                                    shard.openPageIndices.end());
+        page.state = ChunkBufferPageState::SealedPendingResident;
+        page.pendingBatchId = 0;
+        if (!page.sealedPendingResidentQueued)
+        {
+            sealedPendingResidentPageIndices_.push_back(pageIndex);
+            page.sealedPendingResidentQueued = true;
+        }
+        noteExactGpuPageMetadataChange(pageIndex);
+    }
+}
+
+void ChunkManager::Impl::advanceExactPageResidencyQueues(UINT64 completedGpuFenceValue)
+{
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        std::deque<std::uint32_t> stillSealedPendingResident;
+        while (!sealedPendingResidentPageIndices_.empty())
+        {
+            const std::uint32_t pageIndex = sealedPendingResidentPageIndices_.front();
+            sealedPendingResidentPageIndices_.pop_front();
+            if (pageIndex >= bufferPages_.size())
+            {
+                continue;
+            }
+
+            ChunkBufferPage& page = bufferPages_[pageIndex];
+            if (page.usage != ChunkBufferPageUsage::ExactGpu ||
+                page.state != ChunkBufferPageState::SealedPendingResident)
+            {
+                page.sealedPendingResidentQueued = false;
+                continue;
+            }
+
+            const bool waitingOnWrites =
+                page.pendingChunks > 0 ||
+                (page.lastWriteFenceValue != 0 && completedGpuFenceValue < page.lastWriteFenceValue);
+            if (waitingOnWrites)
+            {
+                stillSealedPendingResident.push_back(pageIndex);
+                continue;
+            }
+
+            page.sealedPendingResidentQueued = false;
+            if (!page.readyToResidentQueued)
+            {
+                readyToResidentPageIndices_.push_back(pageIndex);
+                page.readyToResidentQueued = true;
+            }
+        }
+        sealedPendingResidentPageIndices_.swap(stillSealedPendingResident);
+    }
+
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        if (readyToResidentPageIndices_.empty())
+        {
+            return;
+        }
     }
 
     std::unique_lock<std::mutex> exactLock(exactGpuExecutionMutex_);
@@ -11122,17 +11295,19 @@ void ChunkManager::Impl::collectSealedExactPages(UINT64 completedGpuFenceValue)
         return;
     }
 
-    std::vector<std::uint32_t> residentPageIndices;
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-        for (const std::uint32_t pageIndex : candidatePageIndices)
+        while (!readyToResidentPageIndices_.empty())
         {
+            const std::uint32_t pageIndex = readyToResidentPageIndices_.front();
+            readyToResidentPageIndices_.pop_front();
             if (pageIndex >= bufferPages_.size())
             {
                 continue;
             }
 
             ChunkBufferPage& page = bufferPages_[pageIndex];
+            page.readyToResidentQueued = false;
             if (page.usage != ChunkBufferPageUsage::ExactGpu ||
                 page.state != ChunkBufferPageState::SealedPendingResident ||
                 page.pendingChunks > 0 ||
@@ -11149,12 +11324,17 @@ void ChunkManager::Impl::collectSealedExactPages(UINT64 completedGpuFenceValue)
                 page.sealRequested = false;
                 page.pendingBatchId = 0;
                 releaseChunkBufferPageUploadBuffers(page);
-                residentPageIndices.push_back(pageIndex);
+                if (!page.residentQueued)
+                {
+                    residentPageIndices_.push_back(pageIndex);
+                    page.residentQueued = true;
+                }
             }
             else
             {
                 resetChunkBufferPage(page);
                 page.usage = ChunkBufferPageUsage::ExactGpu;
+                ++freeExactGpuPageCount_;
             }
             noteExactGpuPageMetadataChange(pageIndex);
         }
@@ -11165,6 +11345,27 @@ void ChunkManager::Impl::collectSealedExactPages(UINT64 completedGpuFenceValue)
     {
         exactGpuContext_.waitForFence(transitionFlushResult.fenceValue);
         exactGpuContext_.releaseSubmissionSlot(transitionFlushResult.submissionSlotIndex);
+    }
+
+    std::vector<std::uint32_t> residentPageIndices;
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        while (!residentPageIndices_.empty())
+        {
+            const std::uint32_t pageIndex = residentPageIndices_.front();
+            residentPageIndices_.pop_front();
+            if (pageIndex >= bufferPages_.size())
+            {
+                continue;
+            }
+
+            bufferPages_[pageIndex].residentQueued = false;
+            if (bufferPages_[pageIndex].usage == ChunkBufferPageUsage::ExactGpu &&
+                bufferPages_[pageIndex].state == ChunkBufferPageState::ResidentImmutable)
+            {
+                residentPageIndices.push_back(pageIndex);
+            }
+        }
     }
 
     for (const std::uint32_t pageIndex : residentPageIndices)
@@ -11208,7 +11409,8 @@ void ChunkManager::Impl::releasePendingExactBuildAllocation(PendingExactGpuBuild
                     ++page.abandonedOpenReservationCount;
                     if (shouldSealExactOpenPageForAbandonment(page))
                     {
-                        page.sealRequested = true;
+                        requestSealExactPageLocked(pending.allocation.pageIndex,
+                                                   ExactPageSealReason::Abandonment);
                     }
                     noteExactGpuPageMetadataChange(pending.allocation.pageIndex);
                     handledPersistentReservation = true;
@@ -11280,6 +11482,10 @@ ChunkManager::Impl::ChunkAllocation ChunkManager::Impl::acquireChunkAllocation(s
             page.usage = usage;
             page.state = ChunkBufferPageState::OpenWritable;
             page.pendingBatchId = uploadBatchId;
+            if (usage == ChunkBufferPageUsage::ExactGpu && freeExactGpuPageCount_ > 0)
+            {
+                --freeExactGpuPageCount_;
+            }
         }
 
         if (page.usage != usage)
@@ -13561,6 +13767,10 @@ void ChunkManager::Impl::collectReusableChunkBufferPages()
             const std::uint32_t pageIndex = static_cast<std::uint32_t>(&page - bufferPages_.data());
             releaseChunkBufferPageUploadBuffers(page);
             resetChunkBufferPage(page);
+            if (page.usage == ChunkBufferPageUsage::ExactGpu)
+            {
+                ++freeExactGpuPageCount_;
+            }
             noteExactGpuPageMetadataChange(pageIndex);
             if (exactUploadDebugLoggingEnabled())
             {
@@ -13614,7 +13824,10 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
             {
                 if (page.pendingChunks > 0)
                 {
-                    page.state = ChunkBufferPageState::SealedPendingResident;
+                    if (page.usage != ChunkBufferPageUsage::ExactGpu)
+                    {
+                        page.state = ChunkBufferPageState::SealedPendingResident;
+                    }
                     if (exactUploadDebugLoggingEnabled())
                     {
                         std::ostringstream stream;
@@ -13644,6 +13857,10 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
                 {
                     releaseChunkBufferPageUploadBuffers(page);
                     resetChunkBufferPage(page);
+                    if (page.usage == ChunkBufferPageUsage::ExactGpu)
+                    {
+                        ++freeExactGpuPageCount_;
+                    }
                     if (exactUploadDebugLoggingEnabled())
                     {
                         std::ostringstream stream;
@@ -13664,7 +13881,23 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
 
         if (page.pendingChunks == 0)
         {
-            if (page.residentChunks > 0)
+            if (page.usage == ChunkBufferPageUsage::ExactGpu)
+            {
+                if (page.state == ChunkBufferPageState::SealedPendingResident &&
+                    !page.sealedPendingResidentQueued)
+                {
+                    sealedPendingResidentPageIndices_.push_back(pageIndex);
+                    page.sealedPendingResidentQueued = true;
+                }
+                else if (page.state == ChunkBufferPageState::OpenWritable &&
+                         page.sealRequested &&
+                         !page.sealRequestedQueued)
+                {
+                    sealRequestedPageIndices_.push_back(pageIndex);
+                    page.sealRequestedQueued = true;
+                }
+            }
+            else if (page.residentChunks > 0)
             {
                 page.state = ChunkBufferPageState::ResidentImmutable;
                 page.uploadFenceValue = 0;
@@ -13684,6 +13917,10 @@ void ChunkManager::Impl::releaseChunkAllocationRange(std::uint32_t pageIndex,
             {
                 releaseChunkBufferPageUploadBuffers(page);
                 resetChunkBufferPage(page);
+                if (page.usage == ChunkBufferPageUsage::ExactGpu)
+                {
+                    ++freeExactGpuPageCount_;
+                }
                 if (exactUploadDebugLoggingEnabled())
                 {
                     std::ostringstream stream;
@@ -13767,6 +14004,10 @@ void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
     chunk.vertexOffset.store(0, std::memory_order_release);
     chunk.indexOffset.store(0, std::memory_order_release);
     chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        removeChunkFromExactPageMembers(pageIndex, chunk.coord);
+    }
     releaseChunkAllocationRange(pageIndex, vertexOffset, vertexCount, indexOffset, indexCount, true);
 
     std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
@@ -13920,6 +14161,11 @@ void ChunkManager::Impl::destroyBufferPages()
     bufferPages_.clear();
     exactGpuDirtyPageIndices_.clear();
     exactGpuPageMetadataQueued_.clear();
+    freeExactGpuPageCount_ = 0;
+    sealRequestedPageIndices_.clear();
+    sealedPendingResidentPageIndices_.clear();
+    readyToResidentPageIndices_.clear();
+    residentPageIndices_.clear();
     noteExactGpuEmitConfigRefresh();
 }
 
@@ -19687,11 +19933,9 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
     const SteadyClock::time_point commitStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     std::uint64_t emitMetadataSyncMicros = 0u;
     std::uint64_t prepassFaceTotalsReadbackMicros = 0u;
-    std::uint64_t pageSweepMicros = 0u;
     std::uint64_t emitWaitMicros = 0u;
     std::uint64_t emitFenceLifetimeMicros = 0u;
     int emitMetadataDirtyPages = 0;
-    int pageSweepPages = 0;
     int readyForEmitBacklogBatchesLastObserved = 0;
     int readyForEmitBacklogBuildsLastObserved = 0;
     int computeInFlightBeforeEmitLastObserved = 0;
@@ -19704,7 +19948,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
     const bool hadPendingBuilds = !pendingExactGpuBatches_.empty();
     const UINT64 completedGpuFenceValue = exactGpuContext_.completedFenceValue();
     requestExactPageLifecycleSeals();
-    collectSealedExactPages(completedGpuFenceValue);
+    drainSealRequestedExactPages();
+    advanceExactPageResidencyQueues(completedGpuFenceValue);
     const FarLodGpuContext::ExactPassTimings latestExactTimings = exactGpuContext_.latestExactPassTimings();
     if (latestExactTimings.totalMs > 0.0)
     {
@@ -20305,11 +20550,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
 
                                         ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
                                         page.lastWriteFenceValue = emitFlushResult.fenceValue;
-                                        if (page.sealRequested)
-                                        {
-                                            page.state = ChunkBufferPageState::SealedPendingResident;
-                                            page.pendingBatchId = 0;
-                                        }
                                         noteExactGpuPageMetadataChange(pending.allocation.pageIndex);
                                     }
                                 }
@@ -20507,6 +20747,11 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
 
                     {
                         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+                        if (oldPageIndex != kInvalidChunkBufferPage &&
+                            oldPageIndex != pending.allocation.pageIndex)
+                        {
+                            removeChunkFromExactPageMembers(oldPageIndex, chunk.coord);
+                        }
                         if (pending.hasAllocation() && pending.allocation.pageIndex < bufferPages_.size())
                         {
                             ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
@@ -20521,11 +20766,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                          static_cast<std::size_t>(pending.allocation.recordIndex + 1u));
                             assert(page.state == ChunkBufferPageState::OpenWritable ||
                                    page.state == ChunkBufferPageState::SealedPendingResident);
-                            if (page.state == ChunkBufferPageState::OpenWritable && page.sealRequested)
-                            {
-                                page.state = ChunkBufferPageState::SealedPendingResident;
-                                page.pendingBatchId = 0;
-                            }
+                            addChunkToExactPageMembers(pending.allocation.pageIndex, chunk.coord);
+                            queueChunkForExactPagePublish(pending.allocation.pageIndex, chunk.coord);
                             noteExactGpuPageMetadataChange(pending.allocation.pageIndex);
                         }
                     }
@@ -20590,10 +20832,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             {
                 benchmarkMetrics_.exactGpuPrepassFaceTotalsReadbackStage.recordMicros(prepassFaceTotalsReadbackMicros);
             }
-            if (pageSweepMicros > 0u)
-            {
-                benchmarkMetrics_.exactGpuPageSweepStage.recordMicros(pageSweepMicros);
-            }
             if (emitWaitMicros > 0u)
             {
                 benchmarkMetrics_.exactGpuEmitWaitStage.recordMicros(emitWaitMicros);
@@ -20612,10 +20850,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                 benchmarkMetrics_.exactGpuEmitMetadataUploadBytes.record(
                     static_cast<std::uint64_t>(emitMetadataUploadBytes));
             }
-            if (pageSweepPages > 0)
-            {
-                benchmarkMetrics_.exactGpuPageSweepPages.record(static_cast<std::uint64_t>(pageSweepPages));
-            }
             if (emitBatchBuilds > 0)
             {
                 benchmarkMetrics_.exactGpuEmitBatchBuilds.record(static_cast<std::uint64_t>(emitBatchBuilds));
@@ -20625,11 +20859,9 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             exactGpuEmitMetadataSyncMsLastCycle_ = static_cast<double>(emitMetadataSyncMicros) / 1000.0;
             exactGpuPrepassFaceTotalsReadbackMsLastCycle_ =
                 static_cast<double>(prepassFaceTotalsReadbackMicros) / 1000.0;
-            exactGpuPageSweepMsLastCycle_ = static_cast<double>(pageSweepMicros) / 1000.0;
             exactGpuEmitWaitMsLastCycle_ = static_cast<double>(emitWaitMicros) / 1000.0;
             exactGpuEmitFenceLifetimeMsLastCycle_ = static_cast<double>(emitFenceLifetimeMicros) / 1000.0;
             exactGpuEmitMetadataDirtyPagesLastCycle_ = emitMetadataDirtyPages;
-            exactGpuPageSweepPagesLastCycle_ = pageSweepPages;
             exactGpuReadyForEmitBacklogBatchesLastCycle_ = readyForEmitBacklogBatchesLastObserved;
             exactGpuReadyForEmitBacklogBuildsLastCycle_ = readyForEmitBacklogBuildsLastObserved;
             exactGpuComputeInFlightBeforeEmitLastCycle_ = computeInFlightBeforeEmitLastObserved;
@@ -23480,20 +23712,29 @@ void ChunkManager::Impl::publishResidentExactGpuPageChunksReady(std::uint32_t pa
         return;
     }
 
+    std::vector<glm::ivec3> publishCoords;
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        publishCoords = drainExactPagePublishList(pageIndex);
+    }
+    if (publishCoords.empty())
+    {
+        return;
+    }
+
     std::vector<std::shared_ptr<Chunk>> residentChunks;
+    residentChunks.reserve(publishCoords.size());
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
-        residentChunks.reserve(chunks_.size());
-        for (const auto& [_, chunk] : chunks_)
+        for (const glm::ivec3& coord : publishCoords)
         {
-            if (!chunk ||
-                !chunk->exactGpuResident.load(std::memory_order_acquire) ||
-                chunk->bufferPageIndex.load(std::memory_order_acquire) != pageIndex)
+            const auto it = chunks_.find(coord);
+            if (it == chunks_.end() || !it->second)
             {
                 continue;
             }
 
-            residentChunks.push_back(chunk);
+            residentChunks.push_back(it->second);
         }
     }
 
@@ -24563,6 +24804,34 @@ bool ChunkManager::Impl::chunkHasPendingStructureEdits(const glm::ivec3& coord) 
             return true;
         }
     }
+    return false;
+}
+
+bool ChunkManager::Impl::exactGpuWorkerNeedsLifecycleMaintenance()
+{
+    std::lock_guard<std::mutex> lock(bufferPageMutex_);
+    if (!sealRequestedPageIndices_.empty() ||
+        !sealedPendingResidentPageIndices_.empty() ||
+        !readyToResidentPageIndices_.empty() ||
+        !residentPageIndices_.empty())
+    {
+        return true;
+    }
+
+    for (const ChunkBufferPage& page : bufferPages_)
+    {
+        if (page.usage != ChunkBufferPageUsage::ExactGpu)
+        {
+            continue;
+        }
+
+        if (page.state == ChunkBufferPageState::OpenWritable ||
+            page.state == ChunkBufferPageState::SealedPendingResident)
+        {
+            return true;
+        }
+    }
+
     return false;
 }
 

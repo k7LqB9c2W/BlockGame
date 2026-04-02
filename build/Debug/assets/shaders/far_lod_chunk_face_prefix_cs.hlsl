@@ -2,9 +2,9 @@ StructuredBuffer<uint> gInput : register(t0);
 RWStructuredBuffer<uint> gOutput0 : register(u0);
 RWStructuredBuffer<uint> gOutput1 : register(u1);
 
-static const uint kVoxelCount = 4096u;
+static const uint kPlaneCount = 3u + 3u * 64u;
 static const uint kGroupSize = 256u;
-static const uint kGroupCount = kVoxelCount / kGroupSize;
+static const uint kGroupCount = (kPlaneCount + kGroupSize - 1u) / kGroupSize;
 
 groupshared uint sScan[kGroupSize];
 groupshared uint sOriginal[kGroupSize];
@@ -16,7 +16,7 @@ void FarLodChunkFacePrefixGroupMain(uint3 groupId : SV_GroupID,
 {
     const uint linearIndex = dispatchThreadId.x;
     const uint localIndex = groupThreadId.x;
-    const uint count = (linearIndex < kVoxelCount) ? gInput[linearIndex] : 0u;
+    const uint count = (linearIndex < kPlaneCount) ? gInput[linearIndex] : 0u;
     sScan[localIndex] = count;
     sOriginal[localIndex] = count;
     GroupMemoryBarrierWithGroupSync();
@@ -34,7 +34,7 @@ void FarLodChunkFacePrefixGroupMain(uint3 groupId : SV_GroupID,
         GroupMemoryBarrierWithGroupSync();
     }
 
-    if (linearIndex < kVoxelCount)
+    if (linearIndex < kPlaneCount)
     {
         gOutput0[linearIndex] = sScan[localIndex] - sOriginal[localIndex];
     }
@@ -76,7 +76,7 @@ void FarLodChunkFacePrefixScanMain(uint3 groupThreadId : SV_GroupThreadID)
 void FarLodChunkFacePrefixAddMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     const uint linearIndex = dispatchThreadId.x;
-    if (linearIndex >= kVoxelCount)
+    if (linearIndex >= kPlaneCount)
     {
         return;
     }

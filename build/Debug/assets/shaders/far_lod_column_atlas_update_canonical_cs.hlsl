@@ -10,6 +10,10 @@ cbuffer AtlasUpdateParams : register(b0)
     int gUpdateSizeZ;
     int gBlockScale;
     int gSeaLevel;
+    int gSeedCacheOriginChunkX;
+    int gSeedCacheOriginChunkZ;
+    int gSeedCacheSizeX;
+    int gSeedCacheSizeZ;
 };
 
 struct FarLodGpuFloat2
@@ -62,6 +66,8 @@ struct FarLodGpuBiome
 {
     uint surfaceBlock;
     uint fillerBlock;
+    uint canopyBlock;
+    uint secondaryCanopyBlock;
     uint flags;
     uint coastProfile;
     uint propertyBits;
@@ -81,6 +87,7 @@ struct FarLodGpuBiome
     float radiusVariation;
     uint fixedRadius;
     float treeDensityMultiplier;
+    float secondaryCanopyChance;
     float maxSubBiomeCount;
     float subBiomeTotalChance;
     int minHeightLimit;
@@ -215,7 +222,6 @@ StructuredBuffer<FarLodGpuBiomeSelection> gOceanSelections : register(t3);
 StructuredBuffer<FarLodGpuTransitionBiome> gTransitionBiomes : register(t4);
 StructuredBuffer<FarLodGpuSubBiome> gSubBiomes : register(t5);
 StructuredBuffer<uint> gSurfacePermutation : register(t6);
-RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u0);
 
 static const uint kFarLodBiomeOcean = 1u << 0;
 static const uint kFarLodBiomeSmoothBeaches = 1u << 1;
@@ -243,6 +249,7 @@ static const uint kBlockSand = 4u;
 static const uint kBlockPodzol = 9u;
 static const uint kBlockLeaves = 3u;
 static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockBirchLeaves = 14u;
 static const uint kMaxChunkSeeds = 64u;
 static const uint kMaxWeightedSeeds = 4u;
 static const float kClimateEpsilon = 1.0e-6f;
@@ -263,6 +270,27 @@ struct WeightedSeed
     float weight;
     float normalizedDistance;
 };
+
+struct GpuChunkSeedCacheHeader
+{
+    uint seedCount;
+    uint baseSeedIndex;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct GpuSamplePointCacheEntry
+{
+    SamplePoint points[9];
+};
+
+StructuredBuffer<GpuChunkSeedCacheHeader> gChunkSeedCacheHeaders : register(t7);
+StructuredBuffer<ExactBiomeSeed> gChunkSeeds : register(t8);
+StructuredBuffer<GpuSamplePointCacheEntry> gSampleCache : register(t9);
+RWStructuredBuffer<GpuChunkSeedCacheHeader> gChunkSeedCacheHeadersOut : register(u0);
+RWStructuredBuffer<ExactBiomeSeed> gChunkSeedsOut : register(u1);
+RWStructuredBuffer<GpuSamplePointCacheEntry> gSampleCacheOut : register(u2);
+RWStructuredBuffer<GpuTerrainAtlasSample> gAtlasSamples : register(u3);
 
 uint2 xor64(uint2 a, uint2 b)
 {
@@ -756,6 +784,10 @@ void insertWeightedSeed(inout WeightedSeed weighted[kMaxWeightedSeeds], inout ui
 
 int positiveModulo(int value, int divisor)
 {
+    if (divisor == 0)
+    {
+        return 0;
+    }
     const int result = value % divisor;
     return result < 0 ? result + divisor : result;
 }
@@ -765,6 +797,13 @@ uint atlasIndex(int2 cellCoord)
     const int atlasX = positiveModulo(cellCoord.x - gAtlasOriginCellX, gAtlasSizeX);
     const int atlasZ = positiveModulo(cellCoord.y - gAtlasOriginCellZ, gAtlasSizeZ);
     return (uint)(atlasZ * gAtlasSizeX + atlasX);
+}
+
+uint seedCacheIndex(int2 chunkCoord)
+{
+    const int cacheX = positiveModulo(chunkCoord.x - gSeedCacheOriginChunkX, gSeedCacheSizeX);
+    const int cacheZ = positiveModulo(chunkCoord.y - gSeedCacheOriginChunkZ, gSeedCacheSizeZ);
+    return (uint)(cacheZ * gSeedCacheSizeX + cacheX);
 }
 
 float hashToUnitFloat(int x, int y, int z)
@@ -1050,12 +1089,38 @@ uint selectBiomeIndex(float temperature01, float moisture01, float fertility01, 
     return bestBiomeIndex;
 }
 
-SamplePoint samplePointLegacy(int worldX, int worldZ)
+// Keep the atlas sample pass seed-cache-only. Falling back to the legacy
+// generator here drags the old selection/sub-biome path into this shader.
+SamplePoint samplePointSeedCacheFallback()
+{
+    const FarLodGpuBiome fallbackBiome = gBiomes[0];
+    SamplePoint result;
+    result.biomeIndex = 0u;
+    result.biomeFlags = fallbackBiome.flags;
+    result.surfaceY = (int)round(applyHeightLimits(fallbackBiome, fallbackBiome.minHeight, 0.0f));
+    result.distanceToShore = kHugeFloat;
+    return result;
+}
+
+SamplePoint samplePointFromSeedCache(int worldX, int worldZ)
 {
     const FarLodGpuWorldgenHeader header = gWorldgenHeader[0];
     const int2 worldPos = int2(worldX, worldZ);
     const int chunkX = floorDivExact(worldX, header.chunkSpan);
     const int chunkZ = floorDivExact(worldZ, header.chunkSpan);
+    if (gSeedCacheSizeX <= 0 || gSeedCacheSizeZ <= 0)
+    {
+        return samplePointSeedCacheFallback();
+    }
+
+    const uint seedCacheWidth = (uint)gSeedCacheSizeX;
+    const uint seedCacheHeight = (uint)gSeedCacheSizeZ;
+    const uint totalSeedCacheChunks = seedCacheWidth * seedCacheHeight;
+    const uint totalSeedCount = totalSeedCacheChunks * kMaxChunkSeeds;
+    if (totalSeedCacheChunks == 0u || totalSeedCount / kMaxChunkSeeds != totalSeedCacheChunks)
+    {
+        return samplePointSeedCacheFallback();
+    }
 
     WeightedSeed weightedSeeds[kMaxWeightedSeeds];
     uint weightedCount = 0u;
@@ -1068,14 +1133,24 @@ SamplePoint samplePointLegacy(int worldX, int worldZ)
         [loop]
         for (int dx = -header.neighborRadius; dx <= header.neighborRadius; ++dx)
         {
-            ExactBiomeSeed chunkSeeds[kMaxChunkSeeds];
-            uint chunkSeedCount = 0u;
-            buildChunkSeeds(chunkX + dx, chunkZ + dz, chunkSeeds, chunkSeedCount);
+            const uint cacheIndex = seedCacheIndex(int2(chunkX + dx, chunkZ + dz));
+            if (cacheIndex >= totalSeedCacheChunks)
+            {
+                return samplePointSeedCacheFallback();
+            }
+            const GpuChunkSeedCacheHeader cacheHeader = gChunkSeedCacheHeaders[cacheIndex];
+            const uint seedBaseIndex = cacheHeader.baseSeedIndex;
+            if (seedBaseIndex >= totalSeedCount)
+            {
+                return samplePointSeedCacheFallback();
+            }
+
+            const uint chunkSeedCount = min(cacheHeader.seedCount, min(kMaxChunkSeeds, totalSeedCount - seedBaseIndex));
 
             [loop]
             for (uint seedIndex = 0u; seedIndex < chunkSeedCount; ++seedIndex)
             {
-                const ExactBiomeSeed seed = chunkSeeds[seedIndex];
+                const ExactBiomeSeed seed = gChunkSeeds[seedBaseIndex + seedIndex];
                 const FarLodGpuBiome seedBiome = gBiomes[seed.biomeIndex];
                 const float2 delta = float2(worldPos - seed.position);
                 const float distance = length(delta);
@@ -1896,7 +1971,7 @@ void applyTransitionBiomeAtPoint(int worldX, int worldZ, inout ClimateResolvedPo
 
 SamplePoint samplePoint(int worldX, int worldZ)
 {
-    return samplePointLegacy(worldX, worldZ);
+    return samplePointFromSeedCache(worldX, worldZ);
 }
 
 void resolveCenterMaterialAndWater(FarLodGpuBiome biome,
@@ -1959,6 +2034,110 @@ void resolveCenterMaterialAndWater(FarLodGpuBiome biome,
     }
 }
 
+groupshared GpuSamplePointCacheEntry gSharedSampleTile[64];
+
+[numthreads(8, 8, 1)]
+void FarLodChunkSeedCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    if (dispatchThreadId.x >= (uint)gUpdateSizeX || dispatchThreadId.y >= (uint)gUpdateSizeZ)
+    {
+        return;
+    }
+
+    if (gSeedCacheSizeX <= 0 || gSeedCacheSizeZ <= 0)
+    {
+        return;
+    }
+
+    const uint seedCacheWidth = (uint)gSeedCacheSizeX;
+    const uint seedCacheHeight = (uint)gSeedCacheSizeZ;
+    const uint totalSeedCacheChunks = seedCacheWidth * seedCacheHeight;
+    const uint totalSeedCount = totalSeedCacheChunks * kMaxChunkSeeds;
+    if (totalSeedCacheChunks == 0u || totalSeedCount / kMaxChunkSeeds != totalSeedCacheChunks)
+    {
+        return;
+    }
+
+    const int2 chunkCoord = int2(gUpdateOriginCellX + (int)dispatchThreadId.x,
+                                 gUpdateOriginCellZ + (int)dispatchThreadId.y);
+    GpuChunkSeedCacheHeader cacheHeader = (GpuChunkSeedCacheHeader)0;
+    ExactBiomeSeed seeds[kMaxChunkSeeds];
+    uint seedCount = 0u;
+    buildChunkSeeds(chunkCoord.x, chunkCoord.y, seeds, seedCount);
+    const uint cacheIndex = seedCacheIndex(chunkCoord);
+    if (cacheIndex >= totalSeedCacheChunks)
+    {
+        return;
+    }
+    const uint seedBaseIndex = cacheIndex * kMaxChunkSeeds;
+    if (seedBaseIndex >= totalSeedCount)
+    {
+        return;
+    }
+    const uint maxWritableSeedCount = min(seedCount, min(kMaxChunkSeeds, totalSeedCount - seedBaseIndex));
+    cacheHeader.seedCount = maxWritableSeedCount;
+    cacheHeader.baseSeedIndex = seedBaseIndex;
+    [unroll]
+    for (uint seedIndex = 0u; seedIndex < kMaxChunkSeeds; ++seedIndex)
+    {
+        if (seedIndex >= maxWritableSeedCount)
+        {
+            break;
+        }
+        gChunkSeedsOut[seedBaseIndex + seedIndex] = seeds[seedIndex];
+    }
+    gChunkSeedCacheHeadersOut[cacheIndex] = cacheHeader;
+}
+
+[numthreads(8, 8, 1)]
+void FarLodColumnSampleCacheMain(uint3 dispatchThreadId : SV_DispatchThreadID,
+                                 uint3 groupThreadId : SV_GroupThreadID)
+{
+    const bool active = dispatchThreadId.x < (uint)gUpdateSizeX && dispatchThreadId.y < (uint)gUpdateSizeZ;
+    const uint sharedIndex = groupThreadId.y * 8u + groupThreadId.x;
+    gSharedSampleTile[sharedIndex] = (GpuSamplePointCacheEntry)0;
+
+    int2 cellCoord = int2(0, 0);
+    if (active)
+    {
+        cellCoord = int2(gUpdateOriginCellX + (int)dispatchThreadId.x,
+                         gUpdateOriginCellZ + (int)dispatchThreadId.y);
+        const int worldX = cellCoord.x * gBlockScale;
+        const int worldZ = cellCoord.y * gBlockScale;
+        const int footprint = max(gBlockScale, 1);
+        const int maxSampleX = worldX + (footprint - 1);
+        const int maxSampleZ = worldZ + (footprint - 1);
+        const int centerX = worldX + footprint / 2;
+        const int centerZ = worldZ + footprint / 2;
+        const int midX = worldX + footprint / 2;
+        const int midZ = worldZ + footprint / 2;
+
+        const int2 points[9] = {
+            int2(worldX, worldZ),
+            int2(maxSampleX, worldZ),
+            int2(worldX, maxSampleZ),
+            int2(maxSampleX, maxSampleZ),
+            int2(centerX, centerZ),
+            int2(midX, worldZ),
+            int2(midX, maxSampleZ),
+            int2(worldX, midZ),
+            int2(maxSampleX, midZ),
+        };
+
+        [loop]
+        for (uint sampleIndex = 0u; sampleIndex < 9u; ++sampleIndex)
+        {
+            gSharedSampleTile[sharedIndex].points[sampleIndex] =
+                samplePoint(points[sampleIndex].x, points[sampleIndex].y);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (active)
+    {
+        gSampleCacheOut[atlasIndex(cellCoord)] = gSharedSampleTile[sharedIndex];
+    }
+}
+
 [numthreads(8, 8, 1)]
 void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -1992,9 +2171,11 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     };
 
     SamplePoint samples[9];
+    const GpuSamplePointCacheEntry cacheEntry = gSampleCache[atlasIndex(cellCoord)];
+    [unroll]
     for (uint sampleIndex = 0u; sampleIndex < 9u; ++sampleIndex)
     {
-        samples[sampleIndex] = samplePoint(points[sampleIndex].x, points[sampleIndex].y);
+        samples[sampleIndex] = cacheEntry.points[sampleIndex];
     }
 
     int heights[9];
@@ -2062,9 +2243,20 @@ void FarLodColumnAtlasUpdateMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float averageDensity = densitySum / (float)densityCount;
         if (averageDensity >= 0.32f)
         {
+            uint canopyBlock = centerBiome.canopyBlock != 0u ? centerBiome.canopyBlock : kBlockLeaves;
+            if (!taigaCanopy &&
+                centerBiome.secondaryCanopyBlock != 0u &&
+                centerBiome.secondaryCanopyChance > 0.0f)
+            {
+                const float canopyRoll = hashToUnitFloat(centerX, sample.maxSurfaceY + 271, centerZ);
+                if (canopyRoll < centerBiome.secondaryCanopyChance)
+                {
+                    canopyBlock = centerBiome.secondaryCanopyBlock;
+                }
+            }
             sample.canopyBottomY = sample.maxSurfaceY + (taigaCanopy ? 4 : 3);
             sample.canopyTopY = sample.canopyBottomY + (taigaCanopy ? 8 : 6);
-            sample.canopyBlock = taigaCanopy ? kBlockSpruceLeaves : kBlockLeaves;
+            sample.canopyBlock = taigaCanopy ? kBlockSpruceLeaves : canopyBlock;
             sample.canopyStrength = (uint)clamp(round(averageDensity * 255.0f), 0.0f, 255.0f);
         }
     }

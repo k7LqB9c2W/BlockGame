@@ -3,6 +3,7 @@
 Texture2D gAtlas : register(t0);
 Texture2DArray gAerialPerspective : register(t1);
 Texture2D gShadowMap : register(t2);
+Texture2D gSkyBackground : register(t3);
 
 SamplerState gTerrainSampler : register(s0);
 SamplerState gLinearClamp : register(s1);
@@ -20,6 +21,8 @@ cbuffer WorldConstants : register(b0)
     float4 uSunColor;
     float4 uSkyAmbient;
     float4 uGroundAmbient;
+    float4 uSkyTopColor;
+    float4 uSkyHorizonColor;
     float4 uShadowParams;
     float4 uTerrainDebug;
 };
@@ -35,6 +38,7 @@ struct PSInput
     float2 lightChannels : TEXCOORD3;
     float ao : TEXCOORD4;
     uint materialFlags : TEXCOORD5;
+    uint alphaCutout : TEXCOORD7;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
@@ -122,11 +126,24 @@ float4 main(PSInput input) : SV_TARGET
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
-    clip(textureSample.a - 0.5f);
+    if (input.alphaCutout != 0u)
+    {
+        clip(textureSample.a - 0.5f);
+    }
+    const uint grassTintIndex = decodeGrassTintIndex(input.materialFlags);
+
+    float3 albedo = textureSample.rgb;
+    if (grassTintIndex != 0u)
+    {
+        const float3 tint = biomeGrassTint(grassTintIndex);
+        const float tintMask = isGrassSideTint(input.materialFlags) ? grassSideTintMask(wrappedTileUv) : 1.0f;
+        albedo = lerp(albedo, albedo * tint, tintMask);
+    }
 
     const float skyLight = saturate(input.lightChannels.x);
     const float blockLight = saturate(input.lightChannels.y);
-    const float ao = saturate(input.ao);
+    const float aoStrength = max(uTerrainDebug.w, 0.01f);
+    const float ao = pow(saturate(input.ao), aoStrength);
     const float mipLevel = computeMipLevel(atlasUvDdx, atlasUvDdy);
     const int debugView = (int)uTerrainDebug.y;
 
@@ -148,6 +165,8 @@ float4 main(PSInput input) : SV_TARGET
     }
 
     const float faceShade = faceShadeMultiplier(normal);
+    const float indirectFaceShade = lerp(1.0f, faceShade, 0.55f);
+    const float directFaceShade = lerp(1.0f, faceShade, 0.25f);
     const float diff = max(dot(normal, lightDir), 0.0f);
     const float3 halfDir = normalize(lightDir + viewDir);
     const float spec = pow(max(dot(normal, halfDir), 0.0f), 16.0f);
@@ -157,39 +176,36 @@ float4 main(PSInput input) : SV_TARGET
     const float3 skyTint = ambientTint * 2.15f + float3(0.08f, 0.09f, 0.11f);
     const float3 skyIndirect = skyTint * skyLight;
     const float3 blockIndirect = float3(1.12f, 0.95f, 0.70f) * blockLight;
-    const float3 indirect = (skyIndirect + blockIndirect) * faceShade * ao;
+    const float indirectAo = lerp(1.0f, ao, 0.78f);
+    const float3 indirect = (skyIndirect + blockIndirect) * indirectFaceShade * indirectAo;
 
     const float directSunGate = uTerrainDebug.x * saturate(skyLight * 1.08f);
-    const float directAo = lerp(1.0f, ao, 0.35f);
+    const float directAo = lerp(1.0f, ao, 0.18f);
     const float3 directLight =
-        uSunColor.rgb * (diff * shadow * directSunGate * faceShade * directAo * 0.38f);
+        uSunColor.rgb * (diff * shadow * directSunGate * directFaceShade * directAo * 0.38f);
     const float3 specularLight =
-        uSunColor.rgb * (spec * shadow * directSunGate * faceShade * directAo * 0.012f);
+        uSunColor.rgb * (spec * shadow * directSunGate * directFaceShade * directAo * 0.012f);
     const float3 baseBounce = ambientTint * 0.026f;
 
-    float3 color = textureSample.rgb * (indirect + baseBounce + directLight) + specularLight;
-
-    if (uParams0.y > 0.5f)
-    {
-        const int3 currentBlock = int3(floor(input.worldPos));
-        const int3 targetBlock = int3(uHighlightedBlock.xyz);
-        if (all(currentBlock == targetBlock))
-        {
-            color = min(color + float3(0.28f, 0.28f, 0.28f), float3(1.0f, 1.0f, 1.0f));
-        }
-    }
+    float3 color = albedo * (indirect + baseBounce + directLight) + specularLight;
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
-    const float3 fogColor = computeTerrainFogColor(normalize(input.worldPos - uCameraPos.xyz));
+    const float horizontalDistanceBlocks = distance(input.worldPos.xz, uCameraPos.xz);
+    const float3 fogViewDir = normalize(input.worldPos - uCameraPos.xyz);
+    const float2 screenUv = input.position.xy * uParams0.zw;
+    const bool useAnalyticFogBackground = uTerrainDebug.z > 0.5f;
+    const float3 fogColor = useAnalyticFogBackground
+                                ? computeTerrainFogColor(fogViewDir, uSkyTopColor.rgb, uSkyHorizonColor.rgb)
+                                : gSkyBackground.SampleLevel(gLinearClamp, screenUv, 0.0f).rgb;
     if (uParams0.x > 0.5f)
     {
-        const float2 screenUv = input.position.xy * uParams0.zw;
         const float4 aerial = sampleAerialPerspective(screenUv, distanceBlocks * 0.001f, uParams1.y);
         const float transmittance = saturate(max(aerial.a, 0.18f));
         color = color * transmittance + aerial.rgb;
 
-        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
-                                                          viewDir,
+        const FogBlendResult fogBlend = computeLayeredFog(distanceBlocks,
+                                                          horizontalDistanceBlocks,
+                                                          fogViewDir,
                                                           input.worldPos.y,
                                                           uCameraPos.y,
                                                           uParams1.z,
@@ -200,8 +216,9 @@ float4 main(PSInput input) : SV_TARGET
     }
     else if (uParams1.w > uParams1.z)
     {
-        const FogBlendResult fogBlend = computeRoundedFog(distanceBlocks,
-                                                          viewDir,
+        const FogBlendResult fogBlend = computeLayeredFog(distanceBlocks,
+                                                          horizontalDistanceBlocks,
+                                                          fogViewDir,
                                                           input.worldPos.y,
                                                           uCameraPos.y,
                                                           uParams1.z,

@@ -7,11 +7,15 @@ struct DecodedVertexLighting
     float ao;
     float aoDebug;
     uint flags;
+    uint alphaCutout;
     float farVoxelScale;
 };
 
 static const uint kMaterialFlagWater = 0x01u;
 static const uint kMaterialFlagFarLod = 0x02u;
+static const uint kMaterialFlagGrassTintShift = 2u;
+static const uint kMaterialFlagGrassTintMask = 0x1Cu;
+static const uint kMaterialFlagGrassSideTint = 0x20u;
 
 struct FogBlendResult
 {
@@ -26,7 +30,9 @@ static const float kVanillaLightLut[16] = {
     0.520f, 0.690f, 0.845f, 1.000f
 };
 
-static const float kAoFactors[4] = {1.00f, 0.80f, 0.62f, 0.45f};
+// Lean a bit more into corner darkening so terrain AO reads clearly without
+// returning to the old overly harsh fast-lighting look.
+static const float kAoFactors[4] = {1.00f, 0.86f, 0.73f, 0.60f};
 
 float decodeNonLinearLightLevel(uint level)
 {
@@ -50,6 +56,7 @@ DecodedVertexLighting decodeVertexLighting(uint packedLighting)
     decoded.ao = decodeAoFactor(aoLevel);
     decoded.aoDebug = decoded.ao;
     decoded.flags = (packedLighting >> 10) & 0x3Fu;
+    decoded.alphaCutout = (packedLighting >> 24) & 0x1u;
     const uint scale = (packedLighting >> 16) & 0xFFu;
     decoded.farVoxelScale = (scale > 0u) ? (float)scale : 1.0f;
     return decoded;
@@ -60,37 +67,60 @@ float faceShadeMultiplier(float3 normal)
     const float3 absNormal = abs(normal);
     if (absNormal.y >= absNormal.x && absNormal.y >= absNormal.z)
     {
-        return normal.y >= 0.0f ? 1.00f : 0.50f;
+        return normal.y >= 0.0f ? 1.00f : 0.82f;
     }
     if (absNormal.z >= absNormal.x)
     {
-        return 0.80f;
+        return 0.94f;
     }
-    return 0.60f;
+    return 0.90f;
 }
 
-float3 computeTerrainFogColor(float3 viewDir)
+uint decodeGrassTintIndex(uint materialFlags)
 {
-    // Use the same gradient as the base sky pass so fogged terrain merges into the
-    // visible sky horizon instead of fading toward a separate ambient-tinted band.
-    return computeBaseGameSkyGradientFromViewY(max(viewDir.y, 0.0f));
+    return (materialFlags & kMaterialFlagGrassTintMask) >> kMaterialFlagGrassTintShift;
 }
 
-float computeFarLodHaze(float distanceBlocks, float fogStartBlocks, float farDistanceBlocks)
+bool isGrassSideTint(uint materialFlags)
 {
-    const float hazeStart = fogStartBlocks * 0.72f;
-    const float hazeRange = max(farDistanceBlocks - hazeStart, 1.0f);
-    const float haze = saturate((distanceBlocks - hazeStart) / hazeRange);
-    return haze * haze * (3.0f - 2.0f * haze);
+    return (materialFlags & kMaterialFlagGrassSideTint) != 0u;
 }
 
-FogBlendResult computeRoundedFog(float distanceBlocks,
+float3 biomeGrassTint(uint tintIndex)
+{
+    if (tintIndex == 2u)
+    {
+        return float3(80.0f, 122.0f, 50.0f) / 255.0f;
+    }
+    if (tintIndex == 3u)
+    {
+        return float3(134.0f, 183.0f, 131.0f) / 255.0f;
+    }
+    if (tintIndex == 4u)
+    {
+        return float3(191.0f, 183.0f, 85.0f) / 255.0f;
+    }
+    return float3(121.0f, 192.0f, 90.0f) / 255.0f;
+}
+
+float grassSideTintMask(float2 wrappedTileUv)
+{
+    return smoothstep(0.70f, 0.84f, wrappedTileUv.y);
+}
+
+float3 computeTerrainFogColor(float3 viewDir, float3 topSkyColorSrgb, float3 horizonSkyColorSrgb)
+{
+    return computeSkyGradientFromViewY(max(viewDir.y, 0.0f), topSkyColorSrgb, horizonSkyColorSrgb);
+}
+
+FogBlendResult computeLayeredFog(float distanceBlocks,
+                                 float horizontalDistanceBlocks,
                                  float3 viewDir,
                                  float worldY,
                                  float cameraY,
                                  float fogStartBlocks,
                                  float farDistanceBlocks,
-                                 float horizonBoostScale,
+                                 float concealStrength,
                                  float maxFog)
 {
     FogBlendResult result;
@@ -102,17 +132,26 @@ FogBlendResult computeRoundedFog(float distanceBlocks,
         return result;
     }
 
-    const float clampedFogStart = min(fogStartBlocks, farDistanceBlocks - 1.0f);
-    const float fogSpan = max(farDistanceBlocks - clampedFogStart, 1.0f);
-    const float distance01 = saturate((distanceBlocks - clampedFogStart) / fogSpan);
-    const float curvedDistance = 1.0f - exp(-pow(distance01, 1.35f) * 4.0f);
-    const float horizon = pow(saturate(1.0f - abs(viewDir.y)), 1.65f);
-    const float horizonBoost = 1.0f + horizon * horizonBoostScale;
-    const float lowerTerrain = saturate((cameraY - worldY + 20.0f) / max(farDistanceBlocks * 0.18f, 48.0f));
-    const float altitudeBoost = lerp(0.94f, 1.18f, lowerTerrain);
-    const float fog = min(saturate(curvedDistance * horizonBoost * altitudeBoost), maxFog);
+    const float safeFogStart = min(max(fogStartBlocks, 0.0f), farDistanceBlocks - 1.0f);
+    const float horizon = pow(saturate(1.0f - abs(viewDir.y)), 1.10f);
+    const float lowerTerrain = saturate((cameraY - worldY + 24.0f) / max(farDistanceBlocks * 0.20f, 56.0f));
+    const float radialDistanceBlocks = max(horizontalDistanceBlocks, distanceBlocks * 0.35f);
 
-    result.transmittance = saturate(1.0f - fog * 0.88f);
-    result.inscatter = fog;
+    const float hazeStart = min(safeFogStart * 0.34f, farDistanceBlocks * 0.42f);
+    const float hazeEnd = min(max(hazeStart + 1.0f, safeFogStart * 0.98f), farDistanceBlocks - 1.0f);
+    const float hazeRange = max(hazeEnd - hazeStart, 1.0f);
+    const float haze01 = saturate((radialDistanceBlocks - hazeStart) / hazeRange);
+    const float hazeCurve = 1.0f - exp(-pow(haze01, 1.12f) * 1.30f);
+    const float haze = hazeCurve * (0.10f + horizon * 0.04f + lowerTerrain * 0.05f);
+
+    const float concealStart = min(max(safeFogStart * 0.96f, farDistanceBlocks * 0.74f), farDistanceBlocks - 1.0f);
+    const float concealRange = max(farDistanceBlocks - concealStart, 1.0f);
+    const float conceal01 = saturate((radialDistanceBlocks - concealStart) / concealRange);
+    const float concealCurve = conceal01 * conceal01 * (3.0f - 2.0f * conceal01);
+    const float conceal = concealCurve * (0.88f + horizon * 0.06f + lowerTerrain * 0.08f) * concealStrength;
+
+    const float fog = min(saturate(haze + conceal), maxFog);
+    result.transmittance = exp(-fog * 2.35f);
+    result.inscatter = saturate(1.0f - result.transmittance);
     return result;
 }

@@ -12031,7 +12031,7 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
 {
     constexpr int kCoverageColumnsPerUpdate = 96;
     const glm::ivec2 centerColumn{center.x, center.z};
-    std::lock_guard<std::mutex> exactLock(exactPlanMutex_);
+    std::unique_lock<std::mutex> exactLock(exactPlanMutex_);
     ExactCoverageCacheState& state = exactCoverageCache_;
     const bool firstActivation = !state.active;
     const glm::ivec2 previousCenter = state.centerColumn;
@@ -12182,12 +12182,16 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
     }
 
     state.batch.columnsProcessedLastUpdate = 0;
-    while (!state.batch.pendingColumns.empty() && state.batch.columnsProcessedLastUpdate < kCoverageColumnsPerUpdate)
+    while (state.batch.columnsProcessedLastUpdate < kCoverageColumnsPerUpdate)
     {
+        if (state.batch.pendingColumns.empty())
+        {
+            break;
+        }
+
         const glm::ivec2 column = state.batch.pendingColumns.front();
         state.batch.pendingColumns.pop_front();
         state.batch.queuedColumns.erase(column);
-
         ExactCoverageCacheColumnState oldState{};
         bool hadOldState = false;
         if (auto it = state.columnSummaries.find(column); it != state.columnSummaries.end())
@@ -12196,11 +12200,13 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
             hadOldState = true;
         }
 
+        exactLock.unlock();
         ExactCoverageCacheColumnState newState{};
         newState.summary = buildExactCoverageColumnSummary(column, centerColumn, center.y, verticalRadius);
         newState.materializedRequiredIntervals = materializeRequiredIntervals(newState.summary);
         newState.requiredChunkCount = countRequiredChunks(newState.materializedRequiredIntervals);
         newState.authoritative = true;
+        exactLock.lock();
         state.columnSummaries[column] = newState;
 
         {
@@ -12218,11 +12224,13 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
 
     state.reconciling = !state.batch.pendingColumns.empty();
     updateExactCoverageCountsLocked(state);
+    const bool reconciling = state.reconciling;
+    exactLock.unlock();
     {
         std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
         refreshStreamingFrontierCoverageCountsLocked();
     }
-    updatePlayerSafetyOverlay(center, verticalRadius, state.reconciling);
+    updatePlayerSafetyOverlay(center, verticalRadius, reconciling);
 }
 
 void ChunkManager::Impl::markPlanDirtyColumn(const glm::ivec2& column) const
@@ -14540,6 +14548,7 @@ void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
     std::unordered_set<glm::ivec3, ChunkHasher> desiredOverlay{};
     if (reconciling)
     {
+        std::lock_guard<std::mutex> exactLock(exactPlanMutex_);
         desiredOverlay.reserve(static_cast<std::size_t>((kExactPlayerBandHorizontalRadius * 2 + 1) *
                                                         (kExactPlayerBandHorizontalRadius * 2 + 1) *
                                                         (kExactPlayerBandRadiusMax * 2 + 1)));

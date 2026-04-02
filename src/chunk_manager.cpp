@@ -620,28 +620,9 @@ struct ChunkBenchmarkMetrics
         exactGpuAllocateStage.reset();
         exactGpuFaceEmitStage.reset();
         exactGpuTotalStage.reset();
-        exactGpuPrepareCpuStage.reset();
-        exactGpuSubmitCpuStage.reset();
-        exactGpuCommitCpuStage.reset();
         exactGpuBuildQueueWaitStage.reset();
-        exactGpuWorldgenResolveStage.reset();
-        exactGpuPrepassFaceTotalsReadbackStage.reset();
-        exactGpuEmitMetadataSyncStage.reset();
-        exactGpuEmitWaitStage.reset();
-        exactGpuEmitFenceLifetimeStage.reset();
-        exactGpuWorldgenPageMisses.reset();
-        exactGpuEmitMetadataDirtyPages.reset();
-        exactGpuEmitMetadataUploadBytes.reset();
-        exactGpuReadyForEmitBacklogBatches.reset();
-        exactGpuReadyForEmitBacklogBuilds.reset();
-        exactGpuComputeInFlightBeforeEmit.reset();
-        exactGpuComputeInFlightAfterEmit.reset();
         exactGpuBuildQueueDepthEnqueue.reset();
         exactGpuBuildQueueDepthStart.reset();
-        exactGpuBlockingEmitBatchAgeStage.reset();
-        exactGpuBlockingEmitBatchBuilds.reset();
-        exactGpuSubmitBatchBuilds.reset();
-        exactGpuEmitBatchBuilds.reset();
         chunkReadyLatency.reset();
         chunkReadyWaitGenerateStage.reset();
         chunkReadyRequestQueuedGenerateStage.reset();
@@ -794,28 +775,9 @@ struct ChunkBenchmarkMetrics
         report.exactGpuAllocateStage = exactGpuAllocateStage.snapshot();
         report.exactGpuFaceEmitStage = exactGpuFaceEmitStage.snapshot();
         report.exactGpuTotalStage = exactGpuTotalStage.snapshot();
-        report.exactGpuPrepareCpuStage = exactGpuPrepareCpuStage.snapshot();
-        report.exactGpuSubmitCpuStage = exactGpuSubmitCpuStage.snapshot();
-        report.exactGpuCommitCpuStage = exactGpuCommitCpuStage.snapshot();
         report.exactGpuBuildQueueWaitStage = exactGpuBuildQueueWaitStage.snapshot();
-        report.exactGpuWorldgenResolveStage = exactGpuWorldgenResolveStage.snapshot();
-        report.exactGpuPrepassFaceTotalsReadbackStage = exactGpuPrepassFaceTotalsReadbackStage.snapshot();
-        report.exactGpuEmitMetadataSyncStage = exactGpuEmitMetadataSyncStage.snapshot();
-        report.exactGpuEmitWaitStage = exactGpuEmitWaitStage.snapshot();
-        report.exactGpuEmitFenceLifetimeStage = exactGpuEmitFenceLifetimeStage.snapshot();
-        report.exactGpuWorldgenPageMisses = exactGpuWorldgenPageMisses.snapshot();
-        report.exactGpuEmitMetadataDirtyPages = exactGpuEmitMetadataDirtyPages.snapshot();
-        report.exactGpuEmitMetadataUploadBytes = exactGpuEmitMetadataUploadBytes.snapshot();
-        report.exactGpuReadyForEmitBacklogBatches = exactGpuReadyForEmitBacklogBatches.snapshot();
-        report.exactGpuReadyForEmitBacklogBuilds = exactGpuReadyForEmitBacklogBuilds.snapshot();
-        report.exactGpuComputeInFlightBeforeEmit = exactGpuComputeInFlightBeforeEmit.snapshot();
-        report.exactGpuComputeInFlightAfterEmit = exactGpuComputeInFlightAfterEmit.snapshot();
         report.exactGpuBuildQueueDepthEnqueue = exactGpuBuildQueueDepthEnqueue.snapshot();
         report.exactGpuBuildQueueDepthStart = exactGpuBuildQueueDepthStart.snapshot();
-        report.exactGpuBlockingEmitBatchAgeStage = exactGpuBlockingEmitBatchAgeStage.snapshot();
-        report.exactGpuBlockingEmitBatchBuilds = exactGpuBlockingEmitBatchBuilds.snapshot();
-        report.exactGpuSubmitBatchBuilds = exactGpuSubmitBatchBuilds.snapshot();
-        report.exactGpuEmitBatchBuilds = exactGpuEmitBatchBuilds.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
         report.chunkReadyWaitGenerateStage = chunkReadyWaitGenerateStage.snapshot();
         report.chunkReadyRequestQueuedGenerateStage = chunkReadyRequestQueuedGenerateStage.snapshot();
@@ -967,28 +929,9 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram exactGpuAllocateStage{};
     AtomicLatencyHistogram exactGpuFaceEmitStage{};
     AtomicLatencyHistogram exactGpuTotalStage{};
-    AtomicLatencyHistogram exactGpuPrepareCpuStage{};
-    AtomicLatencyHistogram exactGpuSubmitCpuStage{};
-    AtomicLatencyHistogram exactGpuCommitCpuStage{};
     AtomicLatencyHistogram exactGpuBuildQueueWaitStage{};
-    AtomicLatencyHistogram exactGpuWorldgenResolveStage{};
-    AtomicLatencyHistogram exactGpuPrepassFaceTotalsReadbackStage{};
-    AtomicLatencyHistogram exactGpuEmitMetadataSyncStage{};
-    AtomicLatencyHistogram exactGpuEmitWaitStage{};
-    AtomicLatencyHistogram exactGpuEmitFenceLifetimeStage{};
-    AtomicCountHistogram exactGpuWorldgenPageMisses{};
-    AtomicCountHistogram exactGpuEmitMetadataDirtyPages{};
-    AtomicCountHistogram exactGpuEmitMetadataUploadBytes{};
-    AtomicCountHistogram exactGpuReadyForEmitBacklogBatches{};
-    AtomicCountHistogram exactGpuReadyForEmitBacklogBuilds{};
-    AtomicCountHistogram exactGpuComputeInFlightBeforeEmit{};
-    AtomicCountHistogram exactGpuComputeInFlightAfterEmit{};
     AtomicCountHistogram exactGpuBuildQueueDepthEnqueue{};
     AtomicCountHistogram exactGpuBuildQueueDepthStart{};
-    AtomicLatencyHistogram exactGpuBlockingEmitBatchAgeStage{};
-    AtomicCountHistogram exactGpuBlockingEmitBatchBuilds{};
-    AtomicCountHistogram exactGpuSubmitBatchBuilds{};
-    AtomicCountHistogram exactGpuEmitBatchBuilds{};
     AtomicLatencyHistogram chunkReadyLatency{};
     AtomicLatencyHistogram chunkReadyWaitGenerateStage{};
     AtomicCountHistogram chunkReadyRequestQueuedGenerateStage{};
@@ -3956,8 +3899,8 @@ inline constexpr std::uint32_t kExactChunkHaloFaceVoxelCount = kExactChunkSizeX 
 inline constexpr std::uint32_t kExactChunkHaloVoxelCount = 6u * kChunkSizeX * kChunkSizeY;
 inline constexpr std::uint32_t kExactChunkPlaneCount = 102u;
 inline constexpr std::uint32_t kExactGpuInitialFaceCapacity = 256u;
-inline constexpr std::size_t kMaxOutstandingExactGpuBuilds = 1024u;
-inline constexpr std::size_t kMaxOutstandingExactGpuBatches = 8u;
+inline constexpr std::size_t kMaxOutstandingExactGpuBuilds = 2048u;
+inline constexpr std::size_t kMaxOutstandingExactGpuBatches = 16u;
 inline constexpr std::uint32_t kExactGpuLightPropagationPassCount = 15u;
 inline constexpr std::uint8_t kExactGpuSeamPosXBit = 1u << 0u;
 inline constexpr std::uint8_t kExactGpuSeamNegXBit = 1u << 1u;
@@ -3971,7 +3914,7 @@ inline constexpr std::uint32_t kExactCompletionStatusZeroFacesBit = 1u << 2u;
 inline constexpr std::uint32_t kExactCompletionStatusAllocatorExhaustedBit = 1u << 3u;
 inline constexpr std::uint32_t kExactChunkAllocationPhasePrepassSubmitted = 1u;
 inline constexpr std::uint32_t kExactChunkAllocationPhaseEmitSubmitted = 2u;
-inline constexpr std::size_t kExactGpuReserveFreePageWatermark = 8u;
+inline constexpr std::size_t kExactGpuReserveFreePageWatermark = 16u;
 inline constexpr std::uint32_t kInvalidExactGpuAllocatorFreePageSlot = std::numeric_limits<std::uint32_t>::max();
 
 [[nodiscard]] constexpr std::uint8_t oppositeExactGpuSeamBit(std::uint8_t seamBit) noexcept
@@ -4493,20 +4436,18 @@ private:
 
     struct PendingExactGpuBatch
     {
-        std::vector<PendingExactGpuBuild> builds{};
-        std::vector<std::uint32_t> prepassRequiredFaceCounts{};
-        ExactGpuBatchPhase phase{ExactGpuBatchPhase::PrepassSubmitted};
-        UINT64 reservationBatchId{0};
-        SteadyClock::time_point prepassReadyForEmitAt{};
-        SteadyClock::time_point emitSubmittedAt{};
-        ExactGpuBatchPhaseResources prepassResources{};
-        ExactGpuBatchPhaseResources emitResources{};
-        FarLodGpuContext::ExactFaceTotalsReadback prepassFaceTotalsReadback{};
-        FarLodGpuContext::ExactCompletionReadback completionReadback{};
+    std::vector<PendingExactGpuBuild> builds{};
+    std::vector<std::uint32_t> prepassRequiredFaceCounts{};
+    ExactGpuBatchPhase phase{ExactGpuBatchPhase::PrepassSubmitted};
+    UINT64 reservationBatchId{0};
+    ExactGpuBatchPhaseResources prepassResources{};
+    ExactGpuBatchPhaseResources emitResources{};
+    FarLodGpuContext::ExactFaceTotalsReadback prepassFaceTotalsReadback{};
+    FarLodGpuContext::ExactCompletionReadback completionReadback{};
     };
 
-    static constexpr std::size_t kExactReservationShardCount = 1u;
-    static constexpr std::size_t kExactReservationShardSoftOpenPageLimit = 2u;
+    static constexpr std::size_t kExactReservationShardCount = 4u;
+    static constexpr std::size_t kExactReservationShardSoftOpenPageLimit = 4u;
     static constexpr auto kExactOpenPageIdleSealTimeout = std::chrono::milliseconds(250);
 
     enum class ExactPageSealReason : std::uint8_t
@@ -5603,25 +5544,6 @@ private:
     FarLodGpuContext::ExactPassTimings pendingExactGpuPrepassTimings_{};
     bool pendingExactGpuPrepassTimingsValid_{false};
     FarLodGpuContext::ExactPassTimings lastExactGpuPassTimings_{};
-    double exactGpuPrepareCpuMsLastCycle_{0.0};
-    double exactGpuSubmitCpuMsLastCycle_{0.0};
-    double exactGpuCommitCpuMsLastCycle_{0.0};
-    double exactGpuWorldgenResolveMsLastCycle_{0.0};
-    double exactGpuPrepassFaceTotalsReadbackMsLastCycle_{0.0};
-    double exactGpuEmitMetadataSyncMsLastCycle_{0.0};
-    double exactGpuEmitWaitMsLastCycle_{0.0};
-    double exactGpuEmitFenceLifetimeMsLastCycle_{0.0};
-    double exactGpuBlockingEmitBatchAgeMsLastCycle_{0.0};
-    int exactGpuWorldgenPageMissesLastCycle_{0};
-    int exactGpuEmitMetadataDirtyPagesLastCycle_{0};
-    int exactGpuReadyForEmitBacklogBatchesLastCycle_{0};
-    int exactGpuReadyForEmitBacklogBuildsLastCycle_{0};
-    int exactGpuComputeInFlightBeforeEmitLastCycle_{0};
-    int exactGpuComputeInFlightAfterEmitLastCycle_{0};
-    int exactGpuBlockingEmitBatchBuildsLastCycle_{0};
-    int exactGpuSubmitBatchBuildsLastCycle_{0};
-    int exactGpuEmitBatchBuildsLastCycle_{0};
-    std::size_t exactGpuEmitMetadataUploadBytesLastCycle_{0u};
     std::vector<std::uint32_t> freeExactGpuScratchSlices_{};
 
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
@@ -8668,13 +8590,6 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         exactGpuMeshReplacements_.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
-        snapshot.exactGpuPrepareCpuMs = exactGpuPrepareCpuMsLastCycle_;
-        snapshot.exactGpuSubmitCpuMs = exactGpuSubmitCpuMsLastCycle_;
-        snapshot.exactGpuCommitCpuMs = exactGpuCommitCpuMsLastCycle_;
-        snapshot.exactGpuWorldgenResolveMsLastCycle = exactGpuWorldgenResolveMsLastCycle_;
-        snapshot.exactGpuPrepassFaceTotalsReadbackMsLastCycle = exactGpuPrepassFaceTotalsReadbackMsLastCycle_;
-        snapshot.exactGpuEmitMetadataSyncMsLastCycle = exactGpuEmitMetadataSyncMsLastCycle_;
-        snapshot.exactGpuEmitWaitMsLastCycle = exactGpuEmitWaitMsLastCycle_;
         snapshot.exactGpuSynthMs = lastExactGpuPassTimings_.synthMs;
         snapshot.exactGpuStampMs = lastExactGpuPassTimings_.stampMs;
         snapshot.exactGpuLightMs = lastExactGpuPassTimings_.lightMs;
@@ -8683,18 +8598,6 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         snapshot.exactGpuAllocateMs = lastExactGpuPassTimings_.allocateMs;
         snapshot.exactGpuFaceEmitMs = lastExactGpuPassTimings_.faceEmitMs;
         snapshot.exactGpuTotalMs = lastExactGpuPassTimings_.totalMs;
-        snapshot.exactGpuWorldgenPageMissesLastCycle = exactGpuWorldgenPageMissesLastCycle_;
-        snapshot.exactGpuEmitMetadataDirtyPagesLastCycle = exactGpuEmitMetadataDirtyPagesLastCycle_;
-        snapshot.exactGpuReadyForEmitBacklogBatchesLastCycle = exactGpuReadyForEmitBacklogBatchesLastCycle_;
-        snapshot.exactGpuReadyForEmitBacklogBuildsLastCycle = exactGpuReadyForEmitBacklogBuildsLastCycle_;
-        snapshot.exactGpuComputeInFlightBeforeEmitLastCycle = exactGpuComputeInFlightBeforeEmitLastCycle_;
-        snapshot.exactGpuComputeInFlightAfterEmitLastCycle = exactGpuComputeInFlightAfterEmitLastCycle_;
-        snapshot.exactGpuBlockingEmitBatchBuildsLastCycle = exactGpuBlockingEmitBatchBuildsLastCycle_;
-        snapshot.exactGpuSubmitBatchBuildsLastCycle = exactGpuSubmitBatchBuildsLastCycle_;
-        snapshot.exactGpuEmitBatchBuildsLastCycle = exactGpuEmitBatchBuildsLastCycle_;
-        snapshot.exactGpuEmitMetadataUploadBytesLastCycle = exactGpuEmitMetadataUploadBytesLastCycle_;
-        snapshot.exactGpuEmitFenceLifetimeMsLastCycle = exactGpuEmitFenceLifetimeMsLastCycle_;
-        snapshot.exactGpuBlockingEmitBatchAgeMsLastCycle = exactGpuBlockingEmitBatchAgeMsLastCycle_;
     }
     {
         std::lock_guard<std::mutex> queueLock(pendingExactGpuBuildMutex_);
@@ -8870,25 +8773,6 @@ void ChunkManager::Impl::resetBenchmarkMetrics()
     {
         std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
         lastExactGpuPassTimings_ = {};
-        exactGpuPrepareCpuMsLastCycle_ = 0.0;
-        exactGpuSubmitCpuMsLastCycle_ = 0.0;
-        exactGpuCommitCpuMsLastCycle_ = 0.0;
-        exactGpuWorldgenResolveMsLastCycle_ = 0.0;
-        exactGpuPrepassFaceTotalsReadbackMsLastCycle_ = 0.0;
-        exactGpuEmitMetadataSyncMsLastCycle_ = 0.0;
-        exactGpuEmitWaitMsLastCycle_ = 0.0;
-        exactGpuEmitFenceLifetimeMsLastCycle_ = 0.0;
-        exactGpuBlockingEmitBatchAgeMsLastCycle_ = 0.0;
-        exactGpuWorldgenPageMissesLastCycle_ = 0;
-        exactGpuEmitMetadataDirtyPagesLastCycle_ = 0;
-        exactGpuReadyForEmitBacklogBatchesLastCycle_ = 0;
-        exactGpuReadyForEmitBacklogBuildsLastCycle_ = 0;
-        exactGpuComputeInFlightBeforeEmitLastCycle_ = 0;
-        exactGpuComputeInFlightAfterEmitLastCycle_ = 0;
-        exactGpuBlockingEmitBatchBuildsLastCycle_ = 0;
-        exactGpuSubmitBatchBuildsLastCycle_ = 0;
-        exactGpuEmitBatchBuildsLastCycle_ = 0;
-        exactGpuEmitMetadataUploadBytesLastCycle_ = 0u;
     }
     if (climateMap_)
     {
@@ -9263,7 +9147,7 @@ void ChunkManager::Impl::cancelPendingExactGpuBuildsForShutdown()
 void ChunkManager::Impl::exactGpuWorkerThreadFunction()
 {
 #ifdef _WIN32
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
     while (!shouldStop_.load(std::memory_order_acquire) &&
            !exactGpuWorkerStopRequested_.load(std::memory_order_acquire))
@@ -18925,40 +18809,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
 
     const auto recordSubmitStats = [&](bool didWork)
     {
-        if (!didWork || !benchmarkEnabled)
-        {
-            return;
-        }
-
-        const std::uint64_t totalMicros = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - submitStart).count());
-        const std::uint64_t orchestrationMicros = (totalMicros > prepareMicros) ? (totalMicros - prepareMicros) : 0u;
-        if (prepareMicros > 0u)
-        {
-            benchmarkMetrics_.exactGpuPrepareCpuStage.recordMicros(prepareMicros);
-        }
-        if (worldgenResolveMicros > 0u)
-        {
-            benchmarkMetrics_.exactGpuWorldgenResolveStage.recordMicros(worldgenResolveMicros);
-        }
-        benchmarkMetrics_.exactGpuSubmitCpuStage.recordMicros(orchestrationMicros);
-        if (worldgenPageMisses > 0)
-        {
-            benchmarkMetrics_.exactGpuWorldgenPageMisses.record(static_cast<std::uint64_t>(worldgenPageMisses));
-        }
-        if (submitBatchBuilds > 0)
-        {
-            benchmarkMetrics_.exactGpuSubmitBatchBuilds.record(static_cast<std::uint64_t>(submitBatchBuilds));
-        }
-        std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
-        if (prepareMicros > 0u)
-        {
-            exactGpuPrepareCpuMsLastCycle_ = static_cast<double>(prepareMicros) / 1000.0;
-        }
-        exactGpuSubmitCpuMsLastCycle_ = static_cast<double>(orchestrationMicros) / 1000.0;
-        exactGpuWorldgenResolveMsLastCycle_ = static_cast<double>(worldgenResolveMicros) / 1000.0;
-        exactGpuWorldgenPageMissesLastCycle_ = worldgenPageMisses;
-        exactGpuSubmitBatchBuildsLastCycle_ = submitBatchBuilds;
+        (void)didWork;
     };
 
     if (device_ == nullptr ||
@@ -19934,22 +19785,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
 void ChunkManager::Impl::commitPendingExactGpuBuilds()
 {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
-    const SteadyClock::time_point commitStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
-    std::uint64_t emitMetadataSyncMicros = 0u;
-    std::uint64_t prepassFaceTotalsReadbackMicros = 0u;
-    std::uint64_t emitWaitMicros = 0u;
-    std::uint64_t emitFenceLifetimeMicros = 0u;
-    int emitMetadataDirtyPages = 0;
-    int readyForEmitBacklogBatchesLastObserved = 0;
-    int readyForEmitBacklogBuildsLastObserved = 0;
-    int computeInFlightBeforeEmitLastObserved = 0;
-    int computeInFlightAfterEmitLastObserved = 0;
-    int blockingEmitBatchBuildsLastObserved = 0;
-    int emitBatchBuilds = 0;
-    std::size_t emitMetadataUploadBytes = 0u;
-    double blockingEmitBatchAgeMsLastObserved = 0.0;
     std::lock_guard<std::mutex> pendingLock(pendingExactGpuBuildsMutex_);
-    const bool hadPendingBuilds = !pendingExactGpuBatches_.empty();
     const UINT64 completedGpuFenceValue = exactGpuContext_.completedFenceValue();
     requestExactPageLifecycleSeals();
     drainSealRequestedExactPages();
@@ -20184,19 +20020,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     batch.prepassRequiredFaceCounts[buildOrdinal] = requiredFaceCount;
                     batch.builds[buildOrdinal].requiredFaceCount = requiredFaceCount;
                 }
-                if (benchmarkEnabled)
-                {
-                    prepassFaceTotalsReadbackMicros += static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            SteadyClock::now() - prepassReadbackStart)
-                            .count());
-                }
                 retireBatchPhaseResources(batch.prepassResources);
                 batch.phase = ExactGpuBatchPhase::PrepassReadyForEmit;
-                if (benchmarkEnabled)
-                {
-                    batch.prepassReadyForEmitAt = SteadyClock::now();
-                }
             }
 
             if (keepBatch && batch.phase == ExactGpuBatchPhase::PrepassReadyForEmit)
@@ -20272,11 +20097,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     continue;
                 }
 
-                if (benchmarkEnabled && batch.prepassReadyForEmitAt != SteadyClock::time_point{})
-                {
-                    emitWaitMicros += static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - batch.prepassReadyForEmitAt).count());
-                }
                 int readyForEmitBacklogBatches = 0;
                 int readyForEmitBacklogBuilds = 0;
                 int computeInFlightBeforeEmit = 0;
@@ -20313,10 +20133,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             exactGpuContext_.inFlightSubmissionCount(),
                             static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
                     }
-                    emitBatchBuilds += static_cast<int>(std::min<std::size_t>(
-                        batch.builds.size(),
-                        static_cast<std::size_t>(std::numeric_limits<int>::max() - std::max(emitBatchBuilds, 0))));
-
                     FarLodGpuContext::ScratchAllocation overflowCounterUpload =
                         exactGpuContext_.allocateUpload(sizeof(std::uint32_t), alignof(std::uint32_t));
                     if (overflowCounterUpload.resource == nullptr || overflowCounterUpload.cpuPtr == nullptr)
@@ -20352,15 +20168,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                 }
                                 keepBatch = false;
                             }
-                            if (benchmarkEnabled)
-                            {
-                                emitMetadataSyncMicros += static_cast<std::uint64_t>(
-                                    std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - emitMetadataSyncStart).count());
-                                emitMetadataDirtyPages += static_cast<int>(std::min<std::size_t>(
-                                    emitMetadataSyncDebug.dirtyPageCount,
-                                    static_cast<std::size_t>(std::numeric_limits<int>::max() - std::max(emitMetadataDirtyPages, 0))));
-                                emitMetadataUploadBytes += emitMetadataSyncDebug.uploadBytes;
-                            }
+                            (void)emitMetadataSyncStart;
+                            (void)emitMetadataSyncDebug;
                             if (keepBatch)
                             {
                                 std::vector<std::uint32_t> emitScratchSliceIndices{};
@@ -20538,11 +20347,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             const FarLodGpuContext::FlushResult emitFlushResult = exactGpuContext_.flush();
                             if (emitFlushResult.fenceValue != 0 && batch.completionReadback.allocation.cpuPtr != nullptr)
                             {
-                                const int computeInFlightAfterEmit = benchmarkEnabled
-                                    ? static_cast<int>(std::min<std::uint32_t>(
-                                          exactGpuContext_.inFlightSubmissionCount(),
-                                          static_cast<std::uint32_t>(std::numeric_limits<int>::max())))
-                                    : 0;
                                 {
                                     std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
                                     for (const PendingExactGpuBuild& pending : batch.builds)
@@ -20562,22 +20366,10 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                 batch.emitResources.uploadAllocations = std::move(emitOwnedUploads);
                                 batch.emitResources.readbackAllocations.push_back(batch.completionReadback.allocation);
                                 batch.phase = ExactGpuBatchPhase::EmitSubmitted;
-                                if (benchmarkEnabled)
-                                {
-                                    batch.emitSubmittedAt = SteadyClock::now();
-                                    benchmarkMetrics_.exactGpuReadyForEmitBacklogBatches.record(
-                                        static_cast<std::uint64_t>(std::max(readyForEmitBacklogBatches, 0)));
-                                    benchmarkMetrics_.exactGpuReadyForEmitBacklogBuilds.record(
-                                        static_cast<std::uint64_t>(std::max(readyForEmitBacklogBuilds, 0)));
-                                    benchmarkMetrics_.exactGpuComputeInFlightBeforeEmit.record(
-                                        static_cast<std::uint64_t>(std::max(computeInFlightBeforeEmit, 0)));
-                                    benchmarkMetrics_.exactGpuComputeInFlightAfterEmit.record(
-                                        static_cast<std::uint64_t>(std::max(computeInFlightAfterEmit, 0)));
-                                    readyForEmitBacklogBatchesLastObserved = readyForEmitBacklogBatches;
-                                    readyForEmitBacklogBuildsLastObserved = readyForEmitBacklogBuilds;
-                                    computeInFlightBeforeEmitLastObserved = computeInFlightBeforeEmit;
-                                    computeInFlightAfterEmitLastObserved = computeInFlightAfterEmit;
-                                }
+                                (void)benchmarkEnabled;
+                                (void)readyForEmitBacklogBatches;
+                                (void)readyForEmitBacklogBuilds;
+                                (void)computeInFlightBeforeEmit;
                                 for (PendingExactGpuBuild& pending : batch.builds)
                                 {
                                     if (pending.chunk)
@@ -20616,11 +20408,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                 batch.emitResources.fenceValue != 0 &&
                 completedGpuFenceValue >= batch.emitResources.fenceValue)
             {
-                if (benchmarkEnabled && batch.emitSubmittedAt != SteadyClock::time_point{})
-                {
-                    emitFenceLifetimeMicros += static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - batch.emitSubmittedAt).count());
-                }
                 const auto* mappedCompletionEntries =
                     (batch.completionReadback.allocation.cpuPtr != nullptr)
                         ? reinterpret_cast<const FarLodGpuContext::ExactCompletionEntry*>(
@@ -20823,58 +20610,6 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
 
         pendingExactGpuBatches_.resize(writeIndex);
         std::sort(freeExactGpuScratchSlices_.begin(), freeExactGpuScratchSlices_.end());
-        if (benchmarkEnabled && hadPendingBuilds)
-        {
-            const std::uint64_t commitMicros = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(SteadyClock::now() - commitStart).count());
-            benchmarkMetrics_.exactGpuCommitCpuStage.recordMicros(commitMicros);
-            if (emitMetadataSyncMicros > 0u)
-            {
-                benchmarkMetrics_.exactGpuEmitMetadataSyncStage.recordMicros(emitMetadataSyncMicros);
-            }
-            if (prepassFaceTotalsReadbackMicros > 0u)
-            {
-                benchmarkMetrics_.exactGpuPrepassFaceTotalsReadbackStage.recordMicros(prepassFaceTotalsReadbackMicros);
-            }
-            if (emitWaitMicros > 0u)
-            {
-                benchmarkMetrics_.exactGpuEmitWaitStage.recordMicros(emitWaitMicros);
-            }
-            if (emitFenceLifetimeMicros > 0u)
-            {
-                benchmarkMetrics_.exactGpuEmitFenceLifetimeStage.recordMicros(emitFenceLifetimeMicros);
-            }
-            if (emitMetadataDirtyPages > 0)
-            {
-                benchmarkMetrics_.exactGpuEmitMetadataDirtyPages.record(
-                    static_cast<std::uint64_t>(emitMetadataDirtyPages));
-            }
-            if (emitMetadataUploadBytes > 0u)
-            {
-                benchmarkMetrics_.exactGpuEmitMetadataUploadBytes.record(
-                    static_cast<std::uint64_t>(emitMetadataUploadBytes));
-            }
-            if (emitBatchBuilds > 0)
-            {
-                benchmarkMetrics_.exactGpuEmitBatchBuilds.record(static_cast<std::uint64_t>(emitBatchBuilds));
-            }
-            std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
-            exactGpuCommitCpuMsLastCycle_ = static_cast<double>(commitMicros) / 1000.0;
-            exactGpuEmitMetadataSyncMsLastCycle_ = static_cast<double>(emitMetadataSyncMicros) / 1000.0;
-            exactGpuPrepassFaceTotalsReadbackMsLastCycle_ =
-                static_cast<double>(prepassFaceTotalsReadbackMicros) / 1000.0;
-            exactGpuEmitWaitMsLastCycle_ = static_cast<double>(emitWaitMicros) / 1000.0;
-            exactGpuEmitFenceLifetimeMsLastCycle_ = static_cast<double>(emitFenceLifetimeMicros) / 1000.0;
-            exactGpuEmitMetadataDirtyPagesLastCycle_ = emitMetadataDirtyPages;
-            exactGpuReadyForEmitBacklogBatchesLastCycle_ = readyForEmitBacklogBatchesLastObserved;
-            exactGpuReadyForEmitBacklogBuildsLastCycle_ = readyForEmitBacklogBuildsLastObserved;
-            exactGpuComputeInFlightBeforeEmitLastCycle_ = computeInFlightBeforeEmitLastObserved;
-            exactGpuComputeInFlightAfterEmitLastCycle_ = computeInFlightAfterEmitLastObserved;
-            exactGpuBlockingEmitBatchAgeMsLastCycle_ = blockingEmitBatchAgeMsLastObserved;
-            exactGpuBlockingEmitBatchBuildsLastCycle_ = blockingEmitBatchBuildsLastObserved;
-            exactGpuEmitBatchBuildsLastCycle_ = emitBatchBuilds;
-            exactGpuEmitMetadataUploadBytesLastCycle_ = emitMetadataUploadBytes;
-        }
         return;
     }
 }
@@ -24813,24 +24548,21 @@ bool ChunkManager::Impl::chunkHasPendingStructureEdits(const glm::ivec3& coord) 
 
 bool ChunkManager::Impl::exactGpuWorkerNeedsLifecycleMaintenance()
 {
-    std::lock_guard<std::mutex> lock(bufferPageMutex_);
-    if (!sealRequestedPageIndices_.empty() ||
-        !sealedPendingResidentPageIndices_.empty() ||
-        !readyToResidentPageIndices_.empty() ||
-        !residentPageIndices_.empty())
     {
-        return true;
+        std::lock_guard<std::mutex> lock(bufferPageMutex_);
+        if (!sealRequestedPageIndices_.empty() ||
+            !sealedPendingResidentPageIndices_.empty() ||
+            !readyToResidentPageIndices_.empty() ||
+            !residentPageIndices_.empty())
+        {
+            return true;
+        }
     }
 
-    for (const ChunkBufferPage& page : bufferPages_)
+    for (ExactReservationShard& shard : exactReservationShards_)
     {
-        if (page.usage != ChunkBufferPageUsage::ExactGpu)
-        {
-            continue;
-        }
-
-        if (page.state == ChunkBufferPageState::OpenWritable ||
-            page.state == ChunkBufferPageState::SealedPendingResident)
+        std::lock_guard<std::mutex> shardLock(shard.mutex);
+        if (!shard.openPageIndices.empty())
         {
             return true;
         }

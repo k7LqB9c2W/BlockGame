@@ -2999,7 +2999,7 @@ private:
         ((kExactChunkPackedVoxelStrideBytes + kExactIndirectRootBufferAlignment - 1u) /
          kExactIndirectRootBufferAlignment) *
         kExactIndirectRootBufferAlignment;
-    static constexpr std::uint32_t kMaxExactGpuBuildBatches = 512u;
+    static constexpr std::uint32_t kMaxExactGpuBuildBatches = 1024u;
     static constexpr std::uint32_t kMaxInFlightSubmissionSlots = 4u;
     static constexpr UINT kExactTimestampPassCount = static_cast<UINT>(ExactTimingPass::Count);
     static constexpr UINT kExactTimestampQueriesPerPass = 2u;

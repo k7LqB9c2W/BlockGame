@@ -4992,13 +4992,6 @@ private:
         Meshing,
         Ready
     };
-    struct FrontierColumnState
-    {
-        ColumnChunkIntervals intervals{};
-        ColumnChunkIntervals playerBand{};
-        bool countedVisible{false};
-        bool countedExact{false};
-    };
     struct FrontierChunkDemand
     {
         FrontierDemandState state{FrontierDemandState::Missing};
@@ -5061,14 +5054,7 @@ private:
     };
     StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
     void resetStreamingFrontier() noexcept;
-    void invalidateStreamingFrontierColumn(const glm::ivec2& column) const;
-    void invalidateAllStreamingFrontierColumns() const;
     FrontierCoverage streamingFrontierCoverageSnapshot() const noexcept;
-    void refreshStreamingFrontier(const glm::ivec3& center,
-                                  int visibleRadius,
-                                  int preloadRadius,
-                                  int verticalRadius,
-                                  int exactMetricRadius);
     int dispatchStreamingFrontierGenerateJobs(const glm::ivec3& center,
                                               const glm::vec3& priorityForward,
                                               int jobBudget);
@@ -5570,26 +5556,17 @@ private:
     mutable std::unordered_map<glm::ivec2, WorldgenPageDependencyEntry, ColumnHasher> worldgenPageEntries_{};
     std::unordered_set<glm::ivec2, ColumnHasher> pinnedWorldgenPageKeys_{};
     mutable std::mutex streamingFrontierMutex_;
-    mutable std::unordered_set<glm::ivec2, ColumnHasher> streamingFrontierDirtyColumns_{};
-    mutable bool streamingFrontierDirtyAllColumns_{false};
-    std::unordered_map<glm::ivec2, FrontierColumnState, ColumnHasher> streamingFrontierColumns_{};
     std::unordered_map<glm::ivec3, FrontierChunkDemand, ChunkHasher> streamingFrontierDemands_{};
     std::unordered_map<glm::ivec3, FrontierChunkLifecycleState, ChunkHasher> streamingChunkLifecycleStates_{};
     std::priority_queue<FrontierDispatchEntry,
                         std::vector<FrontierDispatchEntry>,
                         FrontierDispatchEntryCompare>
         streamingFrontierDispatchQueue_{};
-    glm::ivec3 streamingFrontierCenter_{0};
-    int streamingFrontierVisibleRadius_{0};
-    int streamingFrontierPreloadRadius_{0};
-    int streamingFrontierVerticalRadius_{0};
-    int streamingFrontierExactMetricRadius_{0};
     int streamingFrontierVisibleRequired_{0};
     int streamingFrontierVisibleReady_{0};
     int streamingFrontierExactRequired_{0};
     int streamingFrontierExactReady_{0};
     std::uint64_t nextStreamingFrontierSequence_{1};
-    bool streamingFrontierInitialized_{false};
     glm::ivec3 streamingFrontierDispatchOrigin_{0};
     glm::vec2 streamingFrontierDispatchForwardXZ_{0.0f, -1.0f};
     std::uint64_t streamingFrontierDispatchPriorityEpoch_{1};
@@ -13978,23 +13955,14 @@ int ChunkManager::Impl::computeColumnJobCap(int backlogSteps, int backlogChunks)
 void ChunkManager::Impl::resetStreamingFrontier() noexcept
 {
     std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
-    streamingFrontierDirtyColumns_.clear();
-    streamingFrontierDirtyAllColumns_ = false;
-    streamingFrontierColumns_.clear();
     streamingFrontierDemands_.clear();
     playerSafetyOverlayCoords_.clear();
     streamingFrontierDispatchQueue_ = {};
-    streamingFrontierCenter_ = glm::ivec3{0};
-    streamingFrontierVisibleRadius_ = 0;
-    streamingFrontierPreloadRadius_ = 0;
-    streamingFrontierVerticalRadius_ = 0;
-    streamingFrontierExactMetricRadius_ = 0;
     streamingFrontierVisibleRequired_ = 0;
     streamingFrontierVisibleReady_ = 0;
     streamingFrontierExactRequired_ = 0;
     streamingFrontierExactReady_ = 0;
     nextStreamingFrontierSequence_ = 1;
-    streamingFrontierInitialized_ = false;
     streamingFrontierDispatchOrigin_ = glm::ivec3{0};
     streamingFrontierDispatchForwardXZ_ = glm::vec2{0.0f, -1.0f};
     streamingFrontierDispatchPriorityEpoch_ = 1;
@@ -14004,19 +13972,6 @@ void ChunkManager::Impl::clearStreamingChunkLifecycleStates() noexcept
 {
     std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
     streamingChunkLifecycleStates_.clear();
-}
-
-void ChunkManager::Impl::invalidateStreamingFrontierColumn(const glm::ivec2& column) const
-{
-    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
-    streamingFrontierDirtyColumns_.insert(column);
-}
-
-void ChunkManager::Impl::invalidateAllStreamingFrontierColumns() const
-{
-    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
-    streamingFrontierDirtyAllColumns_ = true;
-    streamingFrontierDirtyColumns_.clear();
 }
 
 ChunkManager::Impl::FrontierCoverage ChunkManager::Impl::streamingFrontierCoverageSnapshot() const noexcept

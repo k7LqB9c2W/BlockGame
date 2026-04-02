@@ -4313,6 +4313,11 @@ private:
     [[nodiscard]] JobServiceClass highestQueuedWorldgenDependencyServiceClass() const noexcept;
     [[nodiscard]] JobServiceClass highestQueuedStructureRegionDependencyServiceClass() const noexcept;
     void refillBulkShellOracleJobs();
+    void stopStartupExactCensus();
+    struct WorldgenPage;
+    void warmReadyWorldgenPageColumns(const glm::ivec2& pageKey,
+                                      const std::shared_ptr<const WorldgenPage>& page,
+                                      bool buildOccupancy) const;
     bool processWorldgenPageDependencyJob();
     bool processStructureRegionDependencyJob();
     bool processBulkShellOracleJob();
@@ -4827,6 +4832,11 @@ private:
     void trimWorldgenPages();
     void warmWorldgenPagesForChunk(const glm::ivec3& chunkCoord) const;
     void warmWorldgenPagesForColumn(const glm::ivec2& column) const;
+    void primeStartupExactCensus(const glm::ivec3& center, int horizontalRadius, int cameraWorldY);
+    void runStartupExactCensus(const glm::ivec3& center,
+                               int horizontalRadius,
+                               int cameraWorldY,
+                               std::uint64_t generation);
     ColumnSlabOccupancy buildColumnSlabOccupancy(const glm::ivec2& column) const;
     ColumnSlabOccupancy cachedColumnSlabOccupancy(const glm::ivec2& column) const;
     bool tryGetCachedColumnSlabOccupancy(const glm::ivec2& column, ColumnSlabOccupancy& out) const;
@@ -5411,6 +5421,7 @@ private:
     std::mutex pendingExactGpuBuildsMutex_;
     std::mutex exactGpuExecutionMutex_;
     std::thread exactGpuWorkerThread_;
+    std::thread startupExactCensusThread_;
     mutable std::mutex exactGpuWorkerMutex_;
     std::condition_variable exactGpuWorkerCondition_;
     mutable std::mutex exactGpuStatsMutex_;
@@ -5490,6 +5501,9 @@ private:
     mutable std::unordered_map<glm::ivec2, int, ColumnHasher> predictedColumnHeights_;
     mutable std::mutex columnSlabOccupancyMutex_;
     mutable std::unordered_map<glm::ivec2, ColumnSlabOccupancy, ColumnHasher> columnSlabOccupancyCache_{};
+    mutable std::mutex startupStructureColumnSpanMutex_;
+    mutable std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher>
+        startupStructureColumnSpans_{};
     mutable std::mutex columnHeightPrefetchMutex_;
     mutable std::priority_queue<WorldgenPageDependencyRequest,
                                 std::vector<WorldgenPageDependencyRequest>,
@@ -5635,6 +5649,9 @@ private:
     int lastBacklogSteps_{0};
     bool startupEnabled_{true};
     StartupStreamingState startupState_{};
+    std::atomic<std::uint64_t> startupExactCensusGeneration_{0};
+    std::atomic<int> startupExactCensusRequiredChunks_{0};
+    std::atomic<bool> startupExactCensusRequiredReady_{false};
     mutable std::mutex schedulingPriorityMutex_;
     glm::ivec3 schedulingPriorityOrigin_{0};
     glm::vec3 schedulingPriorityForward_{0.0f, 0.0f, -1.0f};
@@ -5823,6 +5840,7 @@ ChunkManager::Impl::Impl(unsigned seed)
 ChunkManager::Impl::~Impl()
 {
     setRenderSynchronization(nullptr, 0);
+    stopStartupExactCensus();
     stopWorkerThreads();
     stopExactGpuWorkerThread();
     farTerrainManager_.shutdown();
@@ -6475,6 +6493,15 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     VisibleChunkCoverage metricCoverage{};
     metricCoverage.ready = frontierCoverage.exactReady;
     metricCoverage.required = frontierCoverage.exactRequired;
+    if (exactOnly &&
+        startupEnabled_ &&
+        startupState_.preloadStarted &&
+        startupState_.phase != StreamingPhase::SteadyState &&
+        startupExactCensusRequiredReady_.load(std::memory_order_acquire))
+    {
+        metricCoverage.required = std::max(metricCoverage.required,
+                                           startupExactCensusRequiredChunks_.load(std::memory_order_acquire));
+    }
     metricCoverage.missing = std::max(0, metricCoverage.required - metricCoverage.ready);
     const int missingChunks = visibleCoverage.missing;
     stationaryExactFillModeActive_ =
@@ -7149,6 +7176,7 @@ ColumnSample ChunkManager::Impl::sampleColumnAt(const glm::vec3& worldPos,
 
 void ChunkManager::Impl::clear()
 {
+    stopStartupExactCensus();
     while (true)
     {
         std::vector<glm::ivec3> coords;
@@ -7259,6 +7287,10 @@ void ChunkManager::Impl::clear()
     {
         std::lock_guard<std::mutex> lock(predictedColumnMutex_);
         predictedColumnHeights_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(startupStructureColumnSpanMutex_);
+        startupStructureColumnSpans_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(worldgenPageMutex_);
@@ -8140,15 +8172,18 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     {
         viewDistance_ = targetViewDistance_;
     }
+    lastCenterChunk_ = startupState_.spawnChunk;
+    schedulingPriorityOrigin_ = startupState_.spawnChunk;
+    stopBulkShellOracle();
     resetStreamingFrontier();
     farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
     farTerrainManager_.clear();
     if (renderSettings_.totalChunks <= renderSettings_.exactChunks)
     {
-        startBulkShellOracle(startupState_.spawnChunk, renderSettings_.exactChunks);
         pinWorldgenWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
-        precomputeFullRadiusWorldgenPageWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
-        requestFullRadiusWorldgenPageDiscovery(startupState_.spawnChunk, renderSettings_.exactChunks);
+        primeStartupExactCensus(startupState_.spawnChunk,
+                                renderSettings_.exactChunks,
+                                std::max(static_cast<int>(std::floor(spawnPos.y)), 0));
     }
 }
 
@@ -8851,6 +8886,17 @@ void ChunkManager::Impl::stopBulkShellOracle()
                                                        std::memory_order_release);
     }
     bulkShellOracleBatch_.reset();
+}
+
+void ChunkManager::Impl::stopStartupExactCensus()
+{
+    startupExactCensusGeneration_.fetch_add(1, std::memory_order_acq_rel);
+    startupExactCensusRequiredReady_.store(false, std::memory_order_release);
+    startupExactCensusRequiredChunks_.store(0, std::memory_order_release);
+    if (startupExactCensusThread_.joinable())
+    {
+        startupExactCensusThread_.join();
+    }
 }
 
 void ChunkManager::Impl::stopWorkerThreads()
@@ -11481,6 +11527,771 @@ void ChunkManager::Impl::precomputeFullRadiusWorldgenPageWindow(const glm::ivec3
     }
 }
 
+void ChunkManager::Impl::primeStartupExactCensus(const glm::ivec3& center,
+                                                 int horizontalRadius,
+                                                 int cameraWorldY)
+{
+    stopStartupExactCensus();
+    const std::uint64_t generation = startupExactCensusGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    startupExactCensusThread_ = std::thread(
+        [this, center, horizontalRadius, cameraWorldY, generation]()
+        {
+            try
+            {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                runStartupExactCensus(center, horizontalRadius, cameraWorldY, generation);
+            }
+            catch (...)
+            {
+            }
+        });
+}
+
+void ChunkManager::Impl::runStartupExactCensus(const glm::ivec3& center,
+                                               int horizontalRadius,
+                                               int cameraWorldY,
+                                               std::uint64_t generation)
+{
+    if (horizontalRadius <= 0 ||
+        shouldStop_.load(std::memory_order_acquire) ||
+        !surfaceMap_ ||
+        !climateMap_)
+    {
+        return;
+    }
+
+    const int radius = std::max(horizontalRadius, 0);
+    const glm::ivec2 cameraColumn{center.x, center.z};
+    const int exactMinChunkX = center.x - radius;
+    const int exactMaxChunkX = center.x + radius;
+    const int exactMinChunkZ = center.z - radius;
+    const int exactMaxChunkZ = center.z + radius;
+    const int analysisMinChunkX = exactMinChunkX - 1;
+    const int analysisMaxChunkX = exactMaxChunkX + 1;
+    const int analysisMinChunkZ = exactMinChunkZ - 1;
+    const int analysisMaxChunkZ = exactMaxChunkZ + 1;
+    const int analysisWidth = analysisMaxChunkX - analysisMinChunkX + 1;
+    const int analysisDepth = analysisMaxChunkZ - analysisMinChunkZ + 1;
+    const std::size_t analysisColumnCount =
+        static_cast<std::size_t>(std::max(analysisWidth, 0)) *
+        static_cast<std::size_t>(std::max(analysisDepth, 0));
+    if (analysisColumnCount == 0)
+    {
+        return;
+    }
+
+    const int analysisMinWorldX = analysisMinChunkX * kChunkSizeX;
+    const int analysisMaxWorldX = (analysisMaxChunkX + 1) * kChunkSizeX - 1;
+    const int analysisMinWorldZ = analysisMinChunkZ * kChunkSizeZ;
+    const int analysisMaxWorldZ = (analysisMaxChunkZ + 1) * kChunkSizeZ - 1;
+    const int censusMinWorldX = analysisMinWorldX - 1;
+    const int censusMaxWorldX = analysisMaxWorldX + 1;
+    const int censusMinWorldZ = analysisMinWorldZ - 1;
+    const int censusMaxWorldZ = analysisMaxWorldZ + 1;
+    const glm::ivec2 minAnalysisPage = worldgenPageKeyForWorld(censusMinWorldX, censusMinWorldZ);
+    const glm::ivec2 maxAnalysisPage = worldgenPageKeyForWorld(censusMaxWorldX, censusMaxWorldZ);
+
+    const auto censusCancelled = [this, generation]()
+    {
+        return shouldStop_.load(std::memory_order_acquire) ||
+               startupExactCensusGeneration_.load(std::memory_order_acquire) != generation;
+    };
+    const auto runParallel = [this, &censusCancelled](std::size_t workCount, const auto& workItem)
+    {
+        if (workCount == 0 || censusCancelled())
+        {
+            return;
+        }
+
+        const std::size_t hardwareWorkers =
+            std::max<std::size_t>(std::thread::hardware_concurrency(), 4u);
+        const std::size_t desiredWorkers =
+            std::max<std::size_t>(workerThreadCount_,
+                                  std::clamp<std::size_t>(hardwareWorkers / 2u, 2u, 4u));
+        const std::size_t workerCount =
+            std::clamp<std::size_t>(desiredWorkers,
+                                    1u,
+                                    std::min<std::size_t>(workCount, 4u));
+        std::atomic<std::size_t> nextIndex{0};
+        std::exception_ptr firstError{};
+        std::mutex errorMutex;
+        auto worker = [&]()
+        {
+            try
+            {
+                while (!censusCancelled())
+                {
+                    const std::size_t index = nextIndex.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= workCount)
+                    {
+                        break;
+                    }
+                    workItem(index);
+                }
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> lock(errorMutex);
+                if (!firstError)
+                {
+                    firstError = std::current_exception();
+                }
+            }
+        };
+
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount > 0 ? workerCount - 1 : 0);
+        for (std::size_t workerIndex = 1; workerIndex < workerCount; ++workerIndex)
+        {
+            workers.emplace_back(worker);
+        }
+        worker();
+        for (std::thread& thread : workers)
+        {
+            if (thread.joinable())
+            {
+                thread.join();
+            }
+        }
+
+        if (firstError)
+        {
+            std::rethrow_exception(firstError);
+        }
+    };
+
+    auto analysisColumnIndex = [analysisMinChunkX, analysisMinChunkZ, analysisWidth](int chunkX, int chunkZ) noexcept
+    {
+        return static_cast<std::size_t>(chunkZ - analysisMinChunkZ) * static_cast<std::size_t>(analysisWidth) +
+               static_cast<std::size_t>(chunkX - analysisMinChunkX);
+    };
+    std::vector<StructureRegionKey> structureRegionKeys;
+    appendStructureRegionKeysForWorldBounds(analysisMinWorldX,
+                                            analysisMaxWorldX,
+                                            analysisMinWorldZ,
+                                            analysisMaxWorldZ,
+                                            structureRegionKeys);
+    std::sort(structureRegionKeys.begin(),
+              structureRegionKeys.end(),
+              [](const StructureRegionKey& lhs, const StructureRegionKey& rhs)
+              {
+                  if (lhs.regionX != rhs.regionX)
+                  {
+                      return lhs.regionX < rhs.regionX;
+                  }
+                  return lhs.regionZ < rhs.regionZ;
+              });
+    structureRegionKeys.erase(std::unique(structureRegionKeys.begin(),
+                                          structureRegionKeys.end(),
+                                          [](const StructureRegionKey& lhs, const StructureRegionKey& rhs)
+                                          {
+                                              return lhs.regionX == rhs.regionX && lhs.regionZ == rhs.regionZ;
+                                          }),
+                              structureRegionKeys.end());
+
+    std::unordered_set<glm::ivec2, ColumnHasher> requiredPageKeySet{};
+    requiredPageKeySet.reserve(static_cast<std::size_t>(std::max(maxAnalysisPage.x - minAnalysisPage.x + 1, 0)) *
+                               static_cast<std::size_t>(std::max(maxAnalysisPage.y - minAnalysisPage.y + 1, 0)) +
+                               structureRegionKeys.size() * 8u);
+    for (int pageZ = minAnalysisPage.y; pageZ <= maxAnalysisPage.y; ++pageZ)
+    {
+        for (int pageX = minAnalysisPage.x; pageX <= maxAnalysisPage.x; ++pageX)
+        {
+            requiredPageKeySet.insert({pageX, pageZ});
+        }
+    }
+    for (const StructureRegionKey& key : structureRegionKeys)
+    {
+        const std::vector<glm::ivec2> regionPageKeys = collectRegionWorldgenPageKeys(key);
+        requiredPageKeySet.insert(regionPageKeys.begin(), regionPageKeys.end());
+    }
+
+    std::vector<glm::ivec2> requiredPageKeys(requiredPageKeySet.begin(), requiredPageKeySet.end());
+    const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn(cameraColumn);
+    std::sort(requiredPageKeys.begin(),
+              requiredPageKeys.end(),
+              [centerPage](const glm::ivec2& lhs, const glm::ivec2& rhs)
+              {
+                  const int lhsDistance = std::max(std::abs(lhs.x - centerPage.x), std::abs(lhs.y - centerPage.y));
+                  const int rhsDistance = std::max(std::abs(rhs.x - centerPage.x), std::abs(rhs.y - centerPage.y));
+                  if (lhsDistance != rhsDistance)
+                  {
+                      return lhsDistance < rhsDistance;
+                  }
+                  if (lhs.x != rhs.x)
+                  {
+                      return lhs.x < rhs.x;
+                  }
+                  return lhs.y < rhs.y;
+              });
+    std::unordered_map<glm::ivec2, std::shared_ptr<const WorldgenPage>, ColumnHasher> readyPages{};
+    readyPages.reserve(requiredPageKeys.size());
+    for (const glm::ivec2& pageKey : requiredPageKeys)
+    {
+        if (censusCancelled())
+        {
+            return;
+        }
+
+        std::shared_ptr<const WorldgenPage> page = tryGetReadyWorldgenPage(pageKey);
+        if (!page)
+        {
+            page = getOrBuildWorldgenPageBlocking(pageKey);
+        }
+        if (!page)
+        {
+            return;
+        }
+
+        readyPages.emplace(pageKey, page);
+    }
+
+    const auto findReadyWorldgenColumn = [&readyPages](int worldX, int worldZ) -> const WorldgenColumnValue*
+    {
+        const glm::ivec2 pageKey = worldgenPageKeyForWorld(worldX, worldZ);
+        auto it = readyPages.find(pageKey);
+        if (it == readyPages.end() || !it->second)
+        {
+            return nullptr;
+        }
+
+        const std::shared_ptr<const WorldgenPage>& page = it->second;
+        return &page->column(worldX - page->baseWorld.x, worldZ - page->baseWorld.y);
+    };
+
+    std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher> editSpans{};
+    {
+        std::lock_guard<std::mutex> lock(pendingStructureMutex_);
+        editSpans.reserve(pendingStructureEdits_.size());
+        for (const auto& [coord, edits] : pendingStructureEdits_)
+        {
+            if (coord.x < analysisMinChunkX ||
+                coord.x > analysisMaxChunkX ||
+                coord.z < analysisMinChunkZ ||
+                coord.z > analysisMaxChunkZ)
+            {
+                continue;
+            }
+
+            const bool hasSolidEdit = std::any_of(edits.begin(),
+                                                  edits.end(),
+                                                  [](const PendingStructureEdit& edit)
+                                                  {
+                                                      return edit.block != BlockId::Air;
+                                                  });
+            if (hasSolidEdit)
+            {
+                editSpans[{coord.x, coord.z}].include(coord.y, coord.y);
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
+        for (const auto& [coord, overlays] : blockEditOverlays_)
+        {
+            if (coord.x < analysisMinChunkX ||
+                coord.x > analysisMaxChunkX ||
+                coord.z < analysisMinChunkZ ||
+                coord.z > analysisMaxChunkZ)
+            {
+                continue;
+            }
+
+            const bool hasSolidOverlay = std::any_of(overlays.begin(),
+                                                     overlays.end(),
+                                                     [](const BlockEditOverlayEntry& overlay)
+                                                     {
+                                                         return overlay.block != BlockId::Air;
+                                                     });
+            if (hasSolidOverlay)
+            {
+                editSpans[{coord.x, coord.z}].include(coord.y, coord.y);
+            }
+        }
+    }
+
+    struct StartupCensusColumnData
+    {
+        int highestTerrainWorld{ColumnManager::kNoHeight};
+        int minWaterBottomWorld{std::numeric_limits<int>::max()};
+        int maxWaterTopWorld{std::numeric_limits<int>::min()};
+    };
+
+    std::vector<StartupCensusColumnData> columnData(analysisColumnCount);
+    runParallel(analysisColumnCount,
+                [analysisMinChunkX,
+                 analysisMinChunkZ,
+                 analysisWidth,
+                 &findReadyWorldgenColumn,
+                 &columnData,
+                 this](std::size_t index)
+                {
+                    const int chunkX = analysisMinChunkX +
+                                       static_cast<int>(index % static_cast<std::size_t>(analysisWidth));
+                    const int chunkZ = analysisMinChunkZ +
+                                       static_cast<int>(index / static_cast<std::size_t>(analysisWidth));
+                    const int baseWorldX = chunkX * kChunkSizeX;
+                    const int baseWorldZ = chunkZ * kChunkSizeZ;
+                    constexpr int kSampleExtentX = kChunkSizeX + 2;
+                    constexpr int kSampleExtentZ = kChunkSizeZ + 2;
+                    std::array<WorldgenColumnValue, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)>
+                        worldgenColumns{};
+                    auto sampleIndex = [](int sampleX, int sampleZ) noexcept
+                    {
+                        return static_cast<std::size_t>(sampleZ * kSampleExtentX + sampleX);
+                    };
+
+                    for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
+                    {
+                        for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
+                        {
+                            const WorldgenColumnValue* worldgenColumn =
+                                findReadyWorldgenColumn(baseWorldX + sampleX, baseWorldZ + sampleZ);
+                            if (worldgenColumn == nullptr)
+                            {
+                                return;
+                            }
+                            worldgenColumns[sampleIndex(sampleX + 1, sampleZ + 1)] = *worldgenColumn;
+                        }
+                    }
+
+                    auto computeNeighborAverage = [&](int localX, int localZ) noexcept
+                    {
+                        float sum = 0.0f;
+                        int count = 0;
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            for (int dz = -1; dz <= 1; ++dz)
+                            {
+                                if (dx == 0 && dz == 0)
+                                {
+                                    continue;
+                                }
+                                sum += static_cast<float>(
+                                    worldgenColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surface.surfaceY);
+                                ++count;
+                            }
+                        }
+                        return count > 0 ? sum / static_cast<float>(count) : 0.0f;
+                    };
+
+                    int highestTerrainWorld = std::numeric_limits<int>::min();
+                    int minWaterBottomWorld = std::numeric_limits<int>::max();
+                    int maxWaterTopWorld = std::numeric_limits<int>::min();
+                    for (int localX = 0; localX < kChunkSizeX; ++localX)
+                    {
+                        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+                        {
+                            const WorldgenColumnValue& worldgenColumn =
+                                worldgenColumns[sampleIndex(localX + 1, localZ + 1)];
+                            if (worldgenColumn.surface.dominantBiome == nullptr)
+                            {
+                                continue;
+                            }
+
+                            const int adjustedSurfaceY =
+                                adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
+                            highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
+
+                            if (!worldgenColumn.waterFillEnabled || adjustedSurfaceY >= globalSeaLevel_)
+                            {
+                                continue;
+                            }
+
+                            int waterBottomWorld = adjustedSurfaceY + 1;
+                            int waterTopWorld = globalSeaLevel_;
+                            if (worldgenColumn.waterFillMaxDepth > 0)
+                            {
+                                waterBottomWorld =
+                                    std::max(waterBottomWorld,
+                                             waterTopWorld - static_cast<int>(worldgenColumn.waterFillMaxDepth) + 1);
+                            }
+                            minWaterBottomWorld = std::min(minWaterBottomWorld, waterBottomWorld);
+                            maxWaterTopWorld = std::max(maxWaterTopWorld, waterTopWorld);
+                        }
+                    }
+
+                    StartupCensusColumnData& data = columnData[index];
+                    if (highestTerrainWorld != std::numeric_limits<int>::min())
+                    {
+                        data.highestTerrainWorld = highestTerrainWorld;
+                    }
+                    if (maxWaterTopWorld >= 0 && minWaterBottomWorld <= maxWaterTopWorld)
+                    {
+                        data.minWaterBottomWorld = minWaterBottomWorld;
+                        data.maxWaterTopWorld = maxWaterTopWorld;
+                    }
+                });
+
+    if (censusCancelled())
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        for (int chunkZ = analysisMinChunkZ; chunkZ <= analysisMaxChunkZ; ++chunkZ)
+        {
+            for (int chunkX = analysisMinChunkX; chunkX <= analysisMaxChunkX; ++chunkX)
+            {
+                const StartupCensusColumnData& data = columnData[analysisColumnIndex(chunkX, chunkZ)];
+                if (data.highestTerrainWorld == ColumnManager::kNoHeight)
+                {
+                    continue;
+                }
+
+                auto [it, inserted] = predictedColumnHeights_.try_emplace(glm::ivec2{chunkX, chunkZ},
+                                                                          data.highestTerrainWorld);
+                if (!inserted)
+                {
+                    it->second = std::max(it->second, data.highestTerrainWorld);
+                }
+            }
+        }
+    }
+
+    std::vector<std::shared_ptr<const StructureRegion>> readyStructureRegions(structureRegionKeys.size());
+    std::vector<StructureRegion> startupStructureRegions(structureRegionKeys.size());
+    std::vector<std::uint8_t> startupStructureRegionBuilt(structureRegionKeys.size(), 0u);
+    const StructureSampleColumnFn sampleColumnFn = [&findReadyWorldgenColumn](int worldX, int worldZ) -> ColumnSample
+    {
+        const WorldgenColumnValue* worldgenColumn = findReadyWorldgenColumn(worldX, worldZ);
+        if (worldgenColumn == nullptr)
+        {
+            return {};
+        }
+
+        ColumnSample sample{};
+        sample.dominantBiome = worldgenColumn->surface.dominantBiome;
+        sample.dominantWeight = worldgenColumn->surface.dominantWeight;
+        sample.surfaceHeight = worldgenColumn->surface.surfaceHeight;
+        sample.surfaceY = worldgenColumn->surface.surfaceY;
+        sample.minSurfaceY = sample.surfaceY;
+        sample.maxSurfaceY = sample.surfaceY;
+        sample.originalSurfaceY = sample.surfaceY;
+        sample.slabHasSolid = true;
+        sample.slabHighestSolidY = sample.surfaceY;
+        sample.soilCreepCoefficient = worldgenColumn->surface.soilCreepCoefficient;
+        sample.roughAmplitude = worldgenColumn->surface.roughAmplitude;
+        sample.hillAmplitude = worldgenColumn->surface.hillAmplitude;
+        sample.mountainAmplitude = worldgenColumn->surface.mountainAmplitude;
+        sample.dominantIsOcean = worldgenColumn->dominantIsOcean;
+        sample.distanceToCoast = worldgenColumn->distanceToCoast;
+        sample.distanceToShore = std::isfinite(worldgenColumn->distanceToCoast)
+                                     ? worldgenColumn->distanceToCoast
+                                     : std::numeric_limits<float>::infinity();
+        return sample;
+    };
+    const StructureSurfaceBlockFn surfaceBlockFn =
+        [this](int worldX, int worldZ, const ColumnSample& sample) -> BlockId
+    {
+        if (!sample.dominantBiome)
+        {
+            return BlockId::Air;
+        }
+        const terrain::TerrainColumnBlocks blocks =
+            terrain::resolveTerrainColumnBlocks(*sample.dominantBiome, sample, worldX, worldZ, globalSeaLevel_);
+        return blocks.surfaceBlock;
+    };
+    const StructureDensityFn densityFn = [this](int worldX, int worldZ) noexcept
+    {
+        return noise_.fbm(static_cast<float>(worldX) * 0.05f,
+                          static_cast<float>(worldZ) * 0.05f,
+                          4,
+                          0.55f,
+                          2.0f);
+    };
+
+    runParallel(structureRegionKeys.size(),
+                [this,
+                 &structureRegionKeys,
+                 &readyStructureRegions,
+                 &startupStructureRegions,
+                 &startupStructureRegionBuilt,
+                 &sampleColumnFn,
+                 &surfaceBlockFn,
+                 &densityFn](std::size_t index)
+                {
+                    const StructureRegionKey key = structureRegionKeys[index];
+                    if (const std::shared_ptr<const StructureRegion> readyRegion = tryGetReadyRegion(key))
+                    {
+                        readyStructureRegions[index] = readyRegion;
+                        return;
+                    }
+
+                    startupStructureRegions[index] =
+                        buildStructureRegionData(key, sampleColumnFn, surfaceBlockFn, densityFn, false, false);
+                    startupStructureRegionBuilt[index] = 1u;
+                });
+
+    if (censusCancelled())
+    {
+        return;
+    }
+
+    std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher> startupStructureSpans{};
+    startupStructureSpans.reserve(analysisColumnCount);
+    const auto mergeStructureSpans = [&startupStructureSpans,
+                                      analysisMinChunkX,
+                                      analysisMaxChunkX,
+                                      analysisMinChunkZ,
+                                      analysisMaxChunkZ](const auto& spans)
+    {
+        for (const auto& [column, span] : spans)
+        {
+            if (!span.valid() ||
+                column.x < analysisMinChunkX ||
+                column.x > analysisMaxChunkX ||
+                column.y < analysisMinChunkZ ||
+                column.y > analysisMaxChunkZ)
+            {
+                continue;
+            }
+
+            startupStructureSpans[column].include(span.minChunkY, span.maxChunkY);
+        }
+    };
+    for (std::size_t index = 0; index < structureRegionKeys.size(); ++index)
+    {
+        if (readyStructureRegions[index])
+        {
+            mergeStructureSpans(readyStructureRegions[index]->chunkColumnSpans);
+        }
+        else if (startupStructureRegionBuilt[index] != 0u)
+        {
+            mergeStructureSpans(startupStructureRegions[index].chunkColumnSpans);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(startupStructureColumnSpanMutex_);
+        for (const auto& [column, span] : startupStructureSpans)
+        {
+            startupStructureColumnSpans_[column].include(span.minChunkY, span.maxChunkY);
+        }
+    }
+
+    const int startupVisibleRadius = targetViewDistance_;
+    const int startupVerticalRadius = computeVerticalRadius(center, startupVisibleRadius, cameraWorldY);
+    const int exactVerticalRadius = computeVerticalRadius(center, horizontalRadius, cameraWorldY);
+    const int frontierVerticalRadius = std::max(startupVerticalRadius, exactVerticalRadius);
+    std::vector<ColumnSlabOccupancy> startupOccupancies(analysisColumnCount);
+    std::atomic<int> exactRequiredChunks{0};
+    runParallel(analysisColumnCount,
+                [this,
+                 analysisMinChunkX,
+                 analysisMinChunkZ,
+                 analysisWidth,
+                 analysisMaxChunkX,
+                 analysisMaxChunkZ,
+                 exactMinChunkX,
+                 exactMaxChunkX,
+                 exactMinChunkZ,
+                 exactMaxChunkZ,
+                 &columnData,
+                 &startupStructureSpans,
+                 &startupOccupancies,
+                 &cameraColumn,
+                 &editSpans,
+                 frontierVerticalRadius,
+                 center,
+                 &exactRequiredChunks,
+                 analysisColumnIndex](std::size_t index)
+                {
+                    const int chunkX = analysisMinChunkX +
+                                       static_cast<int>(index % static_cast<std::size_t>(analysisWidth));
+                    const int chunkZ = analysisMinChunkZ +
+                                       static_cast<int>(index / static_cast<std::size_t>(analysisWidth));
+                    const glm::ivec2 column{chunkX, chunkZ};
+                    const StartupCensusColumnData& data = columnData[index];
+                    ColumnSlabOccupancy occupancy{};
+                    auto noteChunkInterval = [&](int minChunkY, int maxChunkY)
+                    {
+                        occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, maxChunkY);
+                        addColumnChunkInterval(occupancy.terrainIntervals, minChunkY, maxChunkY);
+                    };
+
+                    if (data.highestTerrainWorld != ColumnManager::kNoHeight)
+                    {
+                        const int highestChunkY = floorDiv(data.highestTerrainWorld, kChunkSizeY);
+                        noteChunkInterval(0, highestChunkY);
+
+                        int minNeighborHeight = data.highestTerrainWorld;
+                        constexpr std::array<glm::ivec2, 4> kNeighborOffsets{
+                            glm::ivec2{1, 0},
+                            glm::ivec2{-1, 0},
+                            glm::ivec2{0, 1},
+                            glm::ivec2{0, -1},
+                        };
+                        for (const glm::ivec2& offset : kNeighborOffsets)
+                        {
+                            const int neighborX = chunkX + offset.x;
+                            const int neighborZ = chunkZ + offset.y;
+                            if (neighborX < analysisMinChunkX ||
+                                neighborX > analysisMaxChunkX ||
+                                neighborZ < analysisMinChunkZ ||
+                                neighborZ > analysisMaxChunkZ)
+                            {
+                                continue;
+                            }
+                            const StartupCensusColumnData& neighborData =
+                                columnData[analysisColumnIndex(neighborX, neighborZ)];
+                            if (neighborData.highestTerrainWorld != ColumnManager::kNoHeight)
+                            {
+                                minNeighborHeight = std::min(minNeighborHeight, neighborData.highestTerrainWorld);
+                            }
+                        }
+
+                        const int lowestExposedWorldY = std::min(data.highestTerrainWorld, minNeighborHeight + 1);
+                        const int shellFloorChunk =
+                            std::max(0,
+                                     floorDiv(std::max(0, lowestExposedWorldY), kChunkSizeY) -
+                                         kExactSurfaceShellBelowSlackChunks);
+                        addColumnChunkInterval(occupancy.surfaceShellIntervals,
+                                               shellFloorChunk,
+                                               std::max(highestChunkY, highestChunkY + kExactSurfaceShellAirAboveChunks));
+                    }
+
+                    if (data.maxWaterTopWorld >= 0 && data.minWaterBottomWorld <= data.maxWaterTopWorld)
+                    {
+                        const int minChunkY = floorDiv(std::max(0, data.minWaterBottomWorld), kChunkSizeY);
+                        const int maxChunkY = floorDiv(std::max(0, data.maxWaterTopWorld), kChunkSizeY);
+                        occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, maxChunkY);
+                        addColumnChunkInterval(occupancy.waterIntervals, minChunkY, maxChunkY);
+                    }
+
+                    auto structureIt = startupStructureSpans.find(column);
+                    if (structureIt != startupStructureSpans.end() && structureIt->second.valid())
+                    {
+                        occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY,
+                                                                   structureIt->second.maxChunkY);
+                        addColumnChunkInterval(occupancy.structureIntervals,
+                                               structureIt->second.minChunkY,
+                                               structureIt->second.maxChunkY);
+                    }
+
+                    const auto editIt = editSpans.find(column);
+                    if (editIt != editSpans.end() && editIt->second.valid())
+                    {
+                        occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY,
+                                                                   editIt->second.maxChunkY);
+                        addColumnChunkInterval(occupancy.editIntervals,
+                                               editIt->second.minChunkY,
+                                               editIt->second.maxChunkY);
+                    }
+
+                    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.terrainIntervals);
+                    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.waterIntervals);
+                    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.structureIntervals);
+                    mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.editIntervals);
+                    startupOccupancies[index] = occupancy;
+
+                    if (chunkX < exactMinChunkX ||
+                        chunkX > exactMaxChunkX ||
+                        chunkZ < exactMinChunkZ ||
+                        chunkZ > exactMaxChunkZ)
+                    {
+                        return;
+                    }
+
+                    const ColumnChunkIntervals playerBand =
+                        playerBandIntervalsForColumn(column, cameraColumn, center.y, frontierVerticalRadius);
+                    ColumnChunkIntervals intervals{};
+                    mergeColumnChunkIntervals(intervals, playerBand);
+                    if (!playerBand.empty())
+                    {
+                        mergeColumnChunkIntervals(intervals, occupancy.occupiedIntervals);
+                    }
+                    else
+                    {
+                        mergeColumnChunkIntervals(intervals, occupancy.surfaceShellIntervals);
+                        mergeColumnChunkIntervals(intervals, occupancy.waterIntervals);
+                        mergeColumnChunkIntervals(intervals, occupancy.structureIntervals);
+                        mergeColumnChunkIntervals(intervals, occupancy.editIntervals);
+                    }
+                    mergeColumnChunkIntervals(intervals, occupancy.maybeIntervals);
+                    if (intervals.empty())
+                    {
+                        return;
+                    }
+
+                    int localRequiredChunks = 0;
+                    for (int chunkY = intervals.minChunkY(); chunkY <= intervals.maxChunkY(); ++chunkY)
+                    {
+                        if (!chunkYWithinIntervals(chunkY, intervals))
+                        {
+                            continue;
+                        }
+
+                        const bool forceResident = chunkYWithinIntervals(chunkY, playerBand);
+                        const bool definitelyEmpty =
+                            !forceResident &&
+                            classifyColumnSlab(occupancy, chunkY) == ColumnSlabOccupancyState::DefinitelyEmpty;
+                        if (!definitelyEmpty)
+                        {
+                            ++localRequiredChunks;
+                        }
+                    }
+
+                    exactRequiredChunks.fetch_add(localRequiredChunks, std::memory_order_relaxed);
+                });
+
+    if (censusCancelled())
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        for (int chunkZ = analysisMinChunkZ; chunkZ <= analysisMaxChunkZ; ++chunkZ)
+        {
+            for (int chunkX = analysisMinChunkX; chunkX <= analysisMaxChunkX; ++chunkX)
+            {
+                const StartupCensusColumnData& data = columnData[analysisColumnIndex(chunkX, chunkZ)];
+                if (data.highestTerrainWorld == ColumnManager::kNoHeight)
+                {
+                    continue;
+                }
+
+                auto [it, inserted] = predictedColumnHeights_.try_emplace(glm::ivec2{chunkX, chunkZ},
+                                                                          data.highestTerrainWorld);
+                if (!inserted)
+                {
+                    it->second = std::max(it->second, data.highestTerrainWorld);
+                }
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
+        for (int chunkZ = analysisMinChunkZ; chunkZ <= analysisMaxChunkZ; ++chunkZ)
+        {
+            for (int chunkX = analysisMinChunkX; chunkX <= analysisMaxChunkX; ++chunkX)
+            {
+                const glm::ivec2 column{chunkX, chunkZ};
+                const ColumnSlabOccupancy& src = startupOccupancies[analysisColumnIndex(chunkX, chunkZ)];
+                auto [it, inserted] = columnSlabOccupancyCache_.try_emplace(column, src);
+                if (!inserted)
+                {
+                    mergeColumnChunkIntervals(it->second.terrainIntervals, src.terrainIntervals);
+                    mergeColumnChunkIntervals(it->second.surfaceShellIntervals, src.surfaceShellIntervals);
+                    mergeColumnChunkIntervals(it->second.waterIntervals, src.waterIntervals);
+                    mergeColumnChunkIntervals(it->second.structureIntervals, src.structureIntervals);
+                    mergeColumnChunkIntervals(it->second.editIntervals, src.editIntervals);
+                    mergeColumnChunkIntervals(it->second.occupiedIntervals, src.occupiedIntervals);
+                    mergeColumnChunkIntervals(it->second.maybeIntervals, src.maybeIntervals);
+                    it->second.highestOccupiedChunkY =
+                        std::max(it->second.highestOccupiedChunkY, src.highestOccupiedChunkY);
+                }
+            }
+        }
+    }
+    invalidateAllStreamingFrontierColumns();
+
+    startupExactCensusRequiredChunks_.store(exactRequiredChunks.load(std::memory_order_relaxed),
+                                            std::memory_order_release);
+    startupExactCensusRequiredReady_.store(true, std::memory_order_release);
+}
+
 void ChunkManager::Impl::refillWorldgenPageDependencyJobs()
 {
     if (shouldStop_.load(std::memory_order_acquire))
@@ -11558,6 +12369,59 @@ void ChunkManager::Impl::refillBulkShellOracleJobs()
     }
 }
 
+void ChunkManager::Impl::warmReadyWorldgenPageColumns(const glm::ivec2& pageKey,
+                                                      const std::shared_ptr<const WorldgenPage>& page,
+                                                      bool buildOccupancy) const
+{
+    if (!page)
+    {
+        return;
+    }
+
+    glm::ivec2 minColumn{0};
+    glm::ivec2 maxColumn{0};
+    worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
+    for (int columnZ = minColumn.y; columnZ <= maxColumn.y; ++columnZ)
+    {
+        for (int columnX = minColumn.x; columnX <= maxColumn.x; ++columnX)
+        {
+            const glm::ivec2 column{columnX, columnZ};
+            const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+            int cachedHeight = ColumnManager::kNoHeight;
+            const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
+            ColumnSlabOccupancy occupancy{};
+            const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
+
+            ColumnSlabOccupancy resolvedOccupancy = occupancy;
+            bool resolvedHaveOccupancy = haveOccupancy;
+            if (buildOccupancy && !haveOccupancy)
+            {
+                resolvedOccupancy = cachedColumnSlabOccupancy(column);
+                resolvedHaveOccupancy = true;
+            }
+
+            if (!haveHeight)
+            {
+                if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
+                {
+                    mergePredictedColumnHeight(
+                        column,
+                        resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
+                }
+                else
+                {
+                    const int localX = worldX - page->baseWorld.x;
+                    const int localZ = worldZ - page->baseWorld.y;
+                    mergePredictedColumnHeight(column, page->column(localX, localZ).surface.surfaceY);
+                }
+            }
+
+            invalidateStreamingFrontierColumn(column);
+        }
+    }
+}
+
 bool ChunkManager::Impl::processWorldgenPageDependencyJob()
 {
     glm::ivec2 pageKey{0};
@@ -11580,7 +12444,6 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
     try
     {
         const std::shared_ptr<WorldgenPage> page = buildWorldgenPage(pageKey);
-
         glm::ivec2 minColumn{0};
         glm::ivec2 maxColumn{0};
         worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
@@ -11600,56 +12463,14 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
             buildOccupancy = buildOccupancy || entry.buildOccupancy;
             warmStructures = warmStructures || entry.warmStructures;
         };
-        const auto warmPageColumns = [&]()
-        {
-            for (int columnZ = minColumn.y; columnZ <= maxColumn.y; ++columnZ)
-            {
-                for (int columnX = minColumn.x; columnX <= maxColumn.x; ++columnX)
-                {
-                    const glm::ivec2 column{columnX, columnZ};
-                    const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
-                    const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
-                    int cachedHeight = ColumnManager::kNoHeight;
-                    const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
-                    ColumnSlabOccupancy occupancy{};
-                    const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
-
-                    ColumnSlabOccupancy resolvedOccupancy = occupancy;
-                    bool resolvedHaveOccupancy = haveOccupancy;
-                    if (buildOccupancy && !haveOccupancy)
-                    {
-                        resolvedOccupancy = cachedColumnSlabOccupancy(column);
-                        resolvedHaveOccupancy = true;
-                    }
-
-                    if (!haveHeight)
-                    {
-                        if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
-                        {
-                            mergePredictedColumnHeight(
-                                column,
-                                resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
-                        }
-                        else
-                        {
-                            const int localX = worldX - page->baseWorld.x;
-                            const int localZ = worldZ - page->baseWorld.y;
-                            mergePredictedColumnHeight(column, page->column(localX, localZ).surface.surfaceY);
-                        }
-                    }
-
-                    invalidateStreamingFrontierColumn(column);
-                }
-            }
-        };
 
         mergeLatestRequestState();
-        warmPageColumns();
+        warmReadyWorldgenPageColumns(pageKey, page, buildOccupancy);
         const bool warmedOccupancy = buildOccupancy;
         mergeLatestRequestState();
         if (buildOccupancy && !warmedOccupancy)
         {
-            warmPageColumns();
+            warmReadyWorldgenPageColumns(pageKey, page, true);
         }
 
         publishWorldgenPageReady(pageKey, page);
@@ -13880,17 +14701,21 @@ void ChunkManager::Impl::prefetchVisibleWorldgenPages(const glm::ivec3& center,
                 const glm::ivec2 pageColumn{pageColumnX, pageColumnZ};
                 const int worldX = pageColumn.x * kChunkSizeX + kChunkSizeX / 2;
                 const int worldZ = pageColumn.y * kChunkSizeZ + kChunkSizeZ / 2;
+                ColumnSlabOccupancy occupancy{};
+                const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(pageColumn, occupancy);
                 int cachedHeight = ColumnManager::kNoHeight;
                 if (!tryGetCachedColumnHeight(pageColumn, worldX, worldZ, cachedHeight))
                 {
-                    pageNeedsWork = true;
-                    break;
+                    if (!haveOccupancy)
+                    {
+                        pageNeedsWork = true;
+                        break;
+                    }
                 }
 
                 if (needsOccupancy)
                 {
-                    ColumnSlabOccupancy occupancy{};
-                    if (!tryGetCachedColumnSlabOccupancy(pageColumn, occupancy))
+                    if (!haveOccupancy)
                     {
                         pageNeedsWork = true;
                         break;
@@ -15576,6 +16401,15 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
     {
         occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, structureSpan.maxChunkY);
         addColumnChunkInterval(occupancy.structureIntervals, structureSpan.minChunkY, structureSpan.maxChunkY);
+    }
+    {
+        std::lock_guard<std::mutex> lock(startupStructureColumnSpanMutex_);
+        auto it = startupStructureColumnSpans_.find(column);
+        if (it != startupStructureColumnSpans_.end() && it->second.valid())
+        {
+            occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, it->second.maxChunkY);
+            addColumnChunkInterval(occupancy.structureIntervals, it->second.minChunkY, it->second.maxChunkY);
+        }
     }
 
     {

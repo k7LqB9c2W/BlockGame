@@ -422,7 +422,9 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
 [[nodiscard]] StructureRegion buildStructureRegionData(const StructureRegionKey& key,
                                                        const StructureSampleColumnFn& sampleColumnFn,
                                                        const StructureSurfaceBlockFn& surfaceBlockFn,
-                                                       const StructureDensityFn& densityFn)
+                                                       const StructureDensityFn& densityFn,
+                                                       bool buildVoxelData = true,
+                                                       bool buildBvh = true)
 {
     struct ColumnCacheKeyHasher
     {
@@ -679,8 +681,6 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
     }
 
     region.chunkColumnSpans.reserve(region.instances.size() * 4u);
-    std::unordered_map<glm::ivec3, std::vector<StructureVoxelEdit>, ChunkHasher> voxelEditsByChunk{};
-    voxelEditsByChunk.reserve(region.instances.size() * 4u);
     for (const StructureInstance& instance : region.instances)
     {
         const int minChunkX = floorDiv(instance.bounds.min.x, kChunkSizeX);
@@ -697,7 +697,21 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
                 region.chunkColumnSpans[glm::ivec2{chunkX, chunkZ}].include(minChunkY, maxChunkY);
             }
         }
+    }
 
+    if (!buildVoxelData)
+    {
+        if (buildBvh)
+        {
+            region.bvh.build(region.instances);
+        }
+        return region;
+    }
+
+    std::unordered_map<glm::ivec3, std::vector<StructureVoxelEdit>, ChunkHasher> voxelEditsByChunk{};
+    voxelEditsByChunk.reserve(region.instances.size() * 4u);
+    for (const StructureInstance& instance : region.instances)
+    {
         forEachStructureVoxel(instance,
                               [&](int worldX, int worldY, int worldZ, BlockId block)
                               {
@@ -750,7 +764,10 @@ using StructureDensityFn = std::function<float(int worldX, int worldZ)>;
         region.chunkVoxelSpans.emplace(chunkCoord, span);
     }
 
-    region.bvh.build(region.instances);
+    if (buildBvh)
+    {
+        region.bvh.build(region.instances);
+    }
     return region;
 }
 

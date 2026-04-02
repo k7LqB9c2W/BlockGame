@@ -111,6 +111,6 @@ void ExactIndirectBuildMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     command.args.vertexCountPerInstance = 6u;
     command.args.instanceCount = record.faceCount;
     command.args.startVertexLocation = 0u;
-    command.args.startInstanceLocation = record.faceOffset;
+    command.args.startInstanceLocation = 0u;
     gIndirectArgs[visibleIndex] = command;
 }

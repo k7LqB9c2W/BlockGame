@@ -4174,7 +4174,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             for (std::size_t i = 0; i < batch.faceCounts.size(); ++i)
             {
                 commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
-                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, batch.faceOffsets[i]);
+                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
             }
         }
 
@@ -4501,7 +4501,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
             for (std::size_t i = 0; i < batch.faceCounts.size(); ++i)
             {
                 commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
-                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, batch.faceOffsets[i]);
+                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
             }
         }
     }

@@ -178,8 +178,8 @@ uint faceLighting(uint cornerIndex, GpuExactFaceDescriptor descriptor)
 
 VSOutput main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
-    const GpuExactFaceDescriptor descriptor = gFaceDescriptors[instanceId];
     const GpuExactDrawRecordMetadata metadata = gDrawRecordMetadata[gDrawRecordIndex];
+    const GpuExactFaceDescriptor descriptor = gFaceDescriptors[metadata.faceBase + instanceId];
     const uint localX = faceLocalX(descriptor.packedLocal);
     const uint localY = faceLocalY(descriptor.packedLocal);
     const uint localZ = faceLocalZ(descriptor.packedLocal);

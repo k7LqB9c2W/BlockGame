@@ -6954,10 +6954,14 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             metricCoverage.required > 0 &&
             static_cast<std::int64_t>(metricCoverage.ready) * 100 >=
                 static_cast<std::int64_t>(metricCoverage.required) * 95;
+        // Keep player release conservative, but let exact-only far-ramp widening
+        // follow readiness at the current scheduling radius. Otherwise the startup
+        // ramp can plateau below the configured exact radius while outer rings stay
+        // unscheduled waiting for the near-upload queue to drain almost completely.
         const bool exactRampReady =
             exactCoverageCommittedForCurrentWindow &&
-            uploadReady &&
-            (exactOnlyMode ? schedulingCoverageMostlyReady : nearReleaseReady);
+            (exactOnlyMode ? schedulingCoverageMostlyReady
+                           : (uploadReady && nearReleaseReady));
         const bool exactReleaseReady =
             exactCoverageCommittedForCurrentWindow &&
             uploadReady &&

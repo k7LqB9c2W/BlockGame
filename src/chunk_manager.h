@@ -618,6 +618,16 @@ struct StreamingStatusSnapshot
     StreamingPhase phase{StreamingPhase::SteadyState};
     int exactReadyChunks{0};
     int exactRequiredChunks{0};
+    int exactPlanRadius{0};
+    int exactPlanVisibleRadius{0};
+    int exactPlanPreloadRadius{0};
+    int exactProtectedReadyChunks{0};
+    int exactProtectedRequiredChunks{0};
+    int exactMissingStateChunks{0};
+    int exactWaitingDependenciesChunks{0};
+    int exactQueuedGenerateChunks{0};
+    int exactGeneratingChunks{0};
+    int exactMeshingChunks{0};
     bool exactPlanReplanning{false};
     int exactPendingUploads{0};
     int farActiveTiles{0};

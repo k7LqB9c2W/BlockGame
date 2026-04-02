@@ -5505,6 +5505,21 @@ int runGame()
                         exactPercent,
                         streamingStatus.exactPendingUploads,
                         streamingStatus.exactPlanReplanning ? "replanning" : "committed");
+            ImGui::Text("Exact plan: radius %d | visible %d | preload %d | phase %s",
+                        streamingStatus.exactPlanRadius,
+                        streamingStatus.exactPlanVisibleRadius,
+                        streamingStatus.exactPlanPreloadRadius,
+                        streamingPhaseName(streamingStatus.phase));
+            ImGui::Text("Protected exact: %d/%d ready | blocking %s",
+                        streamingStatus.exactProtectedReadyChunks,
+                        streamingStatus.exactProtectedRequiredChunks,
+                        streamingStatus.blockingReason ? streamingStatus.blockingReason : "ready");
+            ImGui::Text("Exact states: missing %d | deps %d | qgen %d | gen %d | mesh %d",
+                        streamingStatus.exactMissingStateChunks,
+                        streamingStatus.exactWaitingDependenciesChunks,
+                        streamingStatus.exactQueuedGenerateChunks,
+                        streamingStatus.exactGeneratingChunks,
+                        streamingStatus.exactMeshingChunks);
             if (lodActive)
             {
                 ImGui::Text("LOD tiles: %d/%d ready (%.0f%%) | queued %d | pending upload %d | dirty %d",

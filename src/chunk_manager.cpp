@@ -4906,8 +4906,11 @@ private:
     void tryCommitReadyExactPlan(const ExactWindowKey& key);
     [[nodiscard]] ExactPlanSnapshot activePlanSnapshot() const;
     [[nodiscard]] std::shared_ptr<ExactWindowPlan> buildExactWindowPlan(const ExactWindowKey& key,
-                                                                        std::uint64_t generation) const;
-    void launchExactWindowPlanBuild(const ExactWindowKey& key, std::uint64_t generation);
+                                                                        std::uint64_t generation,
+                                                                        bool startupCritical) const;
+    void launchExactWindowPlanBuild(const ExactWindowKey& key,
+                                    std::uint64_t generation,
+                                    bool startupCritical);
     void applyPlanDiff(const std::shared_ptr<const ExactWindowPlan>& oldPlan,
                        const std::shared_ptr<const ExactWindowPlan>& newPlan);
     void updateExactPlanState(const glm::ivec3& center,
@@ -5053,6 +5056,11 @@ private:
         int exactReady{0};
         int protectedRequired{0};
         int protectedReady{0};
+        int exactMissingState{0};
+        int exactWaitingDependencies{0};
+        int exactQueuedGenerate{0};
+        int exactGenerating{0};
+        int exactMeshing{0};
     };
     StreamingStatusSnapshot computeStreamingStatusSnapshot() const noexcept;
     void resetStreamingFrontier() noexcept;
@@ -6889,6 +6897,10 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             metricCoverage.required > 0 &&
             static_cast<std::int64_t>(metricCoverage.ready) * 100 >=
                 static_cast<std::int64_t>(metricCoverage.required) * 95;
+        const bool exactRampReady =
+            exactPlanCommittedForCurrentWindow &&
+            uploadReady &&
+            (exactOnlyMode ? exactCoverageMostlyReady : nearReleaseReady);
         const bool exactReleaseReady =
             exactPlanCommittedForCurrentWindow &&
             uploadReady &&
@@ -6961,7 +6973,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             startupState_.playerReleaseReady = true;
             if (startupState_.exactNearCurrentChunks >= renderSettings_.exactChunks)
             {
-                if (exactReady)
+                if (exactRampReady)
                 {
                     startupState_.phase = StreamingPhase::SteadyState;
                     startupState_.phaseTimeSeconds = 0.0;
@@ -6972,7 +6984,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                     startupState_.healthyTimeSeconds = 0.0;
                 }
             }
-            else if (exactReady)
+            else if (exactRampReady)
             {
                 startupState_.healthyTimeSeconds += frameSeconds;
                 if (startupState_.healthyTimeSeconds >= 0.75)
@@ -8353,6 +8365,7 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
 {
     StreamingStatusSnapshot snapshot{};
     const ExactPlanSnapshot exactPlan = activePlanSnapshot();
+    const FrontierCoverage frontierCoverage = streamingFrontierCoverageSnapshot();
     snapshot.phase = streamingPhase();
     snapshot.playerReleaseReady = playerReleaseReady();
     snapshot.exactPlanReplanning = exactPlan.replanning;
@@ -8367,6 +8380,16 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
 
     snapshot.exactReadyChunks = cachedExactReadyChunks_;
     snapshot.exactRequiredChunks = cachedExactRequiredChunks_;
+    snapshot.exactPlanRadius = exactPlan.activePlan ? exactPlan.activePlan->key.exactRadius : 0;
+    snapshot.exactPlanVisibleRadius = exactPlan.activePlan ? exactPlan.activePlan->key.visibleRadius : 0;
+    snapshot.exactPlanPreloadRadius = exactPlan.activePlan ? exactPlan.activePlan->key.preloadRadius : 0;
+    snapshot.exactProtectedReadyChunks = frontierCoverage.protectedReady;
+    snapshot.exactProtectedRequiredChunks = frontierCoverage.protectedRequired;
+    snapshot.exactMissingStateChunks = frontierCoverage.exactMissingState;
+    snapshot.exactWaitingDependenciesChunks = frontierCoverage.exactWaitingDependencies;
+    snapshot.exactQueuedGenerateChunks = frontierCoverage.exactQueuedGenerate;
+    snapshot.exactGeneratingChunks = frontierCoverage.exactGenerating;
+    snapshot.exactMeshingChunks = frontierCoverage.exactMeshing;
 
     if (!exactPlan.activePlan && exactPlan.replanning)
     {
@@ -10716,6 +10739,14 @@ bool ChunkManager::Impl::shouldSealExactOpenPageForAbandonment(const ChunkBuffer
 void ChunkManager::Impl::requestExactPageLifecycleSeals()
 {
     const SteadyClock::time_point now = SteadyClock::now();
+    const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
+    const bool startupExactWindowActive =
+        startupEnabled_ &&
+        startupState_.preloadStarted &&
+        startupState_.phase != StreamingPhase::SteadyState;
+    const bool aggressiveSealForExactProgress =
+        exactOnly &&
+        (startupExactWindowActive || lastMissingChunks_ > 0);
     for (ExactReservationShard& shard : exactReservationShards_)
     {
         std::lock_guard<std::mutex> shardLock(shard.mutex);
@@ -10755,6 +10786,12 @@ void ChunkManager::Impl::requestExactPageLifecycleSeals()
             ChunkBufferPage& page = bufferPages_[pageIndex];
             if (page.sealRequested)
             {
+                continue;
+            }
+
+            if (aggressiveSealForExactProgress)
+            {
+                page.sealRequested = true;
                 continue;
             }
 
@@ -11787,15 +11824,19 @@ ChunkManager::Impl::ExactPlanSnapshot ChunkManager::Impl::activePlanSnapshot() c
             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)};
 }
 
-void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowKey& key, std::uint64_t generation)
+void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowKey& key,
+                                                    std::uint64_t generation,
+                                                    bool startupCritical)
 {
     exactPlanBuildThread_ = std::thread(
-        [this, key, generation]()
+        [this, key, generation, startupCritical]()
         {
             try
             {
-                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-                std::shared_ptr<ExactWindowPlan> plan = buildExactWindowPlan(key, generation);
+                SetThreadPriority(GetCurrentThread(),
+                                  startupCritical ? THREAD_PRIORITY_ABOVE_NORMAL
+                                                  : THREAD_PRIORITY_BELOW_NORMAL);
+                std::shared_ptr<ExactWindowPlan> plan = buildExactWindowPlan(key, generation, startupCritical);
                 std::lock_guard<std::mutex> lock(exactPlanMutex_);
                 if (!pendingExactPlanKeyValid_ ||
                     pendingExactPlanStatus_ != ExactWindowPlanStatus::Building ||
@@ -11829,6 +11870,7 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
     }
 
     bool joinCompletedThread = false;
+    bool startupCritical = false;
     std::uint64_t generation = 0;
     {
         std::lock_guard<std::mutex> lock(exactPlanMutex_);
@@ -11860,6 +11902,10 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
         pendingExactPlanKeyValid_ = true;
         pendingExactPlanStatus_ = ExactWindowPlanStatus::Building;
         generation = nextExactPlanGeneration_++;
+        startupCritical =
+            startupEnabled_ &&
+            startupState_.preloadStarted &&
+            activeExactPlan_ == nullptr;
         activeWindowReplanNeeded_ = false;
         dirtyPlanColumns_.clear();
         dirtyPlanPages_.clear();
@@ -11872,7 +11918,7 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
         exactPlanBuildThread_.join();
     }
 
-    launchExactWindowPlanBuild(key, generation);
+    launchExactWindowPlanBuild(key, generation, startupCritical);
 }
 
 void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
@@ -11930,7 +11976,9 @@ void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
 }
 
 std::shared_ptr<ChunkManager::Impl::ExactWindowPlan>
-ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key, std::uint64_t generation) const
+ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
+                                         std::uint64_t generation,
+                                         bool startupCritical) const
 {
     auto plan = std::make_shared<ExactWindowPlan>();
     plan->key = key;
@@ -11959,7 +12007,8 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key, std::uint64_
     {
         return shouldStop_.load(std::memory_order_acquire);
     };
-    const auto runPlannerParallel = [this, &plannerCancelled](std::size_t workCount, const auto& workItem)
+    const auto runPlannerParallel =
+        [this, &plannerCancelled, startupCritical](std::size_t workCount, const auto& workItem)
     {
         if (workCount == 0 || plannerCancelled())
         {
@@ -11967,20 +12016,26 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key, std::uint64_
         }
 
         const std::size_t hardwareWorkers = std::max<std::size_t>(std::thread::hardware_concurrency(), 4u);
-        const std::size_t desiredWorkers =
-            std::max<std::size_t>(workerThreadCount_,
-                                  std::clamp<std::size_t>(hardwareWorkers / 2u, 2u, 4u));
+        const std::size_t maxPlannerWorkers = startupCritical ? 8u : 4u;
+        const std::size_t desiredWorkers = startupCritical
+            ? std::max<std::size_t>(workerThreadCount_,
+                                    std::clamp<std::size_t>(hardwareWorkers, 4u, maxPlannerWorkers))
+            : std::max<std::size_t>(workerThreadCount_,
+                                    std::clamp<std::size_t>(hardwareWorkers / 2u, 2u, maxPlannerWorkers));
         const std::size_t workerCount =
             std::clamp<std::size_t>(desiredWorkers,
                                     1u,
-                                    std::min<std::size_t>(workCount, 4u));
+                                    std::min<std::size_t>(workCount, maxPlannerWorkers));
         std::atomic<std::size_t> nextIndex{0};
         std::exception_ptr firstError{};
         std::mutex errorMutex;
-        auto worker = [&]()
+        auto worker = [startupCritical, &plannerCancelled, &nextIndex, workCount, &workItem, &firstError, &errorMutex]()
         {
             try
             {
+                SetThreadPriority(GetCurrentThread(),
+                                  startupCritical ? THREAD_PRIORITY_ABOVE_NORMAL
+                                                  : THREAD_PRIORITY_BELOW_NORMAL);
                 while (!plannerCancelled())
                 {
                     const std::size_t index = nextIndex.fetch_add(1, std::memory_order_relaxed);
@@ -12113,28 +12168,35 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key, std::uint64_
                static_cast<std::size_t>(chunkX - analysisMinChunkX);
     };
 
+    std::vector<std::shared_ptr<const WorldgenPage>> readyPageValues(requiredPageKeys.size());
+    runPlannerParallel(requiredPageKeys.size(),
+                       [this, &requiredPageKeys, &readyPageValues](std::size_t index)
+                       {
+                           const glm::ivec2 pageKey = requiredPageKeys[index];
+                           std::shared_ptr<const WorldgenPage> page = tryGetReadyWorldgenPage(pageKey);
+                           if (!page)
+                           {
+                               page = getOrBuildWorldgenPageBlocking(pageKey);
+                           }
+                           readyPageValues[index] = std::move(page);
+                       });
+    if (plannerCancelled())
+    {
+        plan->status = ExactWindowPlanStatus::Failed;
+        return plan;
+    }
+
     std::unordered_map<glm::ivec2, std::shared_ptr<const WorldgenPage>, ColumnHasher> readyPages{};
     readyPages.reserve(requiredPageKeys.size());
-    for (const glm::ivec2& pageKey : requiredPageKeys)
+    for (std::size_t index = 0; index < requiredPageKeys.size(); ++index)
     {
-        if (plannerCancelled())
+        if (!readyPageValues[index])
         {
             plan->status = ExactWindowPlanStatus::Failed;
             return plan;
         }
 
-        std::shared_ptr<const WorldgenPage> page = tryGetReadyWorldgenPage(pageKey);
-        if (!page)
-        {
-            page = getOrBuildWorldgenPageBlocking(pageKey);
-        }
-        if (!page)
-        {
-            plan->status = ExactWindowPlanStatus::Failed;
-            return plan;
-        }
-
-        readyPages.emplace(pageKey, std::move(page));
+        readyPages.emplace(requiredPageKeys[index], std::move(readyPageValues[index]));
     }
 
     const auto findReadyWorldgenColumn = [&readyPages](int worldX, int worldZ) -> const WorldgenColumnValue*
@@ -13770,15 +13832,39 @@ ChunkManager::Impl::FrontierCoverage ChunkManager::Impl::streamingFrontierCovera
     for (const auto& [coord, demand] : streamingFrontierDemands_)
     {
         (void)coord;
-        if (!demand.forceResident)
+        if (demand.forceResident)
+        {
+            ++coverage.protectedRequired;
+            if (demand.state == FrontierDemandState::Ready)
+            {
+                ++coverage.protectedReady;
+            }
+        }
+
+        if (!demand.countedExact)
         {
             continue;
         }
 
-        ++coverage.protectedRequired;
-        if (demand.state == FrontierDemandState::Ready)
+        switch (demand.state)
         {
-            ++coverage.protectedReady;
+        case FrontierDemandState::Missing:
+            ++coverage.exactMissingState;
+            break;
+        case FrontierDemandState::WaitingDependencies:
+            ++coverage.exactWaitingDependencies;
+            break;
+        case FrontierDemandState::QueuedGenerate:
+            ++coverage.exactQueuedGenerate;
+            break;
+        case FrontierDemandState::Generating:
+            ++coverage.exactGenerating;
+            break;
+        case FrontierDemandState::Meshing:
+            ++coverage.exactMeshing;
+            break;
+        case FrontierDemandState::Ready:
+            break;
         }
     }
 

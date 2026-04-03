@@ -3665,6 +3665,10 @@ struct Chunk
         exactGpuRecordIndex.store(std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
         exactGpuFaceOffset.store(0, std::memory_order_relaxed);
         exactGpuFaceCount.store(0, std::memory_order_relaxed);
+        exactGpuFenceDeferredCount.store(0, std::memory_order_relaxed);
+        exactGpuRequeueCount.store(0, std::memory_order_relaxed);
+        exactGpuLastFenceDeferredMicros.store(0, std::memory_order_relaxed);
+        exactGpuLastRequeueMicros.store(0, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident = false;
         lastDenseFrameTouched = 0;
@@ -3767,6 +3771,10 @@ struct Chunk
     std::atomic<std::uint32_t> exactGpuFaceOffset{0};
     std::atomic<std::uint32_t> exactGpuFaceCount{0};
     std::atomic<std::uint8_t> exactGpuPendingNeighborMask{0};
+    std::atomic<std::uint32_t> exactGpuFenceDeferredCount{0};
+    std::atomic<std::uint32_t> exactGpuRequeueCount{0};
+    std::atomic<long long> exactGpuLastFenceDeferredMicros{0};
+    std::atomic<long long> exactGpuLastRequeueMicros{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     bool cpuDataResident{false};
     std::uint64_t lastDenseFrameTouched{0};
@@ -4478,6 +4486,7 @@ private:
     std::vector<PendingExactGpuBuild> builds{};
     std::vector<std::uint32_t> prepassRequiredFaceCounts{};
     ExactGpuBatchPhase phase{ExactGpuBatchPhase::PrepassSubmitted};
+    std::uint64_t phaseEnteredMicros{0};
     UINT64 reservationBatchId{0};
     ExactGpuBatchPhaseResources prepassResources{};
     ExactGpuBatchPhaseResources emitResources{};
@@ -8511,7 +8520,11 @@ StreamingStatusSnapshot ChunkManager::Impl::streamingStatusSnapshot() const noex
 
 void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatusSnapshot& snapshot) const
 {
-    if (!exactDependencyStallDebugLoggingEnabled() || snapshot.exactWaitingDependenciesChunks <= 0)
+    const bool dependencyStall = snapshot.exactWaitingDependenciesChunks > 0;
+    const bool exactGpuStall =
+        snapshot.exactMeshingChunks > 0 ||
+        snapshot.exactPendingUploads > 0;
+    if (!exactDependencyStallDebugLoggingEnabled() || (!dependencyStall && !exactGpuStall))
     {
         return;
     }
@@ -8544,6 +8557,78 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         std::vector<glm::ivec2> missingWorldgenPages;
         std::vector<StructureRegionKey> missingStructureRegions;
     };
+    struct ExactGpuQueuedDebugEntry
+    {
+        glm::ivec3 coord{0};
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+        std::uint64_t inputVersion{0};
+        std::uint64_t queuedMicros{0};
+        bool rebuildVoxelInputs{false};
+    };
+    struct ExactGpuBatchPhaseSummary
+    {
+        std::size_t batchCount{0};
+        std::size_t buildCount{0};
+        std::uint64_t oldestAgeMicros{0};
+    };
+    struct ExactGpuBatchOwnershipDebugInfo
+    {
+        const char* phase{"none"};
+        std::uint64_t phaseEnteredMicros{0};
+    };
+    struct ExactGpuBatchDebugEntry
+    {
+        glm::ivec3 coord{0};
+        const char* phase{"unknown"};
+        std::uint32_t buildVersion{0};
+        std::uint32_t generationEpoch{0};
+        std::uint64_t inputVersion{0};
+        std::uint32_t requiredFaceCount{0};
+        std::uint32_t faceCapacity{0};
+        std::uint8_t pendingNeighborMask{0};
+        bool hasAllocation{false};
+        std::uint64_t phaseEnteredMicros{0};
+    };
+    struct ExactGpuChunkDebugEntry
+    {
+        glm::ivec3 coord{0};
+        FrontierDemandState frontierState{FrontierDemandState::Missing};
+        bool haveFrontierState{false};
+        ChunkState chunkState{ChunkState::Empty};
+        int inFlight{0};
+        bool hasBlocks{false};
+        bool meshReady{false};
+        bool exactResident{false};
+        bool exactQueued{false};
+        bool exactInFlight{false};
+        bool inputsDirty{false};
+        bool sparseReady{false};
+        bool haloDirty{false};
+        bool hasOverlay{false};
+        bool pendingStructureEdits{false};
+        bool localInteraction{false};
+        std::uint32_t generationEpoch{0};
+        std::uint64_t inputVersion{0};
+        std::uint64_t requestedInputVersion{0};
+        std::uint64_t readyVersion{0};
+        std::uint32_t faceCount{0};
+        std::uint32_t recordIndex{kInvalidExactGpuDrawRecordIndex};
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::uint8_t pendingNeighborMask{0};
+        std::size_t overlayCount{0};
+        std::size_t structureEditCount{0};
+        long long requestTimestampMicros{0};
+        std::uint64_t readyFenceValue{0};
+        std::uint64_t pageLastWriteFenceValue{0};
+        std::uint32_t fenceDeferredCount{0};
+        std::uint32_t requeueCount{0};
+        long long lastFenceDeferredMicros{0};
+        long long lastRequeueMicros{0};
+        bool blockedByReadyFence{false};
+        const char* batchPhase{"none"};
+        std::uint64_t batchPhaseEnteredMicros{0};
+    };
 
     std::vector<WaitingChunkDebugEntry> waitingEntries;
     {
@@ -8568,6 +8653,92 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
                 entry.missingStructureRegions.push_back(regionKey);
             }
             waitingEntries.push_back(std::move(entry));
+        }
+    }
+    std::vector<ExactGpuQueuedDebugEntry> exactGpuQueuedEntries;
+    {
+        std::lock_guard<std::mutex> lock(const_cast<ChunkManager::Impl*>(this)->pendingExactGpuBuildMutex_);
+        exactGpuQueuedEntries.reserve(pendingExactGpuBuildQueue_.size());
+        for (const ExactGpuBuildRequest& request : pendingExactGpuBuildQueue_)
+        {
+            if (!request.chunk)
+            {
+                continue;
+            }
+
+            exactGpuQueuedEntries.push_back(ExactGpuQueuedDebugEntry{
+                request.chunk->coord,
+                request.buildVersion,
+                request.generationEpoch,
+                request.inputVersion,
+                request.queuedTimestampMicros,
+                request.rebuildVoxelInputs});
+        }
+    }
+    ExactGpuBatchPhaseSummary prepassSummary{};
+    ExactGpuBatchPhaseSummary emitSummary{};
+    ExactGpuBatchPhaseSummary prepassReadySummary{};
+    std::vector<ExactGpuBatchDebugEntry> exactGpuBatchEntries;
+    std::unordered_map<glm::ivec3, ExactGpuBatchOwnershipDebugInfo, ChunkHasher> exactGpuBatchOwnership;
+    {
+        std::lock_guard<std::mutex> lock(const_cast<ChunkManager::Impl*>(this)->pendingExactGpuBuildsMutex_);
+        exactGpuBatchEntries.reserve(12u);
+        exactGpuBatchOwnership.reserve(256u);
+        for (const PendingExactGpuBatch& batch : pendingExactGpuBatches_)
+        {
+            ExactGpuBatchPhaseSummary* summary = nullptr;
+            const char* phaseLabel = "unknown";
+            switch (batch.phase)
+            {
+            case ExactGpuBatchPhase::PrepassSubmitted:
+                summary = &prepassSummary;
+                phaseLabel = "prepass_submitted";
+                break;
+            case ExactGpuBatchPhase::PrepassReadyForEmit:
+                summary = &prepassReadySummary;
+                phaseLabel = "prepass_ready";
+                break;
+            case ExactGpuBatchPhase::EmitSubmitted:
+                summary = &emitSummary;
+                phaseLabel = "emit_submitted";
+                break;
+            }
+            if (summary != nullptr)
+            {
+                ++summary->batchCount;
+                summary->buildCount += batch.builds.size();
+                if (batch.phaseEnteredMicros > 0u && nowMicros > batch.phaseEnteredMicros)
+                {
+                    summary->oldestAgeMicros =
+                        std::max(summary->oldestAgeMicros, nowMicros - batch.phaseEnteredMicros);
+                }
+            }
+
+            for (const PendingExactGpuBuild& pending : batch.builds)
+            {
+                if (!pending.chunk)
+                {
+                    continue;
+                }
+                exactGpuBatchOwnership.insert_or_assign(pending.chunk->coord,
+                                                        ExactGpuBatchOwnershipDebugInfo{
+                                                            phaseLabel,
+                                                            batch.phaseEnteredMicros});
+                if (exactGpuBatchEntries.size() < 12u)
+                {
+                    exactGpuBatchEntries.push_back(ExactGpuBatchDebugEntry{
+                        pending.chunk->coord,
+                        phaseLabel,
+                        pending.buildVersion,
+                        pending.generationEpoch,
+                        pending.inputVersion,
+                        pending.requiredFaceCount,
+                        pending.faceCapacity,
+                        pending.pendingNeighborMask,
+                        pending.hasAllocation(),
+                        batch.phaseEnteredMicros});
+                }
+            }
         }
     }
 
@@ -8661,6 +8832,82 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         stream << "(" << key.regionX << "," << key.regionZ << ")";
         return stream.str();
     };
+    const auto exactGpuBatchPhasePriority = [](const char* phase) noexcept
+    {
+        if (std::string_view(phase) == "prepass_ready")
+        {
+            return 0;
+        }
+        if (std::string_view(phase) == "emit_submitted")
+        {
+            return 1;
+        }
+        if (std::string_view(phase) == "prepass_submitted")
+        {
+            return 2;
+        }
+        return 3;
+    };
+
+    std::sort(exactGpuQueuedEntries.begin(),
+              exactGpuQueuedEntries.end(),
+              [](const ExactGpuQueuedDebugEntry& lhs, const ExactGpuQueuedDebugEntry& rhs)
+              {
+                  if (lhs.queuedMicros != rhs.queuedMicros)
+                  {
+                      if (lhs.queuedMicros == 0u)
+                      {
+                          return false;
+                      }
+                      if (rhs.queuedMicros == 0u)
+                      {
+                          return true;
+                      }
+                      return lhs.queuedMicros < rhs.queuedMicros;
+                  }
+                  if (lhs.buildVersion != rhs.buildVersion)
+                  {
+                      return lhs.buildVersion > rhs.buildVersion;
+                  }
+                  if (lhs.generationEpoch != rhs.generationEpoch)
+                  {
+                      return lhs.generationEpoch > rhs.generationEpoch;
+                  }
+                  if (lhs.coord.x != rhs.coord.x)
+                  {
+                      return lhs.coord.x < rhs.coord.x;
+                  }
+                  if (lhs.coord.y != rhs.coord.y)
+                  {
+                      return lhs.coord.y < rhs.coord.y;
+                  }
+                  return lhs.coord.z < rhs.coord.z;
+              });
+    std::sort(exactGpuBatchEntries.begin(),
+              exactGpuBatchEntries.end(),
+              [&exactGpuBatchPhasePriority](const ExactGpuBatchDebugEntry& lhs,
+                                            const ExactGpuBatchDebugEntry& rhs)
+              {
+                  const int lhsPriority = exactGpuBatchPhasePriority(lhs.phase);
+                  const int rhsPriority = exactGpuBatchPhasePriority(rhs.phase);
+                  if (lhsPriority != rhsPriority)
+                  {
+                      return lhsPriority < rhsPriority;
+                  }
+                  if (lhs.requiredFaceCount != rhs.requiredFaceCount)
+                  {
+                      return lhs.requiredFaceCount > rhs.requiredFaceCount;
+                  }
+                  if (lhs.coord.x != rhs.coord.x)
+                  {
+                      return lhs.coord.x < rhs.coord.x;
+                  }
+                  if (lhs.coord.y != rhs.coord.y)
+                  {
+                      return lhs.coord.y < rhs.coord.y;
+                  }
+                  return lhs.coord.z < rhs.coord.z;
+              });
 
     std::sort(waitingEntries.begin(),
               waitingEntries.end(),
@@ -8689,6 +8936,164 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
                   return lhs.coord.z < rhs.coord.z;
               });
 
+    std::vector<ExactGpuChunkDebugEntry> exactGpuChunkEntries;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        const std::uint64_t completedGpuFenceValue = exactGpuContext_.completedFenceValue();
+        exactGpuChunkEntries.reserve(chunks_.size());
+        for (const auto& [coord, chunk] : chunks_)
+        {
+            if (!chunk)
+            {
+                continue;
+            }
+
+            FrontierDemandState frontierState = FrontierDemandState::Missing;
+            bool haveFrontierState = false;
+            {
+                std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
+                auto it = streamingChunkLifecycleStates_.find(coord);
+                if (it != streamingChunkLifecycleStates_.end())
+                {
+                    frontierState = it->second.state;
+                    haveFrontierState = true;
+                }
+            }
+
+            const bool exactQueued = chunk->exactGpuBuildQueued.load(std::memory_order_acquire);
+            const bool exactInFlight = chunk->exactGpuBuildInFlight.load(std::memory_order_acquire);
+            const bool inputsDirty = chunk->exactGpuInputsDirty.load(std::memory_order_acquire);
+            const bool interesting =
+                exactQueued ||
+                exactInFlight ||
+                inputsDirty ||
+                (haveFrontierState && frontierState == FrontierDemandState::Meshing);
+            if (!interesting)
+            {
+                continue;
+            }
+
+            std::size_t overlayCount = 0u;
+            {
+                std::lock_guard<std::mutex> overlayLock(blockEditOverlayMutex_);
+                auto overlayIt = blockEditOverlays_.find(coord);
+                if (overlayIt != blockEditOverlays_.end())
+                {
+                    overlayCount = overlayIt->second.size();
+                }
+            }
+
+            std::size_t structureEditCount = 0u;
+            {
+                std::lock_guard<std::mutex> pendingStructureLock(pendingStructureMutex_);
+                auto editsIt = pendingStructureEdits_.find(coord);
+                if (editsIt != pendingStructureEdits_.end())
+                {
+                    structureEditCount = editsIt->second.size();
+                }
+            }
+
+            std::uint64_t pageLastWriteFenceValue = 0u;
+            const std::uint32_t pageIndex = chunk->bufferPageIndex.load(std::memory_order_acquire);
+            if (pageIndex != kInvalidChunkBufferPage)
+            {
+                std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+                if (pageIndex < bufferPages_.size())
+                {
+                    pageLastWriteFenceValue = bufferPages_[pageIndex].lastWriteFenceValue;
+                }
+            }
+            const std::uint64_t readyFenceValue = chunk->exactGpu.readyFenceValue;
+            const auto ownershipIt = exactGpuBatchOwnership.find(coord);
+            const ExactGpuBatchOwnershipDebugInfo ownership =
+                ownershipIt != exactGpuBatchOwnership.end()
+                    ? ownershipIt->second
+                    : ExactGpuBatchOwnershipDebugInfo{};
+            exactGpuChunkEntries.push_back(ExactGpuChunkDebugEntry{
+                coord,
+                frontierState,
+                haveFrontierState,
+                chunk->state.load(std::memory_order_acquire),
+                chunk->inFlight.load(std::memory_order_acquire),
+                chunk->hasBlocks.load(std::memory_order_acquire),
+                chunk->meshReady.load(std::memory_order_acquire),
+                chunk->exactGpuResident.load(std::memory_order_acquire),
+                exactQueued,
+                exactInFlight,
+                inputsDirty,
+                chunk->gpuExactSparseVoxelsReady,
+                chunk->exactGpuHaloDirty.load(std::memory_order_acquire),
+                overlayCount > 0u,
+                structureEditCount > 0u,
+                shouldKeepChunkInteractive(coord, lastCenterChunk_),
+                chunk->generationEpoch.load(std::memory_order_acquire),
+                chunk->exactGpuInputsVersion.load(std::memory_order_acquire),
+                chunk->exactGpuRequestedInputVersion.load(std::memory_order_acquire),
+                chunk->exactGpuReadyVersion.load(std::memory_order_acquire),
+                chunk->exactGpuFaceCount.load(std::memory_order_acquire),
+                chunk->exactGpuRecordIndex.load(std::memory_order_acquire),
+                pageIndex,
+                chunk->exactGpuPendingNeighborMask.load(std::memory_order_acquire),
+                overlayCount,
+                structureEditCount,
+                chunk->requestTimestampMicros.load(std::memory_order_acquire),
+                readyFenceValue,
+                pageLastWriteFenceValue,
+                chunk->exactGpuFenceDeferredCount.load(std::memory_order_acquire),
+                chunk->exactGpuRequeueCount.load(std::memory_order_acquire),
+                chunk->exactGpuLastFenceDeferredMicros.load(std::memory_order_acquire),
+                chunk->exactGpuLastRequeueMicros.load(std::memory_order_acquire),
+                readyFenceValue != 0u && completedGpuFenceValue < readyFenceValue,
+                ownership.phase,
+                ownership.phaseEnteredMicros});
+        }
+    }
+    std::sort(exactGpuChunkEntries.begin(),
+              exactGpuChunkEntries.end(),
+              [center = lastCenterChunk_](const ExactGpuChunkDebugEntry& lhs,
+                                          const ExactGpuChunkDebugEntry& rhs)
+              {
+                  if (lhs.localInteraction != rhs.localInteraction)
+                  {
+                      return lhs.localInteraction;
+                  }
+                  const bool lhsVisibleMeshing = lhs.haveFrontierState && lhs.frontierState == FrontierDemandState::Meshing;
+                  const bool rhsVisibleMeshing = rhs.haveFrontierState && rhs.frontierState == FrontierDemandState::Meshing;
+                  if (lhsVisibleMeshing != rhsVisibleMeshing)
+                  {
+                      return lhsVisibleMeshing;
+                  }
+                  if (lhs.exactInFlight != rhs.exactInFlight)
+                  {
+                      return lhs.exactInFlight;
+                  }
+                  if (lhs.exactQueued != rhs.exactQueued)
+                  {
+                      return lhs.exactQueued;
+                  }
+                  if (lhs.inputsDirty != rhs.inputsDirty)
+                  {
+                      return lhs.inputsDirty;
+                  }
+                  const int lhsDistance =
+                      std::max(std::abs(lhs.coord.x - center.x), std::abs(lhs.coord.z - center.z));
+                  const int rhsDistance =
+                      std::max(std::abs(rhs.coord.x - center.x), std::abs(rhs.coord.z - center.z));
+                  if (lhsDistance != rhsDistance)
+                  {
+                      return lhsDistance < rhsDistance;
+                  }
+                  if (lhs.coord.y != rhs.coord.y)
+                  {
+                      return lhs.coord.y < rhs.coord.y;
+                  }
+                  if (lhs.coord.x != rhs.coord.x)
+                  {
+                      return lhs.coord.x < rhs.coord.x;
+                  }
+                  return lhs.coord.z < rhs.coord.z;
+              });
+
     std::ostringstream stream;
     stream << "exact_dep_stall_debug"
            << " phase=" << phaseLabel(snapshot.phase)
@@ -8704,7 +9109,108 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << " pending_uploads=" << snapshot.exactPendingUploads
            << " tracked_radius=" << snapshot.exactTrackedRadiusChunks
            << " blocking=" << (snapshot.blockingReason ? snapshot.blockingReason : "unknown")
-           << " deferred_entries=" << waitingEntries.size();
+           << " deferred_entries=" << waitingEntries.size()
+           << " exact_gpu_completed_fence=" << exactGpuContext_.completedFenceValue()
+           << " exact_gpu_queue=" << exactGpuQueuedEntries.size()
+           << " exact_gpu_prepass_batches=" << prepassSummary.batchCount
+           << "/" << prepassSummary.buildCount
+           << "@" << (prepassSummary.oldestAgeMicros / 1000u)
+           << " exact_gpu_prepass_ready_batches=" << prepassReadySummary.batchCount
+           << "/" << prepassReadySummary.buildCount
+           << "@" << (prepassReadySummary.oldestAgeMicros / 1000u)
+           << " exact_gpu_emit_batches=" << emitSummary.batchCount
+           << "/" << emitSummary.buildCount
+           << "@" << (emitSummary.oldestAgeMicros / 1000u)
+           << " exact_gpu_chunk_samples=" << exactGpuChunkEntries.size();
+
+    const std::uint64_t logNowMicros = steadyMicrosNow();
+    const std::size_t queuedLimit = std::min<std::size_t>(exactGpuQueuedEntries.size(), 10u);
+    for (std::size_t index = 0; index < queuedLimit; ++index)
+    {
+        const ExactGpuQueuedDebugEntry& entry = exactGpuQueuedEntries[index];
+        const std::uint64_t ageMicros =
+            (entry.queuedMicros > 0u && logNowMicros > entry.queuedMicros) ? (logNowMicros - entry.queuedMicros) : 0u;
+        stream << "\n  exact_gpu_queue chunk=" << formatChunkCoord(entry.coord)
+               << " age_ms=" << (ageMicros / 1000u)
+               << " build_ver=" << entry.buildVersion
+               << " gen_epoch=" << entry.generationEpoch
+               << " input_ver=" << entry.inputVersion
+               << " rebuild_inputs=" << (entry.rebuildVoxelInputs ? 1 : 0);
+    }
+
+    const std::size_t batchLimit = std::min<std::size_t>(exactGpuBatchEntries.size(), 10u);
+    for (std::size_t index = 0; index < batchLimit; ++index)
+    {
+        const ExactGpuBatchDebugEntry& entry = exactGpuBatchEntries[index];
+        stream << "\n  exact_gpu_batch phase=" << entry.phase
+               << " chunk=" << formatChunkCoord(entry.coord)
+               << " phase_age_ms="
+               << ((entry.phaseEnteredMicros > 0u && logNowMicros > entry.phaseEnteredMicros)
+                       ? ((logNowMicros - entry.phaseEnteredMicros) / 1000u)
+                       : 0u)
+               << " build_ver=" << entry.buildVersion
+               << " gen_epoch=" << entry.generationEpoch
+               << " input_ver=" << entry.inputVersion
+               << " req_faces=" << entry.requiredFaceCount
+               << " face_cap=" << entry.faceCapacity
+               << " pending_neighbors=" << static_cast<int>(entry.pendingNeighborMask)
+               << " allocation=" << (entry.hasAllocation ? 1 : 0);
+    }
+
+    const std::size_t exactGpuChunkLimit = std::min<std::size_t>(exactGpuChunkEntries.size(), 12u);
+    for (std::size_t index = 0; index < exactGpuChunkLimit; ++index)
+    {
+        const ExactGpuChunkDebugEntry& entry = exactGpuChunkEntries[index];
+        stream << "\n  exact_gpu_chunk chunk=" << formatChunkCoord(entry.coord)
+               << " frontier=" << (entry.haveFrontierState ? frontierStateLabel(entry.frontierState) : "none")
+               << " chunk_state=" << chunkStateLabel(entry.chunkState)
+               << " inflight=" << entry.inFlight
+               << " local=" << (entry.localInteraction ? 1 : 0)
+               << " has_blocks=" << (entry.hasBlocks ? 1 : 0)
+               << " mesh_ready=" << (entry.meshReady ? 1 : 0)
+               << " resident=" << (entry.exactResident ? 1 : 0)
+               << " queued=" << (entry.exactQueued ? 1 : 0)
+               << " gpu_inflight=" << (entry.exactInFlight ? 1 : 0)
+               << " inputs_dirty=" << (entry.inputsDirty ? 1 : 0)
+               << " sparse_ready=" << (entry.sparseReady ? 1 : 0)
+               << " halo_dirty=" << (entry.haloDirty ? 1 : 0)
+               << " has_overlay=" << (entry.hasOverlay ? 1 : 0)
+               << " overlay_count=" << entry.overlayCount
+               << " pending_structure=" << (entry.pendingStructureEdits ? 1 : 0)
+               << " structure_count=" << entry.structureEditCount
+               << " gen_epoch=" << entry.generationEpoch
+               << " input_ver=" << entry.inputVersion
+               << " requested_ver=" << entry.requestedInputVersion
+               << " ready_ver=" << entry.readyVersion
+               << " face_count=" << entry.faceCount
+               << " record=" << entry.recordIndex
+               << " page=" << entry.pageIndex
+               << " pending_neighbors=" << static_cast<int>(entry.pendingNeighborMask)
+               << " ready_fence=" << entry.readyFenceValue
+               << " page_last_write_fence=" << entry.pageLastWriteFenceValue
+               << " blocked_by_ready_fence=" << (entry.blockedByReadyFence ? 1 : 0)
+               << " defer_count=" << entry.fenceDeferredCount
+               << " requeue_count=" << entry.requeueCount
+               << " batch_phase=" << entry.batchPhase
+               << " batch_age_ms="
+               << ((entry.batchPhaseEnteredMicros > 0u && logNowMicros > entry.batchPhaseEnteredMicros)
+                       ? ((logNowMicros - entry.batchPhaseEnteredMicros) / 1000u)
+                       : 0u)
+               << " last_defer_ms="
+               << ((entry.lastFenceDeferredMicros > 0 &&
+                    static_cast<std::uint64_t>(entry.lastFenceDeferredMicros) < logNowMicros)
+                       ? ((logNowMicros - static_cast<std::uint64_t>(entry.lastFenceDeferredMicros)) / 1000u)
+                       : 0u)
+               << " last_requeue_ms="
+               << ((entry.lastRequeueMicros > 0 &&
+                    static_cast<std::uint64_t>(entry.lastRequeueMicros) < logNowMicros)
+                       ? ((logNowMicros - static_cast<std::uint64_t>(entry.lastRequeueMicros)) / 1000u)
+                       : 0u)
+               << " req_age_ms="
+               << ((entry.requestTimestampMicros > 0 && static_cast<std::uint64_t>(entry.requestTimestampMicros) < logNowMicros)
+                       ? ((logNowMicros - static_cast<std::uint64_t>(entry.requestTimestampMicros)) / 1000u)
+                       : 0u);
+    }
 
     const std::size_t entryLimit = std::min<std::size_t>(waitingEntries.size(), 12u);
     for (std::size_t index = 0; index < entryLimit; ++index)
@@ -19895,6 +20401,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         if (chunk.exactGpu.readyFenceValue != 0 &&
             exactGpuContext_.completedFenceValue() < chunk.exactGpu.readyFenceValue)
         {
+            chunk.exactGpuFenceDeferredCount.fetch_add(1, std::memory_order_relaxed);
+            chunk.exactGpuLastFenceDeferredMicros.store(static_cast<long long>(steadyMicrosNow()),
+                                                        std::memory_order_release);
             deferredRequests.push_back(std::move(request));
             continue;
         }
@@ -20554,6 +21063,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     PendingExactGpuBatch batch{};
     batch.builds = std::move(stagedBuilds);
     batch.phase = ExactGpuBatchPhase::PrepassSubmitted;
+    batch.phaseEnteredMicros = steadyMicrosNow();
     batch.reservationBatchId = prepassFlushResult.fenceValue;
     batch.prepassResources.fenceValue = prepassFlushResult.fenceValue;
     batch.prepassResources.submissionSlot = prepassFlushResult.submissionSlotIndex;
@@ -20722,6 +21232,9 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             releasePendingAllocation(pending, emittedRecordWritten);
             pending.chunk->exactGpuBuildQueued.store(true, std::memory_order_release);
             pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+            pending.chunk->exactGpuRequeueCount.fetch_add(1, std::memory_order_relaxed);
+            pending.chunk->exactGpuLastRequeueMicros.store(static_cast<long long>(steadyMicrosNow()),
+                                                           std::memory_order_release);
             std::lock_guard<std::mutex> lock(pendingExactGpuBuildMutex_);
             ExactGpuBuildRequest request{
                 pending.chunk,
@@ -20819,6 +21332,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                 }
                 retireBatchPhaseResources(batch.prepassResources);
                 batch.phase = ExactGpuBatchPhase::PrepassReadyForEmit;
+                batch.phaseEnteredMicros = steadyMicrosNow();
             }
 
             if (keepBatch && batch.phase == ExactGpuBatchPhase::PrepassReadyForEmit)
@@ -21187,6 +21701,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                 batch.emitResources.uploadAllocations = std::move(emitOwnedUploads);
                                 batch.emitResources.readbackAllocations.push_back(batch.completionReadback.allocation);
                                 batch.phase = ExactGpuBatchPhase::EmitSubmitted;
+                                batch.phaseEnteredMicros = steadyMicrosNow();
                                 (void)benchmarkEnabled;
                                 (void)readyForEmitBacklogBatches;
                                 (void)readyForEmitBacklogBuilds;

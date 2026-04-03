@@ -5606,6 +5606,10 @@ private:
     std::atomic<int> exactGpuBuildResourceFailures_{0};
     std::atomic<int> exactGpuBuildOverflows_{0};
     std::atomic<int> exactGpuBuildStaleCancels_{0};
+    std::atomic<int> exactGpuReservationTempExhaustions_{0};
+    std::atomic<int> exactGpuEmitMetadataSyncFailures_{0};
+    std::atomic<int> exactGpuAllocationRecordSyncFailures_{0};
+    std::atomic<int> exactGpuSubmitBudgetRejects_{0};
     std::atomic<std::uint64_t> exactGpuBuildsSubmitted_{0};
     std::atomic<std::uint64_t> exactGpuBuildsCommitted_{0};
     std::atomic<std::uint64_t> exactGpuMeshReplacements_{0};
@@ -8680,6 +8684,11 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
     ExactGpuBatchPhaseSummary prepassReadySummary{};
     std::vector<ExactGpuBatchDebugEntry> exactGpuBatchEntries;
     std::unordered_map<glm::ivec3, ExactGpuBatchOwnershipDebugInfo, ChunkHasher> exactGpuBatchOwnership;
+    std::size_t exactGpuDirtyPageCount = 0u;
+    {
+        std::lock_guard<std::mutex> lock(bufferPageMutex_);
+        exactGpuDirtyPageCount = exactGpuDirtyPageIndices_.size();
+    }
     {
         std::lock_guard<std::mutex> lock(const_cast<ChunkManager::Impl*>(this)->pendingExactGpuBuildsMutex_);
         exactGpuBatchEntries.reserve(12u);
@@ -9112,6 +9121,11 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << " deferred_entries=" << waitingEntries.size()
            << " exact_gpu_completed_fence=" << exactGpuContext_.completedFenceValue()
            << " exact_gpu_queue=" << exactGpuQueuedEntries.size()
+           << " exact_gpu_dirty_pages=" << exactGpuDirtyPageCount
+           << " exact_gpu_temp_exhaust=" << exactGpuReservationTempExhaustions_.load(std::memory_order_relaxed)
+           << " exact_gpu_emit_meta_fail=" << exactGpuEmitMetadataSyncFailures_.load(std::memory_order_relaxed)
+           << " exact_gpu_alloc_record_fail=" << exactGpuAllocationRecordSyncFailures_.load(std::memory_order_relaxed)
+           << " exact_gpu_submit_budget_rejects=" << exactGpuSubmitBudgetRejects_.load(std::memory_order_relaxed)
            << " exact_gpu_prepass_batches=" << prepassSummary.batchCount
            << "/" << prepassSummary.buildCount
            << "@" << (prepassSummary.oldestAgeMicros / 1000u)
@@ -11915,13 +11929,6 @@ ChunkManager::Impl::ChunkBufferPage* ChunkManager::Impl::acquireOrCreateOpenExac
         shard.openPageIndices.push_back(pageIndex);
         noteExactGpuPageMetadataChange(pageIndex);
         return &page;
-    }
-
-    if (minFaceCount <= kDefaultExactFaceCapacity &&
-        minRecordCount <= 1u)
-    {
-        pageIndex = kInvalidChunkBufferPage;
-        return nullptr;
     }
 
     ChunkBufferPage newPage{};
@@ -20619,6 +20626,9 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     }
     if (acceptedBuildCount < preparedBuilds.size())
     {
+        exactGpuSubmitBudgetRejects_.fetch_add(
+            static_cast<int>(preparedBuilds.size() - acceptedBuildCount),
+            std::memory_order_relaxed);
         requeueRemainingPreparedBuilds(acceptedBuildCount);
     }
     if (preparedBuilds.empty())
@@ -21399,6 +21409,10 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                         {
                             exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
                         }
+                        else
+                        {
+                            exactGpuReservationTempExhaustions_.fetch_add(1, std::memory_order_relaxed);
+                        }
                         requeueBuildRequest(pending, false, false);
                         finalizeBuild(pending,
                                       pending.chunk &&
@@ -21496,6 +21510,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                                           benchmarkEnabled ? &emitMetadataSyncDebug : nullptr))
                             {
                                 exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+                                exactGpuEmitMetadataSyncFailures_.fetch_add(1, std::memory_order_relaxed);
                                 discardExactSubmission();
                                 for (PendingExactGpuBuild& pending : batch.builds)
                                 {
@@ -21543,6 +21558,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                     !syncExactGpuChunkAllocationRecords(emitScratchSliceIndices, emitOwnedUploads))
                                 {
                                     exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+                                    exactGpuAllocationRecordSyncFailures_.fetch_add(1, std::memory_order_relaxed);
                                     discardExactSubmission();
                                     for (PendingExactGpuBuild& pending : batch.builds)
                                     {

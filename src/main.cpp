@@ -222,6 +222,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableGpuValidation = false;
     bool enableLodVisibilityDebug = false;
     bool enableExactUploadDebug = false;
+    bool enableExactDependencyStallDebug = false;
     bool enableTerrainLogDebug = false;
     for (int i = 1; i < argc; ++i)
     {
@@ -264,6 +265,12 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--exact-dependency-stall-debug" || arg == "--exact-deps-debug")
+        {
+            enableExactDependencyStallDebug = true;
+            continue;
+        }
+
         if (arg == "--terrain-log-debug" || arg == "--debug-terrain-log")
         {
             enableTerrainLogDebug = true;
@@ -272,7 +279,11 @@ void applyLaunchDebugOptions(int argc, char** argv)
 
     }
 
-    if (!enableGpuDebug && !enableLodVisibilityDebug && !enableExactUploadDebug && !enableTerrainLogDebug)
+    if (!enableGpuDebug &&
+        !enableLodVisibilityDebug &&
+        !enableExactUploadDebug &&
+        !enableExactDependencyStallDebug &&
+        !enableTerrainLogDebug)
     {
         return;
     }
@@ -313,6 +324,14 @@ void applyLaunchDebugOptions(int argc, char** argv)
                           "exact upload debug enabled");
     }
 
+    if (enableExactDependencyStallDebug)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_EXACT_DEP_STALL_DEBUG", "1");
+        resetDebugLogFile("BLOCKGAME_EXACT_DEP_STALL_DEBUG_FILE",
+                          "exactdepstalldebug.log",
+                          "exact dependency stall debug enabled");
+    }
+
     if (enableTerrainLogDebug)
     {
         setProcessEnvironmentVariable("BLOCKGAME_TERRAIN_DEBUG_LOG", "1");
@@ -343,6 +362,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (enableExactUploadDebug)
     {
         enabledOptions.emplace_back("exact upload debug (exactuploaddebug.log)");
+    }
+    if (enableExactDependencyStallDebug)
+    {
+        enabledOptions.emplace_back("exact dependency stall debug (exactdepstalldebug.log)");
     }
     if (enableTerrainLogDebug)
     {

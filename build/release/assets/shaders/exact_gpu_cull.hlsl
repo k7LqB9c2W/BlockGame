@@ -61,8 +61,6 @@ bool intersectsFrustum(float3 boundsMin, float3 boundsMax)
 
 bool passesOcclusion(float3 boundsMin, float3 boundsMax)
 {
-    (void)boundsMin;
-    (void)boundsMax;
     return true;
 }
 

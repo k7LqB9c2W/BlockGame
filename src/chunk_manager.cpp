@@ -1135,6 +1135,8 @@ void chunkManagerDebugLog(const std::string& message);
 void exactUploadDebugLog(const std::string& message);
 [[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept;
 void lodVisibilityDebugLog(const std::string& message);
+[[nodiscard]] bool exactDependencyStallDebugLoggingEnabled() noexcept;
+void exactDependencyStallDebugLog(const std::string& message);
 [[nodiscard]] std::string hexU32(std::uint32_t value);
 [[nodiscard]] std::string hexHr(HRESULT hr);
 [[nodiscard]] const char* resourceStateName(D3D12_RESOURCE_STATES state) noexcept;
@@ -1334,6 +1336,27 @@ void lodVisibilityDebugLog(const std::string& message)
 
     std::cerr << message << std::endl;
     appendDebugLogLine("BLOCKGAME_LOD_VIS_DEBUG_FILE", "loddebug.log", message);
+}
+
+[[nodiscard]] bool exactDependencyStallDebugLoggingEnabled() noexcept
+{
+    static const bool enabled = []()
+    {
+        const char* value = std::getenv("BLOCKGAME_EXACT_DEP_STALL_DEBUG");
+        return value != nullptr && std::string_view(value) != "0" && std::string_view(value) != "false";
+    }();
+    return enabled;
+}
+
+void exactDependencyStallDebugLog(const std::string& message)
+{
+    if (!exactDependencyStallDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    std::cerr << message << std::endl;
+    appendDebugLogLine("BLOCKGAME_EXACT_DEP_STALL_DEBUG_FILE", "exactdepstalldebug.log", message);
 }
 
 [[nodiscard]] std::string hexU32(std::uint32_t value)
@@ -4258,6 +4281,7 @@ private:
                                               JobServiceClass& serviceClass);
     void refillWorldgenPageDependencyJobs();
     void refillStructureRegionDependencyJobs();
+    void repairWaitingStructureRegionDependencies();
     [[nodiscard]] JobServiceClass highestQueuedWorldgenDependencyServiceClass() const noexcept;
     [[nodiscard]] JobServiceClass highestQueuedStructureRegionDependencyServiceClass() const noexcept;
     void refillBulkShellOracleJobs();
@@ -5280,6 +5304,12 @@ private:
                                      bool warmStructuresOnly = false) const;
     [[nodiscard]] std::size_t worldgenPageDependencyQueueLimit(DependencyPriority priority,
                                                                bool buildOccupancy) const noexcept;
+    void exactSupportWorldgenWindowBounds(const glm::ivec3& center,
+                                          int horizontalRadius,
+                                          int& minWorldX,
+                                          int& maxWorldX,
+                                          int& minWorldZ,
+                                          int& maxWorldZ) const noexcept;
     void resetFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept;
     [[nodiscard]] bool nextFullRadiusWorldgenPageDiscoveryPage(glm::ivec2& outPageKey,
                                                                ColumnHeightPrefetchPriority& outPriority) noexcept;
@@ -5289,6 +5319,12 @@ private:
                                            bool localInteractionPriority,
                                            std::span<const glm::ivec2> missingWorldgenPages,
                                            std::span<const StructureRegionKey> missingStructureRegions = {});
+    void reconcileDeferredChunkDependencies(const glm::ivec3& coord);
+    void reconcileStructureRegionWaitingPages(const StructureRegionKey& key);
+    [[nodiscard]] bool worldgenPageDependencyHasOutstandingWork(const glm::ivec2& pageKey) const;
+    [[nodiscard]] bool structureRegionDependencyHasOutstandingWork(const StructureRegionKey& key) const;
+    void abandonChunkGenerationPlaceholder(const glm::ivec3& coord, std::uint32_t generationEpoch);
+    void maybeLogExactDependencyStallDebug(const StreamingStatusSnapshot& snapshot) const;
     void clearDeferredChunkDependencies(const glm::ivec3& coord);
     void queueDeferredChunkGenerateIfReady(const glm::ivec3& coord,
                                            const DeferredChunkDependencies& deferred);
@@ -5588,6 +5624,7 @@ private:
     int streamingFrontierExactRequired_{0};
     int streamingFrontierExactReady_{0};
     std::uint64_t nextStreamingFrontierSequence_{1};
+    mutable std::atomic<std::uint64_t> exactDependencyStallDebugLastLogMicros_{0};
     glm::ivec3 streamingFrontierDispatchOrigin_{0};
     glm::vec2 streamingFrontierDispatchForwardXZ_{0.0f, -1.0f};
     std::uint64_t streamingFrontierDispatchPriorityEpoch_{1};
@@ -8462,12 +8499,350 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
         snapshot.blockingReason = "stabilizing preload";
     }
 
+    maybeLogExactDependencyStallDebug(snapshot);
     return snapshot;
 }
 
 StreamingStatusSnapshot ChunkManager::Impl::streamingStatusSnapshot() const noexcept
 {
     return computeStreamingStatusSnapshot();
+}
+
+void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatusSnapshot& snapshot) const
+{
+    if (!exactDependencyStallDebugLoggingEnabled() || snapshot.exactWaitingDependenciesChunks <= 0)
+    {
+        return;
+    }
+
+    constexpr std::uint64_t kLogIntervalMicros = 5'000'000ull;
+    const std::uint64_t nowMicros = steadyMicrosNow();
+    std::uint64_t previousMicros = exactDependencyStallDebugLastLogMicros_.load(std::memory_order_relaxed);
+    while (previousMicros != 0 && nowMicros > previousMicros && nowMicros - previousMicros < kLogIntervalMicros)
+    {
+        return;
+    }
+    while (!exactDependencyStallDebugLastLogMicros_.compare_exchange_weak(previousMicros,
+                                                                          nowMicros,
+                                                                          std::memory_order_relaxed,
+                                                                          std::memory_order_relaxed))
+    {
+        if (previousMicros != 0 && nowMicros > previousMicros && nowMicros - previousMicros < kLogIntervalMicros)
+        {
+            return;
+        }
+    }
+
+    struct WaitingChunkDebugEntry
+    {
+        glm::ivec3 coord{0};
+        std::uint32_t generationEpoch{0};
+        bool initialReadyPriority{false};
+        bool localInteractionPriority{false};
+        std::size_t outstandingDependencyCount{0};
+        std::vector<glm::ivec2> missingWorldgenPages;
+        std::vector<StructureRegionKey> missingStructureRegions;
+    };
+
+    std::vector<WaitingChunkDebugEntry> waitingEntries;
+    {
+        std::lock_guard<std::mutex> lock(deferredChunkDependencyMutex_);
+        waitingEntries.reserve(deferredChunkDependencies_.size());
+        for (const auto& [coord, deferred] : deferredChunkDependencies_)
+        {
+            WaitingChunkDebugEntry entry{};
+            entry.coord = coord;
+            entry.generationEpoch = deferred.generationEpoch;
+            entry.initialReadyPriority = deferred.initialReadyPriority;
+            entry.localInteractionPriority = deferred.localInteractionPriority;
+            entry.outstandingDependencyCount = deferred.outstandingDependencyCount;
+            entry.missingWorldgenPages.reserve(deferred.missingWorldgenPages.size());
+            for (const glm::ivec2& pageKey : deferred.missingWorldgenPages)
+            {
+                entry.missingWorldgenPages.push_back(pageKey);
+            }
+            entry.missingStructureRegions.reserve(deferred.missingStructureRegions.size());
+            for (const StructureRegionKey& regionKey : deferred.missingStructureRegions)
+            {
+                entry.missingStructureRegions.push_back(regionKey);
+            }
+            waitingEntries.push_back(std::move(entry));
+        }
+    }
+
+    const auto phaseLabel = [](StreamingPhase phase) noexcept
+    {
+        switch (phase)
+        {
+        case StreamingPhase::SpawnResolve:
+            return "spawn_resolve";
+        case StreamingPhase::ExactPreload:
+            return "exact_preload";
+        case StreamingPhase::InteractiveNearOnly:
+            return "interactive_near_only";
+        case StreamingPhase::FarRamp:
+            return "far_ramp";
+        case StreamingPhase::SteadyState:
+            return "steady_state";
+        }
+        return "unknown";
+    };
+    const auto worldgenStateLabel = [](WorldgenPageState state) noexcept
+    {
+        switch (state)
+        {
+        case WorldgenPageState::Unrequested:
+            return "unrequested";
+        case WorldgenPageState::Queued:
+            return "queued";
+        case WorldgenPageState::Building:
+            return "building";
+        case WorldgenPageState::Ready:
+            return "ready";
+        case WorldgenPageState::Failed:
+            return "failed";
+        }
+        return "unknown";
+    };
+    const auto structureStateLabel = [](StructureRegionState state) noexcept
+    {
+        switch (state)
+        {
+        case StructureRegionState::Unrequested:
+            return "unrequested";
+        case StructureRegionState::WaitingOnWorldgenPages:
+            return "waiting_pages";
+        case StructureRegionState::Queued:
+            return "queued";
+        case StructureRegionState::Building:
+            return "building";
+        case StructureRegionState::Ready:
+            return "ready";
+        case StructureRegionState::Failed:
+            return "failed";
+        }
+        return "unknown";
+    };
+    const auto frontierStateLabel = [](FrontierDemandState state) noexcept
+    {
+        switch (state)
+        {
+        case FrontierDemandState::Missing:
+            return "missing";
+        case FrontierDemandState::WaitingDependencies:
+            return "deps";
+        case FrontierDemandState::QueuedGenerate:
+            return "qgen";
+        case FrontierDemandState::Generating:
+            return "gen";
+        case FrontierDemandState::Meshing:
+            return "mesh";
+        case FrontierDemandState::Ready:
+            return "ready";
+        }
+        return "unknown";
+    };
+    const auto formatChunkCoord = [](const glm::ivec3& coord)
+    {
+        std::ostringstream stream;
+        stream << "(" << coord.x << "," << coord.y << "," << coord.z << ")";
+        return stream.str();
+    };
+    const auto formatPageKey = [](const glm::ivec2& pageKey)
+    {
+        std::ostringstream stream;
+        stream << "(" << pageKey.x << "," << pageKey.y << ")";
+        return stream.str();
+    };
+    const auto formatRegionKey = [](const StructureRegionKey& key)
+    {
+        std::ostringstream stream;
+        stream << "(" << key.regionX << "," << key.regionZ << ")";
+        return stream.str();
+    };
+
+    std::sort(waitingEntries.begin(),
+              waitingEntries.end(),
+              [center = lastCenterChunk_](const WaitingChunkDebugEntry& lhs, const WaitingChunkDebugEntry& rhs)
+              {
+                  if (lhs.outstandingDependencyCount != rhs.outstandingDependencyCount)
+                  {
+                      return lhs.outstandingDependencyCount > rhs.outstandingDependencyCount;
+                  }
+                  const int lhsDistance =
+                      std::max(std::abs(lhs.coord.x - center.x), std::abs(lhs.coord.z - center.z));
+                  const int rhsDistance =
+                      std::max(std::abs(rhs.coord.x - center.x), std::abs(rhs.coord.z - center.z));
+                  if (lhsDistance != rhsDistance)
+                  {
+                      return lhsDistance > rhsDistance;
+                  }
+                  if (lhs.coord.y != rhs.coord.y)
+                  {
+                      return lhs.coord.y < rhs.coord.y;
+                  }
+                  if (lhs.coord.x != rhs.coord.x)
+                  {
+                      return lhs.coord.x < rhs.coord.x;
+                  }
+                  return lhs.coord.z < rhs.coord.z;
+              });
+
+    std::ostringstream stream;
+    stream << "exact_dep_stall_debug"
+           << " phase=" << phaseLabel(snapshot.phase)
+           << " ready=" << snapshot.exactReadyChunks << "/" << snapshot.exactRequiredChunks;
+    if (snapshot.exactRequiredChunksApproximate)
+    {
+        stream << "~";
+    }
+    stream << " deps=" << snapshot.exactWaitingDependenciesChunks
+           << " qgen=" << snapshot.exactQueuedGenerateChunks
+           << " gen=" << snapshot.exactGeneratingChunks
+           << " mesh=" << snapshot.exactMeshingChunks
+           << " pending_uploads=" << snapshot.exactPendingUploads
+           << " tracked_radius=" << snapshot.exactTrackedRadiusChunks
+           << " blocking=" << (snapshot.blockingReason ? snapshot.blockingReason : "unknown")
+           << " deferred_entries=" << waitingEntries.size();
+
+    const std::size_t entryLimit = std::min<std::size_t>(waitingEntries.size(), 12u);
+    for (std::size_t index = 0; index < entryLimit; ++index)
+    {
+        const WaitingChunkDebugEntry& entry = waitingEntries[index];
+        FrontierDemandState frontierState = FrontierDemandState::Missing;
+        bool haveFrontierState = false;
+        {
+            std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+            auto it = streamingChunkLifecycleStates_.find(entry.coord);
+            if (it != streamingChunkLifecycleStates_.end())
+            {
+                frontierState = it->second.state;
+                haveFrontierState = true;
+            }
+        }
+
+        std::shared_ptr<Chunk> chunk;
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            auto it = chunks_.find(entry.coord);
+            if (it != chunks_.end())
+            {
+                chunk = it->second;
+            }
+        }
+
+        stream << "\n  chunk=" << formatChunkCoord(entry.coord)
+               << " frontier=" << (haveFrontierState ? frontierStateLabel(frontierState) : "none")
+               << " dep_outstanding=" << entry.outstandingDependencyCount
+               << " dep_pages=" << entry.missingWorldgenPages.size()
+               << " dep_regions=" << entry.missingStructureRegions.size()
+               << " dep_gen_epoch=" << entry.generationEpoch
+               << " initial=" << (entry.initialReadyPriority ? 1 : 0)
+               << " local=" << (entry.localInteractionPriority ? 1 : 0);
+        if (chunk)
+        {
+            stream << " chunk_present=1"
+                   << " chunk_state=" << chunkStateLabel(chunk->state.load(std::memory_order_acquire))
+                   << " chunk_inflight=" << chunk->inFlight.load(std::memory_order_acquire)
+                   << " chunk_gen_epoch=" << chunk->generationEpoch.load(std::memory_order_acquire)
+                   << " has_blocks=" << (chunk->hasBlocks.load(std::memory_order_acquire) ? 1 : 0)
+                   << " mesh_ready=" << (chunk->meshReady.load(std::memory_order_acquire) ? 1 : 0);
+        }
+        else
+        {
+            stream << " chunk_present=0";
+        }
+
+        for (const glm::ivec2& pageKey : entry.missingWorldgenPages)
+        {
+            WorldgenPageState state = WorldgenPageState::Unrequested;
+            bool dependencyQueued = false;
+            bool buildOccupancy = false;
+            bool warmStructures = false;
+            bool pagePresent = false;
+            {
+                std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+                auto it = worldgenPageEntries_.find(pageKey);
+                if (it != worldgenPageEntries_.end())
+                {
+                    state = it->second.state;
+                    dependencyQueued = it->second.dependencyJobQueued;
+                    buildOccupancy = it->second.buildOccupancy;
+                    warmStructures = it->second.warmStructures;
+                    pagePresent = static_cast<bool>(it->second.page);
+                }
+            }
+
+            stream << "\n    page=" << formatPageKey(pageKey)
+                   << " state=" << worldgenStateLabel(state)
+                   << " queued=" << (dependencyQueued ? 1 : 0)
+                   << " build_occupancy=" << (buildOccupancy ? 1 : 0)
+                   << " warm_structures=" << (warmStructures ? 1 : 0)
+                   << " page_present=" << (pagePresent ? 1 : 0);
+        }
+
+        for (const StructureRegionKey& regionKey : entry.missingStructureRegions)
+        {
+            StructureRegionState state = StructureRegionState::Unrequested;
+            bool dependencyQueued = false;
+            std::size_t missingPageCount = 0;
+            bool regionPresent = false;
+            std::vector<glm::ivec2> regionMissingPages;
+            {
+                std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+                auto it = structureRegionEntries_.find(regionKey);
+                if (it != structureRegionEntries_.end())
+                {
+                    state = it->second.state;
+                    dependencyQueued = it->second.dependencyJobQueued;
+                    missingPageCount = it->second.missingWorldgenPages.size();
+                    regionPresent = static_cast<bool>(it->second.region);
+                    regionMissingPages.reserve(it->second.missingWorldgenPages.size());
+                    for (const glm::ivec2& pageKey : it->second.missingWorldgenPages)
+                    {
+                        regionMissingPages.push_back(pageKey);
+                    }
+                }
+            }
+
+            stream << "\n    region=" << formatRegionKey(regionKey)
+                   << " state=" << structureStateLabel(state)
+                   << " queued=" << (dependencyQueued ? 1 : 0)
+                   << " missing_pages=" << missingPageCount
+                   << " region_present=" << (regionPresent ? 1 : 0);
+
+            for (const glm::ivec2& pageKey : regionMissingPages)
+            {
+                WorldgenPageState pageState = WorldgenPageState::Unrequested;
+                bool pageDependencyQueued = false;
+                bool buildOccupancy = false;
+                bool warmStructures = false;
+                bool pagePresent = false;
+                {
+                    std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+                    auto it = worldgenPageEntries_.find(pageKey);
+                    if (it != worldgenPageEntries_.end())
+                    {
+                        pageState = it->second.state;
+                        pageDependencyQueued = it->second.dependencyJobQueued;
+                        buildOccupancy = it->second.buildOccupancy;
+                        warmStructures = it->second.warmStructures;
+                        pagePresent = static_cast<bool>(it->second.page);
+                    }
+                }
+
+                stream << "\n      region_page=" << formatPageKey(pageKey)
+                       << " state=" << worldgenStateLabel(pageState)
+                       << " queued=" << (pageDependencyQueued ? 1 : 0)
+                       << " build_occupancy=" << (buildOccupancy ? 1 : 0)
+                       << " warm_structures=" << (warmStructures ? 1 : 0)
+                       << " page_present=" << (pagePresent ? 1 : 0)
+                       << " outstanding=" << (worldgenPageDependencyHasOutstandingWork(pageKey) ? 1 : 0);
+            }
+        }
+    }
+
+    exactDependencyStallDebugLog(stream.str());
 }
 
 LodDiagnosticsSnapshot ChunkManager::Impl::lodDiagnosticsSnapshot(const glm::vec3& cameraPos) const
@@ -11742,13 +12117,37 @@ std::size_t ChunkManager::Impl::worldgenPageDependencyQueueLimit(DependencyPrior
     return 256u;
 }
 
-void ChunkManager::Impl::resetFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept
+void ChunkManager::Impl::exactSupportWorldgenWindowBounds(const glm::ivec3& center,
+                                                          int horizontalRadius,
+                                                          int& minWorldX,
+                                                          int& maxWorldX,
+                                                          int& minWorldZ,
+                                                          int& maxWorldZ) const noexcept
 {
     const int radius = std::max(horizontalRadius, 0);
-    const int minWorldX = (center.x - radius) * kChunkSizeX - 1;
-    const int maxWorldX = (center.x + radius + 1) * kChunkSizeX;
-    const int minWorldZ = (center.z - radius) * kChunkSizeZ - 1;
-    const int maxWorldZ = (center.z + radius + 1) * kChunkSizeZ;
+    const int exactMinWorldX = (center.x - radius) * kChunkSizeX;
+    const int exactMaxWorldX = (center.x + radius + 1) * kChunkSizeX - 1;
+    const int exactMinWorldZ = (center.z - radius) * kChunkSizeZ;
+    const int exactMaxWorldZ = (center.z + radius + 1) * kChunkSizeZ - 1;
+    constexpr int kStructureWorldgenPadding = kMaxStructureHorizontalRadius + 4;
+    const int minRegionX = floorDiv(exactMinWorldX - kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int maxRegionX = floorDiv(exactMaxWorldX + kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int minRegionZ = floorDiv(exactMinWorldZ - kMaxStructureHorizontalRadius, kStructureRegionSize);
+    const int maxRegionZ = floorDiv(exactMaxWorldZ + kMaxStructureHorizontalRadius, kStructureRegionSize);
+
+    minWorldX = minRegionX * kStructureRegionSize - kStructureWorldgenPadding;
+    maxWorldX = (maxRegionX + 1) * kStructureRegionSize - 1 + kStructureWorldgenPadding;
+    minWorldZ = minRegionZ * kStructureRegionSize - kStructureWorldgenPadding;
+    maxWorldZ = (maxRegionZ + 1) * kStructureRegionSize - 1 + kStructureWorldgenPadding;
+}
+
+void ChunkManager::Impl::resetFullRadiusWorldgenPageDiscovery(const glm::ivec3& center, int horizontalRadius) noexcept
+{
+    int minWorldX = 0;
+    int maxWorldX = 0;
+    int minWorldZ = 0;
+    int maxWorldZ = 0;
+    exactSupportWorldgenWindowBounds(center, horizontalRadius, minWorldX, maxWorldX, minWorldZ, maxWorldZ);
     fullRadiusWorldgenPageDiscovery_.centerPage = worldgenPageKeyForChunkColumn({center.x, center.z});
     fullRadiusWorldgenPageDiscovery_.minPage = worldgenPageKeyForWorld(minWorldX, minWorldZ);
     fullRadiusWorldgenPageDiscovery_.maxPage = worldgenPageKeyForWorld(maxWorldX, maxWorldZ);
@@ -11852,11 +12251,11 @@ void ChunkManager::Impl::precomputeFullRadiusWorldgenPageWindow(const glm::ivec3
         return;
     }
 
-    const int radius = std::max(horizontalRadius, 0);
-    const int minWorldX = (center.x - radius) * kChunkSizeX - 1;
-    const int maxWorldX = (center.x + radius + 1) * kChunkSizeX;
-    const int minWorldZ = (center.z - radius) * kChunkSizeZ - 1;
-    const int maxWorldZ = (center.z + radius + 1) * kChunkSizeZ;
+    int minWorldX = 0;
+    int maxWorldX = 0;
+    int minWorldZ = 0;
+    int maxWorldZ = 0;
+    exactSupportWorldgenWindowBounds(center, horizontalRadius, minWorldX, maxWorldX, minWorldZ, maxWorldZ);
     const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn({center.x, center.z});
     const glm::ivec2 minPage = worldgenPageKeyForWorld(minWorldX, minWorldZ);
     const glm::ivec2 maxPage = worldgenPageKeyForWorld(maxWorldX, maxWorldZ);
@@ -13392,6 +13791,8 @@ void ChunkManager::Impl::refillStructureRegionDependencyJobs()
         return;
     }
 
+    repairWaitingStructureRegionDependencies();
+
     const std::size_t targetJobs = targetStructureRegionDependencyJobs();
     const std::size_t outstandingJobs = jobQueue_.outstanding(JobType::StructureRegionDependency);
     const JobServiceClass serviceClass = highestQueuedStructureRegionDependencyServiceClass();
@@ -13408,6 +13809,139 @@ void ChunkManager::Impl::refillStructureRegionDependencyJobs()
                    0,
                    false,
                    serviceClass);
+    }
+}
+
+void ChunkManager::Impl::repairWaitingStructureRegionDependencies()
+{
+    struct RegionRepairSnapshot
+    {
+        StructureRegionKey key{};
+        DependencyPriority priority{DependencyPriority::Background};
+        JobServiceClass serviceClass{JobServiceClass::Refinement};
+        std::vector<glm::ivec2> missingPages;
+    };
+
+    std::vector<RegionRepairSnapshot> waitingRegions;
+    {
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        waitingRegions.reserve(structureRegionEntries_.size());
+        for (const auto& [key, entry] : structureRegionEntries_)
+        {
+            if (entry.state != StructureRegionState::WaitingOnWorldgenPages)
+            {
+                continue;
+            }
+
+            RegionRepairSnapshot snapshot{};
+            snapshot.key = key;
+            snapshot.priority = entry.priority;
+            snapshot.serviceClass = entry.serviceClass;
+            snapshot.missingPages.reserve(entry.missingWorldgenPages.size());
+            for (const glm::ivec2& pageKey : entry.missingWorldgenPages)
+            {
+                snapshot.missingPages.push_back(pageKey);
+            }
+            waitingRegions.push_back(std::move(snapshot));
+        }
+    }
+
+    for (const RegionRepairSnapshot& snapshot : waitingRegions)
+    {
+        std::vector<glm::ivec2> readyPages;
+        std::vector<glm::ivec2> retryPages;
+        readyPages.reserve(snapshot.missingPages.size());
+        retryPages.reserve(snapshot.missingPages.size());
+        for (const glm::ivec2& pageKey : snapshot.missingPages)
+        {
+            if (tryGetReadyWorldgenPage(pageKey))
+            {
+                readyPages.push_back(pageKey);
+                continue;
+            }
+
+            if (!worldgenPageDependencyHasOutstandingWork(pageKey))
+            {
+                retryPages.push_back(pageKey);
+            }
+        }
+
+        for (const glm::ivec2& pageKey : retryPages)
+        {
+            requestWorldgenPageDependency(pageKey, snapshot.priority, false, false, snapshot.serviceClass);
+        }
+
+        if (readyPages.empty() && retryPages.empty())
+        {
+            continue;
+        }
+
+        bool shouldQueueRegion = false;
+        {
+            std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+            auto entryIt = structureRegionEntries_.find(snapshot.key);
+            if (entryIt == structureRegionEntries_.end() ||
+                entryIt->second.state != StructureRegionState::WaitingOnWorldgenPages)
+            {
+                continue;
+            }
+
+            StructureRegionDependencyEntry& entry = entryIt->second;
+            for (const glm::ivec2& pageKey : readyPages)
+            {
+                if (entry.missingWorldgenPages.erase(pageKey) == 0)
+                {
+                    continue;
+                }
+
+                auto waiterIt = worldgenPageStructureRegionWaiters_.find(pageKey);
+                if (waiterIt != worldgenPageStructureRegionWaiters_.end())
+                {
+                    waiterIt->second.erase(snapshot.key);
+                    if (waiterIt->second.empty())
+                    {
+                        worldgenPageStructureRegionWaiters_.erase(waiterIt);
+                    }
+                }
+            }
+
+            if (!entry.missingWorldgenPages.empty())
+            {
+                continue;
+            }
+
+            const StructureRegionKey centerRegion{
+                floorDiv(lastCenterChunk_.x * kChunkSizeX, kStructureRegionSize),
+                floorDiv(lastCenterChunk_.z * kChunkSizeZ, kStructureRegionSize)};
+            const std::uint32_t distance =
+                static_cast<std::uint32_t>(std::max(std::abs(snapshot.key.regionX - centerRegion.regionX),
+                                                    std::abs(snapshot.key.regionZ - centerRegion.regionZ)));
+            entry.state = StructureRegionState::Queued;
+            entry.dependencyJobQueued = true;
+            entry.lastError = {};
+            entry.token = nextStructureRegionDependencyToken_++;
+            pendingStructureRegionDependencyQueue_.push(
+                StructureRegionDependencyRequest{
+                    snapshot.key,
+                    entry.token,
+                    nextStructureRegionDependencySequence_++,
+                    distance,
+                    entry.priority,
+                    entry.serviceClass});
+            shouldQueueRegion = true;
+        }
+
+        if (shouldQueueRegion)
+        {
+            if (exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_region_repaired region=(" << snapshot.key.regionX << "," << snapshot.key.regionZ
+                       << ") ready_pages_cleared=" << readyPages.size()
+                       << " retried_pages=" << retryPages.size();
+                exactDependencyStallDebugLog(stream.str());
+            }
+        }
     }
 }
 
@@ -15379,39 +15913,45 @@ bool ChunkManager::Impl::requestStructureRegionDependency(const StructureRegionK
                     worldgenPageStructureRegionWaiters_[pageKey].insert(key);
                 }
             }
-            return false;
+            shouldNotify = false;
         }
-
-        if (entry.state == StructureRegionState::Ready || entry.state == StructureRegionState::Building)
+        else
         {
-            return false;
-        }
+            if (entry.state == StructureRegionState::Ready || entry.state == StructureRegionState::Building)
+            {
+                return false;
+            }
 
-        if (entry.state == StructureRegionState::Queued && !priorityChanged && !serviceClassChanged)
-        {
-            return false;
-        }
+            if (entry.state == StructureRegionState::Queued && !priorityChanged && !serviceClassChanged)
+            {
+                return false;
+            }
 
-        entry.state = StructureRegionState::Queued;
-        entry.dependencyJobQueued = true;
-        entry.region.reset();
-        entry.lastError = {};
-        entry.token = nextStructureRegionDependencyToken_++;
-        pendingStructureRegionDependencyQueue_.push(
-            StructureRegionDependencyRequest{
-                key,
-                entry.token,
-                nextStructureRegionDependencySequence_++,
-                distance,
-                entry.priority,
-                entry.serviceClass});
-        shouldNotify = true;
-        enqueued = true;
+            entry.state = StructureRegionState::Queued;
+            entry.dependencyJobQueued = true;
+            entry.region.reset();
+            entry.lastError = {};
+            entry.token = nextStructureRegionDependencyToken_++;
+            pendingStructureRegionDependencyQueue_.push(
+                StructureRegionDependencyRequest{
+                    key,
+                    entry.token,
+                    nextStructureRegionDependencySequence_++,
+                    distance,
+                    entry.priority,
+                    entry.serviceClass});
+            shouldNotify = true;
+            enqueued = true;
+        }
     }
 
     if (shouldNotify)
     {
         const_cast<ChunkManager::Impl*>(this)->refillStructureRegionDependencyJobs();
+    }
+    else if (!missingPageKeys.empty())
+    {
+        const_cast<ChunkManager::Impl*>(this)->reconcileStructureRegionWaitingPages(key);
     }
 
     return enqueued;
@@ -16905,11 +17445,11 @@ void ChunkManager::Impl::publishStructureRegionFailure(const StructureRegionKey&
 
 void ChunkManager::Impl::pinWorldgenWindow(const glm::ivec3& center, int horizontalRadius)
 {
-    const int marginChunks = std::clamp(horizontalRadius / 6, 1, 4);
-    const int minWorldX = (center.x - horizontalRadius - marginChunks) * kChunkSizeX;
-    const int maxWorldX = (center.x + horizontalRadius + marginChunks + 1) * kChunkSizeX - 1;
-    const int minWorldZ = (center.z - horizontalRadius - marginChunks) * kChunkSizeZ;
-    const int maxWorldZ = (center.z + horizontalRadius + marginChunks + 1) * kChunkSizeZ - 1;
+    int minWorldX = 0;
+    int maxWorldX = 0;
+    int minWorldZ = 0;
+    int maxWorldZ = 0;
+    exactSupportWorldgenWindowBounds(center, horizontalRadius, minWorldX, maxWorldX, minWorldZ, maxWorldZ);
 
     std::unordered_set<glm::ivec2, ColumnHasher> desiredKeys{};
     const glm::ivec2 minKey = worldgenPageKeyForWorld(minWorldX, minWorldZ);
@@ -17134,20 +17674,49 @@ bool ChunkManager::Impl::computeChunkBaseTerrainState(
                                                                : DependencyPriority::Visible;
         const JobServiceClass serviceClass =
             classifyJobServiceClass(initialReadyPriority, localInteractionPriority, false);
+        std::vector<glm::ivec2> deferredWorldgenPageKeys;
+        deferredWorldgenPageKeys.reserve(missingWorldgenPageKeys.size());
         for (const glm::ivec2& pageKey : missingWorldgenPageKeys)
         {
             requestWorldgenPageDependency(pageKey, dependencyPriority, true, true, serviceClass);
+            if (!tryGetReadyWorldgenPage(pageKey) && worldgenPageDependencyHasOutstandingWork(pageKey))
+            {
+                deferredWorldgenPageKeys.push_back(pageKey);
+            }
         }
+
+        if (deferredWorldgenPageKeys.empty())
+        {
+            if (exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_retryable chunk=(" << chunkCoord.x << "," << chunkCoord.y << "," << chunkCoord.z
+                       << ") stage=base_terrain reason=no_outstanding_worldgen_page_work"
+                       << " missing_pages=" << missingWorldgenPageKeys.size();
+                for (const glm::ivec2& pageKey : missingWorldgenPageKeys)
+                {
+                    stream << " page(" << pageKey.x << "," << pageKey.y << ")_outstanding="
+                           << (worldgenPageDependencyHasOutstandingWork(pageKey) ? 1 : 0);
+                }
+                exactDependencyStallDebugLog(stream.str());
+            }
+            clearDeferredChunkDependencies(chunkCoord);
+            clearStreamingChunkLifecycleState(chunkCoord);
+            abandonChunkGenerationPlaceholder(chunkCoord, generationEpoch);
+            recordWorldgenPageStats();
+            return false;
+        }
+
         registerDeferredChunkDependencies(chunkCoord,
                                           generationEpoch,
                                           initialReadyPriority,
                                           localInteractionPriority,
-                                          missingWorldgenPageKeys);
+                                          deferredWorldgenPageKeys);
         setStreamingChunkLifecycleState(chunkCoord, FrontierDemandState::WaitingDependencies);
         if (benchmarkEnabled)
         {
             benchmarkMetrics_.chunkDependencyWorldgenDeferrals.record(
-                static_cast<std::uint64_t>(missingWorldgenPageKeys.size()));
+                static_cast<std::uint64_t>(deferredWorldgenPageKeys.size()));
         }
         recordWorldgenPageStats();
         return false;
@@ -17879,34 +18448,31 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
             return static_cast<std::uint16_t>(
                 std::min<std::size_t>(value, static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max())));
         };
-        std::shared_ptr<Chunk> chunk;
         {
             std::lock_guard<std::mutex> lock(chunksMutex);
-            auto it = chunks_.find(coord);
-            if (it != chunks_.end())
+            if (chunks_.find(coord) != chunks_.end())
             {
                 return EnsureChunkAsyncResult::NoAction;
             }
+        }
 
-            chunk = acquireChunk(coord);
-            chunk->state.store(ChunkState::Generating, std::memory_order_release);
-            chunk->requestTimestampMicros.store(static_cast<long long>(steadyMicrosNow()), std::memory_order_release);
-            chunk->initialReadyRecorded.store(false, std::memory_order_release);
-            if (benchmarkEnabled)
+        std::shared_ptr<Chunk> chunk = acquireChunk(coord);
+        chunk->state.store(ChunkState::Generating, std::memory_order_release);
+        chunk->requestTimestampMicros.store(static_cast<long long>(steadyMicrosNow()), std::memory_order_release);
+        chunk->initialReadyRecorded.store(false, std::memory_order_release);
+        if (benchmarkEnabled)
+        {
+            for (std::size_t index = 0; index < kJobTypeCount; ++index)
             {
-                for (std::size_t index = 0; index < kJobTypeCount; ++index)
-                {
-                    chunk->requestQueuedByType[index] = clampQueueCount(queueSnapshot.queuedByType[index]);
-                    chunk->requestActiveByType[index] = clampQueueCount(queueSnapshot.activeByType[index]);
-                }
-                const std::size_t latencySensitiveOutstanding =
-                    queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
-                    queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
-                    queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)] +
-                    queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)];
-                chunk->requestLatencySensitiveOutstanding = clampQueueCount(latencySensitiveOutstanding);
+                chunk->requestQueuedByType[index] = clampQueueCount(queueSnapshot.queuedByType[index]);
+                chunk->requestActiveByType[index] = clampQueueCount(queueSnapshot.activeByType[index]);
             }
-            chunks_.emplace(coord, chunk);
+            const std::size_t latencySensitiveOutstanding =
+                queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+                queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::InitialVisible)] +
+                queueSnapshot.queuedByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)] +
+                queueSnapshot.activeByService[jobServiceClassIndex(JobServiceClass::LocalInteraction)];
+            chunk->requestLatencySensitiveOutstanding = clampQueueCount(latencySensitiveOutstanding);
         }
 
         const std::uint32_t generationEpoch =
@@ -17914,8 +18480,11 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
         std::array<glm::ivec2, 4> pageKeys{};
         const std::size_t pageCount = collectChunkWorldgenPageKeys(coord, pageKeys);
         std::array<glm::ivec2, 4> missingPageKeys{};
+        std::array<glm::ivec2, 4> deferredPageKeys{};
         std::size_t missingPageCount = 0;
+        std::size_t deferredPageCount = 0;
         std::vector<StructureRegionKey> missingRegionKeys;
+        std::vector<StructureRegionKey> deferredRegionKeys;
         for (std::size_t i = 0; i < pageCount; ++i)
         {
             if (tryGetReadyWorldgenPage(pageKeys[i]))
@@ -17957,26 +18526,91 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
             {
                 requestStructureRegionDependency(regionKey, dependencyPriority, dependencyServiceClass);
             }
+
+            for (std::size_t i = 0; i < missingPageCount; ++i)
+            {
+                if (!tryGetReadyWorldgenPage(missingPageKeys[i]) &&
+                    worldgenPageDependencyHasOutstandingWork(missingPageKeys[i]))
+                {
+                    deferredPageKeys[deferredPageCount++] = missingPageKeys[i];
+                }
+            }
+
+            deferredRegionKeys.reserve(missingRegionKeys.size());
+            for (const StructureRegionKey& regionKey : missingRegionKeys)
+            {
+                if (!tryGetReadyRegion(regionKey) && structureRegionDependencyHasOutstandingWork(regionKey))
+                {
+                    deferredRegionKeys.push_back(regionKey);
+                }
+            }
+
+            if (deferredPageCount == 0 && deferredRegionKeys.empty())
+            {
+                if (exactDependencyStallDebugLoggingEnabled())
+                {
+                    std::ostringstream stream;
+                    stream << "exact_dep_retryable chunk=(" << coord.x << "," << coord.y << "," << coord.z
+                           << ") reason=no_outstanding_dependency_work"
+                           << " missing_pages=" << missingPageCount
+                           << " missing_regions=" << missingRegionKeys.size();
+                    for (std::size_t i = 0; i < missingPageCount; ++i)
+                    {
+                        stream << " page(" << missingPageKeys[i].x << "," << missingPageKeys[i].y
+                               << ")_outstanding="
+                               << (worldgenPageDependencyHasOutstandingWork(missingPageKeys[i]) ? 1 : 0);
+                    }
+                    for (const StructureRegionKey& regionKey : missingRegionKeys)
+                    {
+                        stream << " region(" << regionKey.regionX << "," << regionKey.regionZ
+                               << ")_outstanding="
+                               << (structureRegionDependencyHasOutstandingWork(regionKey) ? 1 : 0);
+                    }
+                    exactDependencyStallDebugLog(stream.str());
+                }
+                return EnsureChunkAsyncResult::NoAction;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(chunksMutex);
+                if (chunks_.find(coord) != chunks_.end())
+                {
+                    return EnsureChunkAsyncResult::NoAction;
+                }
+
+                chunks_.emplace(coord, chunk);
+            }
+
             registerDeferredChunkDependencies(coord,
                                               generationEpoch,
                                               kInitialReadyPriority,
                                               localInteractionPriority,
-                                              std::span<const glm::ivec2>(missingPageKeys.data(), missingPageCount),
-                                              std::span<const StructureRegionKey>(missingRegionKeys));
+                                              std::span<const glm::ivec2>(deferredPageKeys.data(), deferredPageCount),
+                                              std::span<const StructureRegionKey>(deferredRegionKeys));
             setStreamingChunkLifecycleState(coord, FrontierDemandState::WaitingDependencies);
             if (benchmarkMetrics_.isEnabled())
             {
-                if (missingPageCount > 0)
+                if (deferredPageCount > 0)
                 {
-                    benchmarkMetrics_.chunkDependencyWorldgenDeferrals.record(missingPageCount);
+                    benchmarkMetrics_.chunkDependencyWorldgenDeferrals.record(deferredPageCount);
                 }
-                if (!missingRegionKeys.empty())
+                if (!deferredRegionKeys.empty())
                 {
                     benchmarkMetrics_.chunkDependencyStructureDeferrals.record(
-                        static_cast<std::uint64_t>(missingRegionKeys.size()));
+                        static_cast<std::uint64_t>(deferredRegionKeys.size()));
                 }
             }
             return EnsureChunkAsyncResult::WaitingDependencies;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            if (chunks_.find(coord) != chunks_.end())
+            {
+                return EnsureChunkAsyncResult::NoAction;
+            }
+
+            chunks_.emplace(coord, chunk);
         }
 
         clearDeferredChunkDependencies(coord);
@@ -17991,6 +18625,13 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
     }
     catch (const std::exception& ex)
     {
+        if (exactDependencyStallDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact_dep_exception chunk=(" << coord.x << "," << coord.y << "," << coord.z
+                   << ") message=" << ex.what();
+            exactDependencyStallDebugLog(stream.str());
+        }
         std::cerr << "Error creating chunk at (" << coord.x << ", " << coord.y << ", " << coord.z
                   << "): " << ex.what() << std::endl;
         return EnsureChunkAsyncResult::NoAction;
@@ -23956,38 +24597,343 @@ void ChunkManager::Impl::registerDeferredChunkDependencies(
 
         deferredChunkDependencies_.erase(it);
     };
+    {
+        std::lock_guard<std::mutex> lock(deferredChunkDependencyMutex_);
+        clearLocked(deferredChunkDependencies_.find(coord));
+        if (missingWorldgenPages.empty() && missingStructureRegions.empty())
+        {
+            return;
+        }
 
-    std::lock_guard<std::mutex> lock(deferredChunkDependencyMutex_);
-    clearLocked(deferredChunkDependencies_.find(coord));
-    if (missingWorldgenPages.empty() && missingStructureRegions.empty())
+        DeferredChunkDependencies& deferred = deferredChunkDependencies_[coord];
+        deferred.generationEpoch = generationEpoch;
+        deferred.initialReadyPriority = initialReadyPriority;
+        deferred.localInteractionPriority = localInteractionPriority;
+        deferred.waitedOnWorldgenDependencies = !missingWorldgenPages.empty();
+        deferred.waitedOnStructureDependencies = !missingStructureRegions.empty();
+        deferred.outstandingDependencyCount = 0;
+        deferred.firstDependencyQueuedTimestampMicros = steadyMicrosNow();
+        for (const glm::ivec2& pageKey : missingWorldgenPages)
+        {
+            if (deferred.missingWorldgenPages.insert(pageKey).second)
+            {
+                worldgenPageWaiters_[pageKey].insert(coord);
+                ++deferred.outstandingDependencyCount;
+            }
+        }
+        for (const StructureRegionKey& regionKey : missingStructureRegions)
+        {
+            if (deferred.missingStructureRegions.insert(regionKey).second)
+            {
+                structureRegionWaiters_[regionKey].insert(coord);
+                ++deferred.outstandingDependencyCount;
+            }
+        }
+    }
+
+    reconcileDeferredChunkDependencies(coord);
+}
+
+void ChunkManager::Impl::reconcileDeferredChunkDependencies(const glm::ivec3& coord)
+{
+    std::vector<glm::ivec2> pendingWorldgenPages;
+    std::vector<StructureRegionKey> pendingStructureRegions;
+    {
+        std::lock_guard<std::mutex> lock(deferredChunkDependencyMutex_);
+        auto it = deferredChunkDependencies_.find(coord);
+        if (it == deferredChunkDependencies_.end())
+        {
+            return;
+        }
+
+        pendingWorldgenPages.reserve(it->second.missingWorldgenPages.size());
+        for (const glm::ivec2& pageKey : it->second.missingWorldgenPages)
+        {
+            pendingWorldgenPages.push_back(pageKey);
+        }
+
+        pendingStructureRegions.reserve(it->second.missingStructureRegions.size());
+        for (const StructureRegionKey& regionKey : it->second.missingStructureRegions)
+        {
+            pendingStructureRegions.push_back(regionKey);
+        }
+    }
+
+    std::vector<glm::ivec2> readyWorldgenPages;
+    readyWorldgenPages.reserve(pendingWorldgenPages.size());
+    for (const glm::ivec2& pageKey : pendingWorldgenPages)
+    {
+        if (tryGetReadyWorldgenPage(pageKey))
+        {
+            readyWorldgenPages.push_back(pageKey);
+        }
+    }
+
+    std::vector<StructureRegionKey> readyStructureRegions;
+    readyStructureRegions.reserve(pendingStructureRegions.size());
+    for (const StructureRegionKey& regionKey : pendingStructureRegions)
+    {
+        if (tryGetReadyRegion(regionKey))
+        {
+            readyStructureRegions.push_back(regionKey);
+        }
+    }
+
+    DeferredChunkDependencies readyDependencies{};
+    bool shouldQueueGenerate = false;
+    {
+        std::lock_guard<std::mutex> lock(deferredChunkDependencyMutex_);
+        auto it = deferredChunkDependencies_.find(coord);
+        if (it == deferredChunkDependencies_.end())
+        {
+            return;
+        }
+
+        DeferredChunkDependencies& deferred = it->second;
+        for (const glm::ivec2& pageKey : readyWorldgenPages)
+        {
+            if (deferred.missingWorldgenPages.erase(pageKey) == 0)
+            {
+                continue;
+            }
+
+            auto waiterIt = worldgenPageWaiters_.find(pageKey);
+            if (waiterIt != worldgenPageWaiters_.end())
+            {
+                waiterIt->second.erase(coord);
+                if (waiterIt->second.empty())
+                {
+                    worldgenPageWaiters_.erase(waiterIt);
+                }
+            }
+
+            if (deferred.outstandingDependencyCount > 0)
+            {
+                --deferred.outstandingDependencyCount;
+            }
+        }
+
+        for (const StructureRegionKey& regionKey : readyStructureRegions)
+        {
+            if (deferred.missingStructureRegions.erase(regionKey) == 0)
+            {
+                continue;
+            }
+
+            auto waiterIt = structureRegionWaiters_.find(regionKey);
+            if (waiterIt != structureRegionWaiters_.end())
+            {
+                waiterIt->second.erase(coord);
+                if (waiterIt->second.empty())
+                {
+                    structureRegionWaiters_.erase(waiterIt);
+                }
+            }
+
+            if (deferred.outstandingDependencyCount > 0)
+            {
+                --deferred.outstandingDependencyCount;
+            }
+        }
+
+        if (!deferred.missingWorldgenPages.empty() || !deferred.missingStructureRegions.empty())
+        {
+            return;
+        }
+
+        readyDependencies = deferred;
+        deferredChunkDependencies_.erase(it);
+        shouldQueueGenerate = true;
+    }
+
+    if (shouldQueueGenerate)
+    {
+        queueDeferredChunkGenerateIfReady(coord, readyDependencies);
+    }
+}
+
+void ChunkManager::Impl::reconcileStructureRegionWaitingPages(const StructureRegionKey& key)
+{
+    std::vector<glm::ivec2> pendingPageKeys;
+    {
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        auto it = structureRegionEntries_.find(key);
+        if (it == structureRegionEntries_.end() || it->second.state != StructureRegionState::WaitingOnWorldgenPages)
+        {
+            return;
+        }
+
+        pendingPageKeys.reserve(it->second.missingWorldgenPages.size());
+        for (const glm::ivec2& pageKey : it->second.missingWorldgenPages)
+        {
+            pendingPageKeys.push_back(pageKey);
+        }
+    }
+
+    std::vector<glm::ivec2> readyPageKeys;
+    readyPageKeys.reserve(pendingPageKeys.size());
+    for (const glm::ivec2& pageKey : pendingPageKeys)
+    {
+        if (tryGetReadyWorldgenPage(pageKey))
+        {
+            readyPageKeys.push_back(pageKey);
+        }
+    }
+
+    bool shouldRefillStructureJobs = false;
+    {
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        auto it = structureRegionEntries_.find(key);
+        if (it == structureRegionEntries_.end() || it->second.state != StructureRegionState::WaitingOnWorldgenPages)
+        {
+            return;
+        }
+
+        StructureRegionDependencyEntry& entry = it->second;
+        for (const glm::ivec2& pageKey : readyPageKeys)
+        {
+            if (entry.missingWorldgenPages.erase(pageKey) == 0)
+            {
+                continue;
+            }
+
+            auto waiterIt = worldgenPageStructureRegionWaiters_.find(pageKey);
+            if (waiterIt != worldgenPageStructureRegionWaiters_.end())
+            {
+                waiterIt->second.erase(key);
+                if (waiterIt->second.empty())
+                {
+                    worldgenPageStructureRegionWaiters_.erase(waiterIt);
+                }
+            }
+        }
+
+        if (!entry.missingWorldgenPages.empty())
+        {
+            return;
+        }
+
+        const StructureRegionKey centerRegion{
+            floorDiv(lastCenterChunk_.x * kChunkSizeX, kStructureRegionSize),
+            floorDiv(lastCenterChunk_.z * kChunkSizeZ, kStructureRegionSize)};
+        const std::uint32_t distance =
+            static_cast<std::uint32_t>(std::max(std::abs(key.regionX - centerRegion.regionX),
+                                                std::abs(key.regionZ - centerRegion.regionZ)));
+
+        entry.state = StructureRegionState::Queued;
+        entry.dependencyJobQueued = true;
+        entry.lastError = {};
+        entry.token = nextStructureRegionDependencyToken_++;
+        pendingStructureRegionDependencyQueue_.push(
+            StructureRegionDependencyRequest{
+                key,
+                entry.token,
+                nextStructureRegionDependencySequence_++,
+                distance,
+                entry.priority,
+                entry.serviceClass});
+        shouldRefillStructureJobs = true;
+    }
+
+    if (shouldRefillStructureJobs)
+    {
+        if (exactDependencyStallDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact_dep_region_reconciled region=(" << key.regionX << "," << key.regionZ
+                   << ") reason=pages_ready_before_waiter_registration";
+            exactDependencyStallDebugLog(stream.str());
+        }
+        refillStructureRegionDependencyJobs();
+    }
+}
+
+bool ChunkManager::Impl::worldgenPageDependencyHasOutstandingWork(const glm::ivec2& pageKey) const
+{
+    std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+    auto it = worldgenPageEntries_.find(pageKey);
+    if (it == worldgenPageEntries_.end())
+    {
+        return false;
+    }
+
+    return it->second.state == WorldgenPageState::Queued || it->second.state == WorldgenPageState::Building;
+}
+
+bool ChunkManager::Impl::structureRegionDependencyHasOutstandingWork(const StructureRegionKey& key) const
+{
+    StructureRegionState state = StructureRegionState::Unrequested;
+    std::vector<glm::ivec2> missingPageKeys;
+    {
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        auto it = structureRegionEntries_.find(key);
+        if (it == structureRegionEntries_.end())
+        {
+            return false;
+        }
+
+        state = it->second.state;
+        if (state == StructureRegionState::WaitingOnWorldgenPages)
+        {
+            missingPageKeys.reserve(it->second.missingWorldgenPages.size());
+            for (const glm::ivec2& pageKey : it->second.missingWorldgenPages)
+            {
+                missingPageKeys.push_back(pageKey);
+            }
+        }
+    }
+
+    if (state == StructureRegionState::Queued || state == StructureRegionState::Building)
+    {
+        return true;
+    }
+
+    if (state != StructureRegionState::WaitingOnWorldgenPages)
+    {
+        return false;
+    }
+
+    if (missingPageKeys.empty())
+    {
+        return false;
+    }
+
+    for (const glm::ivec2& pageKey : missingPageKeys)
+    {
+        if (tryGetReadyWorldgenPage(pageKey))
+        {
+            continue;
+        }
+
+        if (!worldgenPageDependencyHasOutstandingWork(pageKey))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void ChunkManager::Impl::abandonChunkGenerationPlaceholder(const glm::ivec3& coord, std::uint32_t generationEpoch)
+{
+    std::lock_guard<std::mutex> lock(chunksMutex);
+    auto it = chunks_.find(coord);
+    if (it == chunks_.end() || !it->second)
     {
         return;
     }
 
-    DeferredChunkDependencies& deferred = deferredChunkDependencies_[coord];
-    deferred.generationEpoch = generationEpoch;
-    deferred.initialReadyPriority = initialReadyPriority;
-    deferred.localInteractionPriority = localInteractionPriority;
-    deferred.waitedOnWorldgenDependencies = !missingWorldgenPages.empty();
-    deferred.waitedOnStructureDependencies = !missingStructureRegions.empty();
-    deferred.outstandingDependencyCount = 0;
-    deferred.firstDependencyQueuedTimestampMicros = steadyMicrosNow();
-    for (const glm::ivec2& pageKey : missingWorldgenPages)
+    if (it->second->generationEpoch.load(std::memory_order_acquire) != generationEpoch)
     {
-        if (deferred.missingWorldgenPages.insert(pageKey).second)
-        {
-            worldgenPageWaiters_[pageKey].insert(coord);
-            ++deferred.outstandingDependencyCount;
-        }
+        return;
     }
-    for (const StructureRegionKey& regionKey : missingStructureRegions)
+
+    if (it->second->state.load(std::memory_order_acquire) != ChunkState::Generating)
     {
-        if (deferred.missingStructureRegions.insert(regionKey).second)
-        {
-            structureRegionWaiters_[regionKey].insert(coord);
-            ++deferred.outstandingDependencyCount;
-        }
+        return;
     }
+
+    chunks_.erase(it);
 }
 
 void ChunkManager::Impl::clearDeferredChunkDependencies(const glm::ivec3& coord)
@@ -24325,25 +25271,54 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
                                                          : DependencyPriority::Visible;
         const JobServiceClass dependencyServiceClass =
             classifyJobServiceClass(initialReadyPriority, localAuthoritative, false);
+        std::vector<StructureRegionKey> deferredStructureRegions;
+        deferredStructureRegions.reserve(missingStructureRegions.size());
         for (const StructureRegionKey& regionKey : missingStructureRegions)
         {
             requestStructureRegionDependency(regionKey, dependencyPriority, dependencyServiceClass);
+            if (!tryGetReadyRegion(regionKey) && structureRegionDependencyHasOutstandingWork(regionKey))
+            {
+                deferredStructureRegions.push_back(regionKey);
+            }
         }
+
+        if (deferredStructureRegions.empty())
+        {
+            if (exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_retryable chunk=(" << chunk.coord.x << "," << chunk.coord.y << "," << chunk.coord.z
+                       << ") stage=structure_resolve reason=no_outstanding_structure_region_work"
+                       << " missing_regions=" << missingStructureRegions.size();
+                for (const StructureRegionKey& regionKey : missingStructureRegions)
+                {
+                    stream << " region(" << regionKey.regionX << "," << regionKey.regionZ << ")_outstanding="
+                           << (structureRegionDependencyHasOutstandingWork(regionKey) ? 1 : 0);
+                }
+                exactDependencyStallDebugLog(stream.str());
+            }
+            clearDeferredChunkDependencies(chunk.coord);
+            clearStreamingChunkLifecycleState(chunk.coord);
+            abandonChunkGenerationPlaceholder(chunk.coord, generationEpoch);
+            recordPhase(benchmarkMetrics_.generateStructureResolveStage, structureResolveStart, phaseNow());
+            return false;
+        }
+
         registerDeferredChunkDependencies(chunk.coord,
                                           generationEpoch,
                                           initialReadyPriority,
                                           localAuthoritative,
                                           std::span<const glm::ivec2>{},
-                                          std::span<const StructureRegionKey>(missingStructureRegions));
+                                          std::span<const StructureRegionKey>(deferredStructureRegions));
         setStreamingChunkLifecycleState(chunk.coord, FrontierDemandState::WaitingDependencies);
         if (benchmarkEnabled)
         {
             chunk.structureDeferredAttemptCount.fetch_add(1, std::memory_order_relaxed);
             storeFirstBenchmarkTimestamp(chunk.firstStructureDeferredTimestampMicros, steadyMicrosNow());
             benchmarkMetrics_.chunkDependencyStructureDeferrals.record(
-                static_cast<std::uint64_t>(missingStructureRegions.size()));
+                static_cast<std::uint64_t>(deferredStructureRegions.size()));
             benchmarkMetrics_.generateDeferredStructureMissingRegions.record(
-                static_cast<std::uint64_t>(missingStructureRegions.size()));
+                static_cast<std::uint64_t>(deferredStructureRegions.size()));
         }
         recordPhase(benchmarkMetrics_.generateStructureResolveStage, structureResolveStart, phaseNow());
         return false;

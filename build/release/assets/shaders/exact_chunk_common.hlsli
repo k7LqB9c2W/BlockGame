@@ -256,26 +256,6 @@ struct GpuBlockFaceUv
     float2 size;
 };
 
-struct WorldVertex
-{
-    float3 position;
-    float3 normal;
-    float2 tileCoord;
-    float2 atlasBase;
-    float2 atlasSize;
-    uint lightingData;
-};
-
-struct GpuCullRecord
-{
-    float4 boundsMin;
-    float4 boundsMax;
-    uint indexCount;
-    uint firstIndexLocation;
-    int baseVertex;
-    uint reserved;
-};
-
 uint voxelIndex(uint x, uint y, uint z)
 {
     return y * (kExactChunkSize * kExactChunkSize) + z * kExactChunkSize + x;

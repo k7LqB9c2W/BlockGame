@@ -20769,6 +20769,9 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             }
         };
         std::size_t writeIndex = 0u;
+        std::size_t zeroFaceReadyCount = 0u;
+        std::vector<glm::ivec3> zeroFaceReadySampleCoords{};
+        zeroFaceReadySampleCoords.reserve(6u);
         for (std::size_t i = 0; i < pendingExactGpuBatches_.size(); ++i)
         {
             PendingExactGpuBatch& batch = pendingExactGpuBatches_[i];
@@ -21328,6 +21331,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     }
 
                     const bool oldExactGpuResident = chunk.exactGpuResident.load(std::memory_order_acquire);
+                    const bool hasExactDrawAllocation = pending.hasAllocation() && completion.requiredFaces > 0u;
                     const std::uint32_t oldPageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
                     const std::size_t oldVertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
                     const std::size_t oldIndexOffset = chunk.indexOffset.load(std::memory_order_acquire);
@@ -21401,7 +21405,19 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                                                     true);
                     }
 
-                    setStreamingChunkLifecycleState(chunk.coord, FrontierDemandState::Meshing);
+                    if (hasExactDrawAllocation)
+                    {
+                        setStreamingChunkLifecycleState(chunk.coord, FrontierDemandState::Meshing);
+                    }
+                    else
+                    {
+                        publishChunkReady(chunk);
+                        ++zeroFaceReadyCount;
+                        if (zeroFaceReadySampleCoords.size() < 6u)
+                        {
+                            zeroFaceReadySampleCoords.push_back(chunk.coord);
+                        }
+                    }
                     releaseExactGpuTransient(chunk);
                     exactGpuBuildsCommitted_.fetch_add(1, std::memory_order_relaxed);
                     if (!chunk.exactGpuInputsDirty.load(std::memory_order_acquire) &&
@@ -21432,6 +21448,16 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
 
         pendingExactGpuBatches_.resize(writeIndex);
         std::sort(freeExactGpuScratchSlices_.begin(), freeExactGpuScratchSlices_.end());
+        if (zeroFaceReadyCount > 0u && exactDependencyStallDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact_gpu_zero_face_ready count=" << zeroFaceReadyCount;
+            for (const glm::ivec3& coord : zeroFaceReadySampleCoords)
+            {
+                stream << " chunk=(" << coord.x << "," << coord.y << "," << coord.z << ")";
+            }
+            exactDependencyStallDebugLog(stream.str());
+        }
         return;
     }
 }

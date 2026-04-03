@@ -1,7 +1,9 @@
 // chunk_manager_structure_registry.inl
 // Defines the internal structure generation and query cache used by ChunkManager and far terrain.
 
-constexpr int kStructureRegionSize = 128;
+// Keep structure regions aligned to one worldgen page so edge exact chunks do not
+// wait on support pages from the far side of a larger region.
+constexpr int kStructureRegionSize = 64;
 constexpr int kMaxStructureHorizontalRadius =
     std::max(std::max(kTaigaSpruceMaxLeafRadius + 1, kDarkOakMaxHorizontalReach), kAcaciaMaxHorizontalReach);
 

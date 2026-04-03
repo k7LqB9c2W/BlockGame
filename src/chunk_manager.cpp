@@ -1113,6 +1113,7 @@ inline constexpr int kExactPlayerBandRadiusMax = 6;
 inline constexpr int kExactPlayerBandHorizontalRadius = 8;
 inline constexpr int kExactSurfaceShellBelowSlackChunks = 1;
 inline constexpr int kExactSurfaceShellAirAboveChunks = 1;
+inline constexpr int kExactSurfaceShellInternalReliefThresholdBlocks = kChunkSizeY;
 inline constexpr int kMovementEnvelopeCoreRadiusMin = 4;
 inline constexpr int kMovementEnvelopeCoreRadiusMax = 8;
 inline constexpr int kMovementEnvelopeTurnReserveRadiusMin = 8;
@@ -13306,6 +13307,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
     struct PlannerColumnData
     {
         int highestTerrainWorld{ColumnManager::kNoHeight};
+        int lowestTerrainWorld{ColumnManager::kNoHeight};
         int minWaterBottomWorld{std::numeric_limits<int>::max()};
         int maxWaterTopWorld{std::numeric_limits<int>::min()};
     };
@@ -13369,6 +13371,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
                            };
 
                            int highestTerrainWorld = std::numeric_limits<int>::min();
+                           int lowestTerrainWorld = std::numeric_limits<int>::max();
                            int minWaterBottomWorld = std::numeric_limits<int>::max();
                            int maxWaterTopWorld = std::numeric_limits<int>::min();
                            for (int localX = 0; localX < kChunkSizeX; ++localX)
@@ -13385,6 +13388,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
                                    const int adjustedSurfaceY =
                                        adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
                                    highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
+                                   lowestTerrainWorld = std::min(lowestTerrainWorld, adjustedSurfaceY);
 
                                    if (!worldgenColumn.waterFillEnabled || adjustedSurfaceY >= globalSeaLevel_)
                                    {
@@ -13408,6 +13412,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
                            if (highestTerrainWorld != std::numeric_limits<int>::min())
                            {
                                data.highestTerrainWorld = highestTerrainWorld;
+                               data.lowestTerrainWorld = lowestTerrainWorld;
                            }
                            if (maxWaterTopWorld >= 0 && minWaterBottomWorld <= maxWaterTopWorld)
                            {
@@ -13598,9 +13603,16 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
                                }
 
                                const int lowestExposedWorldY = std::min(data.highestTerrainWorld, minNeighborHeight + 1);
+                               int shellFloorWorldY = lowestExposedWorldY;
+                               if (data.lowestTerrainWorld != ColumnManager::kNoHeight &&
+                                   data.highestTerrainWorld - data.lowestTerrainWorld >=
+                                       kExactSurfaceShellInternalReliefThresholdBlocks)
+                               {
+                                   shellFloorWorldY = std::min(shellFloorWorldY, data.lowestTerrainWorld);
+                               }
                                const int shellFloorChunk =
                                    std::max(0,
-                                            floorDiv(std::max(0, lowestExposedWorldY), kChunkSizeY) -
+                                            floorDiv(std::max(0, shellFloorWorldY), kChunkSizeY) -
                                                 kExactSurfaceShellBelowSlackChunks);
                                addColumnChunkInterval(occupancy.surfaceShellIntervals,
                                                       shellFloorChunk,
@@ -17843,6 +17855,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
         };
 
         int highestTerrainWorld = std::numeric_limits<int>::min();
+        int lowestTerrainWorld = std::numeric_limits<int>::max();
         int minWaterBottomWorld = std::numeric_limits<int>::max();
         int maxWaterTopWorld = std::numeric_limits<int>::min();
 
@@ -17859,6 +17872,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
 
                 const int adjustedSurfaceY = adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
                 highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
+                lowestTerrainWorld = std::min(lowestTerrainWorld, adjustedSurfaceY);
 
                 if (!worldgenColumn.waterFillEnabled || adjustedSurfaceY >= globalSeaLevel_)
                 {
@@ -17881,7 +17895,16 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
         {
             const int highestChunkY = floorDiv(highestTerrainWorld, kChunkSizeY);
             noteChunkInterval(0, highestChunkY);
-            const int shellFloorChunk = surfaceShellFloorChunkForHeight(column, highestTerrainWorld);
+            int shellFloorChunk = surfaceShellFloorChunkForHeight(column, highestTerrainWorld);
+            if (lowestTerrainWorld != std::numeric_limits<int>::max() &&
+                highestTerrainWorld - lowestTerrainWorld >= kExactSurfaceShellInternalReliefThresholdBlocks)
+            {
+                const int internalReliefFloorChunk =
+                    std::max(0,
+                             floorDiv(std::max(0, lowestTerrainWorld), kChunkSizeY) -
+                                 kExactSurfaceShellBelowSlackChunks);
+                shellFloorChunk = std::min(shellFloorChunk, internalReliefFloorChunk);
+            }
             addColumnChunkInterval(occupancy.surfaceShellIntervals,
                                    std::max(0, shellFloorChunk),
                                    std::max(highestChunkY, highestChunkY + kExactSurfaceShellAirAboveChunks));

@@ -9216,7 +9216,6 @@ void ChunkManager::Impl::exactGpuWorkerThreadFunction()
     {
         commitPendingExactGpuBuilds();
         bool canMaintainExactGpuReserve = true;
-        bool exactGpuReserveReady = true;
         {
             std::lock_guard<std::mutex> lock(pendingExactGpuBuildsMutex_);
             canMaintainExactGpuReserve =
@@ -9230,17 +9229,14 @@ void ChunkManager::Impl::exactGpuWorkerThreadFunction()
         }
         if (canMaintainExactGpuReserve)
         {
-            exactGpuReserveReady = ensureExactGpuFreePageReserve(kExactGpuReserveFreePageWatermark);
+            (void)ensureExactGpuFreePageReserve(kExactGpuReserveFreePageWatermark);
         }
         if (shouldStop_.load(std::memory_order_acquire) ||
             exactGpuWorkerStopRequested_.load(std::memory_order_acquire))
         {
             break;
         }
-        if (exactGpuReserveReady)
-        {
-            submitPendingExactGpuBuilds();
-        }
+        submitPendingExactGpuBuilds();
 
         std::unique_lock<std::mutex> waitLock(exactGpuWorkerMutex_);
         const bool hasPendingWork = exactGpuWorkerHasPendingWork();
@@ -20050,7 +20046,9 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                    static_cast<std::size_t>(completion.faceBase) == pending.allocation.faceOffset &&
                    completion.reservedFaceCapacity == pending.faceCapacity;
         };
-        const auto requeueBuildRequest = [&](PendingExactGpuBuild& pending, bool emittedRecordWritten)
+        const auto requeueBuildRequest = [&](PendingExactGpuBuild& pending,
+                                             bool emittedRecordWritten,
+                                             bool prioritizeFront = true)
         {
             releaseScratchSlice(pending);
             if (!pending.chunk)
@@ -20061,30 +20059,26 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             pending.chunk->exactGpuBuildQueued.store(true, std::memory_order_release);
             pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(pendingExactGpuBuildMutex_);
-            pendingExactGpuBuildQueue_.push_front(ExactGpuBuildRequest{
+            ExactGpuBuildRequest request{
                 pending.chunk,
                 pending.buildVersion,
                 pending.generationEpoch,
                 pending.inputVersion,
                 benchmarkMetrics_.isEnabled() ? steadyMicrosNow() : 0u,
-                pending.rebuildVoxelInputs});
+                pending.rebuildVoxelInputs};
+            if (prioritizeFront)
+            {
+                pendingExactGpuBuildQueue_.push_front(std::move(request));
+            }
+            else
+            {
+                pendingExactGpuBuildQueue_.push_back(std::move(request));
+            }
             if (benchmarkMetrics_.isEnabled())
             {
                 benchmarkMetrics_.exactGpuBuildQueueDepthEnqueue.record(
                     static_cast<std::uint64_t>(pendingExactGpuBuildQueue_.size()));
             }
-        };
-        const auto requeueBuildThroughRefresh = [&](PendingExactGpuBuild& pending, bool emittedRecordWritten)
-        {
-            releaseScratchSlice(pending);
-            if (!pending.chunk)
-            {
-                return;
-            }
-
-            releasePendingAllocation(pending, emittedRecordWritten);
-            pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
-            queueChunkForExactGpuRefresh(pending.chunk);
         };
         const auto releaseBatchScratchSlices = [&](PendingExactGpuBatch& batch)
         {
@@ -20164,13 +20158,19 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             {
                 // The CPU reservation + persistent exact page path never reopens resident pages.
                 // Exact emit must target CPU-reserved ranges on pages that are still OpenWritable.
-                ExactReservationResult reservationResult = ExactReservationResult::Success;
-                for (PendingExactGpuBuild& pending : batch.builds)
+                std::size_t keptBuildCount = 0u;
+                for (std::size_t buildIndex = 0; buildIndex < batch.builds.size(); ++buildIndex)
                 {
+                    PendingExactGpuBuild& pending = batch.builds[buildIndex];
                     if (!pending.chunk)
                     {
                         pending.allocation = {};
                         pending.faceCapacity = 0u;
+                        if (keptBuildCount != buildIndex)
+                        {
+                            batch.builds[keptBuildCount] = std::move(pending);
+                        }
+                        ++keptBuildCount;
                         continue;
                     }
 
@@ -20178,6 +20178,11 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     {
                         pending.allocation = {};
                         pending.faceCapacity = 0u;
+                        if (keptBuildCount != buildIndex)
+                        {
+                            batch.builds[keptBuildCount] = std::move(pending);
+                        }
+                        ++keptBuildCount;
                         continue;
                     }
 
@@ -20193,17 +20198,32 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             assert(page.state == ChunkBufferPageState::OpenWritable);
                             assert(pending.allocation.recordIndex < page.recordCapacity);
                         }
+                        if (keptBuildCount != buildIndex)
+                        {
+                            batch.builds[keptBuildCount] = std::move(pending);
+                        }
+                        ++keptBuildCount;
                         continue;
                     }
 
-                    reservationResult = reserveExactOutputRange(pending.chunk->coord,
-                                                                pending.requiredFaceCount,
-                                                                batch.reservationBatchId,
-                                                                pending.allocation,
-                                                                pending.faceCapacity);
+                    const ExactReservationResult reservationResult =
+                        reserveExactOutputRange(pending.chunk->coord,
+                                                pending.requiredFaceCount,
+                                                batch.reservationBatchId,
+                                                pending.allocation,
+                                                pending.faceCapacity);
                     if (reservationResult != ExactReservationResult::Success)
                     {
-                        break;
+                        if (reservationResult == ExactReservationResult::HardResourceFailure)
+                        {
+                            exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        requeueBuildRequest(pending, false, false);
+                        finalizeBuild(pending,
+                                      pending.chunk &&
+                                          (pending.chunk->exactGpuBuildQueued.load(std::memory_order_acquire) ||
+                                           pending.chunk->exactGpuBuildInFlight.load(std::memory_order_acquire)));
+                        continue;
                     }
 
                     assert(pending.hasAllocation());
@@ -20217,27 +20237,17 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                         assert(page.state == ChunkBufferPageState::OpenWritable);
                         assert(pending.allocation.recordIndex < page.recordCapacity);
                     }
+                    if (keptBuildCount != buildIndex)
+                    {
+                        batch.builds[keptBuildCount] = std::move(pending);
+                    }
+                    ++keptBuildCount;
                 }
+                batch.builds.resize(keptBuildCount);
 
-                if (reservationResult != ExactReservationResult::Success)
+                if (batch.builds.empty())
                 {
-                    if (reservationResult == ExactReservationResult::HardResourceFailure)
-                    {
-                        exactGpuBuildResourceFailures_.fetch_add(1, std::memory_order_relaxed);
-                    }
-                    for (PendingExactGpuBuild& pending : batch.builds)
-                    {
-                        requeueBuildThroughRefresh(pending, false);
-                        finalizeBuild(pending,
-                                      pending.chunk &&
-                                          (pending.chunk->exactGpuBuildQueued.load(std::memory_order_acquire) ||
-                                           pending.chunk->exactGpuBuildInFlight.load(std::memory_order_acquire)));
-                    }
                     keepBatch = false;
-                }
-
-                if (!keepBatch)
-                {
                     continue;
                 }
 

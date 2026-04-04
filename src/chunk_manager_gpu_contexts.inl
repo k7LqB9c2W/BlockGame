@@ -3046,7 +3046,10 @@ private:
         kExactTimestampPassCount * kExactTimestampQueriesPerPass;
     static constexpr UINT kExactTimestampQueryCount =
         kExactTimestampQueriesPerSubmission * kMaxInFlightSubmissionSlots;
-    static constexpr UINT kDescriptorHeapPersistentDescriptorCount = 4096u;
+    // Exact GPU pages consume three persistent UAV descriptors each and pages are not
+    // reopened once they become resident. Full exact-bubble fills can therefore require
+    // substantially more persistent descriptors than the old 4096-entry budget allowed.
+    static constexpr UINT kDescriptorHeapPersistentDescriptorCount = 16384u;
     static constexpr UINT kDescriptorHeapSubmissionDescriptorCount = 8192u;
     static constexpr UINT kDescriptorHeapDescriptorCount =
         kDescriptorHeapPersistentDescriptorCount + kDescriptorHeapSubmissionDescriptorCount;

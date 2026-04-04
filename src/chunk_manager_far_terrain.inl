@@ -1347,10 +1347,10 @@ private:
     {
         const std::uint32_t baseIndex = static_cast<std::uint32_t>(vertices.size());
         const std::uint32_t lightingData = packVertexLighting(packLightLevels(kMaxLightLevel, 0), 0, flags);
-        vertices.push_back(Vertex{p0, normal, projectTileCoord(p0, normal), uv.first, uv.second, lightingData});
-        vertices.push_back(Vertex{p1, normal, projectTileCoord(p1, normal), uv.first, uv.second, lightingData});
-        vertices.push_back(Vertex{p2, normal, projectTileCoord(p2, normal), uv.first, uv.second, lightingData});
-        vertices.push_back(Vertex{p3, normal, projectTileCoord(p3, normal), uv.first, uv.second, lightingData});
+        vertices.push_back(Vertex{p0, normal, projectTileCoord(p0, normal), uv.first, uv.second, lightingData, 0u});
+        vertices.push_back(Vertex{p1, normal, projectTileCoord(p1, normal), uv.first, uv.second, lightingData, 0u});
+        vertices.push_back(Vertex{p2, normal, projectTileCoord(p2, normal), uv.first, uv.second, lightingData, 0u});
+        vertices.push_back(Vertex{p3, normal, projectTileCoord(p3, normal), uv.first, uv.second, lightingData, 0u});
 
         indices.push_back(baseIndex + 0);
         indices.push_back(baseIndex + 1);

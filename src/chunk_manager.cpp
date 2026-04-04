@@ -1608,6 +1608,26 @@ struct BlockLightingProperties
     bool aoSolid{true};
 };
 
+constexpr std::array<BlockRenderProperties, toIndex(BlockId::Count)> kBlockRenderTable{{
+    {BlockRenderClass::Opaque, 0.0f, false},      // Air
+    {BlockRenderClass::Opaque, 1.0f, true},       // Grass
+    {BlockRenderClass::Opaque, 1.0f, true},       // Wood
+    {BlockRenderClass::Cutout, 1.0f, true},       // Leaves
+    {BlockRenderClass::Opaque, 1.0f, true},       // Sand
+    {BlockRenderClass::Translucent, 0.35f, false}, // Water
+    {BlockRenderClass::Opaque, 1.0f, true},       // Stone
+    {BlockRenderClass::Opaque, 1.0f, true},       // SpruceLog
+    {BlockRenderClass::Cutout, 1.0f, true},       // SpruceLeaves
+    {BlockRenderClass::Opaque, 1.0f, true},       // Podzol
+    {BlockRenderClass::Opaque, 1.0f, true},       // DebugLamp
+    {BlockRenderClass::Opaque, 1.0f, true},       // DarkOakLog
+    {BlockRenderClass::Cutout, 1.0f, true},       // DarkOakLeaves
+    {BlockRenderClass::Opaque, 1.0f, true},       // BirchLog
+    {BlockRenderClass::Cutout, 1.0f, true},       // BirchLeaves
+    {BlockRenderClass::Opaque, 1.0f, true},       // AcaciaLog
+    {BlockRenderClass::Cutout, 1.0f, true},       // AcaciaLeaves
+}};
+
 constexpr std::array<BlockLightingProperties, toIndex(BlockId::Count)> kBlockLightingTable{{
     {false, 0, 0, false},              // Air
     {true, kMaxLightLevel, 0, true},   // Grass
@@ -1631,6 +1651,21 @@ constexpr std::array<BlockLightingProperties, toIndex(BlockId::Count)> kBlockLig
 inline const BlockLightingProperties& blockLightingProperties(BlockId block) noexcept
 {
     return kBlockLightingTable[toIndex(block)];
+}
+
+inline const BlockRenderProperties& blockRenderProperties(BlockId block) noexcept
+{
+    return kBlockRenderTable[toIndex(block)];
+}
+
+inline BlockRenderClass blockRenderClass(BlockId block) noexcept
+{
+    return blockRenderProperties(block).renderClass;
+}
+
+inline bool isTranslucentBlock(BlockId block) noexcept
+{
+    return blockRenderClass(block) == BlockRenderClass::Translucent;
 }
 
 inline bool isOpaqueForLighting(BlockId block) noexcept
@@ -1768,16 +1803,14 @@ inline std::size_t cornerIndexForSigns(int uSign, int vSign) noexcept
 
 inline bool isAlphaCutoutBlock(BlockId block) noexcept
 {
-    return block == BlockId::Leaves ||
-           block == BlockId::SpruceLeaves ||
-           block == BlockId::DarkOakLeaves ||
-           block == BlockId::BirchLeaves ||
-           block == BlockId::AcaciaLeaves;
+    return blockRenderClass(block) == BlockRenderClass::Cutout;
 }
 
 inline bool isNonOpaqueBlock(BlockId block) noexcept
 {
-    return block == BlockId::Air || block == BlockId::Water || isAlphaCutoutBlock(block);
+    return block == BlockId::Air ||
+           blockRenderClass(block) == BlockRenderClass::Cutout ||
+           blockRenderClass(block) == BlockRenderClass::Translucent;
 }
 
 inline bool shouldRenderBlockFace(BlockId owningBlock, BlockId neighborBlock) noexcept
@@ -1792,22 +1825,29 @@ inline bool shouldRenderBlockFace(BlockId owningBlock, BlockId neighborBlock) no
         return true;
     }
 
-    if (isAlphaCutoutBlock(owningBlock))
+    const BlockRenderClass owningClass = blockRenderClass(owningBlock);
+    const BlockRenderClass neighborClass = blockRenderClass(neighborBlock);
+
+    if (owningClass == BlockRenderClass::Cutout)
     {
-        if (isAlphaCutoutBlock(neighborBlock))
+        if (neighborClass == BlockRenderClass::Cutout)
         {
             return owningBlock != neighborBlock;
         }
 
-        return neighborBlock == BlockId::Water;
+        return neighborClass == BlockRenderClass::Translucent;
     }
 
-    if (owningBlock == BlockId::Water)
+    if (owningClass == BlockRenderClass::Translucent)
     {
-        return neighborBlock == BlockId::Air;
+        if (neighborClass == BlockRenderClass::Translucent)
+        {
+            return owningBlock != neighborBlock;
+        }
+        return true;
     }
 
-    return isNonOpaqueBlock(neighborBlock);
+    return neighborClass != BlockRenderClass::Opaque;
 }
 
 constexpr int kTaigaSpruceCellSize = 14;
@@ -3620,6 +3660,7 @@ struct Chunk
         meshData.trimForReuse();
         meshReady.store(false, std::memory_order_relaxed);
         hasBlocks.store(false, std::memory_order_relaxed);
+        hasTranslucentBlocks.store(false, std::memory_order_relaxed);
         queuedForUpload.store(false, std::memory_order_relaxed);
         queuedUploadBucket.store(std::numeric_limits<std::uint8_t>::max(), std::memory_order_relaxed);
         uploadQueueTicket.store(0, std::memory_order_relaxed);
@@ -3735,6 +3776,7 @@ struct Chunk
     MeshData meshData;
     std::atomic<bool> meshReady{false};
     std::atomic<bool> hasBlocks{false};
+    std::atomic<bool> hasTranslucentBlocks{false};
     std::atomic<int> inFlight{0};
     std::atomic<long long> requestTimestampMicros{0};
     std::atomic<bool> initialReadyRecorded{false};
@@ -7355,6 +7397,7 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             {
                 continue;
             }
+            const bool hasTranslucentBlocks = chunkPtr->hasTranslucentBlocks.load(std::memory_order_acquire);
             const std::uint32_t faceCount = chunkPtr->exactGpuFaceCount.load(std::memory_order_acquire);
             const std::uint32_t faceOffset = chunkPtr->exactGpuFaceOffset.load(std::memory_order_acquire);
             const std::uint32_t recordIndex = chunkPtr->exactGpuRecordIndex.load(std::memory_order_acquire);
@@ -7367,6 +7410,7 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             batch.faceOffsets.push_back(faceOffset);
             batch.faceCounts.push_back(faceCount);
             batch.recordIndices.push_back(recordIndex);
+            batch.translucentEntries.push_back(hasTranslucentBlocks ? 1u : 0u);
             continue;
         }
 
@@ -7382,6 +7426,7 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         batch.indexCounts.push_back(indexCount);
         batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(indexOffset));
         batch.baseVertices.push_back(static_cast<std::int32_t>(vertexOffset));
+        batch.translucentEntries.push_back(chunkPtr->hasTranslucentBlocks.load(std::memory_order_acquire) ? 1u : 0u);
     }
 
     auto emptyIt = std::remove_if(renderData.nearBatches.begin(),
@@ -22784,6 +22829,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         {
             chunk.meshData.clear();
             chunk.meshReady.store(true, std::memory_order_release);
+            chunk.hasTranslucentBlocks.store(false, std::memory_order_release);
             return;
         }
 
@@ -22803,6 +22849,12 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         chunkBlocks = std::move(scratch.blocks);
         rebuildChunkBaseLighting(chunkBlocks, incomingSky, chunkLightLevels);
     }
+
+    const bool chunkHasTranslucentBlocks =
+        std::any_of(chunkBlocks.begin(), chunkBlocks.end(), [](BlockId block) noexcept
+        {
+            return isTranslucentBlock(block);
+        });
 
     const ChunkNeighborhoodSnapshot neighborhood =
         captureChunkNeighborhoodSnapshot(chunk, chunkBlocks, chunkLightLevels);
@@ -22865,6 +22917,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         glm::ivec3 uAxis{1, 0, 0};
         glm::ivec3 vAxis{0, 1, 0};
         BlockFace face{BlockFace::Top};
+        BlockId blockId{BlockId::Air};
         std::array<std::uint32_t, 4> lightingData{};
         std::uint8_t flags{0};
         bool alphaCutout{false};
@@ -22877,6 +22930,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
                    uAxis == other.uAxis &&
                    vAxis == other.vAxis &&
                    face == other.face &&
+                   blockId == other.blockId &&
                    lightingData == other.lightingData &&
                    flags == other.flags &&
                    alphaCutout == other.alphaCutout &&
@@ -23017,6 +23071,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	        const BlockFace face = faceFromNormal(normal);
 
 	        material.face = face;
+            material.blockId = block;
             material.lightingData = buildCornerLighting(face, owningLocal);
             material.alphaCutout = isAlphaCutoutBlock(block);
 	        material.mergeable =
@@ -23151,6 +23206,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
 	            vertex.atlasSize = material.uvSize;
 	            vertex.lightingData =
                     applyVertexFlags(vertexLighting[i], material.flags) | alphaCutoutLightingFlag;
+                vertex.blockId = static_cast<std::uint32_t>(material.blockId);
 	            meshData.vertices.push_back(vertex);
 	        }
 
@@ -23334,6 +23390,7 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
         // empty mesh and momentarily punch holes in the world.
         chunk.meshData = std::move(meshData);
     }
+    chunk.hasTranslucentBlocks.store(chunkHasTranslucentBlocks, std::memory_order_release);
     chunk.meshReady.store(true, std::memory_order_release);
 }
 

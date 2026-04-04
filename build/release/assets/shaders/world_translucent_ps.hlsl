@@ -25,6 +25,7 @@ cbuffer WorldConstants : register(b0)
     float4 uSkyHorizonColor;
     float4 uShadowParams;
     float4 uTerrainDebug;
+    float4 uTranslucencyParams;
 };
 
 struct PSInput
@@ -42,6 +43,12 @@ struct PSInput
     uint blockId : TEXCOORD8;
 };
 
+struct PSOutput
+{
+    float4 accum : SV_TARGET0;
+    float reveal : SV_TARGET1;
+};
+
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
 {
     const float safeSliceCount = max(sliceCount, 1.0f);
@@ -55,127 +62,32 @@ float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCou
     return lerp(ap0, ap1, blend);
 }
 
-float sampleShadow(float3 worldPos, float3 normal)
+PSOutput main(PSInput input)
 {
-    if (uShadowParams.w < 0.5f)
-    {
-        return 1.0f;
-    }
-
-    const float3 shadowOffsetPos = worldPos + normal * uShadowParams.y;
-    const float4 shadowClip = mul(uShadowViewProj, float4(shadowOffsetPos, 1.0f));
-    const float3 shadowNdc = shadowClip.xyz / max(shadowClip.w, 1e-5f);
-    const float2 shadowUv = float2(shadowNdc.x * 0.5f + 0.5f, shadowNdc.y * -0.5f + 0.5f);
-    const float shadowDepth = shadowNdc.z;
-
-    if (shadowUv.x <= 0.0f || shadowUv.x >= 1.0f ||
-        shadowUv.y <= 0.0f || shadowUv.y >= 1.0f ||
-        shadowDepth <= 0.0f || shadowDepth >= 1.0f)
-    {
-        return 1.0f;
-    }
-
-    const float texelSize = max(uShadowParams.x, 1e-5f);
-    float visibility = 0.0f;
-
-    [unroll]
-    for (int y = -1; y <= 1; ++y)
-    {
-        [unroll]
-        for (int x = -1; x <= 1; ++x)
-        {
-            visibility += gShadowMap.SampleCmpLevelZero(gShadowSampler,
-                                                        shadowUv + float2(x, y) * texelSize,
-                                                        shadowDepth);
-        }
-    }
-
-    visibility *= (1.0f / 9.0f);
-    return lerp(1.0f, visibility, saturate(uShadowParams.z));
-}
-
-float computeMipLevel(float2 atlasUvDdx, float2 atlasUvDdy)
-{
-    uint width = 1;
-    uint height = 1;
-    uint mipCount = 1;
-    gAtlas.GetDimensions(0, width, height, mipCount);
-    const float2 texelScale = float2((float)width, (float)height);
-    const float2 dx = atlasUvDdx * texelScale;
-    const float2 dy = atlasUvDdy * texelScale;
-    const float rho = max(dot(dx, dx), dot(dy, dy));
-    return max(0.0f, 0.5f * log2(max(rho, 1e-8f)));
-}
-
-float3 debugMipColor(float mipLevel)
-{
-    uint width = 1;
-    uint height = 1;
-    uint mipCount = 1;
-    gAtlas.GetDimensions(0, width, height, mipCount);
-    const float mip01 = saturate(mipLevel / max((float)(mipCount - 1), 1.0f));
-    return lerp(float3(0.10f, 0.55f, 0.95f), float3(0.95f, 0.30f, 0.10f), mip01);
-}
-
-float4 main(PSInput input) : SV_TARGET
-{
-    const float3 normal = normalize(input.normal);
-    const float3 lightDir = normalize(uLightDirection.xyz);
-    const float3 viewDir = normalize(uCameraPos.xyz - input.worldPos);
-    if (isTranslucentBlockId(input.blockId))
+    if (!isTranslucentBlockId(input.blockId))
     {
         discard;
     }
+
+    const float3 normal = normalize(input.normal);
+    const float3 lightDir = normalize(uLightDirection.xyz);
+    const float3 viewDir = normalize(uCameraPos.xyz - input.worldPos);
     const float2 wrappedTileUv = frac(input.tileCoord);
-    const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv;
+    const float wavePhase = sin(input.worldPos.x * 0.0125f + input.worldPos.z * 0.0105f + uCameraPos.x * 0.0015f);
+    const float2 waterUvOffset = float2(wavePhase, wavePhase * 0.55f) * (input.atlasSize * 0.20f);
+    const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv + waterUvOffset;
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;
     const float2 atlasUvDdy = ddy(input.tileCoord) * input.atlasSize;
     const float4 textureSample = gAtlas.SampleGrad(gTerrainSampler, atlasUv, atlasUvDdx, atlasUvDdy);
-    if (input.alphaCutout != 0u)
-    {
-        clip(textureSample.a - 0.5f);
-    }
-    const uint grassTintIndex = decodeGrassTintIndex(input.materialFlags);
-
-    float3 albedo = textureSample.rgb;
-    if (grassTintIndex != 0u)
-    {
-        const float3 tint = biomeGrassTint(grassTintIndex);
-        const float tintMask = isGrassSideTint(input.materialFlags) ? grassSideTintMask(wrappedTileUv) : 1.0f;
-        albedo = lerp(albedo, albedo * tint, tintMask);
-    }
 
     const float skyLight = saturate(input.lightChannels.x);
     const float blockLight = saturate(input.lightChannels.y);
     const float aoStrength = max(uTerrainDebug.w, 0.01f);
     const float ao = pow(saturate(input.ao), aoStrength);
-    const float mipLevel = computeMipLevel(atlasUvDdx, atlasUvDdy);
-    const int debugView = (int)uTerrainDebug.y;
-
-    if (debugView == 1)
-    {
-        return float4(skyLight.xxx, 1.0f);
-    }
-    if (debugView == 2)
-    {
-        return float4(blockLight.xxx, 1.0f);
-    }
-    if (debugView == 3)
-    {
-        return float4(debugMipColor(mipLevel), 1.0f);
-    }
-    if (debugView == 4)
-    {
-        return float4(ao.xxx, 1.0f);
-    }
-
     const float faceShade = faceShadeMultiplier(normal);
     const float indirectFaceShade = lerp(1.0f, faceShade, 0.55f);
     const float directFaceShade = lerp(1.0f, faceShade, 0.25f);
     const float diff = max(dot(normal, lightDir), 0.0f);
-    const float3 halfDir = normalize(lightDir + viewDir);
-    const float spec = pow(max(dot(normal, halfDir), 0.0f), 16.0f);
-    const float shadow = sampleShadow(input.worldPos, normal);
     const float hemi = saturate(normal.y * 0.5f + 0.5f);
     const float3 ambientTint = lerp(uGroundAmbient.rgb, uSkyAmbient.rgb, hemi);
     const float3 skyTint = ambientTint * 2.15f + float3(0.08f, 0.09f, 0.11f);
@@ -183,16 +95,22 @@ float4 main(PSInput input) : SV_TARGET
     const float3 blockIndirect = float3(1.12f, 0.95f, 0.70f) * blockLight;
     const float indirectAo = lerp(1.0f, ao, 0.78f);
     const float3 indirect = (skyIndirect + blockIndirect) * indirectFaceShade * indirectAo;
-
     const float directSunGate = uTerrainDebug.x * saturate(skyLight * 1.08f);
     const float directAo = lerp(1.0f, ao, 0.18f);
     const float3 directLight =
-        uSunColor.rgb * (diff * shadow * directSunGate * directFaceShade * directAo * 0.38f);
-    const float3 specularLight =
-        uSunColor.rgb * (spec * shadow * directSunGate * directFaceShade * directAo * 0.012f);
-    const float3 baseBounce = ambientTint * 0.026f;
+        uSunColor.rgb * (diff * directSunGate * directFaceShade * directAo * 0.20f);
+    const float3 baseBounce = ambientTint * 0.024f;
 
-    float3 color = albedo * (indirect + baseBounce + directLight) + specularLight;
+    const float fresnel = pow(1.0f - saturate(dot(normal, viewDir)), 4.0f);
+    const float shimmer = saturate(0.45f + 0.55f * sin(input.worldPos.x * 0.006f + input.worldPos.z * 0.008f));
+    const float3 waterTint = lerp(textureSample.rgb, float3(0.18f, 0.42f, 0.66f), 0.58f);
+    const float3 skyReflection =
+        computeTerrainFogColor(normalize(float3(viewDir.x, abs(viewDir.y), viewDir.z)),
+                               uSkyTopColor.rgb,
+                               uSkyHorizonColor.rgb);
+    float3 color = waterTint * (indirect * 0.62f + baseBounce * 1.35f + directLight * 0.32f);
+    color += skyReflection * (0.10f + fresnel * 0.28f);
+    color += uSunColor.rgb * (0.02f + 0.05f * shimmer) * fresnel;
 
     const float distanceBlocks = distance(input.worldPos, uCameraPos.xyz);
     const float horizontalDistanceBlocks = distance(input.worldPos.xz, uCameraPos.xz);
@@ -233,5 +151,9 @@ float4 main(PSInput input) : SV_TARGET
         color = color * fogBlend.transmittance + fogColor * fogBlend.inscatter;
     }
 
-    return float4(color, 1.0f);
+    const float alpha = opacityForBlock(input.blockId, uTranslucencyParams.x);
+    PSOutput output;
+    output.accum = float4(color * alpha, alpha);
+    output.reveal = alpha;
+    return output;
 }

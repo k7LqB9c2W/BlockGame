@@ -13,7 +13,7 @@ struct ShaderCompileSpec
     const char* target;
 };
 
-inline constexpr std::array<ShaderCompileSpec, 45> kBlockGameShaderCompileSpecs{{
+inline constexpr std::array<ShaderCompileSpec, 47> kBlockGameShaderCompileSpecs{{
     {"world_vs.hlsl", "main", "vs_5_0"},
     {"mob_vs.hlsl", "main", "vs_5_0"},
     {"block_outline_vs.hlsl", "main", "vs_5_0"},
@@ -22,6 +22,7 @@ inline constexpr std::array<ShaderCompileSpec, 45> kBlockGameShaderCompileSpecs{
     {"exact_shadow_vs.hlsl", "main", "vs_5_0"},
     {"shadow_ps.hlsl", "main", "ps_5_0"},
     {"world_near_ps.hlsl", "main", "ps_5_0"},
+    {"world_translucent_ps.hlsl", "main", "ps_5_0"},
     {"world_far_ps.hlsl", "main", "ps_5_0"},
     {"mob_ps.hlsl", "main", "ps_5_0"},
     {"block_outline_ps.hlsl", "main", "ps_5_0"},
@@ -34,6 +35,7 @@ inline constexpr std::array<ShaderCompileSpec, 45> kBlockGameShaderCompileSpecs{
     {"base_sky_ps.hlsl", "main", "ps_5_0"},
     {"clouds_vs.hlsl", "main", "vs_5_0"},
     {"clouds_ps.hlsl", "main", "ps_5_0"},
+    {"oit_composite_ps.hlsl", "main", "ps_5_0"},
     {"tone_map_ps.hlsl", "main", "ps_5_0"},
     {"atmosphere_transmittance_ps.hlsl", "main", "ps_5_0"},
     {"atmosphere_multiscattering_ps.hlsl", "main", "ps_5_0"},

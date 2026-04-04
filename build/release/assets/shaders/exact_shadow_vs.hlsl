@@ -20,6 +20,7 @@ struct VSOutput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint blockId : TEXCOORD3;
 };
 
 uint faceCornerIndex(uint vertexId, bool flipDiagonal)
@@ -111,5 +112,6 @@ VSOutput main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
     output.tileCoord = projectTileCoord(faceId, worldPos);
     output.atlasBase = uv.base;
     output.atlasSize = uv.size;
+    output.blockId = descriptor.blockId;
     return output;
 }

@@ -39,6 +39,7 @@ struct PSInput
     float ao : TEXCOORD4;
     uint materialFlags : TEXCOORD5;
     uint alphaCutout : TEXCOORD7;
+    uint blockId : TEXCOORD8;
 };
 
 float4 sampleAerialPerspective(float2 screenUv, float distanceKm, float sliceCount)
@@ -121,6 +122,10 @@ float4 main(PSInput input) : SV_TARGET
     const float3 normal = normalize(input.normal);
     const float3 lightDir = normalize(uLightDirection.xyz);
     const float3 viewDir = normalize(uCameraPos.xyz - input.worldPos);
+    if (isTranslucentBlockId(input.blockId))
+    {
+        discard;
+    }
     const float2 wrappedTileUv = frac(input.tileCoord);
     const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv;
     const float2 atlasUvDdx = ddx(input.tileCoord) * input.atlasSize;

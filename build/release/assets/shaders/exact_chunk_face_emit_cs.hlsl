@@ -671,7 +671,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         finalDescriptor.packedLighting3 =
             ((vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
-        finalDescriptor.reserved0 = 0u;
+        finalDescriptor.blockId = blockId;
         finalDescriptor.reserved1 = 0u;
         faceDescriptors[build.faceBase + faceIndex] = finalDescriptor;
     }

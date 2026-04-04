@@ -181,6 +181,7 @@ private:
         glm::vec4 skyHorizonColor{0.0f, 0.0f, 0.0f, 0.0f};
         glm::vec4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
         glm::vec4 terrainDebug{0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec4 translucencyParams{0.35f, 0.0f, 0.0f, 0.0f};
     };
 
     struct BaseSkyConstants
@@ -360,6 +361,9 @@ private:
     int width_{0};
     int height_{0};
     int sceneColorSrvIndex_{-1};
+    int sceneResolvedSrvIndex_{-1};
+    int translucencyAccumSrvIndex_{-1};
+    int translucencyRevealSrvIndex_{-1};
     bool frameStarted_{false};
     bool imguiFrameStarted_{false};
     bool debugLayerEnabled_{false};
@@ -390,8 +394,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactIndirectRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> nearPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> nearTranslucentPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactShadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactNearPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactNearTranslucentPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mobPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> blockOutlinePipelineState_;
@@ -406,6 +412,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> baseSkyPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> backgroundCloudPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> cloudPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> oitCompositePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> toneMapPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     std::array<D3D12_RESOURCE_STATES, kBackBufferCount> backBufferStates_{
@@ -416,11 +423,17 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> skyBackground_;
     Microsoft::WRL::ComPtr<ID3D12Resource> sceneColor_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> sceneResolved_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> translucencyAccum_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> translucencyReveal_;
     Microsoft::WRL::ComPtr<ID3D12Resource> screenshotReadbackBuffer_;
     D3D12_RESOURCE_STATES shadowMapState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES depthPyramidState_{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES skyBackgroundState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_RESOURCE_STATES sceneColorState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES sceneResolvedState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES translucencyAccumState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES translucencyRevealState_{D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT screenshotReadbackLayout_{};
 
     D3D12_CPU_DESCRIPTOR_HANDLE depthDsv_{};
@@ -437,6 +450,15 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE sceneColorRtv_{};
     D3D12_CPU_DESCRIPTOR_HANDLE sceneColorSrvCpu_{};
     D3D12_GPU_DESCRIPTOR_HANDLE sceneColorSrvGpu_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneResolvedRtv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneResolvedSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE sceneResolvedSrvGpu_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE translucencyAccumRtv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE translucencyAccumSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE translucencyAccumSrvGpu_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE translucencyRevealRtv_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE translucencyRevealSrvCpu_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE translucencyRevealSrvGpu_{};
     std::array<FrameResource, kBackBufferCount> frameResources_{};
     std::size_t currentFrameConstantOffset_{0};
     HANDLE fenceEvent_{nullptr};

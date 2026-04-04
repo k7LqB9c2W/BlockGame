@@ -134,6 +134,20 @@ enum class BlockId : std::uint8_t
     Count
 };
 
+enum class BlockRenderClass : std::uint8_t
+{
+    Opaque = 0,
+    Cutout = 1,
+    Translucent = 2
+};
+
+struct BlockRenderProperties
+{
+    BlockRenderClass renderClass{BlockRenderClass::Opaque};
+    float opacity{1.0f};
+    bool castsShadow{true};
+};
+
 constexpr std::size_t toIndex(BlockId block) noexcept
 {
     return static_cast<std::size_t>(block);
@@ -160,6 +174,7 @@ struct WorldVertex
     glm::vec2 atlasBase;
     glm::vec2 atlasSize;
     std::uint32_t lightingData{0};
+    std::uint32_t blockId{0};
 };
 
 struct MobVertex
@@ -191,6 +206,7 @@ struct ChunkRenderBatch
     std::vector<std::uint32_t> indexCounts;
     std::vector<std::uint32_t> firstIndexLocations;
     std::vector<std::int32_t> baseVertices;
+    std::vector<std::uint8_t> translucentEntries;
     struct GpuCullRecord
     {
         static constexpr std::uint32_t kReservedActiveBit = 1u << 30u;
@@ -233,6 +249,7 @@ struct ExactChunkRenderBatch
     std::vector<std::uint32_t> faceOffsets;
     std::vector<std::uint32_t> faceCounts;
     std::vector<std::uint32_t> recordIndices;
+    std::vector<std::uint8_t> translucentEntries;
     std::uint32_t gpuCullRecordCount{0};
     bool supportsGpuCull{false};
     std::uint32_t debugPageIndex{0};

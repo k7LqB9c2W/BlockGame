@@ -11,6 +11,7 @@ struct VSInput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint blockId : COLOR1;
 };
 
 struct VSOutput
@@ -19,6 +20,7 @@ struct VSOutput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint blockId : TEXCOORD3;
 };
 
 VSOutput main(VSInput input)
@@ -28,5 +30,6 @@ VSOutput main(VSInput input)
     output.tileCoord = input.tileCoord;
     output.atlasBase = input.atlasBase;
     output.atlasSize = input.atlasSize;
+    output.blockId = input.blockId;
     return output;
 }

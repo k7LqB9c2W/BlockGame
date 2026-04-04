@@ -16,6 +16,16 @@ static const uint kMaterialFlagFarLod = 0x02u;
 static const uint kMaterialFlagGrassTintShift = 2u;
 static const uint kMaterialFlagGrassTintMask = 0x1Cu;
 static const uint kMaterialFlagGrassSideTint = 0x20u;
+static const uint kBlockAir = 0u;
+static const uint kBlockLeaves = 3u;
+static const uint kBlockWater = 5u;
+static const uint kBlockSpruceLeaves = 8u;
+static const uint kBlockDarkOakLeaves = 12u;
+static const uint kBlockBirchLeaves = 14u;
+static const uint kBlockAcaciaLeaves = 16u;
+static const uint kRenderClassOpaque = 0u;
+static const uint kRenderClassCutout = 1u;
+static const uint kRenderClassTranslucent = 2u;
 
 struct FogBlendResult
 {
@@ -60,6 +70,42 @@ DecodedVertexLighting decodeVertexLighting(uint packedLighting)
     const uint scale = (packedLighting >> 16) & 0xFFu;
     decoded.farVoxelScale = (scale > 0u) ? (float)scale : 1.0f;
     return decoded;
+}
+
+uint renderClassForBlock(uint blockId)
+{
+    if (blockId == kBlockLeaves ||
+        blockId == kBlockSpruceLeaves ||
+        blockId == kBlockDarkOakLeaves ||
+        blockId == kBlockBirchLeaves ||
+        blockId == kBlockAcaciaLeaves)
+    {
+        return kRenderClassCutout;
+    }
+    if (blockId == kBlockWater)
+    {
+        return kRenderClassTranslucent;
+    }
+    return kRenderClassOpaque;
+}
+
+bool isAlphaCutoutBlockId(uint blockId)
+{
+    return renderClassForBlock(blockId) == kRenderClassCutout;
+}
+
+bool isTranslucentBlockId(uint blockId)
+{
+    return renderClassForBlock(blockId) == kRenderClassTranslucent;
+}
+
+float opacityForBlock(uint blockId, float defaultWaterOpacity)
+{
+    if (blockId == kBlockWater)
+    {
+        return saturate(defaultWaterOpacity);
+    }
+    return 1.0f;
 }
 
 float faceShadeMultiplier(float3 normal)

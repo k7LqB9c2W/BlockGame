@@ -88,6 +88,7 @@ struct VSOutput
     uint materialFlags : TEXCOORD5;
     float farVoxelScale : TEXCOORD6;
     uint alphaCutout : TEXCOORD7;
+    uint blockId : TEXCOORD8;
 };
 
 uint faceCornerIndex(uint vertexId, bool flipDiagonal)
@@ -205,6 +206,7 @@ VSOutput main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
     output.materialFlags = decodedLighting.flags;
     output.farVoxelScale = 1.0f;
     output.alphaCutout = decodedLighting.alphaCutout;
+    output.blockId = descriptor.blockId;
     output.position = mul(uViewProj, float4(worldPos, 1.0f));
     return output;
 }

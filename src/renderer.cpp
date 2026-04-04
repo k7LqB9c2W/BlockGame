@@ -55,10 +55,13 @@ constexpr UINT kFrameConstantBufferSize = 64u * 1024u;
 constexpr UINT kShadowMapResolution = 2048u;
 constexpr UINT kRtvIndexSkyBackground = 2;
 constexpr UINT kRtvIndexSceneColor = 3;
-constexpr UINT kRtvIndexTransmittance = 4;
-constexpr UINT kRtvIndexMultiScattering = 5;
-constexpr UINT kRtvIndexSkyView = 6;
-constexpr UINT kRtvIndexAerialPerspectiveBase = 7;
+constexpr UINT kRtvIndexSceneResolved = 4;
+constexpr UINT kRtvIndexTranslucencyAccum = 5;
+constexpr UINT kRtvIndexTranslucencyReveal = 6;
+constexpr UINT kRtvIndexTransmittance = 7;
+constexpr UINT kRtvIndexMultiScattering = 8;
+constexpr UINT kRtvIndexSkyView = 9;
+constexpr UINT kRtvIndexAerialPerspectiveBase = 10;
 constexpr UINT kAerialPerspectiveSliceCount = 32;
 constexpr UINT kRtvHeapCapacity = kRtvIndexAerialPerspectiveBase + kAerialPerspectiveSliceCount;
 constexpr int kAtlasMinimumPaddingPixels = 2;
@@ -1056,12 +1059,15 @@ void Renderer::shutdown()
       destroySkyBackground();
       destroyFrameResources();
       toneMapPipelineState_.Reset();
+      oitCompositePipelineState_.Reset();
       cloudPipelineState_.Reset();
       backgroundCloudPipelineState_.Reset();
       baseSkyPipelineState_.Reset();
     shadowPipelineState_.Reset();
     nearPipelineState_.Reset();
+    nearTranslucentPipelineState_.Reset();
     farPipelineState_.Reset();
+    exactNearTranslucentPipelineState_.Reset();
     mobPipelineState_.Reset();
     blockOutlinePipelineState_.Reset();
     lodIndirectPipelineState_.Reset();
@@ -1877,37 +1883,96 @@ void Renderer::createSceneColor()
     destroySceneColor();
 
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
-    D3D12_CLEAR_VALUE clearValue{};
-    clearValue.Format = kSceneColorFormat;
-    const D3D12_RESOURCE_DESC sceneDesc =
-        texture2DDesc(kSceneColorFormat,
-                      static_cast<UINT>(width_),
-                      static_cast<UINT>(height_),
-                      1,
-                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
-                                                   D3D12_HEAP_FLAG_NONE,
-                                                   &sceneDesc,
-                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                   &clearValue,
-                                                   IID_PPV_ARGS(&sceneColor_)),
-                  "failed to create HDR scene color");
-    setResourceDebugName(sceneColor_.Get(), L"SceneColorHDR");
+    const auto createRenderTarget = [&](DXGI_FORMAT format,
+                                        const wchar_t* debugName,
+                                        UINT rtvIndex,
+                                        Microsoft::WRL::ComPtr<ID3D12Resource>& resource,
+                                        D3D12_CPU_DESCRIPTOR_HANDLE& rtv,
+                                        int& srvIndex,
+                                        D3D12_CPU_DESCRIPTOR_HANDLE& srvCpu,
+                                        D3D12_GPU_DESCRIPTOR_HANDLE& srvGpu,
+                                        const float clearR,
+                                        D3D12_RESOURCE_STATES& state)
+    {
+        D3D12_CLEAR_VALUE clearValue{};
+        clearValue.Format = format;
+        clearValue.Color[0] = clearR;
+        clearValue.Color[1] = clearR;
+        clearValue.Color[2] = clearR;
+        clearValue.Color[3] = clearR;
+        const D3D12_RESOURCE_DESC desc =
+            texture2DDesc(format,
+                          static_cast<UINT>(width_),
+                          static_cast<UINT>(height_),
+                          1,
+                          D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        throwIfFailed(device_->CreateCommittedResource(&defaultHeap,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &desc,
+                                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                       &clearValue,
+                                                       IID_PPV_ARGS(&resource)),
+                      "failed to create HDR scene resource");
+        setResourceDebugName(resource.Get(), debugName);
 
-    sceneColorRtv_ = rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, kRtvIndexSceneColor);
-    device_->CreateRenderTargetView(sceneColor_.Get(), nullptr, sceneColorRtv_);
+        rtv = rtvHandleAt(rtvHeap_.Get(), rtvDescriptorSize_, rtvIndex);
+        device_->CreateRenderTargetView(resource.Get(), nullptr, rtv);
 
-    const UINT descriptorIndex = allocateSrvDescriptor();
-    sceneColorSrvIndex_ = static_cast<int>(descriptorIndex);
-    sceneColorSrvCpu_ = srvCpuHandle(descriptorIndex);
-    sceneColorSrvGpu_ = srvGpuHandle(descriptorIndex);
+        const UINT descriptorIndex = allocateSrvDescriptor();
+        srvIndex = static_cast<int>(descriptorIndex);
+        srvCpu = srvCpuHandle(descriptorIndex);
+        srvGpu = srvGpuHandle(descriptorIndex);
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Format = kSceneColorFormat;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
-    device_->CreateShaderResourceView(sceneColor_.Get(), &srvDesc, sceneColorSrvCpu_);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(resource.Get(), &srvDesc, srvCpu);
+        state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    };
+
+    createRenderTarget(kSceneColorFormat,
+                       L"SceneColorHDR",
+                       kRtvIndexSceneColor,
+                       sceneColor_,
+                       sceneColorRtv_,
+                       sceneColorSrvIndex_,
+                       sceneColorSrvCpu_,
+                       sceneColorSrvGpu_,
+                       0.0f,
+                       sceneColorState_);
+    createRenderTarget(kSceneColorFormat,
+                       L"SceneResolvedHDR",
+                       kRtvIndexSceneResolved,
+                       sceneResolved_,
+                       sceneResolvedRtv_,
+                       sceneResolvedSrvIndex_,
+                       sceneResolvedSrvCpu_,
+                       sceneResolvedSrvGpu_,
+                       0.0f,
+                       sceneResolvedState_);
+    createRenderTarget(kSceneColorFormat,
+                       L"TranslucencyAccumHDR",
+                       kRtvIndexTranslucencyAccum,
+                       translucencyAccum_,
+                       translucencyAccumRtv_,
+                       translucencyAccumSrvIndex_,
+                       translucencyAccumSrvCpu_,
+                       translucencyAccumSrvGpu_,
+                       0.0f,
+                       translucencyAccumState_);
+    createRenderTarget(DXGI_FORMAT_R16_FLOAT,
+                       L"TranslucencyReveal",
+                       kRtvIndexTranslucencyReveal,
+                       translucencyReveal_,
+                       translucencyRevealRtv_,
+                       translucencyRevealSrvIndex_,
+                       translucencyRevealSrvCpu_,
+                       translucencyRevealSrvGpu_,
+                       1.0f,
+                       translucencyRevealState_);
+
     sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     sceneColorClearLogged_ = false;
 }
@@ -1967,15 +2032,49 @@ void Renderer::destroySkyBackground()
 
 void Renderer::destroySceneColor()
 {
-    if (sceneColorSrvIndex_ >= 0)
+    const auto destroySrvBackedTarget = [&](int& srvIndex,
+                                            D3D12_CPU_DESCRIPTOR_HANDLE& srvCpu,
+                                            D3D12_GPU_DESCRIPTOR_HANDLE& srvGpu,
+                                            D3D12_CPU_DESCRIPTOR_HANDLE& rtv,
+                                            Microsoft::WRL::ComPtr<ID3D12Resource>& resource,
+                                            D3D12_RESOURCE_STATES& state)
     {
-        freeSrvDescriptor(static_cast<UINT>(sceneColorSrvIndex_));
-        sceneColorSrvIndex_ = -1;
-    }
-    sceneColorSrvCpu_ = {};
-    sceneColorSrvGpu_ = {};
-    sceneColorRtv_ = {};
-    sceneColor_.Reset();
+        if (srvIndex >= 0)
+        {
+            freeSrvDescriptor(static_cast<UINT>(srvIndex));
+            srvIndex = -1;
+        }
+        srvCpu = {};
+        srvGpu = {};
+        rtv = {};
+        resource.Reset();
+        state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    };
+
+    destroySrvBackedTarget(sceneColorSrvIndex_,
+                           sceneColorSrvCpu_,
+                           sceneColorSrvGpu_,
+                           sceneColorRtv_,
+                           sceneColor_,
+                           sceneColorState_);
+    destroySrvBackedTarget(sceneResolvedSrvIndex_,
+                           sceneResolvedSrvCpu_,
+                           sceneResolvedSrvGpu_,
+                           sceneResolvedRtv_,
+                           sceneResolved_,
+                           sceneResolvedState_);
+    destroySrvBackedTarget(translucencyAccumSrvIndex_,
+                           translucencyAccumSrvCpu_,
+                           translucencyAccumSrvGpu_,
+                           translucencyAccumRtv_,
+                           translucencyAccum_,
+                           translucencyAccumState_);
+    destroySrvBackedTarget(translucencyRevealSrvIndex_,
+                           translucencyRevealSrvCpu_,
+                           translucencyRevealSrvGpu_,
+                           translucencyRevealRtv_,
+                           translucencyReveal_,
+                           translucencyRevealState_);
     sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     sceneColorClearLogged_ = false;
 }
@@ -2279,6 +2378,8 @@ void Renderer::createPipelines()
         loadShaderBytecode(shaderPath("shadow_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
         loadShaderBytecode(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> translucentPs =
+        loadShaderBytecode(shaderPath("world_translucent_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
           loadShaderBytecode(shaderPath("world_far_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> mobPs =
@@ -2303,23 +2404,27 @@ void Renderer::createPipelines()
           loadShaderBytecode(shaderPath("clouds_vs.hlsl"), "main", "vs_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> cloudsPs =
           loadShaderBytecode(shaderPath("clouds_ps.hlsl"), "main", "ps_5_0");
+      Microsoft::WRL::ComPtr<ID3DBlob> oitCompositePs =
+          loadShaderBytecode(shaderPath("oit_composite_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> tonePs =
           loadShaderBytecode(shaderPath("tone_map_ps.hlsl"), "main", "ps_5_0");
 
-    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 6> inputLayout = {{
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 7> inputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, normal)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, tileCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasBase)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasSize)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"COLOR", 0, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(WorldVertex, lightingData)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 1, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(WorldVertex, blockId)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
-    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> shadowInputLayout = {{
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 5> shadowInputLayout = {{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, tileCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasBase)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(WorldVertex, atlasSize)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 1, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(WorldVertex, blockId)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> mobInputLayout = {{
@@ -2382,6 +2487,36 @@ void Renderer::createPipelines()
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&nearPipelineState_)),
                   "failed to create near pipeline");
 
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC translucentWorldPso = worldPso;
+    translucentWorldPso.PS = {translucentPs->GetBufferPointer(), translucentPs->GetBufferSize()};
+    translucentWorldPso.BlendState.AlphaToCoverageEnable = FALSE;
+    translucentWorldPso.BlendState.IndependentBlendEnable = TRUE;
+    translucentWorldPso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    translucentWorldPso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    translucentWorldPso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
+    translucentWorldPso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    translucentWorldPso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    translucentWorldPso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+    translucentWorldPso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    translucentWorldPso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    translucentWorldPso.BlendState.RenderTarget[1].BlendEnable = TRUE;
+    translucentWorldPso.BlendState.RenderTarget[1].SrcBlend = D3D12_BLEND_ZERO;
+    translucentWorldPso.BlendState.RenderTarget[1].DestBlend = D3D12_BLEND_INV_SRC_COLOR;
+    translucentWorldPso.BlendState.RenderTarget[1].BlendOp = D3D12_BLEND_OP_ADD;
+    translucentWorldPso.BlendState.RenderTarget[1].SrcBlendAlpha = D3D12_BLEND_ZERO;
+    translucentWorldPso.BlendState.RenderTarget[1].DestBlendAlpha = D3D12_BLEND_ONE;
+    translucentWorldPso.BlendState.RenderTarget[1].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    translucentWorldPso.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED;
+    translucentWorldPso.NumRenderTargets = 2;
+    translucentWorldPso.RTVFormats[0] = kSceneColorFormat;
+    translucentWorldPso.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
+    translucentWorldPso.DepthStencilState.DepthEnable = TRUE;
+    translucentWorldPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    translucentWorldPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&translucentWorldPso,
+                                                       IID_PPV_ARGS(&nearTranslucentPipelineState_)),
+                  "failed to create near translucent pipeline");
+
     D3D12_GRAPHICS_PIPELINE_STATE_DESC exactWorldPso = worldPso;
     exactWorldPso.InputLayout = {nullptr, 0};
     exactWorldPso.pRootSignature = exactWorldRootSignature_.Get();
@@ -2389,6 +2524,14 @@ void Renderer::createPipelines()
     throwIfFailed(device_->CreateGraphicsPipelineState(&exactWorldPso,
                                                        IID_PPV_ARGS(&exactNearPipelineState_)),
                   "failed to create exact near pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC exactTranslucentWorldPso = translucentWorldPso;
+    exactTranslucentWorldPso.InputLayout = {nullptr, 0};
+    exactTranslucentWorldPso.pRootSignature = exactWorldRootSignature_.Get();
+    exactTranslucentWorldPso.VS = {exactWorldVs->GetBufferPointer(), exactWorldVs->GetBufferSize()};
+    throwIfFailed(device_->CreateGraphicsPipelineState(&exactTranslucentWorldPso,
+                                                       IID_PPV_ARGS(&exactNearTranslucentPipelineState_)),
+                  "failed to create exact near translucent pipeline");
 
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
@@ -2650,6 +2793,23 @@ void Renderer::createPipelines()
       D3D12_GRAPHICS_PIPELINE_STATE_DESC tonePso{};
       tonePso.pRootSignature = fullscreenRootSignature_.Get();
       tonePso.VS = {fullscreenVs->GetBufferPointer(), fullscreenVs->GetBufferSize()};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC oitCompositePso = tonePso;
+    oitCompositePso.PS = {oitCompositePs->GetBufferPointer(), oitCompositePs->GetBufferSize()};
+    oitCompositePso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    oitCompositePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    oitCompositePso.RasterizerState.DepthClipEnable = TRUE;
+    oitCompositePso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    oitCompositePso.SampleMask = UINT_MAX;
+    oitCompositePso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    oitCompositePso.NumRenderTargets = 1;
+    oitCompositePso.RTVFormats[0] = kSceneColorFormat;
+    oitCompositePso.SampleDesc.Count = 1;
+    oitCompositePso.DepthStencilState.DepthEnable = FALSE;
+    oitCompositePso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    oitCompositePso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&oitCompositePso, IID_PPV_ARGS(&oitCompositePipelineState_)),
+                  "failed to create OIT composite pipeline");
+
     tonePso.PS = {tonePs->GetBufferPointer(), tonePs->GetBufferSize()};
     tonePso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     tonePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -3894,6 +4054,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                             static_cast<float>(static_cast<int>(environment.debug.terrainDebugView)),
                                             skyPassEnabled ? 1.0f : 0.0f,
                                             environment.debug.aoIntensity);
+    nearConstants->translucencyParams = glm::vec4(0.35f, 0.0f, 0.0f, 0.0f);
     const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
 
     const auto drawBaseSkyToTarget = [&](D3D12_CPU_DESCRIPTOR_HANDLE rtv,
@@ -4308,21 +4469,6 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         }
     }
 
-    if (renderData.hasHighlight)
-    {
-        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
-        commandList_->RSSetViewports(1, &viewport_);
-        commandList_->RSSetScissorRects(1, &scissorRect_);
-        commandList_->SetGraphicsRootSignature(shadowRootSignature_.Get());
-        commandList_->SetPipelineState(blockOutlinePipelineState_.Get());
-        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
-        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-        commandList_->DrawInstanced(24, 1, 0, 0);
-    }
-
-    profilingSnapshot_.worldDrawMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldStart).count();
-
     if (environment.debug.skyPassEnabled)
     {
         drawCloudsToTarget(sceneColorRtv_,
@@ -4332,6 +4478,100 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                            true);
     }
 
+    if (translucencyAccum_ != nullptr && translucencyReveal_ != nullptr)
+    {
+        if (translucencyAccumState_ != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(translucencyAccum_.Get(),
+                                  translucencyAccumState_,
+                                  D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandList_->ResourceBarrier(1, &barrier);
+            translucencyAccumState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+        if (translucencyRevealState_ != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(translucencyReveal_.Get(),
+                                  translucencyRevealState_,
+                                  D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandList_->ResourceBarrier(1, &barrier);
+            translucencyRevealState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        const float accumClear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float revealClear[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+        commandList_->ClearRenderTargetView(translucencyAccumRtv_, accumClear, 0, nullptr);
+        commandList_->ClearRenderTargetView(translucencyRevealRtv_, revealClear, 0, nullptr);
+
+        const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> translucentRtvs{
+            translucencyAccumRtv_,
+            translucencyRevealRtv_};
+        commandList_->OMSetRenderTargets(static_cast<UINT>(translucentRtvs.size()),
+                                         translucentRtvs.data(),
+                                         FALSE,
+                                         &depthHandle);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
+        commandList_->SetGraphicsRootDescriptorTable(1, atlasTexture.srvGpu);
+        commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(3, shadowMapSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(4, skyBackgroundSrvGpu_);
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        commandList_->SetPipelineState(nearTranslucentPipelineState_.Get());
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (const ChunkRenderBatch& batch : renderData.nearBatches)
+        {
+            if (batch.indexCounts.empty())
+            {
+                continue;
+            }
+
+            commandList_->IASetVertexBuffers(0, 1, &batch.vertexBufferView);
+            commandList_->IASetIndexBuffer(&batch.indexBufferView);
+            const std::size_t drawCount =
+                (std::min)(batch.indexCounts.size(),
+                           (std::min)(batch.firstIndexLocations.size(), batch.baseVertices.size()));
+            for (std::size_t i = 0; i < drawCount; ++i)
+            {
+                commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
+            }
+        }
+
+        commandList_->SetGraphicsRootSignature(exactWorldRootSignature_.Get());
+        commandList_->SetPipelineState(exactNearTranslucentPipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        commandList_->SetGraphicsRootShaderResourceView(4, renderData.exactBlockUvBuffer != nullptr
+                                                               ? renderData.exactBlockUvBuffer->GetGPUVirtualAddress()
+                                                               : 0);
+        commandList_->SetGraphicsRootDescriptorTable(5, atlasTexture.srvGpu);
+        commandList_->SetGraphicsRootDescriptorTable(6, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(7, shadowMapSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(8, skyBackgroundSrvGpu_);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
+        {
+            if (batch.faceCounts.empty() ||
+                batch.faceDescriptorBuffer == nullptr ||
+                batch.drawRecordMetadataBuffer == nullptr ||
+                renderData.exactBlockUvBuffer == nullptr)
+            {
+                continue;
+            }
+
+            commandList_->SetGraphicsRootShaderResourceView(2, batch.faceDescriptorBuffer->GetGPUVirtualAddress());
+            commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
+            const std::size_t drawCount =
+                (std::min)(batch.faceCounts.size(), batch.recordIndices.size());
+            for (std::size_t i = 0; i < drawCount; ++i)
+            {
+                commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
+                commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
+            }
+        }
+    }
+
     if (sceneColorState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
     {
         const D3D12_RESOURCE_BARRIER barrier =
@@ -4339,6 +4579,80 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->ResourceBarrier(1, &barrier);
         sceneColorState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
+    if (translucencyAccum_ != nullptr &&
+        translucencyAccumState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(translucencyAccum_.Get(),
+                              translucencyAccumState_,
+                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &barrier);
+        translucencyAccumState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (translucencyReveal_ != nullptr &&
+        translucencyRevealState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(translucencyReveal_.Get(),
+                              translucencyRevealState_,
+                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &barrier);
+        translucencyRevealState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (sceneResolved_ != nullptr && sceneResolvedState_ != D3D12_RESOURCE_STATE_RENDER_TARGET)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(sceneResolved_.Get(),
+                              sceneResolvedState_,
+                              D3D12_RESOURCE_STATE_RENDER_TARGET);
+        commandList_->ResourceBarrier(1, &barrier);
+        sceneResolvedState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+
+    if (sceneResolved_ != nullptr)
+    {
+        commandList_->OMSetRenderTargets(1, &sceneResolvedRtv_, FALSE, nullptr);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(fullscreenRootSignature_.Get());
+        commandList_->SetPipelineState(oitCompositePipelineState_.Get());
+
+        void* compositeCpu = nullptr;
+        const std::uint64_t compositeCb = allocateFrameConstantBytes(sizeof(ToneMapConstants), &compositeCpu);
+        auto* compositeConstants = static_cast<ToneMapConstants*>(compositeCpu);
+        compositeConstants->exposureWhitePoint = glm::vec4(0.0f);
+        commandList_->SetGraphicsRootConstantBufferView(0, compositeCb);
+        commandList_->SetGraphicsRootDescriptorTable(1, sceneColorSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(2, translucencyAccumSrvGpu_);
+        commandList_->SetGraphicsRootDescriptorTable(3, translucencyRevealSrvGpu_);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        commandList_->DrawInstanced(3, 1, 0, 0);
+    }
+
+    if (renderData.hasHighlight && sceneResolved_ != nullptr)
+    {
+        commandList_->OMSetRenderTargets(1, &sceneResolvedRtv_, FALSE, &depthHandle);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+        commandList_->SetGraphicsRootSignature(shadowRootSignature_.Get());
+        commandList_->SetPipelineState(blockOutlinePipelineState_.Get());
+        commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+        commandList_->DrawInstanced(24, 1, 0, 0);
+    }
+
+    if (sceneResolved_ != nullptr && sceneResolvedState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        const D3D12_RESOURCE_BARRIER barrier =
+            transitionBarrier(sceneResolved_.Get(),
+                              sceneResolvedState_,
+                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &barrier);
+        sceneResolvedState_ = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
+    profilingSnapshot_.worldDrawMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldStart).count();
 
     const auto toneMapStart = std::chrono::steady_clock::now();
     const D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv =
@@ -4353,10 +4667,11 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     const std::uint64_t toneCb = allocateFrameConstantBytes(sizeof(ToneMapConstants), &toneCpu);
     auto* toneConstants = static_cast<ToneMapConstants*>(toneCpu);
     toneConstants->exposureWhitePoint = glm::vec4(environment.tonemap.exposure, environment.tonemap.whitePoint, 0.0f, 0.0f);
+    const D3D12_GPU_DESCRIPTOR_HANDLE resolvedSrv = sceneResolved_ != nullptr ? sceneResolvedSrvGpu_ : sceneColorSrvGpu_;
     commandList_->SetGraphicsRootConstantBufferView(0, toneCb);
-    commandList_->SetGraphicsRootDescriptorTable(1, sceneColorSrvGpu_);
-    commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
-    commandList_->SetGraphicsRootDescriptorTable(3, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+    commandList_->SetGraphicsRootDescriptorTable(1, resolvedSrv);
+    commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : resolvedSrv);
+    commandList_->SetGraphicsRootDescriptorTable(3, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : resolvedSrv);
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->DrawInstanced(3, 1, 0, 0);
     profilingSnapshot_.toneMapMs =

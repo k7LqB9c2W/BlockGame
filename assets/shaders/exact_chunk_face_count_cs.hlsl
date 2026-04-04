@@ -192,7 +192,7 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
                 GpuExactFaceDescriptor descriptor;
                 descriptor.packedLocal = packFaceLocal(uint(owningX), uint(owningY), uint(owningZ), faceId);
                 descriptor.blockFaceUvIndex = 0u;
-                descriptor.reserved0 = 0u;
+                descriptor.blockId = 0u;
                 descriptor.reserved1 = 0u;
                 descriptor.packedLighting0 = 0u;
                 descriptor.packedLighting1 = 0u;

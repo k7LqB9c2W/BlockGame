@@ -4449,6 +4449,7 @@ private:
         D3D12_RESOURCE_STATES faceDescriptorState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES drawRecordState{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES drawRecordMetadataState{D3D12_RESOURCE_STATE_COMMON};
+        UINT64 drawRecordEpoch{1};
         std::size_t vertexCapacity{0};
         std::size_t indexCapacity{0};
         std::size_t faceCapacity{0};
@@ -4648,10 +4649,10 @@ private:
     [[nodiscard]] std::string summarizeChunkBufferPagesLocked() const;
     void ensureChunkBufferPageUploadBuffers(ChunkBufferPage& page);
     static void releaseChunkBufferPageUploadBuffers(ChunkBufferPage& page) noexcept;
-    [[nodiscard]] bool ensureChunkDrawRecordClearUploadBuffer();
-    void markChunkDrawRecordInactive(ChunkBufferPage& page,
-                                     std::uint32_t recordIndex,
-                                     bool residentRecord);
+    void enqueueExactDrawRecordInactive(std::uint32_t pageIndex,
+                                        std::uint32_t recordIndex,
+                                        bool residentRecord);
+    void drainPendingExactDrawRecordClears();
     [[nodiscard]] static std::uint64_t exactGpuEmitConfigBytes() noexcept;
     [[nodiscard]] static std::uint64_t exactGpuPageMetadataBytes(std::size_t pageCount) noexcept;
     [[nodiscard]] static FarLodGpuContext::ExactPageGpuMetadata buildExactGpuPageMetadata(
@@ -5704,9 +5705,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> dxgiAdapter_;
     UploadContext uploadContext_{};
-    UploadContext chunkDrawRecordUploadContext_{};
-    Microsoft::WRL::ComPtr<ID3D12Resource> chunkDrawRecordClearUploadBuffer_{};
-    std::byte* chunkDrawRecordClearUploadMapped_{nullptr};
+    struct PendingExactDrawRecordClear
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::uint32_t recordIndex{kInvalidExactGpuDrawRecordIndex};
+        UINT64 pageEpoch{0};
+    };
+    std::mutex pendingExactDrawRecordClearsMutex_;
+    std::vector<PendingExactDrawRecordClear> pendingExactDrawRecordClears_{};
     FarLodGpuContext exactGpuContext_{};
     Microsoft::WRL::ComPtr<ID3D12Resource> exactGpuEmitConfigBuffer_{};
     Microsoft::WRL::ComPtr<ID3D12Resource> exactGpuPageMetadataBuffer_{};
@@ -6146,7 +6152,6 @@ ChunkManager::Impl::~Impl()
     exactGpuChunkAllocationRecords_.clear();
     exactGpuBlockUvBuffer_.Reset();
     exactGpuEmptyVoxelBuffer_.Reset();
-    chunkDrawRecordUploadContext_.shutdown();
     uploadContext_.shutdown();
 }
 
@@ -6168,7 +6173,6 @@ void ChunkManager::Impl::initializeRendering(ID3D12Device* device)
         }
     }
     uploadContext_.initialize(device_.Get());
-    chunkDrawRecordUploadContext_.initialize(device_.Get());
     exactGpuContext_.initialize(device_.Get());
     exactGpuContext_.setReadbackEnabled(true);
     resetExactGpuEmitBuffers();
@@ -7252,6 +7256,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     updateMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
+
+    // Apply batched draw-record inactivation on the owning exact-GPU compute queue before the renderer
+    // snapshots `lastSubmittedExactGpuFenceValue()` for this frame's upload synchronization.
+    drainPendingExactDrawRecordClears();
+
     const double accountedUpdateMs =
         verticalRadiusMsLastFrame_ +
         priorityUpdateMsLastFrame_ +
@@ -11421,49 +11430,6 @@ void ChunkManager::Impl::releaseChunkBufferPageUploadBuffers(ChunkBufferPage& pa
     page.mappedIndexData = nullptr;
 }
 
-bool ChunkManager::Impl::ensureChunkDrawRecordClearUploadBuffer()
-{
-    if (chunkDrawRecordClearUploadBuffer_ != nullptr && chunkDrawRecordClearUploadMapped_ != nullptr)
-    {
-        return true;
-    }
-
-    if (device_ == nullptr)
-    {
-        return false;
-    }
-
-    try
-    {
-        const std::uint64_t clearBytes = std::max<std::uint64_t>(
-            sizeof(ChunkRenderBatch::GpuCullRecord),
-            sizeof(FarLodGpuContext::ExactDrawRecordMetadata));
-        chunkDrawRecordClearUploadBuffer_ =
-            createUploadBuffer(device_.Get(),
-                               clearBytes,
-                               chunkDrawRecordClearUploadMapped_);
-    }
-    catch (const std::exception&)
-    {
-        chunkDrawRecordClearUploadBuffer_.Reset();
-        chunkDrawRecordClearUploadMapped_ = nullptr;
-        return false;
-    }
-
-    if (chunkDrawRecordClearUploadBuffer_ == nullptr || chunkDrawRecordClearUploadMapped_ == nullptr)
-    {
-        chunkDrawRecordClearUploadBuffer_.Reset();
-        chunkDrawRecordClearUploadMapped_ = nullptr;
-        return false;
-    }
-
-    std::memset(chunkDrawRecordClearUploadMapped_,
-                0,
-                std::max(sizeof(ChunkRenderBatch::GpuCullRecord),
-                         sizeof(FarLodGpuContext::ExactDrawRecordMetadata)));
-    return true;
-}
-
 std::uint64_t ChunkManager::Impl::exactGpuEmitConfigBytes() noexcept
 {
     return sizeof(FarLodGpuContext::ExactEmitConfig);
@@ -11847,59 +11813,198 @@ bool ChunkManager::Impl::syncExactGpuChunkAllocationRecords(
     return true;
 }
 
-void ChunkManager::Impl::markChunkDrawRecordInactive(ChunkBufferPage& page,
-                                                     std::uint32_t recordIndex,
-                                                     bool residentRecord)
+void ChunkManager::Impl::enqueueExactDrawRecordInactive(std::uint32_t pageIndex,
+                                                        std::uint32_t recordIndex,
+                                                        bool residentRecord)
 {
     if (recordIndex == kInvalidExactGpuDrawRecordIndex ||
-        page.drawRecordBuffer == nullptr ||
-        device_ == nullptr ||
-        !chunkDrawRecordUploadContext_.ready())
+        pageIndex == kInvalidChunkBufferPage)
     {
         return;
     }
 
-    if (!ensureChunkDrawRecordClearUploadBuffer())
+    UINT64 pageEpoch = 0;
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        if (pageIndex >= bufferPages_.size())
+        {
+            return;
+        }
+
+        ChunkBufferPage& page = bufferPages_[pageIndex];
+        if (page.usage != ChunkBufferPageUsage::ExactGpu ||
+            page.drawRecordBuffer == nullptr)
+        {
+            return;
+        }
+
+        pageEpoch = page.drawRecordEpoch;
+        if (residentRecord)
+        {
+            if (page.liveResidentChunkCount > 0)
+            {
+                --page.liveResidentChunkCount;
+            }
+            ++page.inactiveResidentRecordCount;
+        }
+    }
+
+    if (pageEpoch == 0)
     {
         return;
     }
 
-    std::uint32_t inactiveReservedFlags = 0u;
-    std::memcpy(chunkDrawRecordClearUploadMapped_, &inactiveReservedFlags, sizeof(inactiveReservedFlags));
-    if (!chunkDrawRecordUploadContext_.begin())
+    std::lock_guard<std::mutex> lock(pendingExactDrawRecordClearsMutex_);
+    pendingExactDrawRecordClears_.push_back(PendingExactDrawRecordClear{
+        pageIndex,
+        recordIndex,
+        pageEpoch});
+}
+
+void ChunkManager::Impl::drainPendingExactDrawRecordClears()
+{
+    std::vector<PendingExactDrawRecordClear> clears;
     {
+        std::lock_guard<std::mutex> lock(pendingExactDrawRecordClearsMutex_);
+        if (pendingExactDrawRecordClears_.empty())
+        {
+            return;
+        }
+        clears.swap(pendingExactDrawRecordClears_);
+    }
+
+    std::unique_lock<std::mutex> exactLock(exactGpuExecutionMutex_);
+    if (!exactGpuContext_.begin())
+    {
+        std::lock_guard<std::mutex> lock(pendingExactDrawRecordClearsMutex_);
+        pendingExactDrawRecordClears_.insert(pendingExactDrawRecordClears_.end(), clears.begin(), clears.end());
         return;
     }
 
+    // Synchronize against the last submitted render work before mutating resident draw-record buffers.
     if (renderFence_ != nullptr && renderFenceValue_ > 0)
     {
-        chunkDrawRecordUploadContext_.waitForFence(renderFence_, renderFenceValue_);
+        exactGpuContext_.waitForFence(renderFence_, renderFenceValue_);
     }
-    chunkDrawRecordUploadContext_.transition(page.drawRecordBuffer.Get(),
-                                             page.drawRecordState,
-                                             D3D12_RESOURCE_STATE_COPY_DEST);
-    page.drawRecordState = D3D12_RESOURCE_STATE_COPY_DEST;
-    chunkDrawRecordUploadContext_.copyBuffer(page.drawRecordBuffer.Get(),
-                                             static_cast<std::uint64_t>(recordIndex) *
-                                                 sizeof(ChunkRenderBatch::GpuCullRecord) +
-                                                 offsetof(ChunkRenderBatch::GpuCullRecord, reserved),
-                                             chunkDrawRecordClearUploadBuffer_.Get(),
-                                             0,
-                                             static_cast<std::uint64_t>(sizeof(std::uint32_t)));
-    chunkDrawRecordUploadContext_.transition(page.drawRecordBuffer.Get(),
-                                             page.drawRecordState,
-                                             D3D12_RESOURCE_STATE_COMMON);
-    page.drawRecordState = D3D12_RESOURCE_STATE_COMMON;
-    chunkDrawRecordUploadContext_.flush(nullptr);
-    chunkDrawRecordUploadContext_.waitForIdle();
 
-    if (residentRecord)
+    struct PageClearBatch
     {
-        if (page.liveResidentChunkCount > 0)
+        UINT64 epoch{0};
+        std::vector<std::uint32_t> recordIndices{};
+    };
+
+    // Keep batches bounded so we never risk exhausting the per-submission upload scratch.
+    static constexpr std::size_t kMaxClearIndicesPerPage = 4096u;
+
+    // Group by page so we can dispatch one clear per page.
+    std::unordered_map<std::uint32_t, PageClearBatch> pageToBatches;
+    pageToBatches.reserve(clears.size());
+    std::vector<PendingExactDrawRecordClear> deferred;
+
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        for (const PendingExactDrawRecordClear& clear : clears)
         {
-            --page.liveResidentChunkCount;
+            if (clear.pageIndex >= bufferPages_.size())
+            {
+                continue;
+            }
+
+            ChunkBufferPage& page = bufferPages_[clear.pageIndex];
+            if (page.usage != ChunkBufferPageUsage::ExactGpu ||
+                page.drawRecordBuffer == nullptr ||
+                page.drawRecordEpoch != clear.pageEpoch)
+            {
+                continue;
+            }
+
+            PageClearBatch& batch = pageToBatches[clear.pageIndex];
+            if (batch.epoch == 0)
+            {
+                batch.epoch = clear.pageEpoch;
+            }
+            if (batch.epoch != clear.pageEpoch)
+            {
+                continue;
+            }
+
+            if (batch.recordIndices.size() < kMaxClearIndicesPerPage)
+            {
+                batch.recordIndices.push_back(clear.recordIndex);
+            }
+            else
+            {
+                deferred.push_back(clear);
+            }
         }
-        ++page.inactiveResidentRecordCount;
+
+        for (auto& [pageIndex, batch] : pageToBatches)
+        {
+            if (pageIndex >= bufferPages_.size() || batch.recordIndices.empty())
+            {
+                continue;
+            }
+
+            ChunkBufferPage& page = bufferPages_[pageIndex];
+            if (page.drawRecordEpoch != batch.epoch)
+            {
+                continue;
+            }
+
+            // Deduplicate to avoid wasted dispatch work under churn.
+            std::sort(batch.recordIndices.begin(), batch.recordIndices.end());
+            batch.recordIndices.erase(std::unique(batch.recordIndices.begin(), batch.recordIndices.end()),
+                                      batch.recordIndices.end());
+            if (batch.recordIndices.empty())
+            {
+                continue;
+            }
+
+            const D3D12_RESOURCE_STATES desiredState =
+                (page.state == ChunkBufferPageState::OpenWritable)
+                    ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                    : D3D12_RESOURCE_STATE_COMMON;
+
+            if (page.drawRecordState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+            {
+                exactGpuContext_.transition(page.drawRecordBuffer.Get(),
+                                            page.drawRecordState,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                page.drawRecordState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+
+            const bool cleared =
+                exactGpuContext_.clearExactDrawRecordReservedFlags(page.drawRecordBuffer.Get(),
+                                                                  std::span<const std::uint32_t>(batch.recordIndices));
+            if (!cleared)
+            {
+                // If we fail to record the clear (typically scratch exhaustion), keep the work queued.
+                for (std::uint32_t recordIndex : batch.recordIndices)
+                {
+                    deferred.push_back(PendingExactDrawRecordClear{pageIndex, recordIndex, batch.epoch});
+                }
+            }
+
+            if (page.drawRecordState != desiredState)
+            {
+                exactGpuContext_.transition(page.drawRecordBuffer.Get(),
+                                            page.drawRecordState,
+                                            desiredState);
+                page.drawRecordState = desiredState;
+            }
+        }
+    }
+
+    const FarLodGpuContext::FlushResult flushResult = exactGpuContext_.flush();
+    if (flushResult.fenceValue != 0)
+    {
+        exactGpuContext_.releaseSubmissionSlot(flushResult.submissionSlotIndex);
+    }
+
+    if (!deferred.empty())
+    {
+        std::lock_guard<std::mutex> lock(pendingExactDrawRecordClearsMutex_);
+        pendingExactDrawRecordClears_.insert(pendingExactDrawRecordClears_.end(), deferred.begin(), deferred.end());
     }
 }
 
@@ -12024,6 +12129,9 @@ ChunkManager::Impl::ChunkBufferPage ChunkManager::Impl::createBufferPage(std::si
 
 void ChunkManager::Impl::resetChunkBufferPage(ChunkBufferPage& page) noexcept
 {
+    page.drawRecordEpoch = (page.drawRecordEpoch == std::numeric_limits<UINT64>::max())
+                               ? 1u
+                               : (page.drawRecordEpoch + 1u);
     page.vertexCursor = 0;
     page.indexCursor = 0;
     page.faceCursor = 0;
@@ -12712,9 +12820,9 @@ void ChunkManager::Impl::releasePendingExactBuildAllocation(PendingExactGpuBuild
         pending.allocation.pageIndex < bufferPages_.size() &&
         pending.allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
     {
-        markChunkDrawRecordInactive(bufferPages_[pending.allocation.pageIndex],
-                                    pending.allocation.recordIndex,
-                                    false);
+        enqueueExactDrawRecordInactive(pending.allocation.pageIndex,
+                                       pending.allocation.recordIndex,
+                                       false);
     }
 
     bool handledPersistentReservation = false;
@@ -15499,12 +15607,10 @@ void ChunkManager::Impl::releaseResidentChunkDrawAllocation(const ResidentChunkD
                                 allocation.exactDraw ? 0u : allocation.indexCount,
                                 true);
 
-    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
     if (allocation.exactDraw &&
-        allocation.pageIndex < bufferPages_.size() &&
         allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
     {
-        markChunkDrawRecordInactive(bufferPages_[allocation.pageIndex], allocation.recordIndex, true);
+        enqueueExactDrawRecordInactive(allocation.pageIndex, allocation.recordIndex, true);
     }
 }
 

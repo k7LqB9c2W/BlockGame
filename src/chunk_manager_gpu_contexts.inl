@@ -24,6 +24,10 @@ public:
         }
 
         device_ = device;
+        // When the D3D12 debug layer is enabled, the InfoQueue contains the actionable message
+        // explaining why a command list Close() fails. Capturing it here avoids requiring an
+        // attached debugger or external debug viewers.
+        device_->QueryInterface(IID_PPV_ARGS(&infoQueue_));
 
         D3D12_COMMAND_QUEUE_DESC queueDesc{};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
@@ -61,6 +65,7 @@ public:
         allocator_.Reset();
         queue_.Reset();
         fence_.Reset();
+        infoQueue_.Reset();
         device_.Reset();
         graphicsFence_ = nullptr;
         graphicsFenceValue_ = 0;
@@ -149,7 +154,29 @@ public:
             *timings = FlushTimings{};
         }
 
-        throwIfFailedDx(commandList_->Close(), "failed to close upload command list");
+        const HRESULT closeHr = commandList_->Close();
+        if (FAILED(closeHr))
+        {
+            if (chunkManagerDebugLoggingEnabled())
+            {
+                std::ostringstream failure;
+                failure << "failed to close upload command list"
+                        << " (hr=" << hexHr(closeHr) << ")";
+                const std::string debugMessages = collectInfoQueueMessages();
+                if (!debugMessages.empty())
+                {
+                    failure << "; D3D12 debug messages:" << debugMessages;
+                }
+                const std::string dredMessages = collectDeviceDredMessages(device_.Get());
+                if (!dredMessages.empty())
+                {
+                    failure << "; DRED:" << dredMessages;
+                }
+                chunkManagerDebugLog(failure.str());
+            }
+
+            throw std::runtime_error("failed to close upload command list");
+        }
         if (hasCommands_)
         {
             // Chunk buffers are shared with the render path. Do not transition/copy them
@@ -220,11 +247,48 @@ public:
     }
 
 private:
+    [[nodiscard]] std::string collectInfoQueueMessages() const
+    {
+        if (infoQueue_ == nullptr)
+        {
+            return {};
+        }
+
+        const UINT64 messageCount = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
+        if (messageCount == 0)
+        {
+            return {};
+        }
+
+        std::ostringstream oss;
+        const UINT64 firstMessage = messageCount > 12 ? messageCount - 12 : 0;
+        for (UINT64 i = firstMessage; i < messageCount; ++i)
+        {
+            SIZE_T messageSize = 0;
+            if (FAILED(infoQueue_->GetMessage(i, nullptr, &messageSize)) || messageSize == 0)
+            {
+                continue;
+            }
+
+            std::vector<std::byte> storage(messageSize);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            if (FAILED(infoQueue_->GetMessage(i, message, &messageSize)))
+            {
+                continue;
+            }
+
+            oss << "\n  [" << i << "] " << (message->pDescription != nullptr ? message->pDescription : "<null>");
+        }
+
+        return oss.str();
+    }
+
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue_;
     HANDLE fenceEvent_{nullptr};
     UINT64 fenceValue_{0};
     UINT64 lastSubmittedFenceValue_{0};
@@ -493,6 +557,7 @@ public:
         facePrefixScanPipelineState_.Reset();
         facePrefixAddPipelineState_.Reset();
         faceEmitPipelineState_.Reset();
+        exactDescriptorGenPipelineState_.Reset();
         exactSynthPipelineState_.Reset();
         exactStampPipelineState_.Reset();
         exactHaloCachePipelineState_.Reset();
@@ -501,6 +566,7 @@ public:
         exactFaceCountPipelineState_.Reset();
         exactFacePrefixPipelineState_.Reset();
         exactFaceEmitPipelineState_.Reset();
+        exactDrawRecordClearPipelineState_.Reset();
         atlasSeedRootSignature_.Reset();
         atlasSampleRootSignature_.Reset();
         atlasFinalizeRootSignature_.Reset();
@@ -511,8 +577,10 @@ public:
         facePrefixScanRootSignature_.Reset();
         facePrefixAddRootSignature_.Reset();
         faceEmitRootSignature_.Reset();
+        exactDescriptorGenRootSignature_.Reset();
         exactPrepassRootSignature_.Reset();
         exactFaceEmitRootSignature_.Reset();
+        exactDrawRecordClearRootSignature_.Reset();
         descriptorHeap_.Reset();
         atlasSeedCacheShader_.Reset();
         atlasSampleCacheShader_.Reset();
@@ -532,10 +600,12 @@ public:
         exactFaceCountShader_.Reset();
         exactFacePrefixShader_.Reset();
         exactFaceEmitShader_.Reset();
+        exactDrawRecordClearShader_.Reset();
         exactFaceCountScratchBuffer_.Reset();
         exactFaceDescriptorScratchBuffer_.Reset();
         exactFacePrefixScratchBuffer_.Reset();
         exactFaceTotalScratchBuffer_.Reset();
+        exactDescriptorScratchBuffer_.Reset();
         exactOverflowCountScratchBuffer_.Reset();
         exactOverflowEntryScratchBuffer_.Reset();
         exactCompletionScratchBuffer_.Reset();
@@ -2369,6 +2439,49 @@ public:
         hasCommands_ = true;
     }
 
+    [[nodiscard]] bool clearExactDrawRecordReservedFlags(ID3D12Resource* drawRecordBuffer,
+                                                        std::span<const std::uint32_t> recordIndices)
+    {
+        if (!open_ ||
+            exactDrawRecordClearPipelineState_ == nullptr ||
+            exactDrawRecordClearRootSignature_ == nullptr ||
+            drawRecordBuffer == nullptr ||
+            recordIndices.empty())
+        {
+            return false;
+        }
+
+        ScratchAllocation indicesUpload =
+            allocateUpload(static_cast<std::uint64_t>(recordIndices.size()) * sizeof(std::uint32_t),
+                           alignof(std::uint32_t));
+        if (indicesUpload.resource == nullptr || indicesUpload.cpuPtr == nullptr || indicesUpload.gpuAddress == 0)
+        {
+            return false;
+        }
+
+        std::memcpy(indicesUpload.cpuPtr,
+                    recordIndices.data(),
+                    recordIndices.size() * sizeof(std::uint32_t));
+
+        const std::array<std::uint32_t, 4> constants{
+            static_cast<std::uint32_t>(recordIndices.size()),
+            0u,
+            0u,
+            0u};
+        const UINT dispatchGroups = static_cast<UINT>((recordIndices.size() + 63u) / 64u);
+
+        commandList_->SetPipelineState(exactDrawRecordClearPipelineState_.Get());
+        commandList_->SetComputeRootSignature(exactDrawRecordClearRootSignature_.Get());
+        commandList_->SetComputeRoot32BitConstants(0, static_cast<UINT>(constants.size()), constants.data(), 0);
+        commandList_->SetComputeRootShaderResourceView(1, indicesUpload.gpuAddress);
+        commandList_->SetComputeRootUnorderedAccessView(2, drawRecordBuffer->GetGPUVirtualAddress());
+        commandList_->Dispatch(dispatchGroups, 1u, 1u);
+
+        uavBarrier(drawRecordBuffer);
+        hasCommands_ = true;
+        return true;
+    }
+
     [[nodiscard]] FlushResult flush()
     {
         FlushResult result{};
@@ -2516,6 +2629,7 @@ public:
                exactDescriptorGenRootSignature_ != nullptr &&
                exactPrepassRootSignature_ != nullptr &&
                exactFaceEmitRootSignature_ != nullptr &&
+               exactDrawRecordClearRootSignature_ != nullptr &&
                atlasSeedCachePipelineState_ != nullptr && atlasSampleCachePipelineState_ != nullptr &&
                 atlasUpdatePipelineState_ != nullptr && synthColumnPipelineState_ != nullptr &&
                 stampPipelineState_ != nullptr &&
@@ -2533,6 +2647,7 @@ public:
                exactFaceCountPipelineState_ != nullptr &&
                exactFacePrefixPipelineState_ != nullptr &&
                exactFaceEmitPipelineState_ != nullptr &&
+               exactDrawRecordClearPipelineState_ != nullptr &&
                exactDescriptorScratchBuffer_ != nullptr &&
                exactFaceCountScratchBuffer_ != nullptr &&
                exactFaceDescriptorScratchBuffer_ != nullptr &&
@@ -2945,6 +3060,11 @@ private:
         {
             const std::uint32_t slotIndex = (submissionSlotCursor_ + attempt) % kMaxInFlightSubmissionSlots;
             SubmissionSlot& slot = submissionSlots_[slotIndex];
+            // Never reuse allocators/command lists still in-flight on the GPU.
+            if (slot.fenceValue != 0 && completedFenceValue < slot.fenceValue)
+            {
+                continue;
+            }
             if (slot.reserved)
             {
                 if (slot.fenceValue != 0 && completedFenceValue >= slot.fenceValue)
@@ -3267,6 +3387,8 @@ private:
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_prefix_cs.hlsl").string(), "ExactChunkFacePrefixMain", "cs_6_6");
         exactFaceEmitShader_ =
             loadShaderBytecodeLocal((shaderRoot / "exact_chunk_face_emit_cs.hlsl").string(), "ExactChunkFaceEmitMain", "cs_6_6");
+        exactDrawRecordClearShader_ =
+            loadShaderBytecodeLocal((shaderRoot / "exact_chunk_draw_record_clear_cs.hlsl").string(), "ExactChunkDrawRecordClearMain", "cs_6_6");
     }
 
     void createPipelines()
@@ -3728,6 +3850,30 @@ private:
         throwIfFailedDx(device_->CreateComputePipelineState(&exactFaceEmitPso, IID_PPV_ARGS(&exactFaceEmitPipelineState_)),
                         "failed to create exact chunk face emit pipeline");
 
+        std::array<D3D12_ROOT_PARAMETER, 3> exactDrawRecordClearParams{};
+        exactDrawRecordClearParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        exactDrawRecordClearParams[0].Constants.ShaderRegister = 0;
+        exactDrawRecordClearParams[0].Constants.Num32BitValues = 4;
+        exactDrawRecordClearParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        exactDrawRecordClearParams[1].Descriptor.ShaderRegister = 0;
+        exactDrawRecordClearParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        exactDrawRecordClearParams[2].Descriptor.ShaderRegister = 0;
+        D3D12_ROOT_SIGNATURE_DESC exactDrawRecordClearDesc{};
+        exactDrawRecordClearDesc.NumParameters = static_cast<UINT>(exactDrawRecordClearParams.size());
+        exactDrawRecordClearDesc.pParameters = exactDrawRecordClearParams.data();
+        createRootSignature(exactDrawRecordClearDesc,
+                            exactDrawRecordClearRootSignature_,
+                            "exact chunk draw record clear root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC exactDrawRecordClearPso{};
+        exactDrawRecordClearPso.pRootSignature = exactDrawRecordClearRootSignature_.Get();
+        exactDrawRecordClearPso.CS = {exactDrawRecordClearShader_->GetBufferPointer(),
+                                      exactDrawRecordClearShader_->GetBufferSize()};
+        throwIfFailedDx(
+            device_->CreateComputePipelineState(&exactDrawRecordClearPso,
+                                                IID_PPV_ARGS(&exactDrawRecordClearPipelineState_)),
+            "failed to create exact chunk draw record clear pipeline");
+
     }
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
@@ -3757,6 +3903,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceCountShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFacePrefixShader_;
     Microsoft::WRL::ComPtr<ID3DBlob> exactFaceEmitShader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> exactDrawRecordClearShader_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasSeedRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasSampleRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> atlasFinalizeRootSignature_;
@@ -3770,6 +3917,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactDescriptorGenRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactPrepassRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactFaceEmitRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactDrawRecordClearRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> atlasSeedCachePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> atlasSampleCachePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> atlasUpdatePipelineState_;
@@ -3789,6 +3937,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceCountPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFacePrefixPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactFaceEmitPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactDrawRecordClearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptorHeap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> uploadScratch_;
     std::byte* uploadScratchMapped_{nullptr};

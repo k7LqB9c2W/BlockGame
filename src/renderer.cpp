@@ -4417,6 +4417,42 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                               0);
         }
 
+        if (!renderData.editOverlayVertices.empty() && !renderData.editOverlayIndices.empty())
+        {
+            commandList_->SetPipelineState(nearPipelineState_.Get());
+            commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
+            commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+            commandList_->SetGraphicsRootDescriptorTable(1, atlasTexture.srvGpu);
+            commandList_->SetGraphicsRootDescriptorTable(2, atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_);
+            commandList_->SetGraphicsRootDescriptorTable(3, shadowMapSrvGpu_);
+            commandList_->SetGraphicsRootDescriptorTable(4, skyBackgroundSrvGpu_);
+            commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            void* overlayVertexCpu = nullptr;
+            const std::size_t overlayVertexBytes = renderData.editOverlayVertices.size() * sizeof(WorldVertex);
+            const std::uint64_t overlayVertexGpuAddress =
+                allocateFrameConstantBytes(overlayVertexBytes, &overlayVertexCpu);
+            std::memcpy(overlayVertexCpu, renderData.editOverlayVertices.data(), overlayVertexBytes);
+
+            void* overlayIndexCpu = nullptr;
+            const std::size_t overlayIndexBytes = renderData.editOverlayIndices.size() * sizeof(std::uint32_t);
+            const std::uint64_t overlayIndexGpuAddress =
+                allocateFrameConstantBytes(overlayIndexBytes, &overlayIndexCpu);
+            std::memcpy(overlayIndexCpu, renderData.editOverlayIndices.data(), overlayIndexBytes);
+
+            const D3D12_VERTEX_BUFFER_VIEW vertexView{
+                overlayVertexGpuAddress,
+                static_cast<UINT>(overlayVertexBytes),
+                static_cast<UINT>(sizeof(WorldVertex))};
+            const D3D12_INDEX_BUFFER_VIEW indexView{
+                overlayIndexGpuAddress,
+                static_cast<UINT>(overlayIndexBytes),
+                DXGI_FORMAT_R32_UINT};
+            commandList_->IASetVertexBuffers(0, 1, &vertexView);
+            commandList_->IASetIndexBuffer(&indexView);
+            commandList_->DrawIndexedInstanced(static_cast<UINT>(renderData.editOverlayIndices.size()), 1, 0, 0, 0);
+        }
+
         if (!renderData.mobBatches.empty())
         {
             commandList_->SetPipelineState(mobPipelineState_.Get());

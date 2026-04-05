@@ -203,6 +203,7 @@ public:
     void clear();
 
     int highestSolidBlock(int worldX, int worldZ) const noexcept;
+    int highestSolidBlockInChunkColumn(const glm::ivec2& chunkColumn) const noexcept;
 
 private:
     struct ColumnData

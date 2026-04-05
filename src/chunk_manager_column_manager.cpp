@@ -145,3 +145,28 @@ int ColumnManager::highestSolidBlock(int worldX, int worldZ) const noexcept
     }
     return it->second.highestWorldY;
 }
+
+int ColumnManager::highestSolidBlockInChunkColumn(const glm::ivec2& chunkColumn) const noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    int highest = kNoHeight;
+    const int baseWorldX = chunkColumn.x * kChunkSizeX;
+    const int baseWorldZ = chunkColumn.y * kChunkSizeZ;
+    for (int localX = 0; localX < kChunkSizeX; ++localX)
+    {
+        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+        {
+            const glm::ivec2 key{baseWorldX + localX, baseWorldZ + localZ};
+            auto it = columns_.find(key);
+            if (it == columns_.end())
+            {
+                continue;
+            }
+
+            highest = std::max(highest, it->second.highestWorldY);
+        }
+    }
+
+    return highest;
+}

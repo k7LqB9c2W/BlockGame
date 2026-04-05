@@ -271,6 +271,8 @@ struct WorldRenderData
     std::vector<ExactChunkRenderBatch> exactNearBatches;
     std::vector<ChunkRenderBatch> farBatches;
     std::vector<MobRenderBatch> mobBatches;
+    std::vector<WorldVertex> editOverlayVertices;
+    std::vector<std::uint32_t> editOverlayIndices;
     ID3D12Resource* exactBlockUvBuffer{nullptr};
     std::uint32_t exactBlockUvCount{0};
 };

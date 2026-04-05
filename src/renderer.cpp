@@ -4568,9 +4568,14 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             commandList_->IASetIndexBuffer(&batch.indexBufferView);
             const std::size_t drawCount =
                 (std::min)(batch.indexCounts.size(),
-                           (std::min)(batch.firstIndexLocations.size(), batch.baseVertices.size()));
+                           (std::min)((std::min)(batch.firstIndexLocations.size(), batch.baseVertices.size()),
+                                      batch.translucentEntries.size()));
             for (std::size_t i = 0; i < drawCount; ++i)
             {
+                if (batch.translucentEntries[i] == 0u)
+                {
+                    continue;
+                }
                 commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
             }
         }
@@ -4599,9 +4604,14 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             commandList_->SetGraphicsRootShaderResourceView(2, batch.faceDescriptorBuffer->GetGPUVirtualAddress());
             commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
             const std::size_t drawCount =
-                (std::min)(batch.faceCounts.size(), batch.recordIndices.size());
+                (std::min)((std::min)(batch.faceCounts.size(), batch.recordIndices.size()),
+                           batch.translucentEntries.size());
             for (std::size_t i = 0; i < drawCount; ++i)
             {
+                if (batch.translucentEntries[i] == 0u)
+                {
+                    continue;
+                }
                 commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
                 commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
             }

@@ -463,6 +463,44 @@ bool shouldRenderBlockFace(uint owningBlock, uint neighborBlock)
     return neighborClass != kRenderClassOpaque;
 }
 
+bool classifyRenderableBlockFace(uint owningBlock, uint neighborBlock, out uint owningClass)
+{
+    owningClass = kRenderClassOpaque;
+    if (owningBlock == kBlockAir)
+    {
+        return false;
+    }
+
+    owningClass = renderClassForBlock(owningBlock);
+    if (neighborBlock == kBlockAir)
+    {
+        return true;
+    }
+
+    const uint neighborClass = renderClassForBlock(neighborBlock);
+
+    if (owningClass == kRenderClassCutout)
+    {
+        if (neighborClass == kRenderClassCutout)
+        {
+            return owningBlock != neighborBlock;
+        }
+
+        return neighborClass == kRenderClassTranslucent;
+    }
+
+    if (owningClass == kRenderClassTranslucent)
+    {
+        if (neighborClass == kRenderClassTranslucent)
+        {
+            return owningBlock != neighborBlock;
+        }
+        return true;
+    }
+
+    return neighborClass != kRenderClassOpaque;
+}
+
 uint sampleHaloVoxel(StructuredBuffer<uint> haloBuffer, uint seamBit, int x, int y, int z)
 {
     uint faceIndex = 0u;

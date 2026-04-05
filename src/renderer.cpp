@@ -4142,7 +4142,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
     {
         if (!batch.supportsGpuCull ||
             batch.drawRecordBuffer == nullptr ||
-            batch.gpuCullRecordCount == 0u)
+            batch.gpuCullRecordCount == 0u ||
+            !batch.hasOpaqueFaces)
         {
             continue;
         }
@@ -4240,7 +4241,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         {
             if (!batch.supportsGpuCull ||
                 batch.drawRecordBuffer == nullptr ||
-                batch.gpuCullRecordCount == 0)
+                batch.gpuCullRecordCount == 0 ||
+                (!batch.hasOpaqueFaces && !batch.hasTranslucentFaces))
             {
                 return;
             }
@@ -4295,12 +4297,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             if (shouldUseGpuWorldCull && maxRecordBytes > 0)
             {
                 ensureFarCullBuffers(frame, maxRecordBytes, maxVisibleIndexBytes, maxIndirectBytes);
+                buildDepthPyramid();
             }
             if (shouldUseExactGpuCull)
             {
                 ensureExactCullBuffers(frame, maxExactVisibleIndexBytes, maxExactIndirectBytes);
             }
-            buildDepthPyramid();
         }
 
         commandList_->SetPipelineState(nearPipelineState_.Get());
@@ -4339,7 +4341,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         {
             if (batch.supportsGpuCull &&
                 batch.drawRecordBuffer != nullptr &&
-                batch.gpuCullRecordCount > 0)
+                batch.gpuCullRecordCount > 0 &&
+                batch.hasOpaqueFaces)
             {
                 renderExactBatchGpuCull(batch,
                                         viewProj,
@@ -4630,6 +4633,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             if (batch.supportsGpuCull &&
                 batch.drawRecordBuffer != nullptr &&
                 batch.gpuCullRecordCount > 0 &&
+                batch.hasTranslucentFaces &&
                 renderData.exactBlockUvBuffer != nullptr)
             {
                 renderExactBatchGpuCull(batch,
@@ -4906,7 +4910,8 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
         {
             if (batch.supportsGpuCull &&
                 batch.drawRecordBuffer != nullptr &&
-                batch.gpuCullRecordCount > 0)
+                batch.gpuCullRecordCount > 0 &&
+                batch.hasOpaqueFaces)
             {
                 renderExactBatchGpuCull(batch,
                                         lightViewProj,

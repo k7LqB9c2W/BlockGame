@@ -5643,6 +5643,10 @@ int runGame()
                 {
                     std::cerr << "Invalid teleport input: " << inputContext.teleportBuffer << std::endl;
                 }
+                else
+                {
+                    chunkManager.notifyDiscontinuousCameraMove();
+                }
                 inputContext.showTeleportGUI = false;
                 inputContext.teleportBuffer.clear();
             }

@@ -4463,6 +4463,7 @@ struct ChunkManager::Impl
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
+    void notifyDiscontinuousCameraMove() noexcept;
     WorldRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;
@@ -5390,6 +5391,10 @@ private:
                                                                      int chunkY) noexcept;
     void invalidateColumnSlabOccupancy(const glm::ivec2& column) const;
     void invalidateAllColumnSlabOccupancy() const;
+    [[nodiscard]] bool consumePendingDiscontinuousCameraMove() noexcept;
+    [[nodiscard]] bool isDiscontinuousCameraMove(const glm::ivec3& centerChunk,
+                                                 const glm::ivec3& previousCenterChunk) const noexcept;
+    void resetStreamingForDiscontinuousMove(const glm::ivec3& centerChunk);
     void updateMovementEnvelopeState(const glm::ivec3& center,
                                      const glm::ivec3& previousCenter,
                                      double frameSeconds) noexcept;
@@ -6265,6 +6270,7 @@ private:
     bool protectedPressureActive_{false};
     bool severeProtectedPressureActive_{false};
     std::atomic<bool> refinementBackpressureActive_{false};
+    std::atomic<bool> pendingDiscontinuousCameraMove_{false};
     std::chrono::steady_clock::time_point lastUpdateTime_{};
     std::uint64_t updateFrameIndex_{0};
     double smoothedFrameMs_{16.0};
@@ -6909,7 +6915,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         lastCameraForward_ = glm::normalize(cameraForward);
     }
 
-    const glm::ivec3 previousCenterChunk = lastCenterChunk_;
+    glm::ivec3 previousCenterChunk = lastCenterChunk_;
 
     const auto now = std::chrono::steady_clock::now();
     double frameSeconds = 1.0 / 60.0;
@@ -6927,6 +6933,14 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const int worldZ = static_cast<int>(std::floor(cameraPos.z));
     const int clampedWorldY = std::max(worldY, 0);
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
+    const bool discontinuousCameraMove =
+        consumePendingDiscontinuousCameraMove() ||
+        isDiscontinuousCameraMove(centerChunk, previousCenterChunk);
+    if (discontinuousCameraMove)
+    {
+        resetStreamingForDiscontinuousMove(centerChunk);
+        previousCenterChunk = centerChunk;
+    }
     lastCenterChunk_ = centerChunk;
     updateMovementEnvelopeState(centerChunk, previousCenterChunk, frameSeconds);
     applyQueuedSkyLightColumnVisualRefreshes();
@@ -7764,6 +7778,8 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             }
             const std::uint32_t exactRecordFlags =
                 chunkPtr->exactGpuRecordFlags.load(std::memory_order_acquire);
+            const bool hasOpaqueFaces =
+                (exactRecordFlags & kExactDrawRecordFlagHasOpaqueFaces) != 0u;
             const bool hasTranslucentFaces =
                 (exactRecordFlags & kExactDrawRecordFlagHasTranslucentFaces) != 0u;
             const std::uint32_t faceCount = chunkPtr->exactGpuFaceCount.load(std::memory_order_acquire);
@@ -7778,6 +7794,8 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             batch.faceOffsets.push_back(faceOffset);
             batch.faceCounts.push_back(faceCount);
             batch.recordIndices.push_back(recordIndex);
+            batch.hasOpaqueFaces = batch.hasOpaqueFaces || hasOpaqueFaces;
+            batch.hasTranslucentFaces = batch.hasTranslucentFaces || hasTranslucentFaces;
             batch.translucentEntries.push_back(hasTranslucentFaces ? 1u : 0u);
             continue;
         }
@@ -13696,6 +13714,200 @@ void ChunkManager::Impl::resetExactCoverageCache() noexcept
 {
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
     exactCoverageCache_ = ExactCoverageCacheState{};
+}
+
+void ChunkManager::Impl::notifyDiscontinuousCameraMove() noexcept
+{
+    pendingDiscontinuousCameraMove_.store(true, std::memory_order_release);
+}
+
+bool ChunkManager::Impl::consumePendingDiscontinuousCameraMove() noexcept
+{
+    return pendingDiscontinuousCameraMove_.exchange(false, std::memory_order_acq_rel);
+}
+
+bool ChunkManager::Impl::isDiscontinuousCameraMove(const glm::ivec3& centerChunk,
+                                                   const glm::ivec3& previousCenterChunk) const noexcept
+{
+    if (updateFrameIndex_ <= 1)
+    {
+        return false;
+    }
+
+    const glm::ivec3 delta = centerChunk - previousCenterChunk;
+    const int horizontalShift = std::max(std::abs(delta.x), std::abs(delta.z));
+    const int verticalShift = std::abs(delta.y);
+    const int horizontalThreshold = std::max(renderSettings_.exactChunks + 8, 24);
+    const int verticalThreshold = std::max(lastVerticalRadius_ + 4, 16);
+    return horizontalShift >= horizontalThreshold || verticalShift >= verticalThreshold;
+}
+
+void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& centerChunk)
+{
+    stopExactGpuWorkerThread();
+    stopWorkerThreads();
+    uploadContext_.waitForIdle();
+    stopExactPlanBuild();
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        activeExactPlan_.reset();
+    }
+    stopBulkShellOracle();
+
+    {
+        std::lock_guard<std::mutex> lock(uploadQueueMutex_);
+        for (auto& queue : uploadQueues_)
+        {
+            queue = {};
+        }
+        queuedUploadCount_ = 0;
+        initialVisibleUploadCount_ = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(pendingCommitQueueMutex_);
+        pendingCommitQueue_.clear();
+    }
+    deferredPendingChunkReleases_.clear();
+
+    {
+        std::lock_guard<std::mutex> localEditLock(queuedLocalEditMutex_);
+        queuedLocalEditBatches_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> localUploadLock(dedicatedLocalUploadMutex_);
+        queuedDedicatedLocalUploads_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(queuedSkyLightColumnRefreshMutex_);
+        queuedSkyLightColumnRefreshes_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(queuedRelightMutex_);
+        queuedRelightRequests_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(relightStateMutex_);
+        pendingRelightRegions_.clear();
+        pendingRelightCoordGenerations_.clear();
+        activeRelightCoordGenerations_.clear();
+        activeRelightRegions_.clear();
+        relightBudgetUnitsThisFrame_ = 0;
+        relightBudgetUnitsRemaining_ = 0;
+        relightBatchBudgetThisFrame_ = 0;
+        relightBatchBudgetRemaining_ = 0;
+        nextRelightGeneration_ = 1;
+        nextPendingRelightSequence_ = 1;
+    }
+    activeRelightProcessors_.store(0, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(queuedFarInvalidationMutex_);
+        queuedFarInvalidationValid_ = false;
+        queuedFarInvalidationMin_ = glm::ivec3{0};
+        queuedFarInvalidationMax_ = glm::ivec3{0};
+    }
+
+    std::vector<std::shared_ptr<Chunk>> loadedChunks;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        loadedChunks.reserve(chunks_.size());
+        for (auto& [coord, chunk] : chunks_)
+        {
+            (void)coord;
+            loadedChunks.push_back(std::move(chunk));
+        }
+        chunks_.clear();
+    }
+    for (auto& chunk : loadedChunks)
+    {
+        if (!chunk)
+        {
+            continue;
+        }
+        recycleChunkGPU(*chunk);
+        recycleChunkObject(std::move(chunk));
+    }
+
+    farTerrainManager_.clear();
+    columnManager_.clear();
+    {
+        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+        worldgenPageEntries_.clear();
+        pinnedWorldgenPageKeys_.clear();
+    }
+    invalidateAllColumnSlabOccupancy();
+    {
+        std::lock_guard<std::mutex> lock(predictedColumnMutex_);
+        predictedColumnHeights_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(skyLightCacheMutex_);
+        skyLightColumnGenerations_.clear();
+    }
+
+    resetStreamingFrontier();
+    clearStreamingChunkLifecycleStates();
+    resetExactCoverageCache();
+    fullRadiusWorldgenPageDiscovery_ = FullRadiusWorldgenPageDiscoveryState{};
+    evictionCenterChunkY_ = centerChunk.y;
+    evictionCenterInitialized_ = false;
+
+    lastMissingChunks_ = 0;
+    cachedExactReadyChunks_ = 0;
+    cachedExactRequiredChunks_ = 0;
+    lastProtectedMissingChunks_ = 0;
+    lastProtectedReadyChunks_ = 0;
+    lastProtectedRequiredChunks_ = 0;
+    protectedPressureActive_ = false;
+    severeProtectedPressureActive_ = false;
+    stationaryExactFillModeActive_ = false;
+    refinementBackpressureActive_.store(false, std::memory_order_release);
+    smoothedFrameMs_ = 16.0;
+
+    startupState_ = StartupStreamingState{};
+    if (startupEnabled_)
+    {
+        startupState_.phase = StreamingPhase::ExactPreload;
+        startupState_.preloadStarted = true;
+        startupState_.spawnChunk = centerChunk;
+        startupState_.exactNearCurrentChunks =
+            std::clamp(startupExactPreloadChunks_, 1, renderSettings_.exactChunks);
+        startupState_.playerReleaseReady = false;
+    }
+    else
+    {
+        startupState_.phase = StreamingPhase::SteadyState;
+        startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
+        startupState_.playerReleaseReady = true;
+    }
+    startupState_.farCurrentBlocks = 0;
+    targetViewDistance_ = std::clamp(startupState_.exactNearCurrentChunks, 1, renderSettings_.exactChunks);
+    if (viewDistance_ > targetViewDistance_)
+    {
+        viewDistance_ = targetViewDistance_;
+    }
+
+    const glm::vec2 forwardXZ = normalizePriorityForwardXZ(lastCameraForward_);
+    movementEnvelopeForwardXZ_ = glm::dot(forwardXZ, forwardXZ) > kEpsilon ? forwardXZ : glm::vec2{0.0f, -1.0f};
+    lastCameraForwardXZ_ = movementEnvelopeForwardXZ_;
+    lastHorizontalMovementShift_ = 0;
+    lastVerticalMovementShift_ = 0;
+    movementEnvelopeStationarySeconds_ = 0.0;
+    movementEnvelopeIdleMode_ = false;
+    movementEnvelopeTurnActive_ = false;
+    lastCenterChunk_ = centerChunk;
+    lastJobQueuePriorityOrigin_ = centerChunk;
+    lastJobQueuePriorityForwardXZ_ = movementEnvelopeForwardXZ_;
+    lastJobQueuePriorityRefreshTime_ = SteadyClock::time_point{};
+    {
+        std::lock_guard<std::mutex> lock(schedulingPriorityMutex_);
+        schedulingPriorityOrigin_ = centerChunk;
+        schedulingPriorityForward_ = lastCameraForward_;
+    }
+
+    farTerrainManager_.setEnabled(renderSettings_.totalChunks > renderSettings_.exactChunks);
+    farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
+    startWorkerThreads();
+    startExactGpuWorkerThread();
 }
 
 ChunkManager::Impl::ColumnPlanSummary
@@ -28803,6 +29015,11 @@ void ChunkManager::update(const glm::vec3& cameraPos)
 void ChunkManager::update(const glm::vec3& cameraPos, const glm::vec3& cameraForward)
 {
     impl_->update(cameraPos, cameraForward);
+}
+
+void ChunkManager::notifyDiscontinuousCameraMove() noexcept
+{
+    impl_->notifyDiscontinuousCameraMove();
 }
 
 WorldRenderData ChunkManager::buildRenderData(const Frustum& frustum) const

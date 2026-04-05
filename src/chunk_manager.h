@@ -254,6 +254,8 @@ struct ExactChunkRenderBatch
     std::vector<std::uint8_t> translucentEntries;
     std::uint32_t gpuCullRecordCount{0};
     bool supportsGpuCull{false};
+    bool hasOpaqueFaces{false};
+    bool hasTranslucentFaces{false};
     std::uint32_t debugPageIndex{0};
 };
 
@@ -742,6 +744,7 @@ public:
     void setBlockTextureAtlasConfig(const BlockTextureAtlasConfig& config);
     void update(const glm::vec3& cameraPos);
     void update(const glm::vec3& cameraPos, const glm::vec3& cameraForward);
+    void notifyDiscontinuousCameraMove() noexcept;
     WorldRenderData buildRenderData(const Frustum& frustum) const;
 
     float surfaceHeight(float worldX, float worldZ) const noexcept;

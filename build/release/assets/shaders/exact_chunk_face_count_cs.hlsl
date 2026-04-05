@@ -183,12 +183,13 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
             const uint neighborBlock = positiveFace
                                            ? voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, positiveX, positiveY, positiveZ))
                                            : voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, negativeX, negativeY, negativeZ));
-            if (!shouldRenderBlockFace(owningBlock, neighborBlock))
+            uint owningClass = 0u;
+            if (!classifyRenderableBlockFace(owningBlock, neighborBlock, owningClass))
             {
                 continue;
             }
 
-            if (renderClassForBlock(owningBlock) == kRenderClassTranslucent)
+            if (owningClass == kRenderClassTranslucent)
             {
                 translucentDescriptorCount += 1u;
             }

@@ -3734,6 +3734,7 @@ struct Chunk
         exactGpuRequeueCount.store(0, std::memory_order_relaxed);
         exactGpuLastFenceDeferredMicros.store(0, std::memory_order_relaxed);
         exactGpuLastRequeueMicros.store(0, std::memory_order_relaxed);
+        exactGpuPreferDenseUpload.store(false, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident = false;
         lastDenseFrameTouched = 0;
@@ -3771,6 +3772,7 @@ struct Chunk
         std::vector<BlockId>().swap(blocks);
         std::vector<std::uint8_t>().swap(lightLevels);
         cpuDataResident = false;
+        exactGpuPreferDenseUpload.store(false, std::memory_order_release);
     }
 
     glm::ivec3 coord;
@@ -3843,6 +3845,7 @@ struct Chunk
     std::atomic<std::uint32_t> exactGpuRequeueCount{0};
     std::atomic<long long> exactGpuLastFenceDeferredMicros{0};
     std::atomic<long long> exactGpuLastRequeueMicros{0};
+    std::atomic<bool> exactGpuPreferDenseUpload{false};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     bool cpuDataResident{false};
     std::uint64_t lastDenseFrameTouched{0};
@@ -5648,6 +5651,10 @@ private:
     void refreshExactGpuColumnVisualsAfterSkyLightChange(const glm::ivec2& column,
                                                          bool localInteractionPriority);
     void applyQueuedSkyLightColumnVisualRefreshes();
+    void queueFarTerrainInvalidation(const glm::ivec3& worldPos);
+    void applyQueuedFarTerrainInvalidations();
+    void queueRelightAfterEdit(const glm::ivec3& centerCoord, bool forceRemesh);
+    void applyQueuedRelightRequests();
     std::uint64_t computeRelightBudgetUnits();
     int computeRelightBatchBudget();
     void resetRelightBudgetForFrame();
@@ -5846,10 +5853,16 @@ private:
     std::unordered_map<StructureRegionKey, std::unordered_set<glm::ivec3, ChunkHasher>, StructureRegionKeyHasher>
         structureRegionWaiters_{};
     mutable std::mutex deferredChunkDependencyMutex_;
-    std::unordered_map<glm::ivec3, std::vector<BlockEditOverlayEntry>, ChunkHasher> blockEditOverlays_;
+    std::unordered_map<glm::ivec3, std::unordered_map<std::uint16_t, BlockId>, ChunkHasher> blockEditOverlays_;
     mutable std::mutex blockEditOverlayMutex_;
     std::unordered_map<glm::ivec2, bool, ColumnHasher> queuedSkyLightColumnRefreshes_{};
     mutable std::mutex queuedSkyLightColumnRefreshMutex_;
+    std::unordered_map<glm::ivec3, bool, ChunkHasher> queuedRelightRequests_{};
+    mutable std::mutex queuedRelightMutex_;
+    glm::ivec3 queuedFarInvalidationMin_{0};
+    glm::ivec3 queuedFarInvalidationMax_{0};
+    bool queuedFarInvalidationValid_{false};
+    mutable std::mutex queuedFarInvalidationMutex_;
  
     std::vector<std::thread> workerThreads_;
     std::size_t workerThreadCount_{0};
@@ -6649,6 +6662,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     lastCenterChunk_ = centerChunk;
     updateMovementEnvelopeState(centerChunk, previousCenterChunk, frameSeconds);
     applyQueuedSkyLightColumnVisualRefreshes();
+    applyQueuedRelightRequests();
+    applyQueuedFarTerrainInvalidations();
     glm::vec3 priorityForward(lastCameraForward_.x, lastCameraForward_.y, lastCameraForward_.z);
     if (movementEnvelopeIdleMode_ && !movementEnvelopeTurnActive_)
     {
@@ -7713,6 +7728,16 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(queuedSkyLightColumnRefreshMutex_);
         queuedSkyLightColumnRefreshes_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(queuedRelightMutex_);
+        queuedRelightRequests_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(queuedFarInvalidationMutex_);
+        queuedFarInvalidationValid_ = false;
+        queuedFarInvalidationMin_ = glm::ivec3(0);
+        queuedFarInvalidationMax_ = glm::ivec3(0);
+    }
 
     uploadBudgetBytesThisFrame_ = kUploadBudgetBytesPerFrame;
     uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
@@ -7807,9 +7832,12 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
 
     recordBlockEditOverlay(worldPos, BlockId::Air);
     refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
+    chunk->exactGpuPreferDenseUpload.store(true, std::memory_order_release);
+    requestChunkRemesh(chunk, true);
     queueSkyLightColumnVisualRefresh({chunk->coord.x, chunk->coord.z}, true);
+    queueRelightAfterEdit(chunkCoord, true);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
-    farTerrainManager_.invalidateWorldBlock(worldPos);
+    queueFarTerrainInvalidation(worldPos);
     noteRecentEdit("destroy", worldPos, chunkCoord);
 
     return true;
@@ -7864,9 +7892,12 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
 
     recordBlockEditOverlay(placePos, block);
     refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
+    chunk->exactGpuPreferDenseUpload.store(true, std::memory_order_release);
+    requestChunkRemesh(chunk, true);
     queueSkyLightColumnVisualRefresh({chunk->coord.x, chunk->coord.z}, true);
+    queueRelightAfterEdit(chunkCoord, true);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
-    farTerrainManager_.invalidateWorldBlock(placePos);
+    queueFarTerrainInvalidation(placePos);
     noteRecentEdit("place", placePos, chunkCoord);
 
     return true;
@@ -14402,9 +14433,9 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
 
             const bool hasSolidOverlay = std::any_of(overlays.begin(),
                                                      overlays.end(),
-                                                     [](const BlockEditOverlayEntry& overlay)
+                                                     [](const auto& overlay)
                                                      {
-                                                         return overlay.block != BlockId::Air;
+                                                         return overlay.second != BlockId::Air;
                                                      });
             if (hasSolidOverlay)
             {
@@ -19088,8 +19119,8 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::buildColumnSlabOccup
 
             const bool hasSolidOverlay = std::any_of(overlays.begin(),
                                                      overlays.end(),
-                                                     [](const BlockEditOverlayEntry& overlay) {
-                                                         return overlay.block != BlockId::Air;
+                                                     [](const auto& overlay) {
+                                                         return overlay.second != BlockId::Air;
                                                      });
             if (hasSolidOverlay)
             {
@@ -20433,7 +20464,11 @@ bool ChunkManager::Impl::refreshChunkGpuExactInputs(Chunk& chunk)
         auto overlayIt = blockEditOverlays_.find(chunk.coord);
         if (overlayIt != blockEditOverlays_.end())
         {
-            blockOverlays = overlayIt->second;
+            blockOverlays.reserve(overlayIt->second.size());
+            for (const auto& [localIndex, block] : overlayIt->second)
+            {
+                blockOverlays.push_back(BlockEditOverlayEntry{localIndex, block});
+            }
         }
     }
 
@@ -20555,20 +20590,36 @@ void ChunkManager::Impl::queueChunkForExactGpuRefresh(const std::shared_ptr<Chun
 
     if (chunk->exactGpuInputsDirty.load(std::memory_order_acquire))
     {
-        std::vector<PendingStructureEdit> pendingStructureEdits = copyPendingStructureEdits(chunk->coord);
-        std::vector<BlockEditOverlayEntry> blockOverlays;
+        const bool canUseDenseUpload =
+            chunk->exactGpuPreferDenseUpload.load(std::memory_order_acquire) &&
+            chunk->cpuDataResident &&
+            !chunk->blocks.empty();
+        if (canUseDenseUpload)
         {
-            std::lock_guard<std::mutex> overlayLock(blockEditOverlayMutex_);
-            auto overlayIt = blockEditOverlays_.find(chunk->coord);
-            if (overlayIt != blockEditOverlays_.end())
-            {
-                blockOverlays = overlayIt->second;
-            }
+            chunk->gpuExactSparseVoxels.clear();
+            chunk->gpuExactSparseVoxelsReady = true;
         }
-
-        if (!rebuildChunkGpuExactInputsLocked(*chunk, pendingStructureEdits, blockOverlays))
+        else
         {
-            return;
+            std::vector<PendingStructureEdit> pendingStructureEdits = copyPendingStructureEdits(chunk->coord);
+            std::vector<BlockEditOverlayEntry> blockOverlays;
+            {
+                std::lock_guard<std::mutex> overlayLock(blockEditOverlayMutex_);
+                auto overlayIt = blockEditOverlays_.find(chunk->coord);
+                if (overlayIt != blockEditOverlays_.end())
+                {
+                    blockOverlays.reserve(overlayIt->second.size());
+                    for (const auto& [localIndex, block] : overlayIt->second)
+                    {
+                        blockOverlays.push_back(BlockEditOverlayEntry{localIndex, block});
+                    }
+                }
+            }
+
+            if (!rebuildChunkGpuExactInputsLocked(*chunk, pendingStructureEdits, blockOverlays))
+            {
+                return;
+            }
         }
     }
     (void)queuePreparedExactGpuBuildLocked(chunk, prioritizeFront);
@@ -21150,8 +21201,16 @@ void ChunkManager::Impl::restoreExactGpuNeighborStates(const std::array<Chunk*, 
         pending.generationEpoch = request.generationEpoch;
         pending.inputVersion = request.inputVersion;
         pending.rebuildVoxelInputs = rebuildVoxelInputs;
-        pending.voxelInputMode = rebuildVoxelInputs ? ExactGpuVoxelInputMode::SparseSynthStamp
-                                                    : ExactGpuVoxelInputMode::None;
+        pending.voxelInputMode = ExactGpuVoxelInputMode::None;
+        if (rebuildVoxelInputs)
+        {
+            const bool preferDenseUpload =
+                chunk.exactGpuPreferDenseUpload.load(std::memory_order_acquire) &&
+                chunk.cpuDataResident &&
+                !chunk.blocks.empty();
+            pending.voxelInputMode = preferDenseUpload ? ExactGpuVoxelInputMode::DenseCpuUpload
+                                                       : ExactGpuVoxelInputMode::SparseSynthStamp;
+        }
         pending.tentativeScratchSliceIndex =
             freeExactGpuScratchSlices_[freeExactGpuScratchSlices_.size() - 1u - preparedBuilds.size()];
         preparedBuilds.push_back(std::move(pending));
@@ -24235,8 +24294,69 @@ void ChunkManager::Impl::applyQueuedSkyLightColumnVisualRefreshes()
 
     for (const auto& [column, localInteractionPriority] : pending)
     {
+        (void)localInteractionPriority;
         markSkyLightColumnDirty(column);
-        refreshExactGpuColumnVisualsAfterSkyLightChange(column, localInteractionPriority);
+    }
+}
+
+void ChunkManager::Impl::queueFarTerrainInvalidation(const glm::ivec3& worldPos)
+{
+    std::lock_guard<std::mutex> lock(queuedFarInvalidationMutex_);
+    if (!queuedFarInvalidationValid_)
+    {
+        queuedFarInvalidationValid_ = true;
+        queuedFarInvalidationMin_ = worldPos;
+        queuedFarInvalidationMax_ = worldPos;
+        return;
+    }
+
+    queuedFarInvalidationMin_ = glm::min(queuedFarInvalidationMin_, worldPos);
+    queuedFarInvalidationMax_ = glm::max(queuedFarInvalidationMax_, worldPos);
+}
+
+void ChunkManager::Impl::applyQueuedFarTerrainInvalidations()
+{
+    glm::ivec3 minWorld{0};
+    glm::ivec3 maxWorld{0};
+    {
+        std::lock_guard<std::mutex> lock(queuedFarInvalidationMutex_);
+        if (!queuedFarInvalidationValid_)
+        {
+            return;
+        }
+        queuedFarInvalidationValid_ = false;
+        minWorld = queuedFarInvalidationMin_;
+        maxWorld = queuedFarInvalidationMax_;
+    }
+
+    farTerrainManager_.invalidateWorldBounds(minWorld, maxWorld);
+}
+
+void ChunkManager::Impl::queueRelightAfterEdit(const glm::ivec3& centerCoord, bool forceRemesh)
+{
+    std::lock_guard<std::mutex> lock(queuedRelightMutex_);
+    auto [it, inserted] = queuedRelightRequests_.try_emplace(centerCoord, forceRemesh);
+    if (!inserted && forceRemesh)
+    {
+        it->second = true;
+    }
+}
+
+void ChunkManager::Impl::applyQueuedRelightRequests()
+{
+    std::unordered_map<glm::ivec3, bool, ChunkHasher> pending;
+    {
+        std::lock_guard<std::mutex> lock(queuedRelightMutex_);
+        if (queuedRelightRequests_.empty())
+        {
+            return;
+        }
+        pending.swap(queuedRelightRequests_);
+    }
+
+    for (const auto& [coord, forceRemesh] : pending)
+    {
+        queueRelightRequest(coord, forceRemesh);
     }
 }
 
@@ -26818,7 +26938,11 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
         auto overlayIt = blockEditOverlays_.find(chunk.coord);
         if (overlayIt != blockEditOverlays_.end())
         {
-            blockOverlayEntriesForGpu = overlayIt->second;
+            blockOverlayEntriesForGpu.reserve(overlayIt->second.size());
+            for (const auto& [localIndex, block] : overlayIt->second)
+            {
+                blockOverlayEntriesForGpu.push_back(BlockEditOverlayEntry{localIndex, block});
+            }
         }
     }
     const bool anyBlocks = anyBaseTerrain ||
@@ -27059,20 +27183,7 @@ void ChunkManager::Impl::recordBlockEditOverlay(const glm::ivec3& worldPos, Bloc
     const std::uint16_t localIndex = blockOverlayLocalIndex(local.x, local.y, local.z);
     {
         std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
-        auto& overlays = blockEditOverlays_[chunkCoord];
-        auto it = std::find_if(overlays.begin(),
-                               overlays.end(),
-                               [localIndex](const BlockEditOverlayEntry& entry) {
-                                   return entry.localIndex == localIndex;
-                               });
-        if (it != overlays.end())
-        {
-            it->block = block;
-        }
-        else
-        {
-            overlays.push_back(BlockEditOverlayEntry{localIndex, block});
-        }
+        blockEditOverlays_[chunkCoord][localIndex] = block;
     }
     invalidateColumnSlabOccupancy({chunkCoord.x, chunkCoord.z});
 
@@ -27103,17 +27214,13 @@ bool ChunkManager::Impl::tryGetBlockEditOverlay(const glm::ivec3& worldPos, Bloc
     }
 
     const auto& overlays = chunkIt->second;
-    auto it = std::find_if(overlays.begin(),
-                           overlays.end(),
-                           [localIndex](const BlockEditOverlayEntry& entry) {
-                               return entry.localIndex == localIndex;
-                           });
+    auto it = overlays.find(localIndex);
     if (it == overlays.end())
     {
         return false;
     }
 
-    outBlock = it->block;
+    outBlock = it->second;
     return true;
 }
 
@@ -27126,7 +27233,7 @@ bool ChunkManager::Impl::chunkHasBlockEditOverlay(const glm::ivec3& coord) const
 
 void ChunkManager::Impl::applyBlockEditOverlay(ChunkBuildScratch& scratch, const glm::ivec3& chunkCoord) const
 {
-    std::vector<BlockEditOverlayEntry> overlays;
+    std::unordered_map<std::uint16_t, BlockId> overlays;
     {
         std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
         auto it = blockEditOverlays_.find(chunkCoord);
@@ -27137,15 +27244,15 @@ void ChunkManager::Impl::applyBlockEditOverlay(ChunkBuildScratch& scratch, const
         overlays = it->second;
     }
 
-    for (const BlockEditOverlayEntry& entry : overlays)
+    for (const auto& [localIndex, block] : overlays)
     {
-        const int localX = entry.localIndex % kChunkSizeX;
-        const int localZ = (entry.localIndex / kChunkSizeX) % kChunkSizeZ;
-        const int localY = entry.localIndex / (kChunkSizeX * kChunkSizeZ);
+        const int localX = localIndex % kChunkSizeX;
+        const int localZ = (localIndex / kChunkSizeX) % kChunkSizeZ;
+        const int localY = localIndex / (kChunkSizeX * kChunkSizeZ);
         scratch.setWorldBlock(chunkCoord.x * kChunkSizeX + localX,
                               chunkCoord.y * kChunkSizeY + localY,
                               chunkCoord.z * kChunkSizeZ + localZ,
-                              entry.block,
+                              block,
                               true);
     }
 }

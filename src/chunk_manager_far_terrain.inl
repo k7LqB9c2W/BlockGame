@@ -705,6 +705,42 @@ public:
         }
     }
 
+    void invalidateWorldBounds(const glm::ivec3& minWorldPos, const glm::ivec3& maxWorldPos)
+    {
+        const glm::ivec3 boundsMin = glm::min(minWorldPos, maxWorldPos);
+        const glm::ivec3 boundsMax = glm::max(minWorldPos, maxWorldPos);
+
+        std::lock_guard<std::mutex> lock(configMutex_);
+        for (auto& [levelId, atlas] : levelAtlases_)
+        {
+            (void)levelId;
+            const int scale = std::max(atlas.blockScale, 1);
+            const glm::ivec2 cellMin(floorDiv(boundsMin.x, scale), floorDiv(boundsMin.z, scale));
+            const glm::ivec2 cellMax(floorDiv(boundsMax.x, scale), floorDiv(boundsMax.z, scale));
+            const glm::ivec2 cellSize = glm::max(cellMax - cellMin + glm::ivec2(1, 1), glm::ivec2(1, 1));
+            appendClippedAtlasUpdateRect(atlas.pendingDirtyRects,
+                                         AtlasUpdateRect{cellMin, cellSize},
+                                         atlas.originCell,
+                                         atlas.atlasSizeCells);
+        }
+
+        for (auto& [key, chunk] : chunks_)
+        {
+            (void)key;
+            const int span = chunk.level.chunkSpanBlocks();
+            const glm::ivec3 minWorld = chunk.cpu.worldMin - glm::ivec3(span);
+            const glm::ivec3 maxWorld = chunk.cpu.worldMin + glm::ivec3(span - 1) + glm::ivec3(span);
+            if (boundsMax.x < minWorld.x || boundsMin.x > maxWorld.x ||
+                boundsMax.y < minWorld.y || boundsMin.y > maxWorld.y ||
+                boundsMax.z < minWorld.z || boundsMin.z > maxWorld.z)
+            {
+                continue;
+            }
+
+            markDirty(chunk);
+        }
+    }
+
     void clear()
     {
         buildEpoch_.fetch_add(1, std::memory_order_acq_rel);

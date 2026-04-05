@@ -4516,6 +4516,13 @@ private:
         bool prioritizeFront{false};
     };
 
+    enum class ExactGpuVoxelInputMode : std::uint8_t
+    {
+        None = 0,
+        SparseSynthStamp = 1,
+        DenseCpuUpload = 2,
+    };
+
     struct PendingExactGpuBuild
     {
         std::shared_ptr<Chunk> chunk;
@@ -4528,6 +4535,7 @@ private:
         std::uint32_t scratchSliceIndex{std::numeric_limits<std::uint32_t>::max()};
         ChunkAllocation allocation{};
         bool rebuildVoxelInputs{false};
+        ExactGpuVoxelInputMode voxelInputMode{ExactGpuVoxelInputMode::None};
 
         [[nodiscard]] bool valid() const noexcept
         {
@@ -4595,6 +4603,7 @@ private:
         PrepassPageUploadAlloc,
         PrepassDescriptorUploadAlloc,
         PrepassSkyLightUploadAlloc,
+        PrepassVoxelUploadAlloc,
         PrepassSparseUploadAlloc,
         PrepassAllocationRecordSync,
         PrepassDescriptorBind,
@@ -5632,11 +5641,13 @@ private:
     void mergePendingRelightBatch(PendingRelightBatch& dst, PendingRelightBatch&& src) const;
     std::unordered_set<glm::ivec3, ChunkHasher> expandRelightCoords(const RelightCoordGenerationMap& dirtyCoords) const;
     std::uint64_t estimatePendingRelightBatchCost(const PendingRelightBatch& batch) const;
+    void queueSkyLightColumnVisualRefresh(const glm::ivec2& column, bool localInteractionPriority);
     void markSkyLightColumnDirty(const glm::ivec2& column);
     std::uint64_t currentSkyLightColumnGeneration(const glm::ivec2& column);
     void ensureSkyLightColumnCacheForChunks(const std::vector<std::shared_ptr<Chunk>>& chunks);
     void refreshExactGpuColumnVisualsAfterSkyLightChange(const glm::ivec2& column,
                                                          bool localInteractionPriority);
+    void applyQueuedSkyLightColumnVisualRefreshes();
     std::uint64_t computeRelightBudgetUnits();
     int computeRelightBatchBudget();
     void resetRelightBudgetForFrame();
@@ -5837,7 +5848,9 @@ private:
     mutable std::mutex deferredChunkDependencyMutex_;
     std::unordered_map<glm::ivec3, std::vector<BlockEditOverlayEntry>, ChunkHasher> blockEditOverlays_;
     mutable std::mutex blockEditOverlayMutex_;
-
+    std::unordered_map<glm::ivec2, bool, ColumnHasher> queuedSkyLightColumnRefreshes_{};
+    mutable std::mutex queuedSkyLightColumnRefreshMutex_;
+ 
     std::vector<std::thread> workerThreads_;
     std::size_t workerThreadCount_{0};
     std::size_t columnHeightPrefetchWorkerCount_{0};
@@ -6635,6 +6648,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const glm::ivec3 centerChunk = worldToChunkCoords(worldX, clampedWorldY, worldZ);
     lastCenterChunk_ = centerChunk;
     updateMovementEnvelopeState(centerChunk, previousCenterChunk, frameSeconds);
+    applyQueuedSkyLightColumnVisualRefreshes();
     glm::vec3 priorityForward(lastCameraForward_.x, lastCameraForward_.y, lastCameraForward_.z);
     if (movementEnvelopeIdleMode_ && !movementEnvelopeTurnActive_)
     {
@@ -7695,6 +7709,10 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(blockEditOverlayMutex_);
         blockEditOverlays_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(queuedSkyLightColumnRefreshMutex_);
+        queuedSkyLightColumnRefreshes_.clear();
+    }
 
     uploadBudgetBytesThisFrame_ = kUploadBudgetBytesPerFrame;
     uploadColumnLimitThisFrame_ = kVerticalStreamingConfig.uploadBasePerColumn;
@@ -7789,8 +7807,7 @@ bool ChunkManager::Impl::destroyBlock(const glm::ivec3& worldPos)
 
     recordBlockEditOverlay(worldPos, BlockId::Air);
     refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
-    markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
-    refreshExactGpuColumnVisualsAfterSkyLightChange({chunk->coord.x, chunk->coord.z}, true);
+    queueSkyLightColumnVisualRefresh({chunk->coord.x, chunk->coord.z}, true);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(worldPos);
     noteRecentEdit("destroy", worldPos, chunkCoord);
@@ -7847,8 +7864,7 @@ bool ChunkManager::Impl::placeBlock(const glm::ivec3& targetBlockPos, const glm:
 
     recordBlockEditOverlay(placePos, block);
     refreshPredictedColumnHeightFromLoadedData({chunk->coord.x, chunk->coord.z});
-    markSkyLightColumnDirty({chunk->coord.x, chunk->coord.z});
-    refreshExactGpuColumnVisualsAfterSkyLightChange({chunk->coord.x, chunk->coord.z}, true);
+    queueSkyLightColumnVisualRefresh({chunk->coord.x, chunk->coord.z}, true);
     markNeighborsForRemeshingIfNeeded(chunkCoord, local.x, localY, local.z);
     farTerrainManager_.invalidateWorldBlock(placePos);
     noteRecentEdit("place", placePos, chunkCoord);
@@ -9402,6 +9418,8 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         exactGpuResourceFailureCount(ExactGpuResourceFailureReason::PrepassDescriptorUploadAlloc);
     const int exactGpuResPrepassSkyLightUpload =
         exactGpuResourceFailureCount(ExactGpuResourceFailureReason::PrepassSkyLightUploadAlloc);
+    const int exactGpuResPrepassVoxelUpload =
+        exactGpuResourceFailureCount(ExactGpuResourceFailureReason::PrepassVoxelUploadAlloc);
     const int exactGpuResPrepassSparseUpload =
         exactGpuResourceFailureCount(ExactGpuResourceFailureReason::PrepassSparseUploadAlloc);
     const int exactGpuResPrepassAllocationRecordSync =
@@ -9427,6 +9445,7 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         exactGpuResPrepassPageUpload +
         exactGpuResPrepassDescriptorUpload +
         exactGpuResPrepassSkyLightUpload +
+        exactGpuResPrepassVoxelUpload +
         exactGpuResPrepassSparseUpload +
         exactGpuResPrepassAllocationRecordSync +
         exactGpuResPrepassDescriptorBind +
@@ -20718,8 +20737,8 @@ void ChunkManager::Impl::restoreExactGpuNeighborStates(const std::array<Chunk*, 
     }
 }
 
-void ChunkManager::Impl::submitPendingExactGpuBuilds()
-{
+    void ChunkManager::Impl::submitPendingExactGpuBuilds()
+    {
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
     const SteadyClock::time_point submitStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     std::uint64_t prepareMicros = 0u;
@@ -20831,6 +20850,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         std::uint32_t generationEpoch{0};
         std::uint64_t inputVersion{0};
         bool rebuildVoxelInputs{false};
+        ExactGpuVoxelInputMode voxelInputMode{ExactGpuVoxelInputMode::None};
         std::uint32_t tentativeScratchSliceIndex{std::numeric_limits<std::uint32_t>::max()};
     };
     std::vector<PreparedExactGpuBuild> preparedBuilds;
@@ -21047,14 +21067,32 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             deferredRequests.push_back(std::move(request));
             continue;
         }
-        if (((request.rebuildVoxelInputs ||
-              chunk.exactGpuInputsDirty.load(std::memory_order_acquire) ||
-              !chunk.exactGpuResident.load(std::memory_order_acquire)) &&
-             !chunk.gpuExactSparseVoxelsReady))
+        const bool requestNeedsVoxelInputs =
+            request.rebuildVoxelInputs ||
+            chunk.exactGpuInputsDirty.load(std::memory_order_acquire) ||
+            !chunk.exactGpuResident.load(std::memory_order_acquire) ||
+            chunk.exactGpu.voxelBuffer == nullptr;
+        if (requestNeedsVoxelInputs && !chunk.gpuExactSparseVoxelsReady)
         {
-            chunk.exactGpuBuildQueued.store(false, std::memory_order_release);
-            chunk.inFlight.fetch_sub(1, std::memory_order_relaxed);
-            continue;
+            // Under rapid edit churn, it is possible for a build request to be in-flight/queued while
+            // the CPU-side sparse voxel inputs have not been rebuilt yet. Dropping the request can
+            // leave the chunk permanently stale (CPU world updated, GPU draw record still active).
+            //
+            // Build the sparse voxel list on-demand here and retry; if we cannot, defer without
+            // clearing exactGpuBuildQueued so the refresh attempt is not lost.
+            const bool rebuiltInputs = refreshChunkGpuExactInputs(chunk);
+            if (!rebuiltInputs)
+            {
+                deferredRequests.push_back(std::move(request));
+                continue;
+            }
+            if (exactUploadDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact gpu rebuilt sparse inputs on worker"
+                       << " chunk=(" << chunk.coord.x << "," << chunk.coord.y << "," << chunk.coord.z << ")";
+                exactUploadDebugLog(stream.str());
+            }
         }
 
         const std::uint32_t currentBuildVersion = chunk.exactGpuBuildVersion.load(std::memory_order_acquire);
@@ -21112,6 +21150,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         pending.generationEpoch = request.generationEpoch;
         pending.inputVersion = request.inputVersion;
         pending.rebuildVoxelInputs = rebuildVoxelInputs;
+        pending.voxelInputMode = rebuildVoxelInputs ? ExactGpuVoxelInputMode::SparseSynthStamp
+                                                    : ExactGpuVoxelInputMode::None;
         pending.tentativeScratchSliceIndex =
             freeExactGpuScratchSlices_[freeExactGpuScratchSlices_.size() - 1u - preparedBuilds.size()];
         preparedBuilds.push_back(std::move(pending));
@@ -21219,11 +21259,42 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
 
         const std::uint32_t sparseVoxelCount =
             static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size());
-        if (pending.rebuildVoxelInputs && sparseVoxelCount > 0u)
+        const bool runSparseSynthStamp = pending.voxelInputMode == ExactGpuVoxelInputMode::SparseSynthStamp;
+        if (runSparseSynthStamp && sparseVoxelCount > 0u)
         {
             const std::uint64_t sparseBytes =
                 static_cast<std::uint64_t>(sparseVoxelCount) * sizeof(GpuExactSparseVoxel);
             if (!appendExactUploadBytes(candidateCursor, sparseBytes, alignof(GpuExactSparseVoxel)))
+            {
+                const std::uint64_t denseVoxelBytes =
+                    static_cast<std::uint64_t>(kChunkSizeX * kChunkSizeY * kChunkSizeZ) * sizeof(std::uint32_t);
+                if (chunk.cpuDataResident &&
+                    !chunk.blocks.empty() &&
+                    appendExactUploadBytes(candidateCursor, denseVoxelBytes, alignof(std::uint32_t)))
+                {
+                    pending.voxelInputMode = ExactGpuVoxelInputMode::DenseCpuUpload;
+                    if (exactUploadDebugLoggingEnabled())
+                    {
+                        std::ostringstream stream;
+                        stream << "exact gpu dense voxel upload fallback"
+                               << " chunk=(" << chunk.coord.x << "," << chunk.coord.y << "," << chunk.coord.z << ")"
+                               << " sparseVoxels=" << sparseVoxelCount
+                               << " denseBytes=" << denseVoxelBytes
+                               << " uploadBudget=" << exactUploadBudget;
+                        exactUploadDebugLog(stream.str());
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+        }
+        else if (pending.voxelInputMode == ExactGpuVoxelInputMode::DenseCpuUpload)
+        {
+            const std::uint64_t denseVoxelBytes =
+                static_cast<std::uint64_t>(kChunkSizeX * kChunkSizeY * kChunkSizeZ) * sizeof(std::uint32_t);
+            if (!appendExactUploadBytes(candidateCursor, denseVoxelBytes, alignof(std::uint32_t)))
             {
                 return false;
             }
@@ -21380,7 +21451,52 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     {
         PreparedExactGpuBuild& pending = preparedBuilds[buildIndex];
         Chunk& chunk = *pending.chunk;
-        if (!pending.rebuildVoxelInputs)
+        if (pending.voxelInputMode == ExactGpuVoxelInputMode::DenseCpuUpload)
+        {
+            const std::uint64_t voxelBytes =
+                static_cast<std::uint64_t>(kChunkSizeX * kChunkSizeY * kChunkSizeZ) * sizeof(std::uint32_t);
+            const FarLodGpuContext::ScratchAllocation voxelUpload =
+                exactGpuContext_.allocateUpload(voxelBytes, alignof(std::uint32_t));
+            if (voxelUpload.resource == nullptr || voxelUpload.cpuPtr == nullptr)
+            {
+                recordExactGpuResourceFailure(ExactGpuResourceFailureReason::PrepassVoxelUploadAlloc);
+                requeueRemainingPreparedBuilds(0);
+                discardOpenSubmission();
+                recordSubmitStats(processedRequests);
+                return;
+            }
+            prepassOwnedUploads.push_back(voxelUpload);
+
+            {
+                std::lock_guard<std::mutex> lock(chunk.meshMutex);
+                std::uint32_t* writePtr = reinterpret_cast<std::uint32_t*>(voxelUpload.cpuPtr);
+                const std::size_t voxelCount = chunk.blocks.size();
+                for (std::size_t i = 0; i < voxelCount; ++i)
+                {
+                    writePtr[i] = static_cast<std::uint32_t>(chunk.blocks[i]) & 0xFFu;
+                }
+            }
+
+            if (chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_COPY_DEST)
+            {
+                exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
+                                            chunk.exactGpu.voxelState,
+                                            D3D12_RESOURCE_STATE_COPY_DEST);
+                chunk.exactGpu.voxelState = D3D12_RESOURCE_STATE_COPY_DEST;
+            }
+            exactGpuContext_.copyBuffer(chunk.exactGpu.voxelBuffer.Get(),
+                                        0,
+                                        voxelUpload.resource,
+                                        voxelUpload.offset,
+                                        voxelBytes);
+            exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
+                                        chunk.exactGpu.voxelState,
+                                        D3D12_RESOURCE_STATE_COMMON);
+            chunk.exactGpu.voxelState = D3D12_RESOURCE_STATE_COMMON;
+            continue;
+        }
+
+        if (pending.voxelInputMode != ExactGpuVoxelInputMode::SparseSynthStamp)
         {
             continue;
         }
@@ -21435,6 +21551,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         pending.generationEpoch = prepared.generationEpoch;
         pending.inputVersion = prepared.inputVersion;
         pending.rebuildVoxelInputs = prepared.rebuildVoxelInputs;
+        pending.voxelInputMode = prepared.voxelInputMode;
         pending.scratchSliceIndex = freeExactGpuScratchSlices_.back();
         freeExactGpuScratchSlices_.pop_back();
         Chunk& chunk = *pending.chunk;
@@ -21525,7 +21642,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
         neighborChunksToRestoreByBuild[buildIndex] = neighborChunksToRestore;
         neighborRestoreCounts[buildIndex] = neighborRestoreCount;
 
-        const std::uint32_t sparseVoxelCount = pending.rebuildVoxelInputs
+        const bool runSparseSynthStamp = pending.voxelInputMode == ExactGpuVoxelInputMode::SparseSynthStamp;
+        const std::uint32_t sparseVoxelCount = runSparseSynthStamp
             ? static_cast<std::uint32_t>(chunk.gpuExactSparseVoxels.size())
             : 0u;
         const FarLodGpuContext::ExactPrepassDescriptorIndices descriptorIndices =
@@ -21553,7 +21671,7 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
             chunk.coord.z * kChunkSizeZ,
             pending.scratchSliceIndex,
             pending.scratchSliceIndex * kExactChunkColumnCount,
-            pending.rebuildVoxelInputs ? 1u : 0u,
+            runSparseSynthStamp ? 1u : 0u,
             sparseVoxelCount,
             resolvedNeighborMask,
             kClosedNeighborMask,
@@ -21596,7 +21714,8 @@ void ChunkManager::Impl::submitPendingExactGpuBuilds()
     for (PendingExactGpuBuild& pending : stagedBuilds)
     {
         Chunk& chunk = *pending.chunk;
-        if (pending.rebuildVoxelInputs && chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        if (pending.voxelInputMode == ExactGpuVoxelInputMode::SparseSynthStamp &&
+            chunk.exactGpu.voxelState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         {
             exactGpuContext_.transition(chunk.exactGpu.voxelBuffer.Get(),
                                         chunk.exactGpu.voxelState,
@@ -24022,6 +24141,16 @@ std::uint64_t ChunkManager::Impl::estimatePendingRelightBatchCost(const PendingR
     return std::max<std::uint64_t>(estimatedCost, 1ull);
 }
 
+void ChunkManager::Impl::queueSkyLightColumnVisualRefresh(const glm::ivec2& column, bool localInteractionPriority)
+{
+    std::lock_guard<std::mutex> lock(queuedSkyLightColumnRefreshMutex_);
+    auto [it, inserted] = queuedSkyLightColumnRefreshes_.try_emplace(column, localInteractionPriority);
+    if (!inserted && localInteractionPriority)
+    {
+        it->second = true;
+    }
+}
+
 void ChunkManager::Impl::markSkyLightColumnDirty(const glm::ivec2& column)
 {
     std::lock_guard<std::mutex> lock(skyLightCacheMutex_);
@@ -24089,6 +24218,25 @@ void ChunkManager::Impl::refreshExactGpuColumnVisualsAfterSkyLightChange(const g
         chunk->exactGpuInputsVersion.fetch_add(1, std::memory_order_acq_rel);
         chunk->exactGpuInputsDirty.store(true, std::memory_order_release);
         requestChunkRemesh(chunk, localInteractionPriority);
+    }
+}
+
+void ChunkManager::Impl::applyQueuedSkyLightColumnVisualRefreshes()
+{
+    std::unordered_map<glm::ivec2, bool, ColumnHasher> pending;
+    {
+        std::lock_guard<std::mutex> lock(queuedSkyLightColumnRefreshMutex_);
+        if (queuedSkyLightColumnRefreshes_.empty())
+        {
+            return;
+        }
+        pending.swap(queuedSkyLightColumnRefreshes_);
+    }
+
+    for (const auto& [column, localInteractionPriority] : pending)
+    {
+        markSkyLightColumnDirty(column);
+        refreshExactGpuColumnVisualsAfterSkyLightChange(column, localInteractionPriority);
     }
 }
 

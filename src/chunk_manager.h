@@ -234,12 +234,14 @@ struct ExactChunkRenderBatch
         static constexpr std::uint32_t kReservedActiveBit = 1u << 30u;
         static constexpr std::uint32_t kReservedOverflowBit = 1u << 31u;
         static constexpr std::uint32_t kReservedFaceCountMask = kReservedActiveBit - 1u;
+        static constexpr std::uint32_t kFlagsHasOpaqueFacesBit = 1u << 0u;
+        static constexpr std::uint32_t kFlagsHasTranslucentFacesBit = 1u << 1u;
 
         glm::vec4 boundsMin{0.0f};
         glm::vec4 boundsMax{0.0f};
         std::uint32_t faceCount{0};
         std::uint32_t faceOffset{0};
-        std::uint32_t reserved0{0};
+        std::uint32_t flags{0};
         std::uint32_t reserved{0};
     };
 

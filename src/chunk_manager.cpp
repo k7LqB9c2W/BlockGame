@@ -3802,6 +3802,7 @@ struct Chunk
         std::uint32_t recordIndex{std::numeric_limits<std::uint32_t>::max()};
         std::uint32_t faceOffset{0};
         std::uint32_t faceCount{0};
+        std::uint32_t recordFlags{0};
 
         [[nodiscard]] bool valid() const noexcept
         {
@@ -3816,6 +3817,7 @@ struct Chunk
             recordIndex = std::numeric_limits<std::uint32_t>::max();
             faceOffset = 0;
             faceCount = 0;
+            recordFlags = 0;
         }
     };
 
@@ -3936,6 +3938,7 @@ struct Chunk
         exactGpuRecordIndex.store(std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
         exactGpuFaceOffset.store(0, std::memory_order_relaxed);
         exactGpuFaceCount.store(0, std::memory_order_relaxed);
+        exactGpuRecordFlags.store(0, std::memory_order_relaxed);
         exactGpuFenceDeferredCount.store(0, std::memory_order_relaxed);
         exactGpuRequeueCount.store(0, std::memory_order_relaxed);
         exactGpuLastFenceDeferredMicros.store(0, std::memory_order_relaxed);
@@ -4051,6 +4054,7 @@ struct Chunk
     std::atomic<std::uint32_t> exactGpuRecordIndex{std::numeric_limits<std::uint32_t>::max()};
     std::atomic<std::uint32_t> exactGpuFaceOffset{0};
     std::atomic<std::uint32_t> exactGpuFaceCount{0};
+    std::atomic<std::uint32_t> exactGpuRecordFlags{0};
     std::atomic<std::uint8_t> exactGpuPendingNeighborMask{0};
     std::atomic<std::uint32_t> exactGpuFenceDeferredCount{0};
     std::atomic<std::uint32_t> exactGpuRequeueCount{0};
@@ -4241,6 +4245,10 @@ inline constexpr std::uint32_t kExactCompletionStatusCompletedBit = 1u << 0u;
 inline constexpr std::uint32_t kExactCompletionStatusOverflowBit = 1u << 1u;
 inline constexpr std::uint32_t kExactCompletionStatusZeroFacesBit = 1u << 2u;
 inline constexpr std::uint32_t kExactCompletionStatusAllocatorExhaustedBit = 1u << 3u;
+inline constexpr std::uint32_t kExactCompletionStatusHasOpaqueFacesBit = 1u << 4u;
+inline constexpr std::uint32_t kExactCompletionStatusHasTranslucentFacesBit = 1u << 5u;
+inline constexpr std::uint32_t kExactDrawRecordFlagHasOpaqueFaces = 1u << 0u;
+inline constexpr std::uint32_t kExactDrawRecordFlagHasTranslucentFaces = 1u << 1u;
 inline constexpr std::uint32_t kExactChunkAllocationPhasePrepassSubmitted = 1u;
 inline constexpr std::uint32_t kExactChunkAllocationPhaseEmitSubmitted = 2u;
 inline constexpr std::size_t kExactGpuReserveFreePageWatermark = 16u;
@@ -4258,6 +4266,21 @@ inline constexpr std::uint32_t kInvalidExactGpuAllocatorFreePageSlot = std::nume
     case kExactGpuSeamNegZBit: return kExactGpuSeamPosZBit;
     default: return 0u;
     }
+}
+
+[[nodiscard]] constexpr std::uint32_t exactDrawRecordFlagsFromCompletionStatus(
+    std::uint32_t statusFlags) noexcept
+{
+    std::uint32_t recordFlags = 0u;
+    if ((statusFlags & kExactCompletionStatusHasOpaqueFacesBit) != 0u)
+    {
+        recordFlags |= kExactDrawRecordFlagHasOpaqueFaces;
+    }
+    if ((statusFlags & kExactCompletionStatusHasTranslucentFacesBit) != 0u)
+    {
+        recordFlags |= kExactDrawRecordFlagHasTranslucentFaces;
+    }
+    return recordFlags;
 }
 
 [[nodiscard]] constexpr std::size_t uploadQueueBucketIndex(UploadQueueBucket bucket) noexcept
@@ -7739,7 +7762,10 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             {
                 continue;
             }
-            const bool hasTranslucentBlocks = chunkPtr->hasTranslucentBlocks.load(std::memory_order_acquire);
+            const std::uint32_t exactRecordFlags =
+                chunkPtr->exactGpuRecordFlags.load(std::memory_order_acquire);
+            const bool hasTranslucentFaces =
+                (exactRecordFlags & kExactDrawRecordFlagHasTranslucentFaces) != 0u;
             const std::uint32_t faceCount = chunkPtr->exactGpuFaceCount.load(std::memory_order_acquire);
             const std::uint32_t faceOffset = chunkPtr->exactGpuFaceOffset.load(std::memory_order_acquire);
             const std::uint32_t recordIndex = chunkPtr->exactGpuRecordIndex.load(std::memory_order_acquire);
@@ -7752,7 +7778,7 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             batch.faceOffsets.push_back(faceOffset);
             batch.faceCounts.push_back(faceCount);
             batch.recordIndices.push_back(recordIndex);
-            batch.translucentEntries.push_back(hasTranslucentBlocks ? 1u : 0u);
+            batch.translucentEntries.push_back(hasTranslucentFaces ? 1u : 0u);
             continue;
         }
 
@@ -13890,6 +13916,13 @@ void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState
         ringDelta[static_cast<std::size_t>(distance)] += entry.requiredChunkCount;
     }
 
+    int running = 0;
+    for (int radius = 0; radius <= kMaxExactRenderDistanceChunks; ++radius)
+    {
+        running += ringDelta[static_cast<std::size_t>(radius)];
+        state.displayRequiredByRadius[static_cast<std::size_t>(radius)] = running;
+    }
+
     if (!complete)
     {
         state.authoritativeCountsValid = false;
@@ -13897,12 +13930,11 @@ void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState
         return;
     }
 
-    int running = 0;
+    running = 0;
     for (int radius = 0; radius <= kMaxExactRenderDistanceChunks; ++radius)
     {
         running += ringDelta[static_cast<std::size_t>(radius)];
         state.authoritativeRequiredByRadius[static_cast<std::size_t>(radius)] = running;
-        state.displayRequiredByRadius[static_cast<std::size_t>(radius)] = running;
     }
     state.authoritativeCountsValid = true;
     state.reconciling = !state.batch.pendingColumns.empty() || !state.dirtyColumns.empty() ||
@@ -13916,22 +13948,6 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
                                                   int exactRadius)
 {
     int coverageColumnsPerUpdate = 96;
-    if (smoothedFrameMs_ >= 40.0)
-    {
-        coverageColumnsPerUpdate = 1;
-    }
-    else if (smoothedFrameMs_ >= 28.0)
-    {
-        coverageColumnsPerUpdate = 2;
-    }
-    else if (smoothedFrameMs_ >= 20.0)
-    {
-        coverageColumnsPerUpdate = 4;
-    }
-    else if (smoothedFrameMs_ >= 14.0)
-    {
-        coverageColumnsPerUpdate = 8;
-    }
     const glm::ivec2 centerColumn{center.x, center.z};
     std::unique_lock<std::mutex> exactLock(exactPlanMutex_);
     ExactCoverageCacheState& state = exactCoverageCache_;
@@ -13940,6 +13956,31 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
     const int previousCameraChunkY = state.cameraChunkY;
     const int previousVerticalRadius = state.verticalRadius;
     const int previousTrackedRadius = state.trackedRadiusChunks;
+    const bool movingWindow =
+        firstActivation ||
+        previousCenter != centerColumn ||
+        previousCameraChunkY != center.y ||
+        previousVerticalRadius != verticalRadius ||
+        previousTrackedRadius != trackedRadius;
+    if (!movingWindow)
+    {
+        if (smoothedFrameMs_ >= 40.0)
+        {
+            coverageColumnsPerUpdate = 1;
+        }
+        else if (smoothedFrameMs_ >= 28.0)
+        {
+            coverageColumnsPerUpdate = 2;
+        }
+        else if (smoothedFrameMs_ >= 20.0)
+        {
+            coverageColumnsPerUpdate = 4;
+        }
+        else if (smoothedFrameMs_ >= 14.0)
+        {
+            coverageColumnsPerUpdate = 8;
+        }
+    }
     if (firstActivation)
     {
         state.active = true;
@@ -15864,6 +15905,7 @@ void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
     chunk.exactGpuFaceOffset.store(0, std::memory_order_release);
     chunk.exactGpuFaceCount.store(0, std::memory_order_release);
     chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_release);
+    chunk.exactGpuRecordFlags.store(0, std::memory_order_release);
     chunk.pendingExactDraw.reset();
     chunk.pendingExactDrawReady.store(false, std::memory_order_release);
 
@@ -23127,6 +23169,8 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     const std::uint32_t newRecordIndex = pending.allocation.recordIndex;
                     const std::uint32_t newFaceOffset = static_cast<std::uint32_t>(pending.allocation.faceOffset);
                     const std::uint32_t newFaceCount = completion.requiredFaces;
+                    const std::uint32_t newRecordFlags =
+                        exactDrawRecordFlagsFromCompletionStatus(completion.statusFlags);
                     ResidentChunkDrawAllocation liveAllocation{};
                     liveAllocation.chunkCoord = chunk.coord;
                     ResidentChunkDrawAllocation replacedPendingAllocation{};
@@ -23184,6 +23228,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             chunk.pendingExactDraw.recordIndex = newRecordIndex;
                             chunk.pendingExactDraw.faceOffset = newFaceOffset;
                             chunk.pendingExactDraw.faceCount = newFaceCount;
+                            chunk.pendingExactDraw.recordFlags = newRecordFlags;
                             chunk.pendingExactDrawReady.store(false, std::memory_order_release);
                             chunk.exactGpuPublishPending.store(true, std::memory_order_release);
                             recomputeChunkExactGpuHandoffReadiness(chunk);
@@ -23198,6 +23243,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             chunk.exactGpuFaceOffset.store(0, std::memory_order_release);
                             chunk.exactGpuFaceCount.store(0, std::memory_order_release);
                             chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_release);
+                            chunk.exactGpuRecordFlags.store(0, std::memory_order_release);
                             chunk.exactGpuResident.store(false, std::memory_order_release);
                             chunk.pendingExactDraw.reset();
                             chunk.pendingExactDrawReady.store(false, std::memory_order_release);
@@ -26377,6 +26423,7 @@ void ChunkManager::Impl::publishResidentExactGpuPageChunksReady(std::uint32_t pa
                 chunk->exactGpuFaceOffset.store(chunk->pendingExactDraw.faceOffset, std::memory_order_release);
                 chunk->exactGpuFaceCount.store(chunk->pendingExactDraw.faceCount, std::memory_order_release);
                 chunk->exactGpuRecordIndex.store(chunk->pendingExactDraw.recordIndex, std::memory_order_release);
+                chunk->exactGpuRecordFlags.store(chunk->pendingExactDraw.recordFlags, std::memory_order_release);
                 chunk->exactGpuResident.store(true, std::memory_order_release);
                 chunk->pendingExactDraw.reset();
                 chunk->pendingExactDrawReady.store(false, std::memory_order_release);
@@ -26443,6 +26490,7 @@ bool ChunkManager::Impl::finalizeChunkExactGpuHandoff(const std::shared_ptr<Chun
         chunk->exactGpuFaceOffset.store(chunk->pendingExactDraw.faceOffset, std::memory_order_release);
         chunk->exactGpuFaceCount.store(chunk->pendingExactDraw.faceCount, std::memory_order_release);
         chunk->exactGpuRecordIndex.store(chunk->pendingExactDraw.recordIndex, std::memory_order_release);
+        chunk->exactGpuRecordFlags.store(chunk->pendingExactDraw.recordFlags, std::memory_order_release);
         chunk->exactGpuResident.store(true, std::memory_order_release);
         chunk->pendingExactDraw.reset();
         chunk->pendingExactDrawReady.store(false, std::memory_order_release);

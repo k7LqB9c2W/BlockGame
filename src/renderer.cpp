@@ -2692,7 +2692,7 @@ void Renderer::createPipelines()
       std::array<D3D12_ROOT_PARAMETER, 5> exactCullRootParams{};
       exactCullRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
       exactCullRootParams[0].Constants.ShaderRegister = 0;
-      exactCullRootParams[0].Constants.Num32BitValues = 44;
+      exactCullRootParams[0].Constants.Num32BitValues = 46;
       exactCullRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       exactCullRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
       exactCullRootParams[1].DescriptorTable.pDescriptorRanges = &depthPyramidSrvRange;
@@ -3621,7 +3621,8 @@ void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
                                        D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
                                        D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv,
                                        ID3D12Resource* exactBlockUvBuffer,
-                                       bool shadowPass)
+                                       bool shadowPass,
+                                       std::uint32_t requiredRecordFlags)
 {
     if (batch.drawRecordBuffer == nullptr ||
         batch.faceDescriptorBuffer == nullptr ||
@@ -3712,6 +3713,8 @@ void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
         UINT depthWidth{0};
         UINT depthHeight{0};
         UINT depthMipCount{0};
+        UINT requiredRecordFlags{0};
+        UINT forbiddenRecordFlags{0};
     } constants{};
     constants.viewProj = viewProj;
     const std::array<FrustumPlane, 6> frustumPlanes = extractFrustumPlanes(viewProj);
@@ -3723,11 +3726,13 @@ void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
     constants.depthWidth = static_cast<UINT>(std::max(width_, 1));
     constants.depthHeight = static_cast<UINT>(std::max(height_, 1));
     constants.depthMipCount = depthPyramidMipCount_;
+    constants.requiredRecordFlags = requiredRecordFlags;
+    constants.forbiddenRecordFlags = 0u;
 
     const UINT dispatchGroups = static_cast<UINT>((recordCount + 63u) / 64u);
     commandList_->SetComputeRootSignature(exactCullRootSignature_.Get());
     commandList_->SetPipelineState(exactCullPipelineState_.Get());
-    commandList_->SetComputeRoot32BitConstants(0, 44, &constants, 0);
+    commandList_->SetComputeRoot32BitConstants(0, 46, &constants, 0);
     commandList_->SetComputeRootDescriptorTable(1, depthPyramidSrvGpu_);
     commandList_->SetComputeRootShaderResourceView(2, batch.drawRecordBuffer->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(3, visibleIndices->GetGPUVirtualAddress());
@@ -4130,6 +4135,34 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->DrawInstanced(36, kCloudPrismCount, 0, 0);
     };
 
+    bool hasExactGpuCullWork = false;
+    std::uint64_t prepassExactVisibleIndexBytes = 0;
+    std::uint64_t prepassExactIndirectBytes = 0;
+    for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
+    {
+        if (!batch.supportsGpuCull ||
+            batch.drawRecordBuffer == nullptr ||
+            batch.gpuCullRecordCount == 0u)
+        {
+            continue;
+        }
+
+        hasExactGpuCullWork = true;
+        const std::uint64_t recordCount = static_cast<std::uint64_t>(batch.gpuCullRecordCount);
+        prepassExactVisibleIndexBytes = std::max(
+            prepassExactVisibleIndexBytes,
+            std::max<std::uint64_t>(recordCount * sizeof(std::uint32_t), 4u));
+        prepassExactIndirectBytes = std::max(
+            prepassExactIndirectBytes,
+            std::max<std::uint64_t>(recordCount * (sizeof(std::uint32_t) + sizeof(D3D12_DRAW_ARGUMENTS)), 4u));
+    }
+    if (hasExactGpuCullWork)
+    {
+        ensureExactCullBuffers(frameResources_[currentBackBufferIndex_],
+                               prepassExactVisibleIndexBytes,
+                               prepassExactIndirectBytes);
+    }
+
     if (environment.debug.shadowsEnabled)
     {
         renderShadowMap(renderData, atlasTexture, view, cameraPos, environment, *nearConstants);
@@ -4318,7 +4351,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                         shadowMapSrvGpu_,
                                         skyBackgroundSrvGpu_,
                                         renderData.exactBlockUvBuffer,
-                                        false);
+                                        false,
+                                        ExactChunkRenderBatch::GpuCullRecord::kFlagsHasOpaqueFacesBit);
                 continue;
             }
 
@@ -4593,6 +4627,26 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
         {
+            if (batch.supportsGpuCull &&
+                batch.drawRecordBuffer != nullptr &&
+                batch.gpuCullRecordCount > 0 &&
+                renderData.exactBlockUvBuffer != nullptr)
+            {
+                renderExactBatchGpuCull(batch,
+                                        viewProj,
+                                        exactNearTranslucentPipelineState_.Get(),
+                                        exactWorldRootSignature_.Get(),
+                                        worldCb,
+                                        atlasTexture.srvGpu,
+                                        atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                                        shadowMapSrvGpu_,
+                                        skyBackgroundSrvGpu_,
+                                        renderData.exactBlockUvBuffer,
+                                        false,
+                                        ExactChunkRenderBatch::GpuCullRecord::kFlagsHasTranslucentFacesBit);
+                continue;
+            }
+
             if (batch.faceCounts.empty() ||
                 batch.faceDescriptorBuffer == nullptr ||
                 batch.drawRecordMetadataBuffer == nullptr ||
@@ -4850,6 +4904,25 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
 
         for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
         {
+            if (batch.supportsGpuCull &&
+                batch.drawRecordBuffer != nullptr &&
+                batch.gpuCullRecordCount > 0)
+            {
+                renderExactBatchGpuCull(batch,
+                                        lightViewProj,
+                                        exactShadowPipelineState_.Get(),
+                                        exactShadowRootSignature_.Get(),
+                                        shadowCbAddress,
+                                        atlasTexture.srvGpu,
+                                        {},
+                                        {},
+                                        {},
+                                        renderData.exactBlockUvBuffer,
+                                        true,
+                                        ExactChunkRenderBatch::GpuCullRecord::kFlagsHasOpaqueFacesBit);
+                continue;
+            }
+
             if (batch.faceCounts.empty() ||
                 batch.faceDescriptorBuffer == nullptr ||
                 batch.drawRecordMetadataBuffer == nullptr)

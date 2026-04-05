@@ -602,6 +602,7 @@ public:
         exactFaceEmitShader_.Reset();
         exactDrawRecordClearShader_.Reset();
         exactFaceCountScratchBuffer_.Reset();
+        exactTranslucentFaceCountScratchBuffer_.Reset();
         exactFaceDescriptorScratchBuffer_.Reset();
         exactFacePrefixScratchBuffer_.Reset();
         exactFaceTotalScratchBuffer_.Reset();
@@ -2126,6 +2127,7 @@ public:
             descriptorHeap_ == nullptr ||
             exactDescriptorScratchBuffer_ == nullptr ||
             exactFaceCountScratchBuffer_ == nullptr ||
+            exactTranslucentFaceCountScratchBuffer_ == nullptr ||
             exactFaceDescriptorScratchBuffer_ == nullptr ||
             exactFacePrefixScratchBuffer_ == nullptr ||
             exactFaceTotalScratchBuffer_ == nullptr ||
@@ -2141,6 +2143,13 @@ public:
                        exactFaceCountScratchState_,
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        if (exactTranslucentFaceCountScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(exactTranslucentFaceCountScratchBuffer_.Get(),
+                       exactTranslucentFaceCountScratchState_,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            exactTranslucentFaceCountScratchState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
         if (exactFaceDescriptorScratchState_ != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         {
@@ -2175,6 +2184,7 @@ public:
         commandList_->SetComputeRootUnorderedAccessView(4, exactFaceDescriptorScratchBuffer_->GetGPUVirtualAddress());
         commandList_->SetComputeRootUnorderedAccessView(5, exactFacePrefixScratchBuffer_->GetGPUVirtualAddress());
         commandList_->SetComputeRootUnorderedAccessView(6, exactFaceTotalScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootUnorderedAccessView(7, exactTranslucentFaceCountScratchBuffer_->GetGPUVirtualAddress());
         return true;
     }
 
@@ -2358,6 +2368,7 @@ public:
             pageMetadataBuffer == nullptr ||
             descriptorHeap_ == nullptr ||
             exactFaceCountScratchBuffer_ == nullptr ||
+            exactTranslucentFaceCountScratchBuffer_ == nullptr ||
             exactFaceDescriptorScratchBuffer_ == nullptr ||
             exactFacePrefixScratchBuffer_ == nullptr ||
             exactDescriptorScratchBuffer_ == nullptr ||
@@ -2374,6 +2385,13 @@ public:
                        exactFaceCountScratchState_,
                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
+        if (exactTranslucentFaceCountScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        {
+            transition(exactTranslucentFaceCountScratchBuffer_.Get(),
+                       exactTranslucentFaceCountScratchState_,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            exactTranslucentFaceCountScratchState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
         if (exactFaceDescriptorScratchState_ != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
         {
@@ -2431,10 +2449,11 @@ public:
         commandList_->SetComputeRootShaderResourceView(5, exactFaceCountScratchBuffer_->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(6, exactFaceDescriptorScratchBuffer_->GetGPUVirtualAddress());
         commandList_->SetComputeRootShaderResourceView(7, exactFacePrefixScratchBuffer_->GetGPUVirtualAddress());
-        commandList_->SetComputeRootShaderResourceView(8, batchBuildIndicesAddress);
-        commandList_->SetComputeRootUnorderedAccessView(9, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
-        commandList_->SetComputeRootUnorderedAccessView(10, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
-        commandList_->SetComputeRootUnorderedAccessView(11, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(8, exactTranslucentFaceCountScratchBuffer_->GetGPUVirtualAddress());
+        commandList_->SetComputeRootShaderResourceView(9, batchBuildIndicesAddress);
+        commandList_->SetComputeRootUnorderedAccessView(10, exactOverflowCountScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(11, exactOverflowEntryScratchAddress(activeSubmissionSlotIndex_));
+        commandList_->SetComputeRootUnorderedAccessView(12, exactCompletionScratchBuffer_->GetGPUVirtualAddress());
         commandList_->Dispatch(kExactChunkPlaneCount, batchBuildCount, 1u);
         hasCommands_ = true;
     }
@@ -2650,6 +2669,7 @@ public:
                exactDrawRecordClearPipelineState_ != nullptr &&
                exactDescriptorScratchBuffer_ != nullptr &&
                exactFaceCountScratchBuffer_ != nullptr &&
+               exactTranslucentFaceCountScratchBuffer_ != nullptr &&
                exactFaceDescriptorScratchBuffer_ != nullptr &&
                exactFacePrefixScratchBuffer_ != nullptr &&
                exactFaceTotalScratchBuffer_ != nullptr &&
@@ -2821,6 +2841,7 @@ public:
             static_cast<std::size_t>(kMaxExactGpuBuildBatches) * kExactDescriptorScratchSliceBytes;
         return static_cast<std::size_t>(kMaxExactGpuBuildBatches) *
                    (static_cast<std::size_t>(kExactFaceCountScratchSliceBytes) +
+                    static_cast<std::size_t>(kExactTranslucentFaceCountScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFaceDescriptorScratchSliceBytes) +
                     static_cast<std::size_t>(kExactFacePrefixScratchSliceBytes) +
                static_cast<std::size_t>(kExactFaceTotalScratchSliceBytes)) +
@@ -3146,6 +3167,8 @@ private:
         ((kExactChunkPlaneCount * kExactChunkPackedVoxelStrideBytes + kExactIndirectRootBufferAlignment - 1u) /
          kExactIndirectRootBufferAlignment) *
         kExactIndirectRootBufferAlignment;
+    static constexpr std::uint32_t kExactTranslucentFaceCountScratchSliceBytes =
+        kExactFaceCountScratchSliceBytes;
     static constexpr std::uint32_t kExactFaceDescriptorScratchSliceBytes =
         ((kExactChunkFaceDescriptorCount * kExactChunkFaceDescriptorStrideBytes + kExactIndirectRootBufferAlignment - 1u) /
          kExactIndirectRootBufferAlignment) *
@@ -3191,6 +3214,12 @@ private:
                                                                kExactFaceCountScratchSliceBytes,
                                                            D3D12_RESOURCE_STATE_COMMON,
                                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        exactTranslucentFaceCountScratchBuffer_ = createDefaultBuffer(
+            device_.Get(),
+            static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
+                kExactTranslucentFaceCountScratchSliceBytes,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         exactFaceDescriptorScratchBuffer_ = createDefaultBuffer(
             device_.Get(),
             static_cast<std::uint64_t>(kMaxExactGpuBuildBatches) *
@@ -3229,6 +3258,7 @@ private:
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         setDebugObjectName(exactFaceCountScratchBuffer_.Get(), L"ExactChunkFaceCountScratch");
+        setDebugObjectName(exactTranslucentFaceCountScratchBuffer_.Get(), L"ExactChunkTranslucentFaceCountScratch");
         setDebugObjectName(exactFaceDescriptorScratchBuffer_.Get(), L"ExactChunkFaceDescriptorScratch");
         setDebugObjectName(exactFacePrefixScratchBuffer_.Get(), L"ExactChunkFacePrefixScratch");
         setDebugObjectName(exactFaceTotalScratchBuffer_.Get(), L"ExactChunkFaceTotalScratch");
@@ -3237,6 +3267,7 @@ private:
         setDebugObjectName(exactOverflowEntryScratchBuffer_.Get(), L"ExactChunkOverflowEntryScratch");
         setDebugObjectName(exactCompletionScratchBuffer_.Get(), L"ExactChunkCompletionScratch");
         exactFaceCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
+        exactTranslucentFaceCountScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceDescriptorScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFacePrefixScratchState_ = D3D12_RESOURCE_STATE_COMMON;
         exactFaceTotalScratchState_ = D3D12_RESOURCE_STATE_COMMON;
@@ -3758,7 +3789,7 @@ private:
                                                             IID_PPV_ARGS(&exactDescriptorGenPipelineState_)),
                         "failed to create exact chunk descriptor gen pipeline");
 
-        std::array<D3D12_ROOT_PARAMETER, 7> exactPrepassParams{};
+        std::array<D3D12_ROOT_PARAMETER, 8> exactPrepassParams{};
         exactPrepassParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactPrepassParams[0].Constants.ShaderRegister = 0;
         exactPrepassParams[0].Constants.Num32BitValues = 4;
@@ -3766,7 +3797,7 @@ private:
         exactPrepassParams[1].Descriptor.ShaderRegister = 0;
         exactPrepassParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         exactPrepassParams[2].Descriptor.ShaderRegister = 1;
-        for (UINT parameterIndex = 3; parameterIndex <= 6; ++parameterIndex)
+        for (UINT parameterIndex = 3; parameterIndex <= 7; ++parameterIndex)
         {
             exactPrepassParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
             exactPrepassParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 3;
@@ -3824,19 +3855,19 @@ private:
                                                             IID_PPV_ARGS(&exactFacePrefixPipelineState_)),
                         "failed to create exact chunk face prefix pipeline");
 
-        std::array<D3D12_ROOT_PARAMETER, 12> exactFaceEmitParams{};
+        std::array<D3D12_ROOT_PARAMETER, 13> exactFaceEmitParams{};
         exactFaceEmitParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         exactFaceEmitParams[0].Constants.ShaderRegister = 0;
         exactFaceEmitParams[0].Constants.Num32BitValues = 1;
-        for (UINT parameterIndex = 1; parameterIndex <= 8; ++parameterIndex)
+        for (UINT parameterIndex = 1; parameterIndex <= 9; ++parameterIndex)
         {
             exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
             exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 1;
         }
-        for (UINT parameterIndex = 9; parameterIndex <= 11; ++parameterIndex)
+        for (UINT parameterIndex = 10; parameterIndex <= 12; ++parameterIndex)
         {
             exactFaceEmitParams[parameterIndex].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 9;
+            exactFaceEmitParams[parameterIndex].Descriptor.ShaderRegister = parameterIndex - 10;
         }
         D3D12_ROOT_SIGNATURE_DESC exactFaceEmitDesc{};
         exactFaceEmitDesc.NumParameters = static_cast<UINT>(exactFaceEmitParams.size());
@@ -3944,6 +3975,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> readbackScratch_;
     std::byte* readbackScratchMapped_{nullptr};
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceCountScratchBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> exactTranslucentFaceCountScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceDescriptorScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFacePrefixScratchBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> exactFaceTotalScratchBuffer_;
@@ -3964,6 +3996,7 @@ private:
     UINT exactTimingPassCount_{0};
     std::array<ExactTimingPass, static_cast<std::size_t>(ExactTimingPass::Count)> exactTimingPassesCurrent_{};
     D3D12_RESOURCE_STATES exactFaceCountScratchState_{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES exactTranslucentFaceCountScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFaceDescriptorScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFacePrefixScratchState_{D3D12_RESOURCE_STATE_COMMON};
     D3D12_RESOURCE_STATES exactFaceTotalScratchState_{D3D12_RESOURCE_STATE_COMMON};

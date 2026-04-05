@@ -6,9 +6,13 @@ cbuffer CullParams : register(b0)
     uint gDepthWidth;
     uint gDepthHeight;
     uint gDepthMipCount;
+    uint gRequiredRecordFlags;
+    uint gForbiddenRecordFlags;
 };
 
 static const uint kExactDrawRecordActiveBit = 0x40000000u;
+static const uint kExactDrawRecordFlagHasOpaqueFaces = 1u << 0u;
+static const uint kExactDrawRecordFlagHasTranslucentFaces = 1u << 1u;
 
 struct GpuExactDrawRecord
 {
@@ -75,6 +79,14 @@ void ExactCullMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const GpuExactDrawRecord record = gRecords[recordIndex];
     if ((record.reserved & kExactDrawRecordActiveBit) == 0u || record.faceCount == 0u)
+    {
+        return;
+    }
+    if ((record.reserved0 & gRequiredRecordFlags) != gRequiredRecordFlags)
+    {
+        return;
+    }
+    if ((record.reserved0 & gForbiddenRecordFlags) != 0u)
     {
         return;
     }

@@ -14,6 +14,7 @@ RWStructuredBuffer<uint> gFaceCounts : register(u0);
 RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(u1);
 RWStructuredBuffer<uint> gFacePrefixScratch : register(u2);
 RWStructuredBuffer<uint> gFaceTotalScratch : register(u3);
+RWStructuredBuffer<uint> gTranslucentFaceCounts : register(u4);
 
 static const uint kExactIndirectRootBufferAlignment = 256u;
 static const uint kExactFaceCountScratchStride =
@@ -125,6 +126,7 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
     decodePlane(planeIndex, axis, positiveFace, slice);
     const uint faceId = faceIdForAxis(axis, positiveFace);
     uint descriptorCount = 0u;
+    uint translucentDescriptorCount = 0u;
     const uint descriptorPlaneBase = faceDescriptorBase + planeIndex * kExactChunkMaxDescriptorsPerPlane;
 
     [loop]
@@ -186,6 +188,11 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
                 continue;
             }
 
+            if (renderClassForBlock(owningBlock) == kRenderClassTranslucent)
+            {
+                translucentDescriptorCount += 1u;
+            }
+
             const uint descriptorIndex = descriptorPlaneBase + descriptorCount;
             if (descriptorIndex < faceDescriptorBase + gDescriptorCount)
             {
@@ -205,4 +212,5 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
     }
 
     gFaceCounts[faceCountBase + planeIndex] = descriptorCount;
+    gTranslucentFaceCounts[faceCountBase + planeIndex] = translucentDescriptorCount;
 }

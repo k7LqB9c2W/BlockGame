@@ -340,7 +340,8 @@ private:
                                  D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
                                  D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv,
                                  ID3D12Resource* exactBlockUvBuffer,
-                                 bool shadowPass);
+                                 bool shadowPass,
+                                 std::uint32_t requiredRecordFlags);
     void renderShadowMap(const WorldRenderData& renderData,
                          const LoadedTexture& atlasTexture,
                          const glm::mat4& view,

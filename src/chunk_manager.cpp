@@ -6880,21 +6880,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 {
     const auto updateStart = std::chrono::steady_clock::now();
     const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
-    auto benchmarkPhaseStart = std::chrono::steady_clock::now();
-    const auto benchmarkPhaseCheckpoint = [&](const char* label)
-    {
-        const auto now = std::chrono::steady_clock::now();
-        if (benchmarkEnabled)
-        {
-            const double elapsedMs =
-                std::chrono::duration<double, std::milli>(now - benchmarkPhaseStart).count();
-            if (elapsedMs >= 250.0)
-            {
-                std::cerr << "benchmark_update_phase " << label << " ms=" << elapsedMs << std::endl;
-            }
-        }
-        benchmarkPhaseStart = now;
-    };
     lastCameraPosition_ = cameraPos;
     if (glm::dot(cameraForward, cameraForward) > kEpsilon)
     {
@@ -6926,7 +6911,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     uploadDedicatedLocalCpuMeshes();
     applyQueuedRelightRequests();
     applyQueuedFarTerrainInvalidations();
-    benchmarkPhaseCheckpoint("early_queues");
     glm::vec3 priorityForward(lastCameraForward_.x, lastCameraForward_.y, lastCameraForward_.z);
     if (movementEnvelopeIdleMode_ && !movementEnvelopeTurnActive_)
     {
@@ -7040,7 +7024,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
 
     pinWorldgenWindow(centerChunk, renderSettings_.exactChunks);
     prefetchVisibleWorldgenPages(centerChunk, previousCenterChunk, targetViewDistance_);
-    benchmarkPhaseCheckpoint("prefetch");
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     const bool needsFullExactCoverageMetrics = exactOnly;
 
@@ -7079,7 +7062,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                              currentExactWindowKey.verticalRadius,
                              currentExactWindowKey.visibleRadius,
                              currentExactWindowKey.exactRadius);
-    benchmarkPhaseCheckpoint("exact_coverage_cache");
     const FrontierCoverage frontierCoverage = streamingFrontierCoverageSnapshot();
     VisibleChunkCoverage visibleCoverage{};
     visibleCoverage.ready = frontierCoverage.visibleReady;
@@ -7237,7 +7219,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     int jobBudget = effectiveGenerationBudgetTarget;
     const auto schedulingStart = std::chrono::steady_clock::now();
     const int dispatchedGenerationJobs = dispatchStreamingFrontierGenerateJobs(centerChunk, priorityForward, jobBudget);
-    benchmarkPhaseCheckpoint("dispatch_generation");
     schedulingMsLastFrame_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedulingStart).count();
 
@@ -7303,7 +7284,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - relightStart).count();
     }
     uploadLocalCpuMeshes();
-    benchmarkPhaseCheckpoint("upload_local_cpu_meshes");
     const bool runDenseResidencyThisFrame = !stationaryExactFillModeActive_;
     if (runDenseResidencyThisFrame)
     {
@@ -7316,7 +7296,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     {
         denseResidencyMsLastFrame_ = 0.0;
     }
-    benchmarkPhaseCheckpoint("dense_residency");
     const bool runPoolTrimThisFrame = !stationaryExactFillModeActive_;
     if (runPoolTrimThisFrame)
     {
@@ -7651,16 +7630,19 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
     }
 
     std::vector<bool> exactGpuResidentPages;
+    std::vector<bool> exactGpuPageUsage;
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         const std::size_t pageCount = bufferPages_.size();
         renderData.nearBatches.resize(pageCount);
         renderData.exactNearBatches.resize(pageCount);
         exactGpuResidentPages.assign(pageCount, false);
+        exactGpuPageUsage.assign(pageCount, false);
         for (std::size_t i = 0; i < pageCount; ++i)
         {
             if (bufferPages_[i].usage == ChunkBufferPageUsage::ExactGpu)
             {
+                exactGpuPageUsage[i] = true;
                 const bool residentExactPage =
                     bufferPages_[i].state == ChunkBufferPageState::ResidentImmutable;
                 exactGpuResidentPages[i] = residentExactPage;
@@ -7747,8 +7729,11 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         const bool cpuVisibleAuthority =
             gameplayAuthority == ChunkGameplayAuthority::LocalGameplay ||
             gameplayAuthority == ChunkGameplayAuthority::HandoffToGpu;
+        const bool cpuMeshAvailable =
+            indexCount > 0 &&
+            !exactGpuPageUsage[pageIndex];
 
-        if (exactGpuResident && !cpuVisibleAuthority)
+        if (exactGpuResident && (!cpuVisibleAuthority || !cpuMeshAvailable))
         {
             if (!exactGpuResidentPages[pageIndex])
             {
@@ -13930,7 +13915,23 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
                                                   int schedulingRadius,
                                                   int exactRadius)
 {
-    constexpr int kCoverageColumnsPerUpdate = 96;
+    int coverageColumnsPerUpdate = 96;
+    if (smoothedFrameMs_ >= 40.0)
+    {
+        coverageColumnsPerUpdate = 1;
+    }
+    else if (smoothedFrameMs_ >= 28.0)
+    {
+        coverageColumnsPerUpdate = 2;
+    }
+    else if (smoothedFrameMs_ >= 20.0)
+    {
+        coverageColumnsPerUpdate = 4;
+    }
+    else if (smoothedFrameMs_ >= 14.0)
+    {
+        coverageColumnsPerUpdate = 8;
+    }
     const glm::ivec2 centerColumn{center.x, center.z};
     std::unique_lock<std::mutex> exactLock(exactPlanMutex_);
     ExactCoverageCacheState& state = exactCoverageCache_;
@@ -14083,7 +14084,7 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
     }
 
     state.batch.columnsProcessedLastUpdate = 0;
-    while (state.batch.columnsProcessedLastUpdate < kCoverageColumnsPerUpdate)
+    while (state.batch.columnsProcessedLastUpdate < coverageColumnsPerUpdate)
     {
         if (state.batch.pendingColumns.empty())
         {
@@ -28442,6 +28443,17 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
             {
                 toHydrate.push_back(chunk);
             }
+
+            const bool needsCpuMeshForVisibleOwnership =
+                chunk->state.load(std::memory_order_acquire) == ChunkState::Uploaded &&
+                chunk->indexCount.load(std::memory_order_acquire) == 0 &&
+                !chunk->meshReady.load(std::memory_order_acquire) &&
+                !chunk->queuedForUpload.load(std::memory_order_acquire) &&
+                !chunk->queuedForCommit.load(std::memory_order_acquire);
+            if (needsCpuMeshForVisibleOwnership)
+            {
+                requestChunkRemesh(chunk, true);
+            }
             continue;
         }
 
@@ -28510,6 +28522,10 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
         {
             std::lock_guard<std::mutex> lock(chunk->meshMutex);
             columnManager_.updateChunk(makeChunkBlockView(*chunk));
+        }
+        if (chunk)
+        {
+            requestChunkRemesh(chunk, true);
         }
     }
 

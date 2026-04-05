@@ -3592,6 +3592,29 @@ struct Chunk
         }
     };
 
+    struct PendingExactDraw
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        std::uint32_t recordIndex{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t faceOffset{0};
+        std::uint32_t faceCount{0};
+
+        [[nodiscard]] bool valid() const noexcept
+        {
+            return pageIndex != kInvalidChunkBufferPage &&
+                   recordIndex != std::numeric_limits<std::uint32_t>::max() &&
+                   faceCount > 0u;
+        }
+
+        void reset() noexcept
+        {
+            pageIndex = kInvalidChunkBufferPage;
+            recordIndex = std::numeric_limits<std::uint32_t>::max();
+            faceOffset = 0;
+            faceCount = 0;
+        }
+    };
+
     struct ExactGpuResources
     {
         Microsoft::WRL::ComPtr<ID3D12Resource> columnBuffer;
@@ -3698,6 +3721,7 @@ struct Chunk
         exactGpuBuildQueued.store(false, std::memory_order_relaxed);
         exactGpuBuildInFlight.store(false, std::memory_order_relaxed);
         exactGpuResident.store(false, std::memory_order_relaxed);
+        exactGpuPublishPending.store(false, std::memory_order_relaxed);
         exactGpuInputsDirty.store(false, std::memory_order_relaxed);
         exactGpuInputsVersion.store(0, std::memory_order_relaxed);
         exactGpuRequestedInputVersion.store(0, std::memory_order_relaxed);
@@ -3715,6 +3739,7 @@ struct Chunk
         lastDenseFrameTouched = 0;
         exactGpuPendingNeighborMask.store(0, std::memory_order_relaxed);
         pendingMesh = {};
+        pendingExactDraw.reset();
         exactGpu.reset();
     }
 
@@ -3804,6 +3829,7 @@ struct Chunk
     std::atomic<bool> exactGpuBuildQueued{false};
     std::atomic<bool> exactGpuBuildInFlight{false};
     std::atomic<bool> exactGpuResident{false};
+    std::atomic<bool> exactGpuPublishPending{false};
     std::atomic<bool> exactGpuInputsDirty{false};
     std::atomic<std::uint64_t> exactGpuInputsVersion{0};
     std::atomic<std::uint64_t> exactGpuRequestedInputVersion{0};
@@ -3821,6 +3847,7 @@ struct Chunk
     bool cpuDataResident{false};
     std::uint64_t lastDenseFrameTouched{0};
     PendingRenderMesh pendingMesh{};
+    PendingExactDraw pendingExactDraw{};
     ExactGpuResources exactGpu{};
 };
 
@@ -4019,6 +4046,23 @@ inline constexpr std::uint32_t kInvalidExactGpuAllocatorFreePageSlot = std::nume
 {
     return static_cast<std::size_t>(bucket);
 }
+
+struct ResidentChunkDrawAllocation
+{
+    glm::ivec3 chunkCoord{0};
+    std::uint32_t pageIndex{kInvalidChunkBufferPage};
+    std::size_t vertexOffset{0};
+    std::size_t vertexCount{0};
+    std::size_t indexOffset{0};
+    std::size_t indexCount{0};
+    std::uint32_t recordIndex{kInvalidExactGpuDrawRecordIndex};
+    bool exactDraw{false};
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return pageIndex != kInvalidChunkBufferPage;
+    }
+};
 
 struct UploadQueueEntry
 {
@@ -4716,6 +4760,7 @@ private:
                                       std::size_t& neighborRestoreCount);
     void restoreExactGpuNeighborStates(const std::array<Chunk*, 6>& neighborChunksToRestore,
                                        std::size_t neighborRestoreCount);
+    void releaseResidentChunkDrawAllocation(const ResidentChunkDrawAllocation& allocation);
     void releaseChunkAllocation(Chunk& chunk);
     void recycleChunkGPU(Chunk& chunk);
     void destroyBufferPages();
@@ -15435,53 +15480,73 @@ void ChunkManager::Impl::deferPendingChunkRelease(const Chunk::PendingRenderMesh
         pendingMesh.uploadFenceValue});
 }
 
-void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
+void ChunkManager::Impl::releaseResidentChunkDrawAllocation(const ResidentChunkDrawAllocation& allocation)
 {
-    const std::uint32_t pageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
-    const bool exactResident = chunk.exactGpuResident.load(std::memory_order_acquire);
-    if (pageIndex == kInvalidChunkBufferPage)
+    if (!allocation.valid())
     {
-        chunk.vertexCount.store(0, std::memory_order_relaxed);
-        chunk.indexCount.store(0, std::memory_order_relaxed);
-        chunk.vertexOffset.store(0, std::memory_order_relaxed);
-        chunk.indexOffset.store(0, std::memory_order_relaxed);
-        chunk.exactGpuFaceOffset.store(0, std::memory_order_relaxed);
-        chunk.exactGpuFaceCount.store(0, std::memory_order_relaxed);
-        chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_relaxed);
         return;
     }
 
-    const std::size_t vertexCount = chunk.vertexCount.load(std::memory_order_acquire);
-    const std::size_t indexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
-    const std::size_t vertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
-    const std::size_t indexOffset = chunk.indexOffset.load(std::memory_order_acquire);
-    const std::uint32_t recordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+        removeChunkFromExactPageMembers(allocation.pageIndex, allocation.chunkCoord);
+    }
+
+    releaseChunkAllocationRange(allocation.pageIndex,
+                                allocation.exactDraw ? 0u : allocation.vertexOffset,
+                                allocation.exactDraw ? 0u : allocation.vertexCount,
+                                allocation.exactDraw ? 0u : allocation.indexOffset,
+                                allocation.exactDraw ? 0u : allocation.indexCount,
+                                true);
+
+    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+    if (allocation.exactDraw &&
+        allocation.pageIndex < bufferPages_.size() &&
+        allocation.recordIndex != kInvalidExactGpuDrawRecordIndex)
+    {
+        markChunkDrawRecordInactive(bufferPages_[allocation.pageIndex], allocation.recordIndex, true);
+    }
+}
+
+void ChunkManager::Impl::releaseChunkAllocation(Chunk& chunk)
+{
+    ResidentChunkDrawAllocation liveAllocation{};
+    liveAllocation.chunkCoord = chunk.coord;
+    liveAllocation.pageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
+    liveAllocation.vertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
+    liveAllocation.vertexCount = chunk.vertexCount.load(std::memory_order_acquire);
+    liveAllocation.indexOffset = chunk.indexOffset.load(std::memory_order_acquire);
+    liveAllocation.indexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
+    liveAllocation.recordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
+    liveAllocation.exactDraw = chunk.exactGpuResident.load(std::memory_order_acquire);
+
+    ResidentChunkDrawAllocation pendingExactAllocation{};
+    pendingExactAllocation.chunkCoord = chunk.coord;
+    if (chunk.pendingExactDraw.valid())
+    {
+        pendingExactAllocation.pageIndex = chunk.pendingExactDraw.pageIndex;
+        pendingExactAllocation.recordIndex = chunk.pendingExactDraw.recordIndex;
+        pendingExactAllocation.exactDraw = true;
+    }
 
     chunk.bufferPageIndex.store(kInvalidChunkBufferPage, std::memory_order_release);
     chunk.vertexCount.store(0, std::memory_order_release);
     chunk.indexCount.store(0, std::memory_order_release);
     chunk.vertexOffset.store(0, std::memory_order_release);
     chunk.indexOffset.store(0, std::memory_order_release);
+    chunk.exactGpuResident.store(false, std::memory_order_release);
+    chunk.exactGpuPublishPending.store(false, std::memory_order_release);
     chunk.exactGpuFaceOffset.store(0, std::memory_order_release);
     chunk.exactGpuFaceCount.store(0, std::memory_order_release);
     chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-        removeChunkFromExactPageMembers(pageIndex, chunk.coord);
-    }
-    releaseChunkAllocationRange(pageIndex,
-                                exactResident ? 0u : vertexOffset,
-                                exactResident ? 0u : vertexCount,
-                                exactResident ? 0u : indexOffset,
-                                exactResident ? 0u : indexCount,
-                                true);
+    chunk.pendingExactDraw.reset();
 
-    std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-    if (exactResident &&
-        pageIndex < bufferPages_.size() &&
-        recordIndex != kInvalidExactGpuDrawRecordIndex)
+    releaseResidentChunkDrawAllocation(liveAllocation);
+    if (pendingExactAllocation.valid() &&
+        (pendingExactAllocation.pageIndex != liveAllocation.pageIndex ||
+         pendingExactAllocation.recordIndex != liveAllocation.recordIndex))
     {
-        markChunkDrawRecordInactive(bufferPages_[pageIndex], recordIndex, true);
+        releaseResidentChunkDrawAllocation(pendingExactAllocation);
     }
 }
 
@@ -20273,12 +20338,13 @@ bool ChunkManager::Impl::queuePreparedExactGpuBuildLocked(const std::shared_ptr<
         chunk->exactGpuRequestedInputVersion.load(std::memory_order_acquire);
     const bool buildQueued = chunk->exactGpuBuildQueued.load(std::memory_order_acquire);
     const bool buildInFlight = chunk->exactGpuBuildInFlight.load(std::memory_order_acquire);
+    const bool publishPending = chunk->exactGpuPublishPending.load(std::memory_order_acquire);
     const bool haloDirty = chunk->exactGpuHaloDirty.load(std::memory_order_acquire);
-    const bool residentCurrent =
-        chunk->exactGpuResident.load(std::memory_order_acquire) &&
+    const bool drawCurrent =
+        (chunk->exactGpuResident.load(std::memory_order_acquire) || publishPending) &&
         !chunk->exactGpuInputsDirty.load(std::memory_order_acquire) &&
         chunk->exactGpuReadyVersion.load(std::memory_order_acquire) == currentInputVersion;
-    if ((residentCurrent && !haloDirty) ||
+    if ((drawCurrent && !haloDirty) ||
         ((buildQueued || buildInFlight) && requestedInputVersion == currentInputVersion))
     {
         return true;
@@ -20350,12 +20416,13 @@ void ChunkManager::Impl::queueChunkForExactGpuRefresh(const std::shared_ptr<Chun
         chunk->exactGpuRequestedInputVersion.load(std::memory_order_acquire);
     const bool buildQueued = chunk->exactGpuBuildQueued.load(std::memory_order_acquire);
     const bool buildInFlight = chunk->exactGpuBuildInFlight.load(std::memory_order_acquire);
+    const bool publishPending = chunk->exactGpuPublishPending.load(std::memory_order_acquire);
     const bool haloDirty = chunk->exactGpuHaloDirty.load(std::memory_order_acquire);
-    const bool residentCurrent =
-        chunk->exactGpuResident.load(std::memory_order_acquire) &&
+    const bool drawCurrent =
+        (chunk->exactGpuResident.load(std::memory_order_acquire) || publishPending) &&
         !chunk->exactGpuInputsDirty.load(std::memory_order_acquire) &&
         chunk->exactGpuReadyVersion.load(std::memory_order_acquire) == currentInputVersion;
-    if ((residentCurrent && !haloDirty) ||
+    if ((drawCurrent && !haloDirty) ||
         ((buildQueued || buildInFlight) && requestedInputVersion == currentInputVersion))
     {
         return;
@@ -20394,6 +20461,7 @@ void ChunkManager::Impl::queueChunkForExactGpuBorderRefresh(const std::shared_pt
 
     const bool shouldRefresh =
         chunk->exactGpuResident.load(std::memory_order_acquire) ||
+        chunk->exactGpuPublishPending.load(std::memory_order_acquire) ||
         chunk->exactGpuBuildQueued.load(std::memory_order_acquire) ||
         chunk->exactGpuBuildInFlight.load(std::memory_order_acquire) ||
         chunk->exactGpuPendingNeighborMask.load(std::memory_order_acquire) != 0u;
@@ -22354,46 +22422,76 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                         continue;
                     }
 
-                    const bool oldExactGpuResident = chunk.exactGpuResident.load(std::memory_order_acquire);
                     const bool hasExactDrawAllocation = pending.hasAllocation() && completion.requiredFaces > 0u;
-                    const std::uint32_t oldPageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
-                    const std::size_t oldVertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
-                    const std::size_t oldIndexOffset = chunk.indexOffset.load(std::memory_order_acquire);
-                    const std::size_t oldVertexCount = chunk.vertexCount.load(std::memory_order_acquire);
-                    const std::size_t oldIndexCount = static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
-                    const std::uint32_t oldRecordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
-                    chunk.bufferPageIndex.store(pending.allocation.pageIndex, std::memory_order_release);
-                    chunk.vertexOffset.store(0, std::memory_order_release);
-                    chunk.indexOffset.store(0, std::memory_order_release);
-                    chunk.vertexCount.store(0, std::memory_order_release);
-                    chunk.indexCount.store(0, std::memory_order_release);
-                    chunk.exactGpuFaceOffset.store(static_cast<std::uint32_t>(pending.allocation.faceOffset),
-                                                   std::memory_order_release);
-                    chunk.exactGpuFaceCount.store(completion.requiredFaces, std::memory_order_release);
-                    chunk.exactGpuRecordIndex.store(pending.allocation.recordIndex, std::memory_order_release);
-                    chunk.exactGpuResident.store(true, std::memory_order_release);
-                    chunk.exactGpuPendingNeighborMask.store(pending.pendingNeighborMask, std::memory_order_release);
-                    chunk.exactGpuReadyVersion.store(pending.inputVersion, std::memory_order_release);
-                    chunk.exactGpuHaloDirty.store(false, std::memory_order_release);
-                    if (chunk.exactGpuInputsVersion.load(std::memory_order_acquire) == pending.inputVersion)
-                    {
-                        chunk.exactGpuInputsDirty.store(false, std::memory_order_release);
-                    }
-                    chunk.state.store(ChunkState::Uploaded, std::memory_order_release);
-                    chunk.meshReady.store(false, std::memory_order_release);
-                    chunk.residencyMode.store(shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_)
-                                                  ? ExactChunkResidencyMode::GpuPendingRetire
-                                                  : ExactChunkResidencyMode::GpuResidentNonlocal,
-                                              std::memory_order_release);
+                    const std::uint32_t newPageIndex = pending.allocation.pageIndex;
+                    const std::uint32_t newRecordIndex = pending.allocation.recordIndex;
+                    const std::uint32_t newFaceOffset = static_cast<std::uint32_t>(pending.allocation.faceOffset);
+                    const std::uint32_t newFaceCount = completion.requiredFaces;
+                    ResidentChunkDrawAllocation liveAllocation{};
+                    liveAllocation.chunkCoord = chunk.coord;
+                    ResidentChunkDrawAllocation replacedPendingAllocation{};
+                    replacedPendingAllocation.chunkCoord = chunk.coord;
 
                     {
-                        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
-                        if (oldPageIndex != kInvalidChunkBufferPage &&
-                            oldPageIndex != pending.allocation.pageIndex)
+                        std::lock_guard<std::mutex> meshLock(chunk.meshMutex);
+                        liveAllocation.pageIndex = chunk.bufferPageIndex.load(std::memory_order_acquire);
+                        liveAllocation.vertexOffset = chunk.vertexOffset.load(std::memory_order_acquire);
+                        liveAllocation.vertexCount = chunk.vertexCount.load(std::memory_order_acquire);
+                        liveAllocation.indexOffset = chunk.indexOffset.load(std::memory_order_acquire);
+                        liveAllocation.indexCount =
+                            static_cast<std::size_t>(chunk.indexCount.load(std::memory_order_acquire));
+                        liveAllocation.recordIndex = chunk.exactGpuRecordIndex.load(std::memory_order_acquire);
+                        liveAllocation.exactDraw = chunk.exactGpuResident.load(std::memory_order_acquire);
+
+                        if (chunk.pendingExactDraw.valid())
                         {
-                            removeChunkFromExactPageMembers(oldPageIndex, chunk.coord);
+                            replacedPendingAllocation.pageIndex = chunk.pendingExactDraw.pageIndex;
+                            replacedPendingAllocation.recordIndex = chunk.pendingExactDraw.recordIndex;
+                            replacedPendingAllocation.exactDraw = true;
                         }
-                        if (pending.hasAllocation() && pending.allocation.pageIndex < bufferPages_.size())
+
+                        chunk.exactGpuPendingNeighborMask.store(pending.pendingNeighborMask, std::memory_order_release);
+                        chunk.exactGpuReadyVersion.store(pending.inputVersion, std::memory_order_release);
+                        chunk.exactGpuHaloDirty.store(false, std::memory_order_release);
+                        if (chunk.exactGpuInputsVersion.load(std::memory_order_acquire) == pending.inputVersion)
+                        {
+                            chunk.exactGpuInputsDirty.store(false, std::memory_order_release);
+                        }
+                        chunk.state.store(ChunkState::Uploaded, std::memory_order_release);
+                        chunk.meshReady.store(false, std::memory_order_release);
+                        chunk.residencyMode.store(shouldKeepChunkInteractive(chunk.coord, lastCenterChunk_)
+                                                      ? ExactChunkResidencyMode::GpuPendingRetire
+                                                      : ExactChunkResidencyMode::GpuResidentNonlocal,
+                                                  std::memory_order_release);
+
+                        if (hasExactDrawAllocation)
+                        {
+                            chunk.pendingExactDraw.pageIndex = newPageIndex;
+                            chunk.pendingExactDraw.recordIndex = newRecordIndex;
+                            chunk.pendingExactDraw.faceOffset = newFaceOffset;
+                            chunk.pendingExactDraw.faceCount = newFaceCount;
+                            chunk.exactGpuPublishPending.store(true, std::memory_order_release);
+                        }
+                        else
+                        {
+                            chunk.bufferPageIndex.store(kInvalidChunkBufferPage, std::memory_order_release);
+                            chunk.vertexOffset.store(0, std::memory_order_release);
+                            chunk.indexOffset.store(0, std::memory_order_release);
+                            chunk.vertexCount.store(0, std::memory_order_release);
+                            chunk.indexCount.store(0, std::memory_order_release);
+                            chunk.exactGpuFaceOffset.store(0, std::memory_order_release);
+                            chunk.exactGpuFaceCount.store(0, std::memory_order_release);
+                            chunk.exactGpuRecordIndex.store(kInvalidExactGpuDrawRecordIndex, std::memory_order_release);
+                            chunk.exactGpuResident.store(false, std::memory_order_release);
+                            chunk.pendingExactDraw.reset();
+                            chunk.exactGpuPublishPending.store(false, std::memory_order_release);
+                        }
+                    }
+
+                    if (hasExactDrawAllocation)
+                    {
+                        std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
+                        if (pending.allocation.pageIndex < bufferPages_.size())
                         {
                             ChunkBufferPage& page = bufferPages_[pending.allocation.pageIndex];
                             if (page.pendingChunks > 0)
@@ -22413,20 +22511,18 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                         }
                     }
 
-                    if (oldPageIndex != kInvalidChunkBufferPage)
+                    if (replacedPendingAllocation.valid() &&
+                        (!hasExactDrawAllocation ||
+                         replacedPendingAllocation.pageIndex != newPageIndex ||
+                         replacedPendingAllocation.recordIndex != newRecordIndex))
+                    {
+                        releaseResidentChunkDrawAllocation(replacedPendingAllocation);
+                    }
+
+                    if (!hasExactDrawAllocation && liveAllocation.valid())
                     {
                         exactGpuMeshReplacements_.fetch_add(1, std::memory_order_relaxed);
-                        if (oldPageIndex < bufferPages_.size() &&
-                            oldRecordIndex != kInvalidExactGpuDrawRecordIndex)
-                        {
-                            markChunkDrawRecordInactive(bufferPages_[oldPageIndex], oldRecordIndex, true);
-                        }
-                        releaseChunkAllocationRange(oldPageIndex,
-                                                    oldExactGpuResident ? 0u : oldVertexOffset,
-                                                    oldExactGpuResident ? 0u : oldVertexCount,
-                                                    oldExactGpuResident ? 0u : oldIndexOffset,
-                                                    oldExactGpuResident ? 0u : oldIndexCount,
-                                                    true);
+                        releaseResidentChunkDrawAllocation(liveAllocation);
                     }
 
                     if (hasExactDrawAllocation)
@@ -25363,14 +25459,63 @@ void ChunkManager::Impl::publishResidentExactGpuPageChunksReady(std::uint32_t pa
 
     for (const auto& chunk : residentChunks)
     {
-        if (!chunk ||
-            !chunk->exactGpuResident.load(std::memory_order_acquire) ||
-            chunk->bufferPageIndex.load(std::memory_order_acquire) != pageIndex)
+        if (!chunk)
         {
             continue;
         }
 
-        publishChunkReady(*chunk);
+        ResidentChunkDrawAllocation replacedLiveAllocation{};
+        replacedLiveAllocation.chunkCoord = chunk->coord;
+        bool readyToPublish = false;
+
+        {
+            std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+            if (chunk->pendingExactDraw.valid() &&
+                chunk->pendingExactDraw.pageIndex == pageIndex)
+            {
+                replacedLiveAllocation.pageIndex = chunk->bufferPageIndex.load(std::memory_order_acquire);
+                replacedLiveAllocation.vertexOffset = chunk->vertexOffset.load(std::memory_order_acquire);
+                replacedLiveAllocation.vertexCount = chunk->vertexCount.load(std::memory_order_acquire);
+                replacedLiveAllocation.indexOffset = chunk->indexOffset.load(std::memory_order_acquire);
+                replacedLiveAllocation.indexCount =
+                    static_cast<std::size_t>(chunk->indexCount.load(std::memory_order_acquire));
+                replacedLiveAllocation.recordIndex =
+                    chunk->exactGpuRecordIndex.load(std::memory_order_acquire);
+                replacedLiveAllocation.exactDraw =
+                    chunk->exactGpuResident.load(std::memory_order_acquire);
+
+                chunk->bufferPageIndex.store(chunk->pendingExactDraw.pageIndex, std::memory_order_release);
+                chunk->vertexOffset.store(0, std::memory_order_release);
+                chunk->indexOffset.store(0, std::memory_order_release);
+                chunk->vertexCount.store(0, std::memory_order_release);
+                chunk->indexCount.store(0, std::memory_order_release);
+                chunk->exactGpuFaceOffset.store(chunk->pendingExactDraw.faceOffset, std::memory_order_release);
+                chunk->exactGpuFaceCount.store(chunk->pendingExactDraw.faceCount, std::memory_order_release);
+                chunk->exactGpuRecordIndex.store(chunk->pendingExactDraw.recordIndex, std::memory_order_release);
+                chunk->exactGpuResident.store(true, std::memory_order_release);
+                chunk->pendingExactDraw.reset();
+                chunk->exactGpuPublishPending.store(false, std::memory_order_release);
+                readyToPublish = true;
+            }
+            else if (chunk->exactGpuResident.load(std::memory_order_acquire) &&
+                     chunk->bufferPageIndex.load(std::memory_order_acquire) == pageIndex)
+            {
+                readyToPublish = true;
+            }
+        }
+
+        if (replacedLiveAllocation.valid() &&
+            (replacedLiveAllocation.pageIndex != pageIndex ||
+             replacedLiveAllocation.recordIndex != chunk->exactGpuRecordIndex.load(std::memory_order_acquire)))
+        {
+            exactGpuMeshReplacements_.fetch_add(1, std::memory_order_relaxed);
+            releaseResidentChunkDrawAllocation(replacedLiveAllocation);
+        }
+
+        if (readyToPublish)
+        {
+            publishChunkReady(*chunk);
+        }
     }
 }
 

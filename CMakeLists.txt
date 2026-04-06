@@ -106,7 +106,7 @@ target_compile_definitions(blockgame_shader_precompiler
 
 target_compile_options(blockgame
     PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /Zc:preprocessor /FS>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /Zc:preprocessor /FS /bigobj>
         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
 )
 

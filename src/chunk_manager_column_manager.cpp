@@ -4,6 +4,7 @@
 #include "chunk_manager_support.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace
 {
@@ -116,16 +117,57 @@ void ColumnManager::updateColumn(const ChunkBlockView& chunk, int localX, int lo
     applyHeightLocked(columnKey(chunk.coord, localX, localZ), chunk.coord.y, highestWorld);
 }
 
-void ColumnManager::removeChunk(const glm::ivec3& chunkCoord)
+void ColumnManager::removeChunks(std::span<const glm::ivec3> chunkCoords)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (int x = 0; x < kChunkSizeX; ++x)
+    if (chunkCoords.empty())
     {
-        for (int z = 0; z < kChunkSizeZ; ++z)
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::unordered_set<glm::ivec2, ColumnHasher> touchedColumns;
+    touchedColumns.reserve(chunkCoords.size() * static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ));
+
+    for (const glm::ivec3& chunkCoord : chunkCoords)
+    {
+        for (int x = 0; x < kChunkSizeX; ++x)
         {
-            applyHeightLocked(columnKey(chunkCoord, x, z), chunkCoord.y, kNoHeight);
+            for (int z = 0; z < kChunkSizeZ; ++z)
+            {
+                const glm::ivec2 key = columnKey(chunkCoord, x, z);
+                auto it = columns_.find(key);
+                if (it == columns_.end())
+                {
+                    continue;
+                }
+
+                it->second.slabHeights.erase(chunkCoord.y);
+                if (it->second.slabHeights.empty())
+                {
+                    columns_.erase(it);
+                    continue;
+                }
+
+                touchedColumns.insert(key);
+            }
         }
     }
+
+    for (const glm::ivec2& key : touchedColumns)
+    {
+        auto it = columns_.find(key);
+        if (it == columns_.end())
+        {
+            continue;
+        }
+
+        it->second.highestWorldY = computeHighest(it->second);
+    }
+}
+
+void ColumnManager::removeChunk(const glm::ivec3& chunkCoord)
+{
+    removeChunks(std::span<const glm::ivec3>(&chunkCoord, 1));
 }
 
 void ColumnManager::clear()

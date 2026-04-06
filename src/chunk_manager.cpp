@@ -3944,6 +3944,7 @@ struct Chunk
         exactGpuLastFenceDeferredMicros.store(0, std::memory_order_relaxed);
         exactGpuLastRequeueMicros.store(0, std::memory_order_relaxed);
         exactGpuPreferDenseUpload.store(false, std::memory_order_relaxed);
+        pendingRetire.store(false, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident = false;
         lastDenseFrameTouched = 0;
@@ -4054,6 +4055,7 @@ struct Chunk
     std::atomic<std::uint32_t> exactGpuRecordIndex{std::numeric_limits<std::uint32_t>::max()};
     std::atomic<std::uint32_t> exactGpuFaceOffset{0};
     std::atomic<std::uint32_t> exactGpuFaceCount{0};
+    std::atomic<bool> pendingRetire{false};
     std::atomic<std::uint32_t> exactGpuRecordFlags{0};
     std::atomic<std::uint8_t> exactGpuPendingNeighborMask{0};
     std::atomic<std::uint32_t> exactGpuFenceDeferredCount{0};
@@ -5201,6 +5203,55 @@ private:
     {
         std::weak_ptr<Chunk> chunk{};
         RenderSpatialBucketKey bucket{};
+        glm::ivec2 column{0};
+    };
+    struct ResidencyBucketEntry
+    {
+        std::vector<glm::ivec3> coords{};
+        std::vector<glm::ivec2> columns{};
+    };
+    struct ResidencyColumnEntry
+    {
+        std::vector<glm::ivec3> chunkCoordsByY{};
+        std::uint64_t membershipVersion{1};
+        std::uint64_t lastEvictionQueryGeneration{0};
+    };
+    struct EvictionBucketRect
+    {
+        int minX{0};
+        int maxX{0};
+        int minZ{0};
+        int maxZ{0};
+
+        bool operator==(const EvictionBucketRect& other) const noexcept
+        {
+            return minX == other.minX &&
+                   maxX == other.maxX &&
+                   minZ == other.minZ &&
+                   maxZ == other.maxZ;
+        }
+    };
+    struct EvictionQueryState
+    {
+        glm::ivec3 centerChunk{0};
+        int evictionCenterY{0};
+        int horizontalThreshold{0};
+        int verticalRadius{0};
+        int evictionSlack{0};
+        EvictionBucketRect activeBucketRect{};
+        std::uint64_t generation{0};
+    };
+    struct EvictionColumnCacheEntry
+    {
+        int columnHeight{ColumnManager::kNoHeight};
+        ColumnChunkIntervals intervals{};
+        std::uint64_t membershipVersion{0};
+        std::uint64_t queryGeneration{0};
+    };
+    struct PendingChunkRetire
+    {
+        glm::ivec3 coord{0};
+        std::shared_ptr<Chunk> chunk{};
     };
     struct BulkShellOracleBatch
     {
@@ -5613,12 +5664,40 @@ private:
     [[nodiscard]] bool chunkHasPendingStructureEdits(const glm::ivec3& coord) const;
     void releaseChunkCpuData(Chunk& chunk);
     static glm::ivec3 worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept;
+    [[nodiscard]] static glm::ivec2 residencyColumnForChunk(const glm::ivec3& coord) noexcept;
     [[nodiscard]] static RenderSpatialBucketKey renderSpatialBucketKeyForChunk(const glm::ivec3& coord) noexcept;
+    [[nodiscard]] static EvictionBucketRect evictionBucketRectForQuery(const glm::ivec3& center,
+                                                                       int horizontalThreshold) noexcept;
+    [[nodiscard]] static bool evictionQueryMatches(const EvictionQueryState& lhs,
+                                                   const EvictionQueryState& rhs) noexcept;
+    void insertResidencyColumnMember(const glm::ivec3& coord, const RenderSpatialBucketKey& bucket);
+    void removeResidencyColumnMember(const glm::ivec3& coord,
+                                     const RenderSpatialBucketKey& bucket,
+                                     const glm::ivec2& column);
+    void clearResidencyIndex();
     void registerChunkRenderRegistryEntry(const glm::ivec3& coord, const std::shared_ptr<Chunk>& chunk);
     void unregisterChunkRenderRegistryEntry(const glm::ivec3& coord);
     void collectRenderRegistryCandidates(const glm::ivec3& cameraChunk,
                                          int horizontalRadius,
                                          std::vector<std::shared_ptr<Chunk>>& outChunks) const;
+    void enqueueEvictionDiscoveryColumn(const glm::ivec2& column);
+    void enqueuePendingEvictionCandidate(const glm::ivec3& coord);
+    void enqueueEvictionDiscoveryColumnsForBucketRect(const EvictionBucketRect& rect);
+    void enqueueEvictionDiscoveryColumnsForBucketShell(const EvictionBucketRect& rect);
+    void enqueueEvictionDiscoveryColumnsForBucketDelta(const EvictionBucketRect& previousRect,
+                                                       const EvictionBucketRect& currentRect);
+    void collectActiveBucketColumns(const EvictionBucketRect& rect,
+                                    std::vector<glm::ivec2>& outColumns) const;
+    void collectResidencyBucketCoords(const EvictionBucketRect& rect, std::vector<glm::ivec3>& outCoords) const;
+    void updateEvictionDiscovery(const EvictionQueryState& query);
+    void evaluateEvictionColumn(const glm::ivec2& column, const EvictionQueryState& query);
+    void drainPendingEvictionDiscovery(const EvictionQueryState& query);
+    bool tryMarkChunkForRetire(const glm::ivec3& coord);
+    void drainPendingChunkRetires();
+    void setDenseTrackedCoord(const glm::ivec3& coord, bool tracked);
+    void collectDenseResidencyCandidateCoords(const glm::ivec3& centerChunk,
+                                              int horizontalRadius,
+                                              std::vector<glm::ivec3>& outCoords) const;
     static std::size_t estimateChunkRetainedBytes(const Chunk& chunk) noexcept;
     std::size_t chunkPoolBudgetBytes() const noexcept;
     void trimChunkPoolToBudget();
@@ -6098,9 +6177,11 @@ private:
     mutable std::mutex renderRegistryMutex_;
     std::unordered_map<glm::ivec3, RenderRegistryEntry, ChunkHasher> renderRegistry_{};
     std::unordered_map<RenderSpatialBucketKey,
-                       std::vector<glm::ivec3>,
+                       ResidencyBucketEntry,
                        RenderSpatialBucketKeyHasher>
         renderSpatialBuckets_{};
+    std::unordered_map<glm::ivec2, ResidencyColumnEntry, ColumnHasher> residencyColumns_{};
+    std::unordered_map<glm::ivec2, EvictionColumnCacheEntry, ColumnHasher> evictionColumnCache_{};
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
     JobQueue jobQueue_;
     ColumnManager columnManager_;
@@ -6224,6 +6305,15 @@ private:
     int lastVerticalRadiusDelta_{0};
     int evictionCenterChunkY_{0};
     bool evictionCenterInitialized_{false};
+    EvictionQueryState lastEvictionQueryState_{};
+    bool lastEvictionQueryStateValid_{false};
+    std::uint64_t nextEvictionQueryGeneration_{1};
+    std::deque<glm::ivec2> pendingEvictionDiscoveryColumns_{};
+    std::unordered_set<glm::ivec2, ColumnHasher> pendingEvictionDiscoveryColumnSet_{};
+    std::deque<glm::ivec3> pendingEvictionCandidates_{};
+    std::unordered_set<glm::ivec3, ChunkHasher> pendingEvictionCandidateSet_{};
+    std::deque<PendingChunkRetire> pendingChunkRetires_{};
+    std::unordered_set<glm::ivec3, ChunkHasher> denseTrackedCoords_{};
     int uploadColumnLimitThisFrame_{kVerticalStreamingConfig.uploadBasePerColumn};
     int uploadChunkLimitThisFrame_{1};
     std::size_t uploadBudgetBytesThisFrame_{kUploadBudgetBytesPerFrame};
@@ -8026,10 +8116,21 @@ void ChunkManager::Impl::clear()
         }
     }
     {
-        std::lock_guard<std::mutex> lock(renderRegistryMutex_);
-        renderRegistry_.clear();
-        renderSpatialBuckets_.clear();
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        denseTrackedCoords_.clear();
     }
+    while (!pendingChunkRetires_.empty())
+    {
+        drainPendingChunkRetires();
+    }
+    clearResidencyIndex();
+    pendingEvictionDiscoveryColumns_.clear();
+    pendingEvictionDiscoveryColumnSet_.clear();
+    pendingEvictionCandidates_.clear();
+    pendingEvictionCandidateSet_.clear();
+    lastEvictionQueryState_ = EvictionQueryState{};
+    lastEvictionQueryStateValid_ = false;
+    nextEvictionQueryGeneration_ = 1;
     {
         std::lock_guard<std::mutex> lock(uploadQueueMutex_);
         for (auto& queue : uploadQueues_)
@@ -14238,6 +14339,23 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
         recycleChunkObject(std::move(chunk));
     }
 
+    while (!pendingChunkRetires_.empty())
+    {
+        drainPendingChunkRetires();
+    }
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        denseTrackedCoords_.clear();
+    }
+    clearResidencyIndex();
+    pendingEvictionDiscoveryColumns_.clear();
+    pendingEvictionDiscoveryColumnSet_.clear();
+    pendingEvictionCandidates_.clear();
+    pendingEvictionCandidateSet_.clear();
+    lastEvictionQueryState_ = EvictionQueryState{};
+    lastEvictionQueryStateValid_ = false;
+    nextEvictionQueryGeneration_ = 1;
+
     farTerrainManager_.clear();
     columnManager_.clear();
     {
@@ -18538,6 +18656,8 @@ bool ChunkManager::Impl::materializeChunkForLocalEdit(const glm::ivec3& coord, s
         outChunk = inserted ? chunk : it->second;
     }
 
+    setDenseTrackedCoord(outChunk->coord, true);
+
     if (!outChunk->cpuDataResident)
     {
         (void)ensureChunkCpuDataResident(*outChunk);
@@ -18594,6 +18714,7 @@ bool ChunkManager::Impl::applyLocalBlockEdit(const glm::ivec3& worldPos, BlockId
         chunk->gameplayAuthority.store(ChunkGameplayAuthority::LocalGameplay, std::memory_order_release);
         chunk->residencyMode.store(ExactChunkResidencyMode::CpuAuthoritative, std::memory_order_release);
     }
+    setDenseTrackedCoord(chunk->coord, true);
 
     const std::uint64_t revision = recordBlockEditOverlay(worldPos, block);
     chunk->lastLocalEditMicros.store(steadyMicrosNow(), std::memory_order_release);
@@ -20478,68 +20599,152 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
         int verticalExcess{0};
     };
 
-    std::vector<EvictionCandidate> immediateRemovals;
-    std::vector<EvictionCandidate> deferredVerticalRemovals;
-    const glm::ivec2 cameraColumn{center.x, center.z};
     const int evictionCenterY = updateEvictionCenterChunkY(center.y);
     const bool deferVerticalEvictions = evictionCenterY != center.y;
     const int evictionSlack =
         std::max(0, kVerticalStreamingConfig.columnSlackChunks) +
         std::max(0, kVerticalStreamingConfig.verticalEvictionExtraSlackChunks);
+    EvictionQueryState query{
+        center,
+        evictionCenterY,
+        horizontalThreshold,
+        verticalRadius,
+        evictionSlack,
+        evictionBucketRectForQuery(center, horizontalThreshold),
+        0};
+    query.generation =
+        (lastEvictionQueryStateValid_ && evictionQueryMatches(lastEvictionQueryState_, query))
+            ? lastEvictionQueryState_.generation
+            : nextEvictionQueryGeneration_++;
+    updateEvictionDiscovery(query);
+    drainPendingEvictionDiscovery(query);
+
+    struct ColumnQueryCache
     {
-        std::lock_guard<std::mutex> lock(chunksMutex);
-        immediateRemovals.reserve(chunks_.size());
-        deferredVerticalRemovals.reserve(chunks_.size());
-        for (const auto& [coord, chunkPtr] : chunks_)
+        int columnHeight{ColumnManager::kNoHeight};
+        ColumnChunkIntervals intervals{};
+        bool valid{false};
+    };
+
+    std::unordered_map<glm::ivec2, ColumnQueryCache, ColumnHasher> columnCache;
+    auto resolveColumnCache = [this, &query, &columnCache](const glm::ivec2& column) -> const ColumnQueryCache&
+    {
+        auto [cacheIt, inserted] = columnCache.try_emplace(column);
+        if (!inserted)
         {
-            (void)chunkPtr;
-            if (coord.y < 0)
+            return cacheIt->second;
+        }
+
+        std::uint64_t membershipVersion = 0;
+        {
+            std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+            const auto columnIt = residencyColumns_.find(column);
+            if (columnIt == residencyColumns_.end())
             {
-                immediateRemovals.push_back(EvictionCandidate{coord, horizontalThreshold + 1, 0});
-                continue;
+                return cacheIt->second;
             }
 
-            const int dx = coord.x - center.x;
-            const int dz = coord.z - center.z;
-            const int horizontalDistance = std::max(std::abs(dx), std::abs(dz));
-            if (horizontalDistance > horizontalThreshold)
+            membershipVersion = columnIt->second.membershipVersion;
+            const auto evictionCacheIt = evictionColumnCache_.find(column);
+            if (evictionCacheIt != evictionColumnCache_.end() &&
+                evictionCacheIt->second.membershipVersion == membershipVersion &&
+                evictionCacheIt->second.queryGeneration == query.generation)
             {
-                immediateRemovals.push_back(EvictionCandidate{
-                    coord,
-                    horizontalDistance - horizontalThreshold,
-                    0});
-                continue;
+                cacheIt->second.columnHeight = evictionCacheIt->second.columnHeight;
+                cacheIt->second.intervals = evictionCacheIt->second.intervals;
+                cacheIt->second.valid = true;
+                columnIt->second.lastEvictionQueryGeneration = query.generation;
+                return cacheIt->second;
             }
+        }
 
-            const glm::ivec2 column{coord.x, coord.z};
-            const int worldX = coord.x * kChunkSizeX + kChunkSizeX / 2;
-            const int worldZ = coord.z * kChunkSizeZ + kChunkSizeZ / 2;
-            int columnHeight = ColumnManager::kNoHeight;
-            if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-            {
-                if (!stationaryExactFillModeActive_)
-                {
-                    requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Normal);
-                }
-            }
-            const ColumnChunkIntervals intervals = columnIntervalsForHeight(column,
-                                                                            cameraColumn,
-                                                                            evictionCenterY,
-                                                                            verticalRadius,
-                                                                            columnHeight);
-            const int verticalExcess = chunkYDistanceToIntervals(coord.y, intervals, evictionSlack);
+        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+        int columnHeight = ColumnManager::kNoHeight;
+        if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight) && !stationaryExactFillModeActive_)
+        {
+            requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Normal);
+        }
 
-            if (verticalExcess > 0)
-            {
-                if (deferVerticalEvictions)
-                {
-                    deferredVerticalRemovals.push_back(EvictionCandidate{coord, 0, verticalExcess});
-                }
-                else
-                {
-                    immediateRemovals.push_back(EvictionCandidate{coord, 0, verticalExcess});
-                }
-            }
+        cacheIt->second.columnHeight = columnHeight;
+        cacheIt->second.intervals = columnIntervalsForHeight(column,
+                                                             {query.centerChunk.x, query.centerChunk.z},
+                                                             query.evictionCenterY,
+                                                             query.verticalRadius,
+                                                             columnHeight);
+        cacheIt->second.valid = true;
+
+        std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+        const auto columnIt = residencyColumns_.find(column);
+        if (columnIt != residencyColumns_.end())
+        {
+            evictionColumnCache_[column] = EvictionColumnCacheEntry{
+                columnHeight,
+                cacheIt->second.intervals,
+                membershipVersion,
+                query.generation};
+            columnIt->second.lastEvictionQueryGeneration = query.generation;
+        }
+        return cacheIt->second;
+    };
+
+    std::vector<EvictionCandidate> immediateRemovals;
+    std::vector<EvictionCandidate> deferredVerticalRemovals;
+    immediateRemovals.reserve(pendingEvictionCandidates_.size());
+    deferredVerticalRemovals.reserve(pendingEvictionCandidates_.size());
+
+    while (!pendingEvictionCandidates_.empty())
+    {
+        const glm::ivec3 coord = pendingEvictionCandidates_.front();
+        pendingEvictionCandidates_.pop_front();
+        pendingEvictionCandidateSet_.erase(coord);
+
+        bool chunkPresent = false;
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            const auto it = chunks_.find(coord);
+            chunkPresent = it != chunks_.end() && it->second != nullptr;
+        }
+        if (!chunkPresent)
+        {
+            continue;
+        }
+
+        if (coord.y < 0)
+        {
+            immediateRemovals.push_back(EvictionCandidate{coord, horizontalThreshold + 1, 0});
+            continue;
+        }
+
+        const int horizontalDistance = std::max(std::abs(coord.x - center.x), std::abs(coord.z - center.z));
+        if (horizontalDistance > horizontalThreshold)
+        {
+            immediateRemovals.push_back(EvictionCandidate{
+                coord,
+                horizontalDistance - horizontalThreshold,
+                0});
+            continue;
+        }
+
+        const ColumnQueryCache& cache = resolveColumnCache({coord.x, coord.z});
+        if (!cache.valid)
+        {
+            continue;
+        }
+
+        const int verticalExcess = chunkYDistanceToIntervals(coord.y, cache.intervals, evictionSlack);
+        if (verticalExcess <= 0)
+        {
+            continue;
+        }
+
+        if (deferVerticalEvictions)
+        {
+            deferredVerticalRemovals.push_back(EvictionCandidate{coord, 0, verticalExcess});
+        }
+        else
+        {
+            immediateRemovals.push_back(EvictionCandidate{coord, 0, verticalExcess});
         }
     }
 
@@ -20565,6 +20770,10 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
     const int evictionBudget = computeEvictionBudget(deferredVerticalRemovals.size());
     if (static_cast<int>(deferredVerticalRemovals.size()) > evictionBudget)
     {
+        for (std::size_t i = static_cast<std::size_t>(evictionBudget); i < deferredVerticalRemovals.size(); ++i)
+        {
+            enqueuePendingEvictionCandidate(deferredVerticalRemovals[i].coord);
+        }
         deferredVerticalRemovals.resize(static_cast<std::size_t>(evictionBudget));
     }
 
@@ -20574,75 +20783,57 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
     toRemove.insert(toRemove.end(), deferredVerticalRemovals.begin(), deferredVerticalRemovals.end());
 
     int evictedCount = 0;
+    const auto shouldRetryCandidate = [this](const glm::ivec3& coord)
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        const auto it = chunks_.find(coord);
+        return it != chunks_.end() && it->second != nullptr;
+    };
     for (const EvictionCandidate& candidate : toRemove)
     {
         const glm::ivec3& coord = candidate.coord;
-        std::shared_ptr<Chunk> chunk;
+        if (!tryMarkChunkForRetire(coord))
         {
-            std::lock_guard<std::mutex> lock(chunksMutex);
-            auto it = chunks_.find(coord);
-            if (it == chunks_.end())
+            if (shouldRetryCandidate(coord))
             {
-                continue;
+                enqueuePendingEvictionCandidate(coord);
             }
-
-            if (it->second->inFlight.load(std::memory_order_acquire) != 0)
-            {
-                continue;
-            }
-
-            chunk = it->second;
-            unregisterChunkRenderRegistryEntry(coord);
-            chunks_.erase(it);
+            continue;
         }
 
-        if (chunk)
+        if (shouldTrackRecentEditChunk(coord))
         {
-            if (shouldTrackRecentEditChunk(chunk->coord))
-            {
-                const glm::ivec2 evictionCameraColumn{center.x, center.z};
-                const glm::ivec2 column{chunk->coord.x, chunk->coord.z};
-                const int worldX = chunk->coord.x * kChunkSizeX + kChunkSizeX / 2;
-                const int worldZ = chunk->coord.z * kChunkSizeZ + kChunkSizeZ / 2;
-                int columnHeight = ColumnManager::kNoHeight;
-                if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight))
-                {
-                    if (!stationaryExactFillModeActive_)
-                    {
-                        requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Background);
-                    }
-                }
+            const glm::ivec2 column{coord.x, coord.z};
+            const ColumnQueryCache& cache = resolveColumnCache(column);
+            const auto [minChunkY, maxChunkY] =
+                columnSpanForHeight(column,
+                                    {center.x, center.z},
+                                    evictionCenterY,
+                                    lastVerticalRadius_,
+                                    cache.columnHeight);
+            const int horizontalDistance =
+                std::max(std::abs(coord.x - center.x), std::abs(coord.z - center.z));
 
-                const auto [minChunkY, maxChunkY] =
-                    columnSpanForHeight(column, evictionCameraColumn, evictionCenterY, lastVerticalRadius_, columnHeight);
-                const int horizontalDistance =
-                    std::max(std::abs(chunk->coord.x - center.x), std::abs(chunk->coord.z - center.z));
-
-                std::ostringstream stream;
-                stream << "evict chunk=(" << chunk->coord.x << ", " << chunk->coord.y << ", " << chunk->coord.z
-                       << ") hDist=" << horizontalDistance
-                       << " hThreshold=" << horizontalThreshold
-                       << " hExcess=" << candidate.horizontalExcess
-                       << " vExcess=" << candidate.verticalExcess
-                       << " evictCenterY=" << evictionCenterY
-                       << " spanY=[" << minChunkY << ", " << maxChunkY << "]"
-                       << " idx=" << chunk->indexCount.load(std::memory_order_acquire);
-                appendRecentEditDebugEvent(stream.str());
-            }
-
-            columnManager_.removeChunk(chunk->coord);
-            recycleChunkGPU(*chunk);
-            clearDeferredChunkDependencies(coord);
-            clearStreamingChunkLifecycleState(coord);
-            recycleChunkObject(std::move(chunk));
-            ++evictedCount;
+            std::ostringstream stream;
+            stream << "evict chunk=(" << coord.x << ", " << coord.y << ", " << coord.z
+                   << ") hDist=" << horizontalDistance
+                   << " hThreshold=" << horizontalThreshold
+                   << " hExcess=" << candidate.horizontalExcess
+                   << " vExcess=" << candidate.verticalExcess
+                   << " evictCenterY=" << evictionCenterY
+                   << " spanY=[" << minChunkY << ", " << maxChunkY << "]";
+            appendRecentEditDebugEvent(stream.str());
         }
+
+        ++evictedCount;
     }
 
     if (evictedCount > 0)
     {
         profilingCounters_.evictedChunks.fetch_add(evictedCount, std::memory_order_relaxed);
     }
+
+    drainPendingChunkRetires();
 }
 
 ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(const glm::ivec3& coord,
@@ -24962,12 +25153,124 @@ glm::ivec3 ChunkManager::Impl::worldToChunkCoords(int worldX, int worldY, int wo
     return {floorDiv(worldX, kChunkSizeX), floorDiv(worldY, kChunkSizeY), floorDiv(worldZ, kChunkSizeZ)};
 }
 
+glm::ivec2 ChunkManager::Impl::residencyColumnForChunk(const glm::ivec3& coord) noexcept
+{
+    return {coord.x, coord.z};
+}
+
 ChunkManager::Impl::RenderSpatialBucketKey
 ChunkManager::Impl::renderSpatialBucketKeyForChunk(const glm::ivec3& coord) noexcept
 {
     return RenderSpatialBucketKey{
         floorDiv(coord.x, kRenderSpatialBucketSizeChunks),
         floorDiv(coord.z, kRenderSpatialBucketSizeChunks)};
+}
+
+ChunkManager::Impl::EvictionBucketRect
+ChunkManager::Impl::evictionBucketRectForQuery(const glm::ivec3& center, int horizontalThreshold) noexcept
+{
+    return EvictionBucketRect{
+        floorDiv(center.x - horizontalThreshold, kRenderSpatialBucketSizeChunks),
+        floorDiv(center.x + horizontalThreshold, kRenderSpatialBucketSizeChunks),
+        floorDiv(center.z - horizontalThreshold, kRenderSpatialBucketSizeChunks),
+        floorDiv(center.z + horizontalThreshold, kRenderSpatialBucketSizeChunks)};
+}
+
+bool ChunkManager::Impl::evictionQueryMatches(const EvictionQueryState& lhs,
+                                              const EvictionQueryState& rhs) noexcept
+{
+    return lhs.centerChunk == rhs.centerChunk &&
+           lhs.evictionCenterY == rhs.evictionCenterY &&
+           lhs.horizontalThreshold == rhs.horizontalThreshold &&
+           lhs.verticalRadius == rhs.verticalRadius &&
+           lhs.evictionSlack == rhs.evictionSlack &&
+           lhs.activeBucketRect == rhs.activeBucketRect;
+}
+
+void ChunkManager::Impl::insertResidencyColumnMember(const glm::ivec3& coord,
+                                                     const RenderSpatialBucketKey& bucket)
+{
+    const glm::ivec2 column = residencyColumnForChunk(coord);
+    auto& bucketEntry = renderSpatialBuckets_[bucket];
+    if (std::find(bucketEntry.columns.begin(), bucketEntry.columns.end(), column) == bucketEntry.columns.end())
+    {
+        bucketEntry.columns.push_back(column);
+    }
+
+    auto& columnEntry = residencyColumns_[column];
+    auto insertIt = std::lower_bound(columnEntry.chunkCoordsByY.begin(),
+                                     columnEntry.chunkCoordsByY.end(),
+                                     coord.y,
+                                     [](const glm::ivec3& lhs, int rhsY)
+                                     {
+                                         return lhs.y < rhsY;
+                                     });
+    if (insertIt != columnEntry.chunkCoordsByY.end() && *insertIt == coord)
+    {
+        return;
+    }
+
+    columnEntry.chunkCoordsByY.insert(insertIt, coord);
+    ++columnEntry.membershipVersion;
+    evictionColumnCache_.erase(column);
+}
+
+void ChunkManager::Impl::removeResidencyColumnMember(const glm::ivec3& coord,
+                                                     const RenderSpatialBucketKey& bucket,
+                                                     const glm::ivec2& column)
+{
+    bool columnStillPresent = false;
+    auto columnIt = residencyColumns_.find(column);
+    if (columnIt != residencyColumns_.end())
+    {
+        auto& members = columnIt->second.chunkCoordsByY;
+        auto memberIt = std::lower_bound(members.begin(),
+                                         members.end(),
+                                         coord.y,
+                                         [](const glm::ivec3& lhs, int rhsY)
+                                         {
+                                             return lhs.y < rhsY;
+                                         });
+        if (memberIt != members.end() && *memberIt == coord)
+        {
+            members.erase(memberIt);
+            ++columnIt->second.membershipVersion;
+            evictionColumnCache_.erase(column);
+        }
+
+        columnStillPresent = !members.empty();
+        if (!columnStillPresent)
+        {
+            residencyColumns_.erase(columnIt);
+            evictionColumnCache_.erase(column);
+        }
+    }
+
+    auto bucketIt = renderSpatialBuckets_.find(bucket);
+    if (bucketIt == renderSpatialBuckets_.end())
+    {
+        return;
+    }
+
+    if (!columnStillPresent)
+    {
+        auto& bucketColumns = bucketIt->second.columns;
+        bucketColumns.erase(std::remove(bucketColumns.begin(), bucketColumns.end(), column), bucketColumns.end());
+    }
+
+    if (bucketIt->second.coords.empty() && bucketIt->second.columns.empty())
+    {
+        renderSpatialBuckets_.erase(bucketIt);
+    }
+}
+
+void ChunkManager::Impl::clearResidencyIndex()
+{
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    renderRegistry_.clear();
+    renderSpatialBuckets_.clear();
+    residencyColumns_.clear();
+    evictionColumnCache_.clear();
 }
 
 void ChunkManager::Impl::registerChunkRenderRegistryEntry(const glm::ivec3& coord,
@@ -24979,32 +25282,34 @@ void ChunkManager::Impl::registerChunkRenderRegistryEntry(const glm::ivec3& coor
     }
 
     const RenderSpatialBucketKey bucket = renderSpatialBucketKeyForChunk(coord);
+    const glm::ivec2 column = residencyColumnForChunk(coord);
     std::lock_guard<std::mutex> lock(renderRegistryMutex_);
-    auto [it, inserted] = renderRegistry_.emplace(coord, RenderRegistryEntry{chunk, bucket});
+    auto [it, inserted] = renderRegistry_.emplace(coord, RenderRegistryEntry{chunk, bucket, column});
     if (!inserted)
     {
+        const RenderSpatialBucketKey oldBucket = it->second.bucket;
+        const glm::ivec2 oldColumn = it->second.column;
         it->second.chunk = chunk;
-        if (!(it->second.bucket == bucket))
+        if (!(oldBucket == bucket))
         {
-            auto oldBucketIt = renderSpatialBuckets_.find(it->second.bucket);
+            auto oldBucketIt = renderSpatialBuckets_.find(oldBucket);
             if (oldBucketIt != renderSpatialBuckets_.end())
             {
-                auto& oldCoords = oldBucketIt->second;
+                auto& oldCoords = oldBucketIt->second.coords;
                 oldCoords.erase(std::remove(oldCoords.begin(), oldCoords.end(), coord), oldCoords.end());
-                if (oldCoords.empty())
-                {
-                    renderSpatialBuckets_.erase(oldBucketIt);
-                }
             }
-            it->second.bucket = bucket;
+            removeResidencyColumnMember(coord, oldBucket, oldColumn);
         }
+        it->second.bucket = bucket;
+        it->second.column = column;
     }
 
-    std::vector<glm::ivec3>& bucketCoords = renderSpatialBuckets_[bucket];
-    if (std::find(bucketCoords.begin(), bucketCoords.end(), coord) == bucketCoords.end())
+    ResidencyBucketEntry& bucketEntry = renderSpatialBuckets_[bucket];
+    if (std::find(bucketEntry.coords.begin(), bucketEntry.coords.end(), coord) == bucketEntry.coords.end())
     {
-        bucketCoords.push_back(coord);
+        bucketEntry.coords.push_back(coord);
     }
+    insertResidencyColumnMember(coord, bucket);
 }
 
 void ChunkManager::Impl::unregisterChunkRenderRegistryEntry(const glm::ivec3& coord)
@@ -25017,20 +25322,16 @@ void ChunkManager::Impl::unregisterChunkRenderRegistryEntry(const glm::ivec3& co
     }
 
     const RenderSpatialBucketKey bucket = entryIt->second.bucket;
+    const glm::ivec2 column = entryIt->second.column;
     renderRegistry_.erase(entryIt);
 
     const auto bucketIt = renderSpatialBuckets_.find(bucket);
-    if (bucketIt == renderSpatialBuckets_.end())
+    if (bucketIt != renderSpatialBuckets_.end())
     {
-        return;
+        auto& bucketCoords = bucketIt->second.coords;
+        bucketCoords.erase(std::remove(bucketCoords.begin(), bucketCoords.end(), coord), bucketCoords.end());
     }
-
-    auto& bucketCoords = bucketIt->second;
-    bucketCoords.erase(std::remove(bucketCoords.begin(), bucketCoords.end(), coord), bucketCoords.end());
-    if (bucketCoords.empty())
-    {
-        renderSpatialBuckets_.erase(bucketIt);
-    }
+    removeResidencyColumnMember(coord, bucket, column);
 }
 
 void ChunkManager::Impl::collectRenderRegistryCandidates(const glm::ivec3& cameraChunk,
@@ -25065,7 +25366,7 @@ void ChunkManager::Impl::collectRenderRegistryCandidates(const glm::ivec3& camer
                 continue;
             }
 
-            for (const glm::ivec3& coord : bucketIt->second)
+            for (const glm::ivec3& coord : bucketIt->second.coords)
             {
                 const auto entryIt = renderRegistry_.find(coord);
                 if (entryIt == renderRegistry_.end())
@@ -25084,6 +25385,442 @@ void ChunkManager::Impl::collectRenderRegistryCandidates(const glm::ivec3& camer
                     outChunks.push_back(std::move(chunk));
                 }
             }
+        }
+    }
+}
+
+void ChunkManager::Impl::enqueueEvictionDiscoveryColumn(const glm::ivec2& column)
+{
+    if (pendingEvictionDiscoveryColumnSet_.insert(column).second)
+    {
+        pendingEvictionDiscoveryColumns_.push_back(column);
+    }
+}
+
+void ChunkManager::Impl::enqueuePendingEvictionCandidate(const glm::ivec3& coord)
+{
+    if (pendingEvictionCandidateSet_.insert(coord).second)
+    {
+        pendingEvictionCandidates_.push_back(coord);
+    }
+}
+
+void ChunkManager::Impl::collectActiveBucketColumns(const EvictionBucketRect& rect,
+                                                    std::vector<glm::ivec2>& outColumns) const
+{
+    outColumns.clear();
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    for (int bucketZ = rect.minZ; bucketZ <= rect.maxZ; ++bucketZ)
+    {
+        for (int bucketX = rect.minX; bucketX <= rect.maxX; ++bucketX)
+        {
+            const auto bucketIt = renderSpatialBuckets_.find(RenderSpatialBucketKey{bucketX, bucketZ});
+            if (bucketIt == renderSpatialBuckets_.end())
+            {
+                continue;
+            }
+
+            outColumns.insert(outColumns.end(), bucketIt->second.columns.begin(), bucketIt->second.columns.end());
+        }
+    }
+}
+
+void ChunkManager::Impl::collectResidencyBucketCoords(const EvictionBucketRect& rect,
+                                                      std::vector<glm::ivec3>& outCoords) const
+{
+    outCoords.clear();
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    for (int bucketZ = rect.minZ; bucketZ <= rect.maxZ; ++bucketZ)
+    {
+        for (int bucketX = rect.minX; bucketX <= rect.maxX; ++bucketX)
+        {
+            const auto bucketIt = renderSpatialBuckets_.find(RenderSpatialBucketKey{bucketX, bucketZ});
+            if (bucketIt == renderSpatialBuckets_.end())
+            {
+                continue;
+            }
+
+            outCoords.insert(outCoords.end(), bucketIt->second.coords.begin(), bucketIt->second.coords.end());
+        }
+    }
+}
+
+void ChunkManager::Impl::enqueueEvictionDiscoveryColumnsForBucketRect(const EvictionBucketRect& rect)
+{
+    std::vector<glm::ivec2> columns;
+    collectActiveBucketColumns(rect, columns);
+    for (const glm::ivec2& column : columns)
+    {
+        enqueueEvictionDiscoveryColumn(column);
+    }
+}
+
+void ChunkManager::Impl::enqueueEvictionDiscoveryColumnsForBucketShell(const EvictionBucketRect& rect)
+{
+    std::vector<glm::ivec2> columns;
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    for (int bucketZ = rect.minZ; bucketZ <= rect.maxZ; ++bucketZ)
+    {
+        for (int bucketX = rect.minX; bucketX <= rect.maxX; ++bucketX)
+        {
+            const bool boundaryBucket =
+                bucketX == rect.minX || bucketX == rect.maxX || bucketZ == rect.minZ || bucketZ == rect.maxZ;
+            if (!boundaryBucket)
+            {
+                continue;
+            }
+
+            const auto bucketIt = renderSpatialBuckets_.find(RenderSpatialBucketKey{bucketX, bucketZ});
+            if (bucketIt == renderSpatialBuckets_.end())
+            {
+                continue;
+            }
+
+            columns.insert(columns.end(), bucketIt->second.columns.begin(), bucketIt->second.columns.end());
+        }
+    }
+
+    for (const glm::ivec2& column : columns)
+    {
+        enqueueEvictionDiscoveryColumn(column);
+    }
+}
+
+void ChunkManager::Impl::enqueueEvictionDiscoveryColumnsForBucketDelta(const EvictionBucketRect& previousRect,
+                                                                       const EvictionBucketRect& currentRect)
+{
+    std::vector<glm::ivec2> columns;
+    const auto contains = [](const EvictionBucketRect& rect, int bucketX, int bucketZ) noexcept
+    {
+        return bucketX >= rect.minX && bucketX <= rect.maxX &&
+               bucketZ >= rect.minZ && bucketZ <= rect.maxZ;
+    };
+
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    for (int bucketZ = previousRect.minZ; bucketZ <= previousRect.maxZ; ++bucketZ)
+    {
+        for (int bucketX = previousRect.minX; bucketX <= previousRect.maxX; ++bucketX)
+        {
+            if (contains(currentRect, bucketX, bucketZ))
+            {
+                continue;
+            }
+
+            const auto bucketIt = renderSpatialBuckets_.find(RenderSpatialBucketKey{bucketX, bucketZ});
+            if (bucketIt == renderSpatialBuckets_.end())
+            {
+                continue;
+            }
+
+            columns.insert(columns.end(), bucketIt->second.columns.begin(), bucketIt->second.columns.end());
+        }
+    }
+
+    for (int bucketZ = currentRect.minZ; bucketZ <= currentRect.maxZ; ++bucketZ)
+    {
+        for (int bucketX = currentRect.minX; bucketX <= currentRect.maxX; ++bucketX)
+        {
+            if (contains(previousRect, bucketX, bucketZ))
+            {
+                continue;
+            }
+
+            const auto bucketIt = renderSpatialBuckets_.find(RenderSpatialBucketKey{bucketX, bucketZ});
+            if (bucketIt == renderSpatialBuckets_.end())
+            {
+                continue;
+            }
+
+            columns.insert(columns.end(), bucketIt->second.columns.begin(), bucketIt->second.columns.end());
+        }
+    }
+
+    for (const glm::ivec2& column : columns)
+    {
+        enqueueEvictionDiscoveryColumn(column);
+    }
+}
+
+void ChunkManager::Impl::updateEvictionDiscovery(const EvictionQueryState& query)
+{
+    if (lastEvictionQueryStateValid_ && evictionQueryMatches(lastEvictionQueryState_, query))
+    {
+        return;
+    }
+
+    const bool havePrevious = lastEvictionQueryStateValid_;
+    const bool horizontalChanged =
+        !havePrevious ||
+        query.centerChunk.x != lastEvictionQueryState_.centerChunk.x ||
+        query.centerChunk.z != lastEvictionQueryState_.centerChunk.z ||
+        query.horizontalThreshold != lastEvictionQueryState_.horizontalThreshold ||
+        !(query.activeBucketRect == lastEvictionQueryState_.activeBucketRect);
+    const bool verticalChanged =
+        !havePrevious ||
+        query.centerChunk.y != lastEvictionQueryState_.centerChunk.y ||
+        query.evictionCenterY != lastEvictionQueryState_.evictionCenterY ||
+        query.verticalRadius != lastEvictionQueryState_.verticalRadius ||
+        query.evictionSlack != lastEvictionQueryState_.evictionSlack;
+
+    if (verticalChanged)
+    {
+        enqueueEvictionDiscoveryColumnsForBucketRect(query.activeBucketRect);
+    }
+    else if (horizontalChanged)
+    {
+        if (havePrevious)
+        {
+            enqueueEvictionDiscoveryColumnsForBucketDelta(lastEvictionQueryState_.activeBucketRect, query.activeBucketRect);
+            enqueueEvictionDiscoveryColumnsForBucketShell(lastEvictionQueryState_.activeBucketRect);
+        }
+        enqueueEvictionDiscoveryColumnsForBucketShell(query.activeBucketRect);
+    }
+
+    lastEvictionQueryState_ = query;
+    lastEvictionQueryStateValid_ = true;
+}
+
+void ChunkManager::Impl::evaluateEvictionColumn(const glm::ivec2& column, const EvictionQueryState& query)
+{
+    std::vector<glm::ivec3> memberCoords;
+    std::uint64_t membershipVersion = 0;
+    ColumnChunkIntervals intervals{};
+    bool haveIntervals = false;
+
+    {
+        std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+        const auto columnIt = residencyColumns_.find(column);
+        if (columnIt == residencyColumns_.end())
+        {
+            evictionColumnCache_.erase(column);
+            return;
+        }
+
+        memberCoords = columnIt->second.chunkCoordsByY;
+        membershipVersion = columnIt->second.membershipVersion;
+
+        const auto cacheIt = evictionColumnCache_.find(column);
+        if (cacheIt != evictionColumnCache_.end() &&
+            cacheIt->second.membershipVersion == membershipVersion &&
+            cacheIt->second.queryGeneration == query.generation)
+        {
+            intervals = cacheIt->second.intervals;
+            haveIntervals = true;
+        }
+    }
+
+    if (!haveIntervals)
+    {
+        const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+        const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+        int columnHeight = ColumnManager::kNoHeight;
+        if (!tryGetCachedColumnHeight(column, worldX, worldZ, columnHeight) && !stationaryExactFillModeActive_)
+        {
+            requestColumnHeightPrefetch(column, ColumnHeightPrefetchPriority::Normal);
+        }
+
+        intervals = columnIntervalsForHeight(column,
+                                             {query.centerChunk.x, query.centerChunk.z},
+                                             query.evictionCenterY,
+                                             query.verticalRadius,
+                                             columnHeight);
+
+        std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+        const auto columnIt = residencyColumns_.find(column);
+        if (columnIt != residencyColumns_.end())
+        {
+            evictionColumnCache_[column] = EvictionColumnCacheEntry{
+                columnHeight,
+                intervals,
+                membershipVersion,
+                query.generation};
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+        const auto columnIt = residencyColumns_.find(column);
+        if (columnIt != residencyColumns_.end())
+        {
+            columnIt->second.lastEvictionQueryGeneration = query.generation;
+        }
+    }
+
+    for (const glm::ivec3& coord : memberCoords)
+    {
+        if (coord.y < 0)
+        {
+            enqueuePendingEvictionCandidate(coord);
+            continue;
+        }
+
+        const int horizontalDistance =
+            std::max(std::abs(coord.x - query.centerChunk.x), std::abs(coord.z - query.centerChunk.z));
+        if (horizontalDistance > query.horizontalThreshold)
+        {
+            enqueuePendingEvictionCandidate(coord);
+            continue;
+        }
+
+        if (chunkYDistanceToIntervals(coord.y, intervals, query.evictionSlack) > 0)
+        {
+            enqueuePendingEvictionCandidate(coord);
+        }
+    }
+}
+
+void ChunkManager::Impl::drainPendingEvictionDiscovery(const EvictionQueryState& query)
+{
+    constexpr std::size_t kEvictionDiscoveryColumnBudget = 512;
+    std::size_t processedColumns = 0;
+    while (processedColumns < kEvictionDiscoveryColumnBudget && !pendingEvictionDiscoveryColumns_.empty())
+    {
+        const glm::ivec2 column = pendingEvictionDiscoveryColumns_.front();
+        pendingEvictionDiscoveryColumns_.pop_front();
+        pendingEvictionDiscoveryColumnSet_.erase(column);
+        evaluateEvictionColumn(column, query);
+        ++processedColumns;
+    }
+}
+
+bool ChunkManager::Impl::tryMarkChunkForRetire(const glm::ivec3& coord)
+{
+    std::shared_ptr<Chunk> chunk;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        const auto it = chunks_.find(coord);
+        if (it == chunks_.end() || !it->second)
+        {
+            return false;
+        }
+
+        chunk = it->second;
+        if (chunk->inFlight.load(std::memory_order_acquire) != 0)
+        {
+            return false;
+        }
+        if (chunk->exactGpuBuildInFlight.load(std::memory_order_acquire) ||
+            chunk->exactGpuPublishPending.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        if (chunk->pendingRetire.exchange(true, std::memory_order_acq_rel))
+        {
+            return false;
+        }
+
+        chunk->queuedForUpload.store(false, std::memory_order_release);
+        chunk->queuedUploadBucket.store(std::numeric_limits<std::uint8_t>::max(), std::memory_order_release);
+        chunk->uploadQueueTicket.store(0, std::memory_order_release);
+        chunk->queuedForCommit.store(false, std::memory_order_release);
+        chunk->commitQueueTicket.store(0, std::memory_order_release);
+        chunk->exactGpuBuildQueued.store(false, std::memory_order_release);
+        chunk->exactGpuPreferDenseUpload.store(false, std::memory_order_release);
+        chunk->residencyMode.store(ExactChunkResidencyMode::GpuPendingRetire, std::memory_order_release);
+
+        unregisterChunkRenderRegistryEntry(coord);
+        chunks_.erase(it);
+        denseTrackedCoords_.erase(coord);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(dedicatedLocalUploadMutex_);
+        queuedDedicatedLocalUploads_.erase(coord);
+    }
+
+    clearDeferredChunkDependencies(coord);
+    clearStreamingChunkLifecycleState(coord);
+    pendingChunkRetires_.push_back(PendingChunkRetire{coord, std::move(chunk)});
+    return true;
+}
+
+void ChunkManager::Impl::drainPendingChunkRetires()
+{
+    constexpr std::size_t kPendingRetireChunkCap = 32;
+    constexpr double kPendingRetireTimeBudgetMs = 2.0;
+    const auto start = std::chrono::steady_clock::now();
+
+    std::vector<glm::ivec3> retiredCoords;
+    retiredCoords.reserve(kPendingRetireChunkCap);
+
+    std::size_t retiredCount = 0;
+    while (retiredCount < kPendingRetireChunkCap && !pendingChunkRetires_.empty())
+    {
+        if (retiredCount > 0)
+        {
+            const double elapsedMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (elapsedMs >= kPendingRetireTimeBudgetMs)
+            {
+                break;
+            }
+        }
+
+        PendingChunkRetire pending = std::move(pendingChunkRetires_.front());
+        pendingChunkRetires_.pop_front();
+        if (!pending.chunk)
+        {
+            continue;
+        }
+
+        retiredCoords.push_back(pending.coord);
+        recycleChunkGPU(*pending.chunk);
+        recycleChunkObject(std::move(pending.chunk));
+        ++retiredCount;
+    }
+
+    if (!retiredCoords.empty())
+    {
+        columnManager_.removeChunks(std::span<const glm::ivec3>(retiredCoords.data(), retiredCoords.size()));
+        for (const glm::ivec3& coord : retiredCoords)
+        {
+            invalidatePredictedColumn({coord.x, coord.z});
+            markSkyLightColumnDirty({coord.x, coord.z});
+        }
+    }
+}
+
+void ChunkManager::Impl::setDenseTrackedCoord(const glm::ivec3& coord, bool tracked)
+{
+    std::lock_guard<std::mutex> lock(chunksMutex);
+    if (tracked)
+    {
+        denseTrackedCoords_.insert(coord);
+    }
+    else
+    {
+        denseTrackedCoords_.erase(coord);
+    }
+}
+
+void ChunkManager::Impl::collectDenseResidencyCandidateCoords(const glm::ivec3& centerChunk,
+                                                              int horizontalRadius,
+                                                              std::vector<glm::ivec3>& outCoords) const
+{
+    outCoords.clear();
+
+    std::unordered_set<glm::ivec3, ChunkHasher> seen;
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        seen.reserve(denseTrackedCoords_.size());
+        for (const glm::ivec3& coord : denseTrackedCoords_)
+        {
+            if (seen.insert(coord).second)
+            {
+                outCoords.push_back(coord);
+            }
+        }
+    }
+
+    std::vector<glm::ivec3> bucketCoords;
+    collectResidencyBucketCoords(evictionBucketRectForQuery(centerChunk, horizontalRadius), bucketCoords);
+    seen.reserve(seen.size() + bucketCoords.size());
+    for (const glm::ivec3& coord : bucketCoords)
+    {
+        if (seen.insert(coord).second)
+        {
+            outCoords.push_back(coord);
         }
     }
 }
@@ -27993,6 +28730,7 @@ void ChunkManager::Impl::abandonChunkGenerationPlaceholder(const glm::ivec3& coo
 
         unregisterChunkRenderRegistryEntry(coord);
         chunks_.erase(it);
+        denseTrackedCoords_.erase(coord);
         removed = true;
     }
 
@@ -29180,6 +29918,7 @@ bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
         {
             chunk.lastDenseFrameTouched = updateFrameIndex_;
             chunk.residencyMode.store(desiredResidencyModeWhileLocked(), std::memory_order_release);
+            setDenseTrackedCoord(chunk.coord, true);
             return true;
         }
     }
@@ -29197,6 +29936,7 @@ bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
                           std::memory_order_release);
     chunk.lastDenseFrameTouched = updateFrameIndex_;
     chunk.residencyMode.store(desiredResidencyModeWhileLocked(), std::memory_order_release);
+    setDenseTrackedCoord(chunk.coord, true);
     return true;
 }
 
@@ -29241,14 +29981,25 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
                                           kDenseCpuDemotionBudgetMin,
                                           kDenseCpuDemotionBudgetMax);
 
+    std::vector<glm::ivec3> candidateCoords;
+    collectDenseResidencyCandidateCoords(centerChunk, horizontalRadius, candidateCoords);
+
     std::vector<std::shared_ptr<Chunk>> chunks;
+    std::vector<glm::ivec3> staleTrackedCoords;
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
-        chunks.reserve(chunks_.size());
-        for (const auto& [coord, chunk] : chunks_)
+        chunks.reserve(candidateCoords.size());
+        staleTrackedCoords.reserve(candidateCoords.size());
+        for (const glm::ivec3& coord : candidateCoords)
         {
-            (void)coord;
-            chunks.push_back(chunk);
+            const auto it = chunks_.find(coord);
+            if (it == chunks_.end() || !it->second)
+            {
+                staleTrackedCoords.push_back(coord);
+                continue;
+            }
+
+            chunks.push_back(it->second);
         }
     }
 
@@ -29440,6 +30191,34 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
             }
 
             releaseChunkCpuData(*chunk);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        for (const glm::ivec3& coord : staleTrackedCoords)
+        {
+            denseTrackedCoords_.erase(coord);
+        }
+
+        for (const std::shared_ptr<Chunk>& chunk : chunks)
+        {
+            if (!chunk)
+            {
+                continue;
+            }
+
+            const bool shouldTrack =
+                chunk->cpuDataResident ||
+                chunk->gameplayAuthority.load(std::memory_order_acquire) != ChunkGameplayAuthority::GpuStreaming;
+            if (shouldTrack)
+            {
+                denseTrackedCoords_.insert(chunk->coord);
+            }
+            else
+            {
+                denseTrackedCoords_.erase(chunk->coord);
+            }
         }
     }
 }

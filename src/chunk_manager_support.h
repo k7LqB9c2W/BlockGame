@@ -199,6 +199,7 @@ public:
     void updateChunkHeights(const glm::ivec3& chunkCoord,
                             const std::array<int, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>& highestWorlds);
     void updateColumn(const ChunkBlockView& chunk, int localX, int localZ);
+    void removeChunks(std::span<const glm::ivec3> chunkCoords);
     void removeChunk(const glm::ivec3& chunkCoord);
     void clear();
 

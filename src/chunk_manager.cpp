@@ -5142,6 +5142,15 @@ private:
         std::array<int, static_cast<std::size_t>(kMaxExactRenderDistanceChunks + 1)> authoritativeRequiredByRadius{};
         bool authoritativeCountsValid{false};
         bool reconciling{false};
+        bool lastMovingWindow{true};
+        int lastCoverageColumnsBudget{96};
+        int lastPendingColumnsBeforeUpdate{0};
+        int lastPendingColumnsAfterUpdate{0};
+        int lastQueuedColumnCount{0};
+        int lastDirtyColumnCount{0};
+        int lastDirtyPageCount{0};
+        int lastDirtyRegionCount{0};
+        double lastSmoothedFrameMs{16.0};
         ExactCoverageCacheBatchState batch{};
     };
     enum class ExactWindowPlanStatus : std::uint8_t
@@ -6072,6 +6081,8 @@ private:
     int streamingFrontierExactReady_{0};
     std::uint64_t nextStreamingFrontierSequence_{1};
     mutable std::atomic<std::uint64_t> exactDependencyStallDebugLastLogMicros_{0};
+    mutable std::atomic<int> exactDependencyStallDebugLastReadyChunks_{-1};
+    mutable std::atomic<std::uint64_t> exactDependencyStallDebugLastReadyProgressMicros_{0};
     glm::ivec3 streamingFrontierDispatchOrigin_{0};
     glm::vec2 streamingFrontierDispatchForwardXZ_{0.0f, -1.0f};
     std::uint64_t streamingFrontierDispatchPriorityEpoch_{1};
@@ -8920,17 +8931,43 @@ StreamingStatusSnapshot ChunkManager::Impl::streamingStatusSnapshot() const noex
 
 void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatusSnapshot& snapshot) const
 {
-    const bool dependencyStall = snapshot.exactWaitingDependenciesChunks > 0;
-    const bool exactGpuStall =
+    const bool dependencyCandidate = snapshot.exactWaitingDependenciesChunks > 0;
+    const bool exactGpuCandidate =
         snapshot.exactMeshingChunks > 0 ||
         snapshot.exactPendingUploads > 0;
-    if (!exactDependencyStallDebugLoggingEnabled() || (!dependencyStall && !exactGpuStall))
+    if (!exactDependencyStallDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    constexpr std::uint64_t kStallPlateauMicros = 8'000'000ull;
+    const std::uint64_t nowMicros = steadyMicrosNow();
+    const int previousReadyChunks = exactDependencyStallDebugLastReadyChunks_.load(std::memory_order_relaxed);
+    if (previousReadyChunks != snapshot.exactReadyChunks)
+    {
+        exactDependencyStallDebugLastReadyChunks_.store(snapshot.exactReadyChunks, std::memory_order_relaxed);
+        exactDependencyStallDebugLastReadyProgressMicros_.store(nowMicros, std::memory_order_relaxed);
+    }
+    else if (exactDependencyStallDebugLastReadyProgressMicros_.load(std::memory_order_relaxed) == 0u)
+    {
+        exactDependencyStallDebugLastReadyProgressMicros_.store(nowMicros, std::memory_order_relaxed);
+    }
+    const std::uint64_t lastReadyProgressMicros =
+        exactDependencyStallDebugLastReadyProgressMicros_.load(std::memory_order_relaxed);
+    const bool readyBacklogged = snapshot.exactReadyChunks < snapshot.exactRequiredChunks;
+    const std::uint64_t readyPlateauMicros =
+        (lastReadyProgressMicros != 0u && nowMicros > lastReadyProgressMicros)
+            ? (nowMicros - lastReadyProgressMicros)
+            : 0u;
+    const bool readyPlateau = readyBacklogged && readyPlateauMicros >= kStallPlateauMicros;
+    const bool dependencyStall = dependencyCandidate && readyPlateau;
+    const bool exactGpuStall = exactGpuCandidate && readyPlateau;
+    if (!dependencyStall && !exactGpuStall)
     {
         return;
     }
 
     constexpr std::uint64_t kLogIntervalMicros = 5'000'000ull;
-    const std::uint64_t nowMicros = steadyMicrosNow();
     std::uint64_t previousMicros = exactDependencyStallDebugLastLogMicros_.load(std::memory_order_relaxed);
     while (previousMicros != 0 && nowMicros > previousMicros && nowMicros - previousMicros < kLogIntervalMicros)
     {
@@ -9034,6 +9071,65 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         const char* batchPhase{"none"};
         std::uint64_t batchPhaseEnteredMicros{0};
     };
+    struct ExactCoverageDebugSnapshot
+    {
+        bool active{false};
+        bool authoritativeCountsValid{false};
+        bool reconciling{false};
+        bool movingWindow{false};
+        int trackedRadiusChunks{0};
+        int verticalRadius{0};
+        int coverageColumnsBudget{0};
+        int columnsProcessedLastUpdate{0};
+        int pendingColumnsBeforeUpdate{0};
+        int pendingColumnsAfterUpdate{0};
+        int queuedColumns{0};
+        int dirtyColumns{0};
+        int dirtyPages{0};
+        int dirtyRegions{0};
+        std::size_t cachedColumns{0};
+        double smoothedFrameMs{0.0};
+    };
+    struct ExactGpuPageDebugEntry
+    {
+        std::uint32_t pageIndex{kInvalidChunkBufferPage};
+        ChunkBufferPageState state{ChunkBufferPageState::Free};
+        std::size_t faceCursor{0};
+        std::size_t faceCapacity{0};
+        std::size_t recordCursor{0};
+        std::size_t recordCapacity{0};
+        std::size_t recordActiveCount{0};
+        std::size_t residentChunks{0};
+        std::size_t pendingChunks{0};
+        std::size_t liveResidentChunkCount{0};
+        std::size_t exactChunkMemberCount{0};
+        std::size_t exactPendingPublishCount{0};
+        bool sealRequested{false};
+        std::uint64_t lastWriteFenceValue{0};
+        std::uint64_t retireFenceValue{0};
+        std::uint64_t idleAgeMicros{0};
+    };
+
+    ExactCoverageDebugSnapshot coverageDebug{};
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        coverageDebug.active = exactCoverageCache_.active;
+        coverageDebug.authoritativeCountsValid = exactCoverageCache_.authoritativeCountsValid;
+        coverageDebug.reconciling = exactCoverageCache_.reconciling;
+        coverageDebug.movingWindow = exactCoverageCache_.lastMovingWindow;
+        coverageDebug.trackedRadiusChunks = exactCoverageCache_.trackedRadiusChunks;
+        coverageDebug.verticalRadius = exactCoverageCache_.verticalRadius;
+        coverageDebug.coverageColumnsBudget = exactCoverageCache_.lastCoverageColumnsBudget;
+        coverageDebug.columnsProcessedLastUpdate = exactCoverageCache_.batch.columnsProcessedLastUpdate;
+        coverageDebug.pendingColumnsBeforeUpdate = exactCoverageCache_.lastPendingColumnsBeforeUpdate;
+        coverageDebug.pendingColumnsAfterUpdate = exactCoverageCache_.lastPendingColumnsAfterUpdate;
+        coverageDebug.queuedColumns = exactCoverageCache_.lastQueuedColumnCount;
+        coverageDebug.dirtyColumns = exactCoverageCache_.lastDirtyColumnCount;
+        coverageDebug.dirtyPages = exactCoverageCache_.lastDirtyPageCount;
+        coverageDebug.dirtyRegions = exactCoverageCache_.lastDirtyRegionCount;
+        coverageDebug.cachedColumns = exactCoverageCache_.columnSummaries.size();
+        coverageDebug.smoothedFrameMs = exactCoverageCache_.lastSmoothedFrameMs;
+    }
 
     std::vector<WaitingChunkDebugEntry> waitingEntries;
     {
@@ -9090,9 +9186,53 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
     std::vector<ExactGpuBatchDebugEntry> exactGpuBatchEntries;
     std::unordered_map<glm::ivec3, ExactGpuBatchOwnershipDebugInfo, ChunkHasher> exactGpuBatchOwnership;
     std::size_t exactGpuDirtyPageCount = 0u;
+    std::string exactGpuPageSummary;
+    std::vector<ExactGpuPageDebugEntry> exactGpuPageEntries;
     {
         std::lock_guard<std::mutex> lock(bufferPageMutex_);
         exactGpuDirtyPageCount = exactGpuDirtyPageIndices_.size();
+        exactGpuPageSummary = summarizeChunkBufferPagesLocked();
+        exactGpuPageEntries.reserve(16u);
+        for (std::uint32_t pageIndex = 0; pageIndex < bufferPages_.size(); ++pageIndex)
+        {
+            const ChunkBufferPage& page = bufferPages_[pageIndex];
+            if (page.usage != ChunkBufferPageUsage::ExactGpu ||
+                (page.state == ChunkBufferPageState::Free &&
+                 page.pendingChunks == 0u &&
+                 page.residentChunks == 0u &&
+                 page.recordActiveCount == 0u &&
+                 page.exactPendingPublishCount == 0u))
+            {
+                continue;
+            }
+
+            std::uint64_t idleAgeMicros = 0u;
+            if (page.lastReservationAt != SteadyClock::time_point{} &&
+                SteadyClock::now() > page.lastReservationAt)
+            {
+                idleAgeMicros = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        SteadyClock::now() - page.lastReservationAt).count());
+            }
+
+            exactGpuPageEntries.push_back(ExactGpuPageDebugEntry{
+                pageIndex,
+                page.state,
+                page.faceCursor,
+                page.faceCapacity,
+                page.recordCursor,
+                page.recordCapacity,
+                page.recordActiveCount,
+                page.residentChunks,
+                page.pendingChunks,
+                page.liveResidentChunkCount,
+                page.exactChunkMemberCount,
+                page.exactPendingPublishCount,
+                page.sealRequested,
+                page.lastWriteFenceValue,
+                page.retireFenceValue,
+                idleAgeMicros});
+        }
     }
     {
         std::lock_guard<std::mutex> lock(const_cast<ChunkManager::Impl*>(this)->pendingExactGpuBuildsMutex_);
@@ -9501,6 +9641,87 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
                   }
                   return lhs.coord.z < rhs.coord.z;
               });
+    const auto exactGpuPageStatePriority = [](ChunkBufferPageState state) noexcept
+    {
+        switch (state)
+        {
+        case ChunkBufferPageState::SealedPendingResident: return 0;
+        case ChunkBufferPageState::OpenWritable: return 1;
+        case ChunkBufferPageState::Retiring: return 2;
+        case ChunkBufferPageState::ResidentImmutable: return 3;
+        case ChunkBufferPageState::Free: return 4;
+        }
+        return 5;
+    };
+    std::sort(exactGpuPageEntries.begin(),
+              exactGpuPageEntries.end(),
+              [&exactGpuPageStatePriority](const ExactGpuPageDebugEntry& lhs,
+                                           const ExactGpuPageDebugEntry& rhs)
+              {
+                  const std::size_t lhsPressure =
+                      lhs.pendingChunks + lhs.liveResidentChunkCount + lhs.exactPendingPublishCount;
+                  const std::size_t rhsPressure =
+                      rhs.pendingChunks + rhs.liveResidentChunkCount + rhs.exactPendingPublishCount;
+                  if (lhsPressure != rhsPressure)
+                  {
+                      return lhsPressure > rhsPressure;
+                  }
+                  const int lhsStatePriority = exactGpuPageStatePriority(lhs.state);
+                  const int rhsStatePriority = exactGpuPageStatePriority(rhs.state);
+                  if (lhsStatePriority != rhsStatePriority)
+                  {
+                      return lhsStatePriority < rhsStatePriority;
+                  }
+                  if (lhs.faceCursor != rhs.faceCursor)
+                  {
+                      return lhs.faceCursor > rhs.faceCursor;
+                  }
+                  if (lhs.recordCursor != rhs.recordCursor)
+                  {
+                      return lhs.recordCursor > rhs.recordCursor;
+                  }
+                  return lhs.pageIndex < rhs.pageIndex;
+              });
+    std::vector<ExactGpuChunkDebugEntry> exactGpuHotChunkEntries = exactGpuChunkEntries;
+    std::sort(exactGpuHotChunkEntries.begin(),
+              exactGpuHotChunkEntries.end(),
+              [center = lastCenterChunk_](const ExactGpuChunkDebugEntry& lhs,
+                                          const ExactGpuChunkDebugEntry& rhs)
+              {
+                  if (lhs.blockedByReadyFence != rhs.blockedByReadyFence)
+                  {
+                      return lhs.blockedByReadyFence;
+                  }
+                  if (lhs.requeueCount != rhs.requeueCount)
+                  {
+                      return lhs.requeueCount > rhs.requeueCount;
+                  }
+                  if (lhs.fenceDeferredCount != rhs.fenceDeferredCount)
+                  {
+                      return lhs.fenceDeferredCount > rhs.fenceDeferredCount;
+                  }
+                  if (lhs.inputsDirty != rhs.inputsDirty)
+                  {
+                      return lhs.inputsDirty;
+                  }
+                  const int lhsDistance =
+                      std::max(std::abs(lhs.coord.x - center.x), std::abs(lhs.coord.z - center.z));
+                  const int rhsDistance =
+                      std::max(std::abs(rhs.coord.x - center.x), std::abs(rhs.coord.z - center.z));
+                  if (lhsDistance != rhsDistance)
+                  {
+                      return lhsDistance < rhsDistance;
+                  }
+                  if (lhs.coord.y != rhs.coord.y)
+                  {
+                      return lhs.coord.y < rhs.coord.y;
+                  }
+                  if (lhs.coord.x != rhs.coord.x)
+                  {
+                      return lhs.coord.x < rhs.coord.x;
+                  }
+                  return lhs.coord.z < rhs.coord.z;
+              });
 
     struct ExactGpuQueueSummary
     {
@@ -9625,6 +9846,34 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         }
         accumulateVerticalBand(exactGpuPendingSummary, entry.coord.y);
     }
+    std::size_t exactGpuFenceBlockedCount = 0u;
+    std::size_t exactGpuRequeuedChunkCount = 0u;
+    std::size_t exactGpuDeferredChunkCount = 0u;
+    std::size_t exactGpuSparseNotReadyCount = 0u;
+    std::size_t exactGpuPendingNeighborCount = 0u;
+    for (const ExactGpuChunkDebugEntry& entry : exactGpuChunkEntries)
+    {
+        if (entry.blockedByReadyFence)
+        {
+            ++exactGpuFenceBlockedCount;
+        }
+        if (entry.requeueCount > 0u)
+        {
+            ++exactGpuRequeuedChunkCount;
+        }
+        if (entry.fenceDeferredCount > 0u)
+        {
+            ++exactGpuDeferredChunkCount;
+        }
+        if ((entry.exactQueued || entry.exactInFlight || entry.inputsDirty) && !entry.sparseReady)
+        {
+            ++exactGpuSparseNotReadyCount;
+        }
+        if (entry.pendingNeighborMask != 0u)
+        {
+            ++exactGpuPendingNeighborCount;
+        }
+    }
 
     const auto exactGpuResourceFailureCount = [&](ExactGpuResourceFailureReason reason) -> int
     {
@@ -9694,6 +9943,7 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
     std::ostringstream stream;
     stream << "exact_dep_stall_debug"
            << " phase=" << phaseLabel(snapshot.phase)
+           << " stall_ms=" << (readyPlateauMicros / 1000u)
            << " ready=" << snapshot.exactReadyChunks << "/" << snapshot.exactRequiredChunks;
     if (snapshot.exactRequiredChunksApproximate)
     {
@@ -9705,6 +9955,8 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << " mesh=" << snapshot.exactMeshingChunks
            << " pending_uploads=" << snapshot.exactPendingUploads
            << " tracked_radius=" << snapshot.exactTrackedRadiusChunks
+           << " dep_candidate=" << (dependencyCandidate ? 1 : 0)
+           << " gpu_candidate=" << (exactGpuCandidate ? 1 : 0)
            << " blocking=" << (snapshot.blockingReason ? snapshot.blockingReason : "unknown")
            << " deferred_entries=" << waitingEntries.size()
            << " exact_gpu_completed_fence=" << exactGpuContext_.completedFenceValue()
@@ -9730,6 +9982,21 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << "/" << emitSummary.buildCount
            << "@" << (emitSummary.oldestAgeMicros / 1000u)
            << " exact_gpu_chunk_samples=" << exactGpuChunkEntries.size()
+           << "\n  exact_coverage frame_ms=" << std::fixed << std::setprecision(2) << coverageDebug.smoothedFrameMs
+           << " moving_window=" << (coverageDebug.movingWindow ? 1 : 0)
+           << " authoritative=" << (coverageDebug.authoritativeCountsValid ? 1 : 0)
+           << " reconciling=" << (coverageDebug.reconciling ? 1 : 0)
+           << " tracked_radius=" << coverageDebug.trackedRadiusChunks
+           << " vertical_radius=" << coverageDebug.verticalRadius
+           << " budget=" << coverageDebug.coverageColumnsBudget
+           << " processed=" << coverageDebug.columnsProcessedLastUpdate
+           << " pending_before=" << coverageDebug.pendingColumnsBeforeUpdate
+           << " pending_after=" << coverageDebug.pendingColumnsAfterUpdate
+           << " queued=" << coverageDebug.queuedColumns
+           << " dirty_columns=" << coverageDebug.dirtyColumns
+           << " dirty_pages=" << coverageDebug.dirtyPages
+           << " dirty_regions=" << coverageDebug.dirtyRegions
+           << " cached_columns=" << coverageDebug.cachedColumns
            << "\n  exact_gpu_queue_summary total=" << exactGpuQueueSummary.total
            << " front=" << exactGpuQueueSummary.frontPriority
            << " local=" << exactGpuQueueSummary.localInteraction
@@ -9754,6 +10021,11 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << " below_camera=" << exactGpuPendingSummary.belowCamera
            << " camera_band=" << exactGpuPendingSummary.cameraBand
            << " above_camera=" << exactGpuPendingSummary.aboveCamera
+           << "\n  exact_gpu_stall_signals fence_blocked=" << exactGpuFenceBlockedCount
+           << " requeued_chunks=" << exactGpuRequeuedChunkCount
+           << " deferred_chunks=" << exactGpuDeferredChunkCount
+           << " sparse_not_ready=" << exactGpuSparseNotReadyCount
+           << " pending_neighbors=" << exactGpuPendingNeighborCount
            << "\n  exact_gpu_resource_summary prepare=" << exactGpuResPrepare
            << " prepass_page_up=" << exactGpuResPrepassPageUpload
            << " prepass_desc_up=" << exactGpuResPrepassDescriptorUpload
@@ -9787,6 +10059,26 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         {
             stream << " exception=\"" << exactGpuReservationFailureInfo.exceptionText << "\"";
         }
+    }
+    stream << "\n  exact_gpu_pages " << exactGpuPageSummary;
+    const std::size_t exactGpuPageLimit = std::min<std::size_t>(exactGpuPageEntries.size(), 8u);
+    for (std::size_t index = 0; index < exactGpuPageLimit; ++index)
+    {
+        const ExactGpuPageDebugEntry& entry = exactGpuPageEntries[index];
+        stream << "\n  exact_gpu_page page=" << entry.pageIndex
+               << " state=" << chunkBufferPageStateLabel(entry.state)
+               << " faces=" << entry.faceCursor << "/" << entry.faceCapacity
+               << " records=" << entry.recordCursor << "/" << entry.recordCapacity
+               << " active_records=" << entry.recordActiveCount
+               << " resident_chunks=" << entry.residentChunks
+               << " pending_chunks=" << entry.pendingChunks
+               << " live_resident=" << entry.liveResidentChunkCount
+               << " members=" << entry.exactChunkMemberCount
+               << " pending_publish=" << entry.exactPendingPublishCount
+               << " seal_requested=" << (entry.sealRequested ? 1 : 0)
+               << " last_write_fence=" << entry.lastWriteFenceValue
+               << " retire_fence=" << entry.retireFenceValue
+               << " idle_ms=" << (entry.idleAgeMicros / 1000u);
     }
 
     const std::size_t queuedLimit = std::min<std::size_t>(exactGpuQueuedEntries.size(), 10u);
@@ -9876,6 +10168,33 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
                     static_cast<std::uint64_t>(entry.lastRequeueMicros) < logNowMicros)
                        ? ((logNowMicros - static_cast<std::uint64_t>(entry.lastRequeueMicros)) / 1000u)
                        : 0u)
+               << " req_age_ms="
+               << ((entry.requestTimestampMicros > 0 && static_cast<std::uint64_t>(entry.requestTimestampMicros) < logNowMicros)
+                       ? ((logNowMicros - static_cast<std::uint64_t>(entry.requestTimestampMicros)) / 1000u)
+                       : 0u);
+    }
+    const std::size_t exactGpuHotChunkLimit = std::min<std::size_t>(exactGpuHotChunkEntries.size(), 6u);
+    for (std::size_t index = 0; index < exactGpuHotChunkLimit; ++index)
+    {
+        const ExactGpuChunkDebugEntry& entry = exactGpuHotChunkEntries[index];
+        if (!entry.blockedByReadyFence &&
+            entry.requeueCount == 0u &&
+            entry.fenceDeferredCount == 0u &&
+            !entry.inputsDirty)
+        {
+            break;
+        }
+
+        stream << "\n  exact_gpu_hot_chunk chunk=" << formatChunkCoord(entry.coord)
+               << " blocked_by_ready_fence=" << (entry.blockedByReadyFence ? 1 : 0)
+               << " requeue_count=" << entry.requeueCount
+               << " defer_count=" << entry.fenceDeferredCount
+               << " inputs_dirty=" << (entry.inputsDirty ? 1 : 0)
+               << " sparse_ready=" << (entry.sparseReady ? 1 : 0)
+               << " pending_neighbors=" << static_cast<int>(entry.pendingNeighborMask)
+               << " ready_fence=" << entry.readyFenceValue
+               << " page_last_write_fence=" << entry.pageLastWriteFenceValue
+               << " batch_phase=" << entry.batchPhase
                << " req_age_ms="
                << ((entry.requestTimestampMicros > 0 && static_cast<std::uint64_t>(entry.requestTimestampMicros) < logNowMicros)
                        ? ((logNowMicros - static_cast<std::uint64_t>(entry.requestTimestampMicros)) / 1000u)
@@ -14205,6 +14524,9 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
     state.cameraChunkY = center.y;
     state.verticalRadius = verticalRadius;
     state.trackedRadiusChunks = trackedRadius;
+    state.lastMovingWindow = movingWindow;
+    state.lastCoverageColumnsBudget = coverageColumnsPerUpdate;
+    state.lastSmoothedFrameMs = smoothedFrameMs_;
 
     auto queueColumn = [&state, centerColumn, trackedRadius](const glm::ivec2& column)
     {
@@ -14276,6 +14598,7 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         }
     }
 
+    state.lastDirtyPageCount = static_cast<int>(state.dirtyPages.size());
     if (!state.dirtyPages.empty())
     {
         for (const glm::ivec2& pageKey : state.dirtyPages)
@@ -14293,6 +14616,7 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         }
         state.dirtyPages.clear();
     }
+    state.lastDirtyRegionCount = static_cast<int>(state.dirtyRegions.size());
     if (!state.dirtyRegions.empty())
     {
         for (const StructureRegionKey& key : state.dirtyRegions)
@@ -14313,6 +14637,7 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         }
         state.dirtyRegions.clear();
     }
+    state.lastDirtyColumnCount = static_cast<int>(state.dirtyColumns.size());
     for (const glm::ivec2& column : state.dirtyColumns)
     {
         queueColumn(column);
@@ -14336,6 +14661,7 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         }
     }
 
+    state.lastPendingColumnsBeforeUpdate = static_cast<int>(state.batch.pendingColumns.size());
     state.batch.columnsProcessedLastUpdate = 0;
     while (state.batch.columnsProcessedLastUpdate < coverageColumnsPerUpdate)
     {
@@ -14377,6 +14703,8 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         ++state.batch.columnsProcessedLastUpdate;
     }
 
+    state.lastPendingColumnsAfterUpdate = static_cast<int>(state.batch.pendingColumns.size());
+    state.lastQueuedColumnCount = static_cast<int>(state.batch.queuedColumns.size());
     state.reconciling = !state.batch.pendingColumns.empty();
     updateExactCoverageCountsLocked(state);
     const bool reconciling = state.reconciling;

@@ -265,7 +265,16 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
-        if (arg == "--exact-dependency-stall-debug" || arg == "--exact-deps-debug")
+        if (arg == "--exact-stall-capture" || arg == "--chunk-stall-capture")
+        {
+            enableExactUploadDebug = true;
+            enableExactDependencyStallDebug = true;
+            continue;
+        }
+
+        if (arg == "--exact-stall-debug" ||
+            arg == "--exact-dependency-stall-debug" ||
+            arg == "--exact-deps-debug")
         {
             enableExactDependencyStallDebug = true;
             continue;

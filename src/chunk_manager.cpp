@@ -4231,9 +4231,12 @@ inline constexpr std::uint32_t kExactChunkHaloFaceVoxelCount = kExactChunkSizeX 
 inline constexpr std::uint32_t kExactChunkHaloVoxelCount = 6u * kChunkSizeX * kChunkSizeY;
 inline constexpr std::uint32_t kExactChunkPlaneCount = 102u;
 inline constexpr std::uint32_t kExactGpuInitialFaceCapacity = 256u;
-inline constexpr std::size_t kDefaultExactFaceCapacity = 16384u;
+// Keep exact pages materially larger than the original water-era baseline so a full
+// 48-radius window does not devolve into thousands of tiny page-sized render/cull dispatches.
+inline constexpr std::size_t kDefaultExactFaceCapacity = 65536u;
 inline constexpr std::size_t kMaxOutstandingExactGpuBuilds = 2048u;
 inline constexpr std::size_t kMaxOutstandingExactGpuBatches = 16u;
+inline constexpr int kRenderSpatialBucketSizeChunks = 8;
 inline constexpr std::uint32_t kExactGpuLightPropagationPassCount = 15u;
 inline constexpr std::uint8_t kExactGpuSeamPosXBit = 1u << 0u;
 inline constexpr std::uint8_t kExactGpuSeamNegXBit = 1u << 1u;
@@ -5175,6 +5178,30 @@ private:
         std::shared_ptr<const ExactWindowPlan> activePlan{};
         bool replanning{false};
     };
+    struct RenderSpatialBucketKey
+    {
+        int x{0};
+        int z{0};
+
+        bool operator==(const RenderSpatialBucketKey& other) const noexcept
+        {
+            return x == other.x && z == other.z;
+        }
+    };
+    struct RenderSpatialBucketKeyHasher
+    {
+        std::size_t operator()(const RenderSpatialBucketKey& key) const noexcept
+        {
+            std::size_t hash = std::hash<int>{}(key.x);
+            hash ^= std::hash<int>{}(key.z) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            return hash;
+        }
+    };
+    struct RenderRegistryEntry
+    {
+        std::weak_ptr<Chunk> chunk{};
+        RenderSpatialBucketKey bucket{};
+    };
     struct BulkShellOracleBatch
     {
         std::vector<glm::ivec2> fragmentCoords{};
@@ -5586,6 +5613,12 @@ private:
     [[nodiscard]] bool chunkHasPendingStructureEdits(const glm::ivec3& coord) const;
     void releaseChunkCpuData(Chunk& chunk);
     static glm::ivec3 worldToChunkCoords(int worldX, int worldY, int worldZ) noexcept;
+    [[nodiscard]] static RenderSpatialBucketKey renderSpatialBucketKeyForChunk(const glm::ivec3& coord) noexcept;
+    void registerChunkRenderRegistryEntry(const glm::ivec3& coord, const std::shared_ptr<Chunk>& chunk);
+    void unregisterChunkRenderRegistryEntry(const glm::ivec3& coord);
+    void collectRenderRegistryCandidates(const glm::ivec3& cameraChunk,
+                                         int horizontalRadius,
+                                         std::vector<std::shared_ptr<Chunk>>& outChunks) const;
     static std::size_t estimateChunkRetainedBytes(const Chunk& chunk) noexcept;
     std::size_t chunkPoolBudgetBytes() const noexcept;
     void trimChunkPoolToBudget();
@@ -6062,6 +6095,12 @@ private:
 
     std::unordered_map<glm::ivec3, std::shared_ptr<Chunk>, ChunkHasher> chunks_;
     mutable std::mutex chunksMutex;
+    mutable std::mutex renderRegistryMutex_;
+    std::unordered_map<glm::ivec3, RenderRegistryEntry, ChunkHasher> renderRegistry_{};
+    std::unordered_map<RenderSpatialBucketKey,
+                       std::vector<glm::ivec3>,
+                       RenderSpatialBucketKeyHasher>
+        renderSpatialBuckets_{};
     const glm::vec3 lightDirection_{glm::normalize(glm::vec3(0.5f, -1.0f, 0.2f))};
     JobQueue jobQueue_;
     ColumnManager columnManager_;
@@ -7667,66 +7706,129 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
                                                       0,
                                                       static_cast<int>(std::floor(lastCameraPosition_.z)));
 
-    std::vector<std::pair<glm::ivec3, std::shared_ptr<Chunk>>> snapshot;
-    {
-        std::lock_guard<std::mutex> lock(chunksMutex);
-        snapshot.reserve(chunks_.size());
-        for (const auto& entry : chunks_)
-        {
-            snapshot.push_back(entry);
-        }
-    }
+    std::vector<std::shared_ptr<Chunk>> snapshot;
+    collectRenderRegistryCandidates(cameraChunk, exactDrawRadiusChunks, snapshot);
 
-    std::vector<bool> exactGpuResidentPages;
-    std::vector<bool> exactGpuPageUsage;
+    struct PageRenderInfo
+    {
+        bool exactGpuUsage{false};
+        bool exactGpuResident{false};
+        D3D12_VERTEX_BUFFER_VIEW vertexBufferView{};
+        D3D12_INDEX_BUFFER_VIEW indexBufferView{};
+        ID3D12Resource* gpuCullRecordBuffer{nullptr};
+        std::uint32_t gpuCullRecordCount{0};
+        bool supportsGpuCull{false};
+        ID3D12Resource* exactFaceDescriptorBuffer{nullptr};
+        ID3D12Resource* exactDrawRecordBuffer{nullptr};
+        ID3D12Resource* exactDrawRecordMetadataBuffer{nullptr};
+        std::uint32_t exactGpuCullRecordCount{0};
+        bool exactSupportsGpuCull{false};
+    };
+
+    std::vector<PageRenderInfo> pageInfos;
     {
         std::lock_guard<std::mutex> pageLock(bufferPageMutex_);
         const std::size_t pageCount = bufferPages_.size();
-        renderData.nearBatches.resize(pageCount);
-        renderData.exactNearBatches.resize(pageCount);
-        exactGpuResidentPages.assign(pageCount, false);
-        exactGpuPageUsage.assign(pageCount, false);
+        pageInfos.resize(pageCount);
         for (std::size_t i = 0; i < pageCount; ++i)
         {
+            PageRenderInfo& info = pageInfos[i];
             if (bufferPages_[i].usage == ChunkBufferPageUsage::ExactGpu)
             {
-                exactGpuPageUsage[i] = true;
+                info.exactGpuUsage = true;
                 const bool residentExactPage =
                     bufferPages_[i].state == ChunkBufferPageState::ResidentImmutable;
-                exactGpuResidentPages[i] = residentExactPage;
-                renderData.exactNearBatches[i].faceDescriptorBuffer = bufferPages_[i].faceDescriptorBuffer.Get();
-                renderData.exactNearBatches[i].drawRecordBuffer = bufferPages_[i].drawRecordBuffer.Get();
-                renderData.exactNearBatches[i].drawRecordMetadataBuffer =
-                    bufferPages_[i].drawRecordMetadataBuffer.Get();
-                renderData.exactNearBatches[i].gpuCullRecordCount =
+                info.exactGpuResident = residentExactPage;
+                info.exactFaceDescriptorBuffer = bufferPages_[i].faceDescriptorBuffer.Get();
+                info.exactDrawRecordBuffer = bufferPages_[i].drawRecordBuffer.Get();
+                info.exactDrawRecordMetadataBuffer = bufferPages_[i].drawRecordMetadataBuffer.Get();
+                info.exactGpuCullRecordCount =
                     residentExactPage ? static_cast<std::uint32_t>(bufferPages_[i].recordActiveCount) : 0u;
-                renderData.exactNearBatches[i].supportsGpuCull =
+                info.exactSupportsGpuCull =
                     residentExactPage &&
-                    renderData.exactNearBatches[i].drawRecordBuffer != nullptr &&
-                    renderData.exactNearBatches[i].gpuCullRecordCount > 0u;
-                renderData.exactNearBatches[i].debugPageIndex = static_cast<std::uint32_t>(i);
+                    info.exactDrawRecordBuffer != nullptr &&
+                    info.exactGpuCullRecordCount > 0u;
                 continue;
             }
 
-            renderData.nearBatches[i].vertexBufferView = bufferPages_[i].vertexView;
-            renderData.nearBatches[i].indexBufferView = bufferPages_[i].indexView;
-            renderData.nearBatches[i].gpuCullRecordBuffer = bufferPages_[i].drawRecordBuffer.Get();
-            renderData.nearBatches[i].gpuCullRecordCount =
+            info.vertexBufferView = bufferPages_[i].vertexView;
+            info.indexBufferView = bufferPages_[i].indexView;
+            info.gpuCullRecordBuffer = bufferPages_[i].drawRecordBuffer.Get();
+            info.gpuCullRecordCount =
                 static_cast<std::uint32_t>(bufferPages_[i].recordActiveCount);
-            renderData.nearBatches[i].supportsGpuCull =
-                renderData.nearBatches[i].gpuCullRecordBuffer != nullptr &&
-                renderData.nearBatches[i].gpuCullRecordCount > 0;
-            renderData.nearBatches[i].debugPageIndex = static_cast<std::uint32_t>(i);
+            info.supportsGpuCull =
+                info.gpuCullRecordBuffer != nullptr &&
+                info.gpuCullRecordCount > 0;
         }
     }
-    std::vector<bool> exactGpuPageVisible(renderData.nearBatches.size(), false);
+    std::vector<int> nearBatchSlots(pageInfos.size(), -1);
+    std::vector<int> exactBatchSlots(pageInfos.size(), -1);
 
-    for (const auto& [coord, chunkPtr] : snapshot)
+    const auto ensureNearBatch = [&renderData, &pageInfos, &nearBatchSlots](std::uint32_t pageIndex) -> ChunkRenderBatch&
+    {
+        int& slot = nearBatchSlots[pageIndex];
+        if (slot < 0)
+        {
+            slot = static_cast<int>(renderData.nearBatches.size());
+            renderData.nearBatches.emplace_back();
+            ChunkRenderBatch& batch = renderData.nearBatches.back();
+            const PageRenderInfo& info = pageInfos[pageIndex];
+            batch.vertexBufferView = info.vertexBufferView;
+            batch.indexBufferView = info.indexBufferView;
+            batch.gpuCullRecordBuffer = info.gpuCullRecordBuffer;
+            batch.gpuCullRecordCount = info.gpuCullRecordCount;
+            batch.supportsGpuCull = info.supportsGpuCull;
+            batch.debugPageIndex = pageIndex;
+            if (info.gpuCullRecordCount > 0u)
+            {
+                const std::size_t reserveCount = static_cast<std::size_t>(info.gpuCullRecordCount);
+                batch.indexCounts.reserve(reserveCount);
+                batch.firstIndexLocations.reserve(reserveCount);
+                batch.baseVertices.reserve(reserveCount);
+                batch.translucentEntries.reserve(reserveCount);
+            }
+        }
+        return renderData.nearBatches[static_cast<std::size_t>(slot)];
+    };
+    const auto ensureExactBatch =
+        [&renderData, &pageInfos, &exactBatchSlots](std::uint32_t pageIndex) -> ExactChunkRenderBatch&
+    {
+        int& slot = exactBatchSlots[pageIndex];
+        if (slot < 0)
+        {
+            slot = static_cast<int>(renderData.exactNearBatches.size());
+            renderData.exactNearBatches.emplace_back();
+            ExactChunkRenderBatch& batch = renderData.exactNearBatches.back();
+            const PageRenderInfo& info = pageInfos[pageIndex];
+            batch.faceDescriptorBuffer = info.exactFaceDescriptorBuffer;
+            batch.drawRecordBuffer = info.exactDrawRecordBuffer;
+            batch.drawRecordMetadataBuffer = info.exactDrawRecordMetadataBuffer;
+            batch.gpuCullRecordCount = info.exactGpuCullRecordCount;
+            batch.supportsGpuCull = info.exactSupportsGpuCull;
+            batch.debugPageIndex = pageIndex;
+            if (info.exactGpuCullRecordCount > 0u)
+            {
+                const std::size_t reserveCount = static_cast<std::size_t>(info.exactGpuCullRecordCount);
+                batch.faceOffsets.reserve(reserveCount);
+                batch.faceCounts.reserve(reserveCount);
+                batch.recordIndices.reserve(reserveCount);
+                batch.boundsMins.reserve(reserveCount);
+                batch.boundsMaxs.reserve(reserveCount);
+                batch.opaqueEntries.reserve(reserveCount);
+                batch.translucentEntries.reserve(reserveCount);
+            }
+        }
+        return renderData.exactNearBatches[static_cast<std::size_t>(slot)];
+    };
+
+    for (const std::shared_ptr<Chunk>& chunkPtr : snapshot)
     {
         if (!chunkPtr)
         {
             continue;
         }
+
+        const glm::ivec3 coord = chunkPtr->coord;
 
         ChunkState state = chunkPtr->state.load();
         const std::uint32_t indexCount = chunkPtr->indexCount.load(std::memory_order_acquire);
@@ -7767,11 +7869,12 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
         }
 
         const std::uint32_t pageIndex = chunkPtr->bufferPageIndex.load(std::memory_order_acquire);
-        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= renderData.nearBatches.size())
+        if (pageIndex == kInvalidChunkBufferPage || pageIndex >= pageInfos.size())
         {
             continue;
         }
 
+        const PageRenderInfo& pageInfo = pageInfos[pageIndex];
         const ChunkGameplayAuthority gameplayAuthority =
             chunkPtr->gameplayAuthority.load(std::memory_order_acquire);
         const bool cpuVisibleAuthority =
@@ -7779,11 +7882,11 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             gameplayAuthority == ChunkGameplayAuthority::HandoffToGpu;
         const bool cpuMeshAvailable =
             indexCount > 0 &&
-            !exactGpuPageUsage[pageIndex];
+            !pageInfo.exactGpuUsage;
 
         if (exactGpuResident && (!cpuVisibleAuthority || !cpuMeshAvailable))
         {
-            if (!exactGpuResidentPages[pageIndex])
+            if (!pageInfo.exactGpuResident)
             {
                 continue;
             }
@@ -7800,11 +7903,13 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             {
                 continue;
             }
-            exactGpuPageVisible[pageIndex] = true;
-            ExactChunkRenderBatch& batch = renderData.exactNearBatches[pageIndex];
+            ExactChunkRenderBatch& batch = ensureExactBatch(pageIndex);
             batch.faceOffsets.push_back(faceOffset);
             batch.faceCounts.push_back(faceCount);
             batch.recordIndices.push_back(recordIndex);
+            batch.boundsMins.push_back(minCorner);
+            batch.boundsMaxs.push_back(maxCorner);
+            batch.opaqueEntries.push_back(hasOpaqueFaces ? 1u : 0u);
             batch.hasOpaqueFaces = batch.hasOpaqueFaces || hasOpaqueFaces;
             batch.hasTranslucentFaces = batch.hasTranslucentFaces || hasTranslucentFaces;
             batch.translucentEntries.push_back(hasTranslucentFaces ? 1u : 0u);
@@ -7819,31 +7924,12 @@ WorldRenderData ChunkManager::Impl::buildRenderData(const Frustum& frustum) cons
             continue;
         }
 
-        ChunkRenderBatch& batch = renderData.nearBatches[pageIndex];
+        ChunkRenderBatch& batch = ensureNearBatch(pageIndex);
         batch.indexCounts.push_back(indexCount);
         batch.firstIndexLocations.push_back(static_cast<std::uint32_t>(indexOffset));
         batch.baseVertices.push_back(static_cast<std::int32_t>(vertexOffset));
         batch.translucentEntries.push_back(chunkPtr->hasTranslucentBlocks.load(std::memory_order_acquire) ? 1u : 0u);
     }
-
-    auto emptyIt = std::remove_if(renderData.nearBatches.begin(),
-                                  renderData.nearBatches.end(),
-                                  [&exactGpuPageVisible](const ChunkRenderBatch& batch)
-                                  {
-                                      return batch.indexCounts.empty();
-                                  });
-    renderData.nearBatches.erase(emptyIt, renderData.nearBatches.end());
-    auto exactEmptyIt = std::remove_if(renderData.exactNearBatches.begin(),
-                                       renderData.exactNearBatches.end(),
-                                       [&exactGpuPageVisible](const ExactChunkRenderBatch& batch)
-                                       {
-                                           const bool exactGpuVisible =
-                                               batch.debugPageIndex < exactGpuPageVisible.size() &&
-                                               exactGpuPageVisible[batch.debugPageIndex];
-                                           return batch.faceCounts.empty() &&
-                                                  (!exactGpuVisible || batch.gpuCullRecordCount == 0u);
-                                       });
-    renderData.exactNearBatches.erase(exactEmptyIt, renderData.exactNearBatches.end());
     renderData.farBatches = farTerrainManager_.buildRenderBatches(frustum);
 
     return renderData;
@@ -7916,6 +8002,7 @@ void ChunkManager::Impl::clear()
                 }
 
                 chunk = it->second;
+                unregisterChunkRenderRegistryEntry(coord);
                 chunks_.erase(it);
                 removedAny = true;
             }
@@ -7937,6 +8024,11 @@ void ChunkManager::Impl::clear()
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+        renderRegistry_.clear();
+        renderSpatialBuckets_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(uploadQueueMutex_);
@@ -14431,6 +14523,7 @@ void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState
     std::array<int, static_cast<std::size_t>(kMaxExactRenderDistanceChunks + 1)> ringDelta{};
     ringDelta.fill(0);
     bool complete = state.active;
+    int cachedColumnsInRange = 0;
     for (const auto& [column, entry] : state.columnSummaries)
     {
         const int distance =
@@ -14439,12 +14532,40 @@ void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState
         {
             continue;
         }
+        ++cachedColumnsInRange;
         if (!entry.authoritative)
         {
             complete = false;
             continue;
         }
         ringDelta[static_cast<std::size_t>(distance)] += entry.requiredChunkCount;
+    }
+    const bool noCoverageWorkQueued =
+        state.batch.pendingColumns.empty() &&
+        state.batch.queuedColumns.empty() &&
+        state.dirtyColumns.empty() &&
+        state.dirtyPages.empty() &&
+        state.dirtyRegions.empty();
+    const int trackedDiameter = state.trackedRadiusChunks * 2 + 1;
+    const int expectedColumnsInRange = trackedDiameter * trackedDiameter;
+    if (!complete &&
+        state.active &&
+        noCoverageWorkQueued &&
+        cachedColumnsInRange >= expectedColumnsInRange)
+    {
+        complete = true;
+        ringDelta.fill(0);
+        for (auto& [column, entry] : state.columnSummaries)
+        {
+            const int distance =
+                std::max(std::abs(column.x - state.centerColumn.x), std::abs(column.y - state.centerColumn.y));
+            if (distance > state.trackedRadiusChunks)
+            {
+                continue;
+            }
+            entry.authoritative = true;
+            ringDelta[static_cast<std::size_t>(distance)] += entry.requiredChunkCount;
+        }
     }
 
     int running = 0;
@@ -14468,8 +14589,7 @@ void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState
         state.authoritativeRequiredByRadius[static_cast<std::size_t>(radius)] = running;
     }
     state.authoritativeCountsValid = true;
-    state.reconciling = !state.batch.pendingColumns.empty() || !state.dirtyColumns.empty() ||
-                        !state.dirtyPages.empty() || !state.dirtyRegions.empty();
+    state.reconciling = !noCoverageWorkQueued;
 }
 
 void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
@@ -14495,21 +14615,20 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         previousTrackedRadius != trackedRadius;
     if (!movingWindow)
     {
-        if (smoothedFrameMs_ >= 40.0)
+        // Coverage discovery uses cached column occupancy and should keep moving even when
+        // the renderer is heavy; otherwise denominator growth gets pinned behind render cost.
+        coverageColumnsPerUpdate = 192;
+        if (smoothedFrameMs_ >= 50.0)
         {
-            coverageColumnsPerUpdate = 1;
+            coverageColumnsPerUpdate = 96;
+        }
+        else if (smoothedFrameMs_ >= 40.0)
+        {
+            coverageColumnsPerUpdate = 128;
         }
         else if (smoothedFrameMs_ >= 28.0)
         {
-            coverageColumnsPerUpdate = 2;
-        }
-        else if (smoothedFrameMs_ >= 20.0)
-        {
-            coverageColumnsPerUpdate = 4;
-        }
-        else if (smoothedFrameMs_ >= 14.0)
-        {
-            coverageColumnsPerUpdate = 8;
+            coverageColumnsPerUpdate = 160;
         }
     }
     if (firstActivation)
@@ -14643,6 +14762,43 @@ void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
         queueColumn(column);
     }
     state.dirtyColumns.clear();
+
+    if ((state.reconciling || !state.authoritativeCountsValid) &&
+        state.batch.pendingColumns.empty() &&
+        state.batch.queuedColumns.empty() &&
+        state.dirtyColumns.empty() &&
+        state.dirtyPages.empty() &&
+        state.dirtyRegions.empty())
+    {
+        int cachedColumnsInRange = 0;
+        for (const auto& [column, entry] : state.columnSummaries)
+        {
+            (void)entry;
+            const int distance =
+                std::max(std::abs(column.x - centerColumn.x), std::abs(column.y - centerColumn.y));
+            if (distance <= trackedRadius)
+            {
+                ++cachedColumnsInRange;
+            }
+        }
+        const int trackedDiameter = trackedRadius * 2 + 1;
+        const int expectedColumnsInRange = trackedDiameter * trackedDiameter;
+        if (cachedColumnsInRange < expectedColumnsInRange)
+        {
+            state.authoritativeCountsValid = false;
+            for (int dz = -trackedRadius; dz <= trackedRadius; ++dz)
+            {
+                for (int dx = -trackedRadius; dx <= trackedRadius; ++dx)
+                {
+                    const glm::ivec2 column{centerColumn.x + dx, centerColumn.y + dz};
+                    if (state.columnSummaries.find(column) == state.columnSummaries.end())
+                    {
+                        queueColumn(column);
+                    }
+                }
+            }
+        }
+    }
 
     {
         std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
@@ -18375,6 +18531,10 @@ bool ChunkManager::Impl::materializeChunkForLocalEdit(const glm::ivec3& coord, s
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
         auto [it, inserted] = chunks_.emplace(coord, chunk);
+        if (inserted)
+        {
+            registerChunkRenderRegistryEntry(coord, chunk);
+        }
         outChunk = inserted ? chunk : it->second;
     }
 
@@ -20432,6 +20592,7 @@ void ChunkManager::Impl::removeDistantChunks(const glm::ivec3& center,
             }
 
             chunk = it->second;
+            unregisterChunkRenderRegistryEntry(coord);
             chunks_.erase(it);
         }
 
@@ -20643,6 +20804,7 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
                 }
 
                 chunks_.emplace(coord, chunk);
+                registerChunkRenderRegistryEntry(coord, chunk);
             }
 
             registerDeferredChunkDependencies(coord,
@@ -20675,6 +20837,7 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
             }
 
             chunks_.emplace(coord, chunk);
+            registerChunkRenderRegistryEntry(coord, chunk);
         }
 
         clearDeferredChunkDependencies(coord);
@@ -24799,6 +24962,132 @@ glm::ivec3 ChunkManager::Impl::worldToChunkCoords(int worldX, int worldY, int wo
     return {floorDiv(worldX, kChunkSizeX), floorDiv(worldY, kChunkSizeY), floorDiv(worldZ, kChunkSizeZ)};
 }
 
+ChunkManager::Impl::RenderSpatialBucketKey
+ChunkManager::Impl::renderSpatialBucketKeyForChunk(const glm::ivec3& coord) noexcept
+{
+    return RenderSpatialBucketKey{
+        floorDiv(coord.x, kRenderSpatialBucketSizeChunks),
+        floorDiv(coord.z, kRenderSpatialBucketSizeChunks)};
+}
+
+void ChunkManager::Impl::registerChunkRenderRegistryEntry(const glm::ivec3& coord,
+                                                          const std::shared_ptr<Chunk>& chunk)
+{
+    if (!chunk)
+    {
+        return;
+    }
+
+    const RenderSpatialBucketKey bucket = renderSpatialBucketKeyForChunk(coord);
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    auto [it, inserted] = renderRegistry_.emplace(coord, RenderRegistryEntry{chunk, bucket});
+    if (!inserted)
+    {
+        it->second.chunk = chunk;
+        if (!(it->second.bucket == bucket))
+        {
+            auto oldBucketIt = renderSpatialBuckets_.find(it->second.bucket);
+            if (oldBucketIt != renderSpatialBuckets_.end())
+            {
+                auto& oldCoords = oldBucketIt->second;
+                oldCoords.erase(std::remove(oldCoords.begin(), oldCoords.end(), coord), oldCoords.end());
+                if (oldCoords.empty())
+                {
+                    renderSpatialBuckets_.erase(oldBucketIt);
+                }
+            }
+            it->second.bucket = bucket;
+        }
+    }
+
+    std::vector<glm::ivec3>& bucketCoords = renderSpatialBuckets_[bucket];
+    if (std::find(bucketCoords.begin(), bucketCoords.end(), coord) == bucketCoords.end())
+    {
+        bucketCoords.push_back(coord);
+    }
+}
+
+void ChunkManager::Impl::unregisterChunkRenderRegistryEntry(const glm::ivec3& coord)
+{
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    const auto entryIt = renderRegistry_.find(coord);
+    if (entryIt == renderRegistry_.end())
+    {
+        return;
+    }
+
+    const RenderSpatialBucketKey bucket = entryIt->second.bucket;
+    renderRegistry_.erase(entryIt);
+
+    const auto bucketIt = renderSpatialBuckets_.find(bucket);
+    if (bucketIt == renderSpatialBuckets_.end())
+    {
+        return;
+    }
+
+    auto& bucketCoords = bucketIt->second;
+    bucketCoords.erase(std::remove(bucketCoords.begin(), bucketCoords.end(), coord), bucketCoords.end());
+    if (bucketCoords.empty())
+    {
+        renderSpatialBuckets_.erase(bucketIt);
+    }
+}
+
+void ChunkManager::Impl::collectRenderRegistryCandidates(const glm::ivec3& cameraChunk,
+                                                         int horizontalRadius,
+                                                         std::vector<std::shared_ptr<Chunk>>& outChunks) const
+{
+    outChunks.clear();
+    const int minChunkX = cameraChunk.x - horizontalRadius;
+    const int maxChunkX = cameraChunk.x + horizontalRadius;
+    const int minChunkZ = cameraChunk.z - horizontalRadius;
+    const int maxChunkZ = cameraChunk.z + horizontalRadius;
+    const RenderSpatialBucketKey minBucket{
+        floorDiv(minChunkX, kRenderSpatialBucketSizeChunks),
+        floorDiv(minChunkZ, kRenderSpatialBucketSizeChunks)};
+    const RenderSpatialBucketKey maxBucket{
+        floorDiv(maxChunkX, kRenderSpatialBucketSizeChunks),
+        floorDiv(maxChunkZ, kRenderSpatialBucketSizeChunks)};
+
+    std::lock_guard<std::mutex> lock(renderRegistryMutex_);
+    const std::size_t reserveEstimate =
+        static_cast<std::size_t>(std::max(1, maxBucket.x - minBucket.x + 1)) *
+        static_cast<std::size_t>(std::max(1, maxBucket.z - minBucket.z + 1)) *
+        static_cast<std::size_t>(kRenderSpatialBucketSizeChunks * kRenderSpatialBucketSizeChunks);
+    outChunks.reserve((std::max)(outChunks.capacity(), reserveEstimate));
+    for (int bucketZ = minBucket.z; bucketZ <= maxBucket.z; ++bucketZ)
+    {
+        for (int bucketX = minBucket.x; bucketX <= maxBucket.x; ++bucketX)
+        {
+            const auto bucketIt = renderSpatialBuckets_.find(RenderSpatialBucketKey{bucketX, bucketZ});
+            if (bucketIt == renderSpatialBuckets_.end())
+            {
+                continue;
+            }
+
+            for (const glm::ivec3& coord : bucketIt->second)
+            {
+                const auto entryIt = renderRegistry_.find(coord);
+                if (entryIt == renderRegistry_.end())
+                {
+                    continue;
+                }
+
+                if (coord.x < minChunkX || coord.x > maxChunkX ||
+                    coord.z < minChunkZ || coord.z > maxChunkZ)
+                {
+                    continue;
+                }
+
+                if (std::shared_ptr<Chunk> chunk = entryIt->second.chunk.lock())
+                {
+                    outChunks.push_back(std::move(chunk));
+                }
+            }
+        }
+    }
+}
+
 std::shared_ptr<Chunk> ChunkManager::Impl::acquireChunk(const glm::ivec3& coord)
 {
     std::shared_ptr<Chunk> chunk;
@@ -27702,6 +27991,7 @@ void ChunkManager::Impl::abandonChunkGenerationPlaceholder(const glm::ivec3& coo
             return;
         }
 
+        unregisterChunkRenderRegistryEntry(coord);
         chunks_.erase(it);
         removed = true;
     }

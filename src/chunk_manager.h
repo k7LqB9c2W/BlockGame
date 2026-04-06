@@ -251,6 +251,9 @@ struct ExactChunkRenderBatch
     std::vector<std::uint32_t> faceOffsets;
     std::vector<std::uint32_t> faceCounts;
     std::vector<std::uint32_t> recordIndices;
+    std::vector<glm::vec3> boundsMins;
+    std::vector<glm::vec3> boundsMaxs;
+    std::vector<std::uint8_t> opaqueEntries;
     std::vector<std::uint8_t> translucentEntries;
     std::uint32_t gpuCullRecordCount{0};
     bool supportsGpuCull{false};

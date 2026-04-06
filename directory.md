@@ -141,6 +141,7 @@ Scope:
   tree/structure spawning and structure edit dispatch
   worldgen page dependency tracking
   structure region dependency tracking
+  render registry and spatial bucket indexing for exact/near render collection
   vertical streaming radius control
   far-LOD shell coordination
   profiling, benchmark metrics, LOD diagnostics, and recent-edit-hole diagnostics

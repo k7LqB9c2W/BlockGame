@@ -450,6 +450,87 @@ struct FrustumPlane
     return normalized;
 }
 
+[[nodiscard]] bool frustumIntersectsAabb(const std::array<FrustumPlane, 6>& planes,
+                                         const glm::vec3& minCorner,
+                                         const glm::vec3& maxCorner) noexcept
+{
+    for (const FrustumPlane& plane : planes)
+    {
+        const glm::vec3 positiveVertex{
+            plane.equation.x >= 0.0f ? maxCorner.x : minCorner.x,
+            plane.equation.y >= 0.0f ? maxCorner.y : minCorner.y,
+            plane.equation.z >= 0.0f ? maxCorner.z : minCorner.z};
+        if (glm::dot(glm::vec3(plane.equation), positiveVertex) + plane.equation.w < 0.0f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::vector<ExactChunkRenderBatch> compactExactShadowBatches(
+    const std::vector<ExactChunkRenderBatch>& sourceBatches,
+    const std::array<FrustumPlane, 6>& shadowFrustumPlanes)
+{
+    std::vector<ExactChunkRenderBatch> compacted;
+    compacted.reserve(sourceBatches.size());
+    for (const ExactChunkRenderBatch& source : sourceBatches)
+    {
+        const std::size_t entryCount =
+            (std::min)((std::min)(source.faceCounts.size(), source.recordIndices.size()),
+                       (std::min)(source.boundsMins.size(),
+                                  (std::min)(source.boundsMaxs.size(), source.opaqueEntries.size())));
+        if (entryCount == 0 || source.faceDescriptorBuffer == nullptr || source.drawRecordMetadataBuffer == nullptr)
+        {
+            continue;
+        }
+
+        ExactChunkRenderBatch compact;
+        compact.faceDescriptorBuffer = source.faceDescriptorBuffer;
+        compact.drawRecordBuffer = source.drawRecordBuffer;
+        compact.drawRecordMetadataBuffer = source.drawRecordMetadataBuffer;
+        compact.debugPageIndex = source.debugPageIndex;
+        compact.hasOpaqueFaces = true;
+        compact.hasTranslucentFaces = false;
+        compact.supportsGpuCull = false;
+        compact.gpuCullRecordCount = 0u;
+        compact.faceOffsets.reserve(entryCount);
+        compact.faceCounts.reserve(entryCount);
+        compact.recordIndices.reserve(entryCount);
+        compact.boundsMins.reserve(entryCount);
+        compact.boundsMaxs.reserve(entryCount);
+        compact.opaqueEntries.reserve(entryCount);
+        compact.translucentEntries.reserve(entryCount);
+
+        for (std::size_t i = 0; i < entryCount; ++i)
+        {
+            if (source.opaqueEntries[i] == 0u)
+            {
+                continue;
+            }
+            if (!frustumIntersectsAabb(shadowFrustumPlanes, source.boundsMins[i], source.boundsMaxs[i]))
+            {
+                continue;
+            }
+
+            compact.faceOffsets.push_back(source.faceOffsets[i]);
+            compact.faceCounts.push_back(source.faceCounts[i]);
+            compact.recordIndices.push_back(source.recordIndices[i]);
+            compact.boundsMins.push_back(source.boundsMins[i]);
+            compact.boundsMaxs.push_back(source.boundsMaxs[i]);
+            compact.opaqueEntries.push_back(1u);
+            compact.translucentEntries.push_back(0u);
+        }
+
+        if (!compact.faceCounts.empty())
+        {
+            compacted.push_back(std::move(compact));
+        }
+    }
+
+    return compacted;
+}
+
 [[nodiscard]] std::vector<std::uint8_t> buildRuntimeAtlasPixels(const std::uint8_t* sourcePixels,
                                                                 int sourceWidth,
                                                                 int sourceHeight,
@@ -3322,6 +3403,7 @@ void Renderer::buildDepthPyramid()
         return;
     }
 
+    const auto start = std::chrono::steady_clock::now();
     renderDebugLog("buildDepthPyramid: begin");
 
     const D3D12_RESOURCE_BARRIER depthBeginBarrier =
@@ -3379,6 +3461,8 @@ void Renderer::buildDepthPyramid()
         transitionBarrier(depthBuffer_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     commandList_->ResourceBarrier(1, &depthEndBarrier);
     depthPyramidState_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    profilingSnapshot_.depthPyramidMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     renderDebugLog("buildDepthPyramid: end");
 }
 
@@ -3737,7 +3821,10 @@ void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
     commandList_->SetComputeRootShaderResourceView(2, batch.drawRecordBuffer->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(3, visibleIndices->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(4, visibleCount->GetGPUVirtualAddress());
+    const auto cullStart = std::chrono::steady_clock::now();
     commandList_->Dispatch(dispatchGroups, 1, 1);
+    profilingSnapshot_.exactGpuCullMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cullStart).count();
 
     std::array<D3D12_RESOURCE_BARRIER, 3> cullBarriers{};
     cullBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -3756,7 +3843,10 @@ void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
     commandList_->SetComputeRootShaderResourceView(1, visibleIndices->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(2, indirectArgs->GetGPUVirtualAddress());
     commandList_->SetComputeRootUnorderedAccessView(3, visibleCount->GetGPUVirtualAddress());
+    const auto indirectStart = std::chrono::steady_clock::now();
     commandList_->Dispatch(dispatchGroups, 1, 1);
+    profilingSnapshot_.exactIndirectBuildMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - indirectStart).count();
 
     std::array<D3D12_RESOURCE_BARRIER, 4> indirectBarriers{};
     indirectBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -3844,13 +3934,19 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         throwRenderError("beginFrame() called while a frame is already open");
     }
 
+    profilingSnapshot_ = {};
+    const auto beginFrameStart = std::chrono::steady_clock::now();
     currentBackBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
     FrameResource& frame = frameResources_[currentBackBufferIndex_];
     if (frame.fenceValue != 0 && fence_->GetCompletedValue() < frame.fenceValue)
     {
+        const auto waitStart = std::chrono::steady_clock::now();
         throwIfFailed(fence_->SetEventOnCompletion(frame.fenceValue, fenceEvent_), "failed to wait for frame fence");
         WaitForSingleObject(fenceEvent_, INFINITE);
+        profilingSnapshot_.beginFrameFrameFenceWaitMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
     }
+    const auto readbackStart = std::chrono::steady_clock::now();
     if (frame.farCullVisibleCountReadbackEntryCount > 0 &&
         frame.farCullVisibleCountReadbackMapped != nullptr)
     {
@@ -3881,6 +3977,8 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
             }
         }
     }
+    profilingSnapshot_.beginFrameReadbackMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readbackStart).count();
     frame.farCullVisibleCountReadbackEntryCount = 0;
     frame.transientResources.clear();
 
@@ -3923,8 +4021,12 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
         }
         if (completedValue < syncPoint.value)
         {
+            const auto queueSyncStart = std::chrono::steady_clock::now();
             throwIfFailed(commandQueue_->Wait(syncPoint.fence, syncPoint.value),
                           "failed to wait for upload fence");
+            profilingSnapshot_.beginFrameUploadQueueSyncMs +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - queueSyncStart).count();
+            ++profilingSnapshot_.beginFrameUploadQueueSyncCount;
         }
         syncPoint.consumedValue = std::max(syncPoint.consumedValue, syncPoint.value);
     }
@@ -3979,7 +4081,8 @@ void Renderer::beginFrame(const glm::vec4& clearColor)
     commandList_->SetDescriptorHeaps(static_cast<UINT>(std::size(heaps)), heaps);
 
     currentFrameConstantOffset_ = 0;
-    profilingSnapshot_ = {};
+    profilingSnapshot_.beginFrameMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beginFrameStart).count();
     frameStarted_ = true;
     imguiFrameStarted_ = false;
 }
@@ -4011,6 +4114,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         return;
     }
 
+    const auto setupStart = std::chrono::steady_clock::now();
     void* worldCpu = nullptr;
     const std::uint64_t worldCb = allocateFrameConstantBytes(sizeof(WorldConstants), &worldCpu);
     auto* nearConstants = static_cast<WorldConstants*>(worldCpu);
@@ -4198,7 +4302,13 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         drawBaseSkyToTarget(sceneColorRtv_, sceneColor_.Get(), sceneColorState_);
     }
 
+    profilingSnapshot_.frameSetupMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - setupStart).count();
+
     const auto worldStart = std::chrono::steady_clock::now();
+    profilingSnapshot_.nearBatchCount = static_cast<std::uint32_t>(renderData.nearBatches.size());
+    profilingSnapshot_.exactBatchCount = static_cast<std::uint32_t>(renderData.exactNearBatches.size());
+    profilingSnapshot_.farBatchCount = static_cast<std::uint32_t>(renderData.farBatches.size());
     sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
     commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
     commandList_->RSSetViewports(1, &viewport_);
@@ -4269,12 +4379,15 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         }
         commandList_->SetPipelineState(nearPipelineState_.Get());
         commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        const auto nearOpaqueStart = std::chrono::steady_clock::now();
         for (const ChunkRenderBatch& batch : renderData.nearBatches)
         {
             if (batch.supportsGpuCull &&
                 batch.gpuCullRecordBuffer != nullptr &&
                 batch.gpuCullRecordCount > 0)
             {
+                ++profilingSnapshot_.nearOpaqueGpuCullBatchCount;
+                profilingSnapshot_.nearOpaqueGpuCullRecordCount += batch.gpuCullRecordCount;
                 continue;
             }
 
@@ -4287,9 +4400,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             commandList_->IASetIndexBuffer(&batch.indexBufferView);
             for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
             {
+                ++profilingSnapshot_.nearOpaqueFallbackDrawCount;
                 commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
             }
         }
+        profilingSnapshot_.nearOpaqueMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - nearOpaqueStart).count();
 
         if ((shouldUseGpuWorldCull && maxRecordBytes > 0) || shouldUseExactGpuCull)
         {
@@ -4307,6 +4423,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
         commandList_->SetPipelineState(nearPipelineState_.Get());
         commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
+        const auto nearGpuCullStart = std::chrono::steady_clock::now();
         for (const ChunkRenderBatch& batch : renderData.nearBatches)
         {
             if (!batch.supportsGpuCull ||
@@ -4325,6 +4442,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                     shadowMapSrvGpu_,
                                     skyBackgroundSrvGpu_);
         }
+        profilingSnapshot_.nearOpaqueMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - nearGpuCullStart).count();
 
         commandList_->SetGraphicsRootSignature(exactWorldRootSignature_.Get());
         commandList_->SetPipelineState(exactNearPipelineState_.Get());
@@ -4337,6 +4456,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootDescriptorTable(7, shadowMapSrvGpu_);
         commandList_->SetGraphicsRootDescriptorTable(8, skyBackgroundSrvGpu_);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const auto exactOpaqueStart = std::chrono::steady_clock::now();
         for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
         {
             if (batch.supportsGpuCull &&
@@ -4344,6 +4464,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                 batch.gpuCullRecordCount > 0 &&
                 batch.hasOpaqueFaces)
             {
+                ++profilingSnapshot_.exactOpaqueGpuCullBatchCount;
+                profilingSnapshot_.exactOpaqueGpuCullRecordCount += batch.gpuCullRecordCount;
                 renderExactBatchGpuCull(batch,
                                         viewProj,
                                         exactNearPipelineState_.Get(),
@@ -4371,10 +4493,13 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
             for (std::size_t i = 0; i < batch.faceCounts.size(); ++i)
             {
+                ++profilingSnapshot_.exactOpaqueFallbackDrawCount;
                 commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
                 commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
             }
         }
+        profilingSnapshot_.exactOpaqueMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - exactOpaqueStart).count();
 
         std::size_t farBatchCount = 0;
         std::size_t farCullEligibleBatchCount = 0;
@@ -4406,11 +4531,14 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         farConstants->shadowParams.w = 0.0f;
         commandList_->SetPipelineState(farPipelineState_.Get());
         commandList_->SetGraphicsRootConstantBufferView(0, farCb);
+        const auto farOpaqueStart = std::chrono::steady_clock::now();
         for (const ChunkRenderBatch& batch : renderData.farBatches)
         {
             if (batch.supportsGpuCull &&
                 batch.gpuCullRecordBuffer != nullptr && batch.gpuCullRecordCount > 0)
             {
+                ++profilingSnapshot_.farGpuCullBatchCount;
+                profilingSnapshot_.farGpuCullRecordCount += batch.gpuCullRecordCount;
                 renderWorldBatchGpuCull(batch,
                                         viewProj,
                                         farPipelineState_.Get(),
@@ -4436,6 +4564,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
             auto* indirectArgs = static_cast<D3D12_DRAW_INDEXED_ARGUMENTS*>(indirectCpu);
             for (std::size_t i = 0; i < commandCount; ++i)
             {
+                ++profilingSnapshot_.farFallbackDrawCount;
                 indirectArgs[i].IndexCountPerInstance = batch.indexCounts[i];
                 indirectArgs[i].InstanceCount = 1;
                 indirectArgs[i].StartIndexLocation = batch.firstIndexLocations[i];
@@ -4453,9 +4582,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                               nullptr,
                                               0);
         }
+        profilingSnapshot_.farOpaqueMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - farOpaqueStart).count();
 
         if (!renderData.editOverlayVertices.empty() && !renderData.editOverlayIndices.empty())
         {
+            const auto editOverlayStart = std::chrono::steady_clock::now();
             commandList_->SetPipelineState(nearPipelineState_.Get());
             commandList_->SetGraphicsRootSignature(worldRootSignature_.Get());
             commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
@@ -4487,11 +4619,15 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                 DXGI_FORMAT_R32_UINT};
             commandList_->IASetVertexBuffers(0, 1, &vertexView);
             commandList_->IASetIndexBuffer(&indexView);
+            profilingSnapshot_.editOverlayDrawCount = 1u;
             commandList_->DrawIndexedInstanced(static_cast<UINT>(renderData.editOverlayIndices.size()), 1, 0, 0, 0);
+            profilingSnapshot_.editOverlayMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - editOverlayStart).count();
         }
 
         if (!renderData.mobBatches.empty())
         {
+            const auto mobStart = std::chrono::steady_clock::now();
             commandList_->SetPipelineState(mobPipelineState_.Get());
             for (const MobRenderBatch& batch : renderData.mobBatches)
             {
@@ -4537,8 +4673,11 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                 commandList_->SetGraphicsRootDescriptorTable(4, skyBackgroundSrvGpu_);
                 commandList_->IASetVertexBuffers(0, 1, &vertexView);
                 commandList_->IASetIndexBuffer(&indexView);
+                ++profilingSnapshot_.mobDrawCount;
                 commandList_->DrawIndexedInstanced(static_cast<UINT>(batch.indices.size()), 1, 0, 0, 0);
             }
+            profilingSnapshot_.mobDrawMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mobStart).count();
         }
     }
 
@@ -4594,6 +4733,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
         commandList_->SetPipelineState(nearTranslucentPipelineState_.Get());
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const auto nearTranslucentStart = std::chrono::steady_clock::now();
         for (const ChunkRenderBatch& batch : renderData.nearBatches)
         {
             if (batch.indexCounts.empty())
@@ -4613,9 +4753,12 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                 {
                     continue;
                 }
+                ++profilingSnapshot_.nearTranslucentDrawCount;
                 commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
             }
         }
+        profilingSnapshot_.nearTranslucentMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - nearTranslucentStart).count();
 
         commandList_->SetGraphicsRootSignature(exactWorldRootSignature_.Get());
         commandList_->SetPipelineState(exactNearTranslucentPipelineState_.Get());
@@ -4628,6 +4771,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootDescriptorTable(7, shadowMapSrvGpu_);
         commandList_->SetGraphicsRootDescriptorTable(8, skyBackgroundSrvGpu_);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const auto exactTranslucentStart = std::chrono::steady_clock::now();
         for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
         {
             if (batch.supportsGpuCull &&
@@ -4636,6 +4780,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                 batch.hasTranslucentFaces &&
                 renderData.exactBlockUvBuffer != nullptr)
             {
+                ++profilingSnapshot_.exactTranslucentGpuCullBatchCount;
+                profilingSnapshot_.exactTranslucentGpuCullRecordCount += batch.gpuCullRecordCount;
                 renderExactBatchGpuCull(batch,
                                         viewProj,
                                         exactNearTranslucentPipelineState_.Get(),
@@ -4670,10 +4816,13 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                 {
                     continue;
                 }
+                ++profilingSnapshot_.exactTranslucentFallbackDrawCount;
                 commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
                 commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
             }
         }
+        profilingSnapshot_.exactTranslucentMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - exactTranslucentStart).count();
     }
 
     if (sceneColorState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
@@ -4715,6 +4864,7 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
 
     if (sceneResolved_ != nullptr)
     {
+        const auto compositeStart = std::chrono::steady_clock::now();
         commandList_->OMSetRenderTargets(1, &sceneResolvedRtv_, FALSE, nullptr);
         commandList_->RSSetViewports(1, &viewport_);
         commandList_->RSSetScissorRects(1, &scissorRect_);
@@ -4731,10 +4881,13 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootDescriptorTable(3, translucencyRevealSrvGpu_);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         commandList_->DrawInstanced(3, 1, 0, 0);
+        profilingSnapshot_.translucencyCompositeMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compositeStart).count();
     }
 
     if (renderData.hasHighlight && sceneResolved_ != nullptr)
     {
+        const auto highlightStart = std::chrono::steady_clock::now();
         commandList_->OMSetRenderTargets(1, &sceneResolvedRtv_, FALSE, &depthHandle);
         commandList_->RSSetViewports(1, &viewport_);
         commandList_->RSSetScissorRects(1, &scissorRect_);
@@ -4743,6 +4896,8 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootConstantBufferView(0, worldCb);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
         commandList_->DrawInstanced(24, 1, 0, 0);
+        profilingSnapshot_.highlightMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - highlightStart).count();
     }
 
     if (sceneResolved_ != nullptr && sceneResolvedState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
@@ -4875,6 +5030,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
                                                 1.0f,
                                                 kShadowDepth);
     const glm::mat4 lightViewProj = lightProj * lightView;
+    const std::array<FrustumPlane, 6> shadowFrustumPlanes = extractFrustumPlanes(lightViewProj);
 
     void* shadowCpu = nullptr;
     const std::uint64_t shadowCbAddress = allocateFrameConstantBytes(sizeof(ShadowConstants), &shadowCpu);
@@ -4882,6 +5038,7 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
     shadowConstants->lightViewProj = lightViewProj;
     commandList_->SetGraphicsRootConstantBufferView(0, shadowCbAddress);
 
+    const auto shadowNearStart = std::chrono::steady_clock::now();
     for (const ChunkRenderBatch& batch : renderData.nearBatches)
     {
         if (batch.indexCounts.empty())
@@ -4893,12 +5050,17 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
         commandList_->IASetIndexBuffer(&batch.indexBufferView);
         for (std::size_t i = 0; i < batch.indexCounts.size(); ++i)
         {
+            ++profilingSnapshot_.shadowNearDrawCount;
             commandList_->DrawIndexedInstanced(batch.indexCounts[i], 1, batch.firstIndexLocations[i], batch.baseVertices[i], 0);
         }
     }
+    profilingSnapshot_.shadowNearMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - shadowNearStart).count();
 
     if (renderData.exactBlockUvBuffer != nullptr)
     {
+        const std::vector<ExactChunkRenderBatch> compactedExactShadowBatches =
+            compactExactShadowBatches(renderData.exactNearBatches, shadowFrustumPlanes);
         commandList_->SetGraphicsRootSignature(exactShadowRootSignature_.Get());
         commandList_->SetPipelineState(exactShadowPipelineState_.Get());
         commandList_->SetGraphicsRootConstantBufferView(0, shadowCbAddress);
@@ -4906,28 +5068,9 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
         commandList_->SetGraphicsRootDescriptorTable(5, atlasTexture.srvGpu);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        for (const ExactChunkRenderBatch& batch : renderData.exactNearBatches)
+        const auto shadowExactStart = std::chrono::steady_clock::now();
+        for (const ExactChunkRenderBatch& batch : compactedExactShadowBatches)
         {
-            if (batch.supportsGpuCull &&
-                batch.drawRecordBuffer != nullptr &&
-                batch.gpuCullRecordCount > 0 &&
-                batch.hasOpaqueFaces)
-            {
-                renderExactBatchGpuCull(batch,
-                                        lightViewProj,
-                                        exactShadowPipelineState_.Get(),
-                                        exactShadowRootSignature_.Get(),
-                                        shadowCbAddress,
-                                        atlasTexture.srvGpu,
-                                        {},
-                                        {},
-                                        {},
-                                        renderData.exactBlockUvBuffer,
-                                        true,
-                                        ExactChunkRenderBatch::GpuCullRecord::kFlagsHasOpaqueFacesBit);
-                continue;
-            }
-
             if (batch.faceCounts.empty() ||
                 batch.faceDescriptorBuffer == nullptr ||
                 batch.drawRecordMetadataBuffer == nullptr)
@@ -4939,10 +5082,13 @@ void Renderer::renderShadowMap(const WorldRenderData& renderData,
             commandList_->SetGraphicsRootShaderResourceView(3, batch.drawRecordMetadataBuffer->GetGPUVirtualAddress());
             for (std::size_t i = 0; i < batch.faceCounts.size(); ++i)
             {
+                ++profilingSnapshot_.shadowExactDrawCount;
                 commandList_->SetGraphicsRoot32BitConstant(1, batch.recordIndices[i], 0);
                 commandList_->DrawInstanced(6u, batch.faceCounts[i], 0u, 0u);
             }
         }
+        profilingSnapshot_.shadowExactMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - shadowExactStart).count();
     }
 
     if (shadowMapState_ != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
@@ -4977,9 +5123,12 @@ void Renderer::endFrame()
 
     if (imguiFrameStarted_)
     {
+        const auto imguiStart = std::chrono::steady_clock::now();
         ImGui::Render();
         commandList_->SetDescriptorHeaps(1, srvHeap_.GetAddressOf());
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList_.Get());
+        profilingSnapshot_.imguiMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - imguiStart).count();
     }
 
     const bool captureThisFrame = screenshotRequested_ && !pendingScreenshotPath_.empty();

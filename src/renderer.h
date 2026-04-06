@@ -111,15 +111,56 @@ struct EnvironmentState
 
 struct RendererProfilingSnapshot
 {
+    double beginFrameMs{0.0};
+    double beginFrameFrameFenceWaitMs{0.0};
+    double beginFrameUploadQueueSyncMs{0.0};
+    double beginFrameReadbackMs{0.0};
+    double frameSetupMs{0.0};
     double atmosphereLutMs{0.0};
     double skyDrawMs{0.0};
+    double depthPyramidMs{0.0};
+    double shadowNearMs{0.0};
+    double shadowExactMs{0.0};
     double shadowDrawMs{0.0};
+    double nearOpaqueMs{0.0};
+    double exactOpaqueMs{0.0};
+    double farOpaqueMs{0.0};
+    double editOverlayMs{0.0};
+    double mobDrawMs{0.0};
+    double nearTranslucentMs{0.0};
+    double exactTranslucentMs{0.0};
+    double translucencyCompositeMs{0.0};
+    double highlightMs{0.0};
     double worldDrawMs{0.0};
     double lodGpuCullMs{0.0};
     double lodIndirectBuildMs{0.0};
+    double exactGpuCullMs{0.0};
+    double exactIndirectBuildMs{0.0};
     double toneMapMs{0.0};
+    double imguiMs{0.0};
     double presentMs{0.0};
     double endFrameMs{0.0};
+    std::uint32_t nearBatchCount{0};
+    std::uint32_t exactBatchCount{0};
+    std::uint32_t farBatchCount{0};
+    std::uint32_t nearOpaqueGpuCullBatchCount{0};
+    std::uint32_t nearOpaqueGpuCullRecordCount{0};
+    std::uint32_t nearOpaqueFallbackDrawCount{0};
+    std::uint32_t exactOpaqueGpuCullBatchCount{0};
+    std::uint32_t exactOpaqueGpuCullRecordCount{0};
+    std::uint32_t exactOpaqueFallbackDrawCount{0};
+    std::uint32_t farGpuCullBatchCount{0};
+    std::uint32_t farGpuCullRecordCount{0};
+    std::uint32_t farFallbackDrawCount{0};
+    std::uint32_t nearTranslucentDrawCount{0};
+    std::uint32_t exactTranslucentGpuCullBatchCount{0};
+    std::uint32_t exactTranslucentGpuCullRecordCount{0};
+    std::uint32_t exactTranslucentFallbackDrawCount{0};
+    std::uint32_t shadowNearDrawCount{0};
+    std::uint32_t shadowExactDrawCount{0};
+    std::uint32_t editOverlayDrawCount{0};
+    std::uint32_t mobDrawCount{0};
+    std::uint32_t beginFrameUploadQueueSyncCount{0};
 };
 
 class Renderer

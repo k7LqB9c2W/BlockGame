@@ -3196,7 +3196,11 @@ private:
     static constexpr UINT kDescriptorHeapSubmissionDescriptorCount = 8192u;
     static constexpr UINT kDescriptorHeapDescriptorCount =
         kDescriptorHeapPersistentDescriptorCount + kDescriptorHeapSubmissionDescriptorCount;
-    static constexpr std::uint64_t kUploadScratchSizeBytes = 16ull * 1024ull * 1024ull;
+    // Water/translucent exact builds can require staging many more unique worldgen pages
+    // per submission. The old 16 MiB upload scratch buffer only left 4 MiB per in-flight
+    // slot, which collapsed exact prepass batches to a handful of chunks and caused
+    // sustained submit-budget backpressure during far-ramp fills.
+    static constexpr std::uint64_t kUploadScratchSizeBytes = 64ull * 1024ull * 1024ull;
     static constexpr std::uint64_t kReadbackScratchSizeBytes = 4ull * 1024ull * 1024ull;
     static constexpr std::uint64_t kUploadScratchBytesPerSubmission =
         kUploadScratchSizeBytes / kMaxInFlightSubmissionSlots;

@@ -215,6 +215,18 @@ void resetDebugLogFile(const char* envVarName,
     }
 }
 
+void appendDebugLogFileLine(const char* envVarName,
+                            const std::filesystem::path& defaultPath,
+                            const std::string& line)
+{
+    const std::filesystem::path logPath = resolveDebugLogPath(envVarName, defaultPath);
+    std::ofstream out(logPath, std::ios::app);
+    if (out)
+    {
+        out << line << '\n';
+    }
+}
+
 void applyLaunchDebugOptions(int argc, char** argv)
 {
     bool enableGpuDebug = false;
@@ -223,6 +235,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableLodVisibilityDebug = false;
     bool enableExactUploadDebug = false;
     bool enableExactDependencyStallDebug = false;
+    bool enableRendererTimingCapture = false;
     bool enableTerrainLogDebug = false;
     for (int i = 1; i < argc; ++i)
     {
@@ -286,12 +299,21 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--renderer-timing-capture" ||
+            arg == "--renderer-profile-capture" ||
+            arg == "--render-timing-capture")
+        {
+            enableRendererTimingCapture = true;
+            continue;
+        }
+
     }
 
     if (!enableGpuDebug &&
         !enableLodVisibilityDebug &&
         !enableExactUploadDebug &&
         !enableExactDependencyStallDebug &&
+        !enableRendererTimingCapture &&
         !enableTerrainLogDebug)
     {
         return;
@@ -349,6 +371,14 @@ void applyLaunchDebugOptions(int argc, char** argv)
                           "terrain debug logging enabled");
     }
 
+    if (enableRendererTimingCapture)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_RENDER_TIMING_CAPTURE", "1");
+        resetDebugLogFile("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                          "renderertimingcapture.log",
+                          "renderer timing capture enabled");
+    }
+
     std::vector<std::string> enabledOptions;
     if (enableGpuDebug)
     {
@@ -379,6 +409,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (enableTerrainLogDebug)
     {
         enabledOptions.emplace_back("terrain debug log (debug_terrain.log)");
+    }
+    if (enableRendererTimingCapture)
+    {
+        enabledOptions.emplace_back("renderer timing capture (renderertimingcapture.log)");
     }
 
     if (!enabledOptions.empty())
@@ -1084,6 +1118,186 @@ struct BenchmarkFrameSummary
         return true;
     }
     return false;
+}
+
+struct RendererTimingCaptureWindow
+{
+    double elapsedSeconds{0.0};
+    double worstFrameCpuMs{0.0};
+    double worstPresentMs{0.0};
+    double worstRendererWorkMs{0.0};
+};
+
+void appendRendererTimingCaptureSummary(std::uint64_t frameIndex,
+                                        double fps,
+                                        double frameCpuMs,
+                                        double pollEventsMs,
+                                        double gameplayCpuMs,
+                                        double chunkUpdateCpuMs,
+                                        double renderBeginCpuMs,
+                                        double buildRenderDataMs,
+                                        double renderWorldCpuMs,
+                                        double uiCpuMs,
+                                        const ChunkProfilingSnapshot& chunkSnapshot,
+                                        const RendererProfilingSnapshot& rendererSnapshot,
+                                        const StreamingStatusSnapshot& streamingStatus,
+                                        const RendererTimingCaptureWindow& window)
+{
+    const double rendererWorkMs =
+        rendererSnapshot.atmosphereLutMs +
+        rendererSnapshot.skyDrawMs +
+        rendererSnapshot.shadowDrawMs +
+        rendererSnapshot.worldDrawMs +
+        rendererSnapshot.toneMapMs +
+        rendererSnapshot.endFrameMs;
+    const double accountedCpuMs =
+        pollEventsMs +
+        gameplayCpuMs +
+        chunkUpdateCpuMs +
+        renderBeginCpuMs +
+        buildRenderDataMs +
+        renderWorldCpuMs +
+        uiCpuMs +
+        rendererSnapshot.endFrameMs;
+    const double unaccountedCpuMs = std::max(0.0, frameCpuMs - accountedCpuMs);
+
+    std::ostringstream header;
+    header.setf(std::ios::fixed, std::ios::floatfield);
+    header << std::setprecision(2);
+    header << "renderer_timing frame=" << frameIndex
+           << " fps=" << fps
+           << " frame_cpu_ms=" << frameCpuMs
+           << " renderer_work_ms=" << rendererWorkMs
+           << " worst_frame_cpu_ms=" << window.worstFrameCpuMs
+           << " worst_present_ms=" << window.worstPresentMs
+           << " worst_renderer_work_ms=" << window.worstRendererWorkMs;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           header.str());
+
+    const char* phaseName = "steady";
+    switch (streamingStatus.phase)
+    {
+    case StreamingPhase::SpawnResolve:
+        phaseName = "spawn";
+        break;
+    case StreamingPhase::ExactPreload:
+        phaseName = "preload";
+        break;
+    case StreamingPhase::InteractiveNearOnly:
+        phaseName = "near";
+        break;
+    case StreamingPhase::FarRamp:
+        phaseName = "ramp";
+        break;
+    case StreamingPhase::SteadyState:
+    default:
+        phaseName = "steady";
+        break;
+    }
+
+    std::ostringstream streamLine;
+    streamLine.setf(std::ios::fixed, std::ios::floatfield);
+    streamLine << std::setprecision(2);
+    streamLine << "  stream phase=" << phaseName
+               << " exact=" << streamingStatus.exactReadyChunks << "/" << streamingStatus.exactRequiredChunks;
+    if (streamingStatus.exactRequiredChunksApproximate)
+    {
+        streamLine << "~";
+    }
+    streamLine << " pending_exact_uploads=" << streamingStatus.exactPendingUploads
+               << " far_ready=" << streamingStatus.farReadyTiles << "/" << streamingStatus.farActiveTiles
+               << " far_dirty=" << streamingStatus.farDirtyTiles
+               << " far_pending_upload=" << streamingStatus.farPendingUploadTiles
+               << " player_released=" << (streamingStatus.playerReleaseReady ? 1 : 0)
+               << " blocking=" << streamingStatus.blockingReason;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           streamLine.str());
+
+    std::ostringstream timingLine;
+    timingLine.setf(std::ios::fixed, std::ios::floatfield);
+    timingLine << std::setprecision(2);
+    timingLine << "  cpu_ms poll=" << pollEventsMs
+               << " gameplay=" << gameplayCpuMs
+               << " chunk_update=" << chunkUpdateCpuMs
+               << " render_begin=" << renderBeginCpuMs
+               << " build_render_data=" << buildRenderDataMs
+               << " render_world_call=" << renderWorldCpuMs
+               << " ui_build=" << uiCpuMs
+               << " accounted=" << accountedCpuMs
+               << " unaccounted=" << unaccountedCpuMs
+               << " chunk_update_reported=" << chunkSnapshot.updateMsLastFrame
+               << " chunk_update_residual=" << chunkSnapshot.updateResidualMsLastFrame
+               << " chunk_dense_residency=" << chunkSnapshot.denseResidencyMsLastFrame
+               << " chunk_vertical_radius=" << chunkSnapshot.verticalRadiusMsLastFrame
+               << " chunk_priority=" << chunkSnapshot.priorityUpdateMsLastFrame
+               << " chunk_upload_budget=" << chunkSnapshot.uploadBudgetMsLastFrame
+               << " chunk_missing_scan=" << chunkSnapshot.missingScanMsLastFrame
+               << " chunk_ensure_volume=" << chunkSnapshot.ensureVolumeMsLastFrame
+               << " chunk_schedule=" << chunkSnapshot.schedulingMsLastFrame
+               << " chunk_evict=" << chunkSnapshot.evictionMsLastFrame
+               << " chunk_relight=" << chunkSnapshot.relightMsLastFrame
+               << " chunk_upload=" << chunkSnapshot.uploadMsLastFrame
+               << " chunk_far_update=" << chunkSnapshot.farTerrainUpdateMsLastFrame
+               << " begin_frame_total=" << rendererSnapshot.beginFrameMs
+               << " begin_frame_fence_wait=" << rendererSnapshot.beginFrameFrameFenceWaitMs
+               << " begin_frame_upload_sync=" << rendererSnapshot.beginFrameUploadQueueSyncMs
+               << " begin_frame_readback=" << rendererSnapshot.beginFrameReadbackMs
+               << " setup=" << rendererSnapshot.frameSetupMs
+               << " atmo_lut=" << rendererSnapshot.atmosphereLutMs
+               << " sky=" << rendererSnapshot.skyDrawMs
+               << " depth_pyramid=" << rendererSnapshot.depthPyramidMs
+               << " shadow_total=" << rendererSnapshot.shadowDrawMs
+               << " shadow_near=" << rendererSnapshot.shadowNearMs
+               << " shadow_exact=" << rendererSnapshot.shadowExactMs
+               << " near_opaque=" << rendererSnapshot.nearOpaqueMs
+               << " chunk_gpu_cull=" << rendererSnapshot.lodGpuCullMs
+               << " chunk_indirect=" << rendererSnapshot.lodIndirectBuildMs
+               << " exact_opaque=" << rendererSnapshot.exactOpaqueMs
+               << " exact_gpu_cull=" << rendererSnapshot.exactGpuCullMs
+               << " exact_indirect=" << rendererSnapshot.exactIndirectBuildMs
+               << " far_opaque=" << rendererSnapshot.farOpaqueMs
+               << " edit_overlay=" << rendererSnapshot.editOverlayMs
+               << " mobs=" << rendererSnapshot.mobDrawMs
+               << " near_translucent=" << rendererSnapshot.nearTranslucentMs
+               << " exact_translucent=" << rendererSnapshot.exactTranslucentMs
+               << " translucency_composite=" << rendererSnapshot.translucencyCompositeMs
+               << " highlight=" << rendererSnapshot.highlightMs
+               << " tone_map=" << rendererSnapshot.toneMapMs
+               << " imgui=" << rendererSnapshot.imguiMs
+               << " world_total=" << rendererSnapshot.worldDrawMs
+               << " end_frame=" << rendererSnapshot.endFrameMs
+               << " present=" << rendererSnapshot.presentMs;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           timingLine.str());
+
+    std::ostringstream countLine;
+    countLine << "  counts near_batches=" << rendererSnapshot.nearBatchCount
+              << " exact_batches=" << rendererSnapshot.exactBatchCount
+              << " far_batches=" << rendererSnapshot.farBatchCount
+              << " near_gpu_cull_batches=" << rendererSnapshot.nearOpaqueGpuCullBatchCount
+              << " near_gpu_cull_records=" << rendererSnapshot.nearOpaqueGpuCullRecordCount
+              << " near_fallback_draws=" << rendererSnapshot.nearOpaqueFallbackDrawCount
+              << " exact_opaque_gpu_cull_batches=" << rendererSnapshot.exactOpaqueGpuCullBatchCount
+              << " exact_opaque_gpu_cull_records=" << rendererSnapshot.exactOpaqueGpuCullRecordCount
+              << " exact_opaque_fallback_draws=" << rendererSnapshot.exactOpaqueFallbackDrawCount
+              << " far_gpu_cull_batches=" << rendererSnapshot.farGpuCullBatchCount
+              << " far_gpu_cull_records=" << rendererSnapshot.farGpuCullRecordCount
+              << " far_fallback_draws=" << rendererSnapshot.farFallbackDrawCount
+              << " near_translucent_draws=" << rendererSnapshot.nearTranslucentDrawCount
+              << " exact_translucent_gpu_cull_batches=" << rendererSnapshot.exactTranslucentGpuCullBatchCount
+              << " exact_translucent_gpu_cull_records=" << rendererSnapshot.exactTranslucentGpuCullRecordCount
+              << " exact_translucent_fallback_draws=" << rendererSnapshot.exactTranslucentFallbackDrawCount
+              << " shadow_near_draws=" << rendererSnapshot.shadowNearDrawCount
+              << " shadow_exact_draws=" << rendererSnapshot.shadowExactDrawCount
+              << " edit_overlay_draws=" << rendererSnapshot.editOverlayDrawCount
+              << " mob_draws=" << rendererSnapshot.mobDrawCount
+              << " begin_frame_upload_sync_count=" << rendererSnapshot.beginFrameUploadQueueSyncCount;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           countLine.str());
 }
 
 [[nodiscard]] bool benchmarkScenarioStartsAtSpawn(BenchmarkScenarioKind scenario) noexcept
@@ -4086,6 +4300,9 @@ int runGame()
     std::string loadingOverlayText;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
+    const bool rendererTimingCaptureEnabled = envFlagEnabled("BLOCKGAME_RENDER_TIMING_CAPTURE");
+    RendererTimingCaptureWindow rendererTimingCaptureWindow{};
+    std::uint64_t rendererTimingCaptureFrameIndex = 0;
     std::cout << "Controls: WASD to move, mouse to look, hold CTRL to sprint, SPACE to jump, double-tap SPACE to toggle flight, SHIFT to descend while flying, . to toggle mouse/UI control, N to set exact/total render distance, F2 to teleport, E to choose block type, left-click to destroy blocks, right-click to place blocks, ESC to quit." << std::endl;
 
     while (!glfwWindowShouldClose(window))
@@ -4093,8 +4310,12 @@ int runGame()
         noteDiagnosticPhase("frame/start", true);
         const auto frameCpuStart = std::chrono::steady_clock::now();
         double pollEventsMs = 0.0;
+        double gameplayCpuMs = 0.0;
+        double chunkUpdateCpuMs = 0.0;
+        double renderBeginCpuMs = 0.0;
         double buildRenderDataMs = 0.0;
         double renderWorldCpuMs = 0.0;
+        double uiCpuMs = 0.0;
         bool benchmarkRequestClose = false;
         const double currentTime = glfwGetTime();
         const double rawFrameTime = currentTime - previousTime;
@@ -4116,7 +4337,7 @@ int runGame()
         profilingOverlayTimer += frameTime;
 
         noteDiagnosticPhase("frame/poll_events");
-        if (!benchmarkConfig.enabled && profilingOverlayTimer >= 1.0)
+        if (!benchmarkConfig.enabled && profilingOverlayTimer >= 1.0 && !rendererTimingCaptureEnabled)
         {
             ChunkProfilingSnapshot snapshot = chunkManager.sampleProfilingSnapshot();
             const RendererProfilingSnapshot rendererSnapshot = renderer.profilingSnapshot();
@@ -4243,6 +4464,7 @@ int runGame()
         glfwPollEvents();
         pollEventsMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pollEventsStart).count();
+        const auto gameplayStart = std::chrono::steady_clock::now();
         noteDiagnosticPhase("frame/input");
 
         bool f1CurrentlyPressed = (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS);
@@ -4794,7 +5016,12 @@ int runGame()
 
         chunkManager.setRenderSynchronization(renderer.frameFence(), renderer.lastSubmittedFrameFenceValue());
         noteDiagnosticPhase("frame/chunk_update");
+        gameplayCpuMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - gameplayStart).count();
+        const auto chunkUpdateStart = std::chrono::steady_clock::now();
         chunkManager.update(camera.position, camera.front());
+        chunkUpdateCpuMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - chunkUpdateStart).count();
         renderer.setUploadSynchronization(chunkManager.uploadFence(),
                                           chunkManager.lastSubmittedUploadFenceValue(),
                                           chunkManager.farUploadFence(),
@@ -4889,10 +5116,13 @@ int runGame()
         const bool lookingBelowHorizon = viewDirection.y < 0.0f;
 
         noteDiagnosticPhase("frame/render_begin");
+        const auto renderBeginStart = std::chrono::steady_clock::now();
         renderer.beginFrame(glm::vec4(120.0f / 255.0f,
                                       167.0f / 255.0f,
                                       255.0f / 255.0f,
                                       1.0f));
+        renderBeginCpuMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - renderBeginStart).count();
         if (chunkManager.streamingPhase() != StreamingPhase::ExactPreload)
         {
             noteDiagnosticPhase("frame/build_render_data");
@@ -4908,6 +5138,7 @@ int runGame()
                 std::chrono::steady_clock::now() - renderWorldStart).count();
         }
         noteDiagnosticPhase("frame/ui");
+        const auto uiStart = std::chrono::steady_clock::now();
         renderer.beginImGuiFrame();
 
         const double currentFpsEstimate = (fpsFrameCount > 0 && fpsTimer > 0.0)
@@ -5735,10 +5966,47 @@ int runGame()
         {
             drawCrosshairOverlay(framebufferWidth, framebufferHeight);
         }
+        uiCpuMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - uiStart).count();
 
         noteDiagnosticPhase("frame/end_frame");
         renderer.endFrame();
         noteDiagnosticPhase("frame/presented");
+
+        if (rendererTimingCaptureEnabled)
+        {
+            const double frameCpuMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - frameCpuStart).count();
+            const ChunkProfilingSnapshot chunkSnapshot = chunkManager.sampleProfilingSnapshot();
+            const RendererProfilingSnapshot rendererSnapshot = renderer.profilingSnapshot();
+            const double rendererWorkTotalMs = rendererWorkMs(rendererSnapshot);
+            ++rendererTimingCaptureFrameIndex;
+            rendererTimingCaptureWindow.elapsedSeconds += frameTime;
+            rendererTimingCaptureWindow.worstFrameCpuMs =
+                std::max(rendererTimingCaptureWindow.worstFrameCpuMs, frameCpuMs);
+            rendererTimingCaptureWindow.worstPresentMs =
+                std::max(rendererTimingCaptureWindow.worstPresentMs, rendererSnapshot.presentMs);
+            rendererTimingCaptureWindow.worstRendererWorkMs =
+                std::max(rendererTimingCaptureWindow.worstRendererWorkMs, rendererWorkTotalMs);
+            if (rendererTimingCaptureWindow.elapsedSeconds >= 1.0)
+            {
+                appendRendererTimingCaptureSummary(rendererTimingCaptureFrameIndex,
+                                                  fpsValue,
+                                                  frameCpuMs,
+                                                  pollEventsMs,
+                                                  gameplayCpuMs,
+                                                  chunkUpdateCpuMs,
+                                                  renderBeginCpuMs,
+                                                  buildRenderDataMs,
+                                                  renderWorldCpuMs,
+                                                  uiCpuMs,
+                                                  chunkSnapshot,
+                                                  rendererSnapshot,
+                                                  chunkManager.streamingStatusSnapshot(),
+                                                  rendererTimingCaptureWindow);
+                rendererTimingCaptureWindow = {};
+            }
+        }
 
         if (benchmarkConfig.enabled && benchmarkState.started)
         {

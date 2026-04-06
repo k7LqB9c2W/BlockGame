@@ -95,6 +95,16 @@ VSOutput main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
     const GpuExactDrawRecordMetadata metadata = gDrawRecordMetadata[gDrawRecordIndex];
     const GpuExactFaceDescriptor descriptor = gFaceDescriptors[metadata.faceBase + instanceId];
+    if (renderClassForBlock(descriptor.blockId) == kRenderClassTranslucent)
+    {
+        VSOutput clipped;
+        clipped.position = float4(0.0f, 0.0f, 2.0f, 1.0f);
+        clipped.tileCoord = float2(0.0f, 0.0f);
+        clipped.atlasBase = float2(0.0f, 0.0f);
+        clipped.atlasSize = float2(0.0f, 0.0f);
+        clipped.blockId = descriptor.blockId;
+        return clipped;
+    }
     const uint localX = faceLocalX(descriptor.packedLocal);
     const uint localY = faceLocalY(descriptor.packedLocal);
     const uint localZ = faceLocalZ(descriptor.packedLocal);

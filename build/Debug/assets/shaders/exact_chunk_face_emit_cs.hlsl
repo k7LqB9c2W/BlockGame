@@ -15,7 +15,8 @@ StructuredBuffer<GpuExactColumnDescriptor> gColumnScratch : register(t3);
 StructuredBuffer<uint> gFaceCountScratch : register(t4);
 StructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptorScratch : register(t5);
 StructuredBuffer<uint> gFacePrefixScratch : register(t6);
-StructuredBuffer<uint> gBatchBuildIndices : register(t7);
+StructuredBuffer<uint> gTranslucentFaceCountScratch : register(t7);
+StructuredBuffer<uint> gBatchBuildIndices : register(t8);
 RWStructuredBuffer<uint> gOverflowCount : register(u0);
 RWStructuredBuffer<GpuExactOverflowEntry> gOverflowEntries : register(u1);
 RWStructuredBuffer<GpuExactCompletionEntry> gCompletionEntries : register(u2);
@@ -537,6 +538,24 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
             statusFlags |= kExactCompletionStatusZeroFacesBit;
         }
 
+        const uint translucentFaceCountBase = buildIndex * kExactFaceCountScratchStride;
+        uint translucentFaces = 0u;
+        [unroll]
+        for (uint i = 0u; i < kExactChunkPlaneCount; ++i)
+        {
+            translucentFaces += gTranslucentFaceCountScratch[translucentFaceCountBase + i];
+        }
+        const bool hasTranslucentFaces = translucentFaces > 0u;
+        const bool hasOpaqueFaces = totalFaces > translucentFaces;
+        if (hasOpaqueFaces)
+        {
+            statusFlags |= kExactCompletionStatusHasOpaqueFacesBit;
+        }
+        if (hasTranslucentFaces)
+        {
+            statusFlags |= kExactCompletionStatusHasTranslucentFacesBit;
+        }
+
         GpuExactDrawRecord record;
         record.boundsMin = float4(float(build.chunkWorldMinX), float(build.chunkWorldMinY), float(build.chunkWorldMinZ), 1.0f);
         record.boundsMax = float4(float(build.chunkWorldMinX + int(kExactChunkSize)),
@@ -545,7 +564,9 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
                                   1.0f);
         record.faceCount = (totalFaces <= build.reservedFaceCapacity) ? totalFaces : 0u;
         record.faceOffset = build.faceBase;
-        record.reserved0 = 0u;
+        record.reserved0 =
+            (hasOpaqueFaces ? kExactDrawRecordFlagHasOpaqueFaces : 0u) |
+            (hasTranslucentFaces ? kExactDrawRecordFlagHasTranslucentFaces : 0u);
         record.reserved = kExactDrawRecordActiveBit |
                           min(totalFaces, kExactDrawRecordFaceCountMask) |
                           ((totalFaces > build.reservedFaceCapacity) ? kExactDrawRecordOverflowFlag : 0u);
@@ -671,7 +692,7 @@ void ExactChunkFaceEmitMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV
         finalDescriptor.packedLighting3 =
             ((vertexLighting[3] & ~((0x3Fu) << 10u)) | ((materialFlags & 0x3Fu) << 10u)) |
             alphaCutoutLightingFlag;
-        finalDescriptor.reserved0 = 0u;
+        finalDescriptor.blockId = blockId;
         finalDescriptor.reserved1 = 0u;
         faceDescriptors[build.faceBase + faceIndex] = finalDescriptor;
     }

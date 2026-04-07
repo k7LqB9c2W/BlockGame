@@ -3,14 +3,14 @@
   "WorkspaceRootPath": "C:\\Users\\Jacob\\Documents\\code\\BlockGame\\build\\release\\",
   "Documents": [
     {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Jacob\\Documents\\code\\BlockGame\\src\\chunk_manager.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.42.34433\\include\\mutex||{3B902123-F8A7-4915-9F01-361F908088D0}|"
     },
     {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Jacob\\Documents\\code\\BlockGame\\build\\release\\blockgame_hang.dmp||{FF0A863B-6F9C-46BF-9684-DBE4C0A3ED6D}",
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:blockgame_hang.dmp||{FF0A863B-6F9C-46BF-9684-DBE4C0A3ED6D}"
-    },
-    {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Jacob\\Documents\\code\\BlockGame\\src\\chunk_manager.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
     }
   ],
   "DocumentGroupContainers": [
@@ -20,7 +20,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 2,
+          "SelectedChildIndex": 1,
           "Children": [
             {
               "$type": "Bookmark",
@@ -28,33 +28,33 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 2,
+              "DocumentIndex": 0,
               "Title": "chunk_manager.cpp",
               "DocumentMoniker": "C:\\Users\\Jacob\\Documents\\code\\BlockGame\\src\\chunk_manager.cpp",
               "RelativeDocumentMoniker": "..\\..\\src\\chunk_manager.cpp",
               "ToolTip": "C:\\Users\\Jacob\\Documents\\code\\BlockGame\\src\\chunk_manager.cpp",
               "RelativeToolTip": "..\\..\\src\\chunk_manager.cpp",
-              "ViewState": "AgIAAF52AAAAAAAAAAAAAFl2AAAEAAAAAAAAAA==",
+              "ViewState": "AgIAAEN2AAAAAAAAAIB5wFZ2AAAEAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
               "WhenOpened": "2026-04-07T03:49:35.09Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 1,
               "Title": "mutex",
               "DocumentMoniker": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.42.34433\\include\\mutex",
               "RelativeDocumentMoniker": "..\\..\\..\\..\\..\\..\\..\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.42.34433\\include\\mutex",
               "ToolTip": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.42.34433\\include\\mutex",
               "RelativeToolTip": "..\\..\\..\\..\\..\\..\\..\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.42.34433\\include\\mutex",
-              "ViewState": "AgIAACMAAAAAAAAAABBywDMAAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAACoAAAAAAAAAAAAqwDMAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2026-04-07T03:47:15.903Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 2,
               "Title": "blockgame_hang.dmp",
               "DocumentMoniker": "C:\\Users\\Jacob\\Documents\\code\\BlockGame\\build\\release\\blockgame_hang.dmp",
               "RelativeDocumentMoniker": "blockgame_hang.dmp",

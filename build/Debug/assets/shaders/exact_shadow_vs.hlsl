@@ -20,6 +20,7 @@ struct VSOutput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint blockId : TEXCOORD3;
 };
 
 uint faceCornerIndex(uint vertexId, bool flipDiagonal)
@@ -94,6 +95,16 @@ VSOutput main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
     const GpuExactDrawRecordMetadata metadata = gDrawRecordMetadata[gDrawRecordIndex];
     const GpuExactFaceDescriptor descriptor = gFaceDescriptors[metadata.faceBase + instanceId];
+    if (renderClassForBlock(descriptor.blockId) == kRenderClassTranslucent)
+    {
+        VSOutput clipped;
+        clipped.position = float4(0.0f, 0.0f, 2.0f, 1.0f);
+        clipped.tileCoord = float2(0.0f, 0.0f);
+        clipped.atlasBase = float2(0.0f, 0.0f);
+        clipped.atlasSize = float2(0.0f, 0.0f);
+        clipped.blockId = descriptor.blockId;
+        return clipped;
+    }
     const uint localX = faceLocalX(descriptor.packedLocal);
     const uint localY = faceLocalY(descriptor.packedLocal);
     const uint localZ = faceLocalZ(descriptor.packedLocal);
@@ -111,5 +122,6 @@ VSOutput main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
     output.tileCoord = projectTileCoord(faceId, worldPos);
     output.atlasBase = uv.base;
     output.atlasSize = uv.size;
+    output.blockId = descriptor.blockId;
     return output;
 }

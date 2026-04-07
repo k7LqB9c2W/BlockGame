@@ -27,10 +27,14 @@ static const uint kMaterialFlagGrassSideTint = 0x20u;
 static const uint kExactDrawRecordOverflowFlag = 0x80000000u;
 static const uint kExactDrawRecordActiveBit = 0x40000000u;
 static const uint kExactDrawRecordFaceCountMask = 0x3fffffffu;
+static const uint kExactDrawRecordFlagHasOpaqueFaces = 1u << 0u;
+static const uint kExactDrawRecordFlagHasTranslucentFaces = 1u << 1u;
 static const uint kExactCompletionStatusCompletedBit = 1u << 0u;
 static const uint kExactCompletionStatusOverflowBit = 1u << 1u;
 static const uint kExactCompletionStatusZeroFacesBit = 1u << 2u;
 static const uint kExactCompletionStatusAllocatorExhaustedBit = 1u << 3u;
+static const uint kExactCompletionStatusHasOpaqueFacesBit = 1u << 4u;
+static const uint kExactCompletionStatusHasTranslucentFacesBit = 1u << 5u;
 static const uint kExactChunkAllocationPhasePrepassSubmitted = 1u;
 static const uint kExactChunkAllocationPhaseEmitSubmitted = 2u;
 static const uint kChunkBufferPageStateFree = 0u;
@@ -55,6 +59,9 @@ static const uint kBlockDarkOakLeaves = 12u;
 static const uint kBlockBirchLeaves = 14u;
 static const uint kBlockAcaciaLeaves = 16u;
 static const uint kBlockNeighborSolidSentinel = 255u;
+static const uint kRenderClassOpaque = 0u;
+static const uint kRenderClassCutout = 1u;
+static const uint kRenderClassTranslucent = 2u;
 
 static const uint kGrassTintDefault = 1u;
 static const uint kGrassTintDarkForest = 2u;
@@ -154,7 +161,7 @@ struct GpuExactFaceDescriptor
     uint packedLighting1;
     uint packedLighting2;
     uint packedLighting3;
-    uint reserved0;
+    uint blockId;
     uint reserved1;
 };
 
@@ -345,9 +352,22 @@ bool isLeafBlock(uint blockId)
            blockId == kBlockAcaciaLeaves;
 }
 
+uint renderClassForBlock(uint blockId)
+{
+    if (isLeafBlock(blockId))
+    {
+        return kRenderClassCutout;
+    }
+    if (blockId == kBlockWater)
+    {
+        return kRenderClassTranslucent;
+    }
+    return kRenderClassOpaque;
+}
+
 bool isAlphaCutoutBlock(uint blockId)
 {
-    return isLeafBlock(blockId);
+    return renderClassForBlock(blockId) == kRenderClassCutout;
 }
 
 bool isOpaqueForLighting(uint blockId)
@@ -418,22 +438,67 @@ bool shouldRenderBlockFace(uint owningBlock, uint neighborBlock)
         return true;
     }
 
-    if (isAlphaCutoutBlock(owningBlock))
+    const uint owningClass = renderClassForBlock(owningBlock);
+    const uint neighborClass = renderClassForBlock(neighborBlock);
+
+    if (owningClass == kRenderClassCutout)
     {
-        if (isAlphaCutoutBlock(neighborBlock))
+        if (neighborClass == kRenderClassCutout)
         {
             return owningBlock != neighborBlock;
         }
 
-        return neighborBlock == kBlockWater;
+        return neighborClass == kRenderClassTranslucent;
     }
 
-    if (owningBlock == kBlockWater)
+    if (owningClass == kRenderClassTranslucent)
     {
-        return neighborBlock == kBlockAir;
+        if (neighborClass == kRenderClassTranslucent)
+        {
+            return owningBlock != neighborBlock;
+        }
+        return true;
     }
 
-    return neighborBlock == kBlockWater || isAlphaCutoutBlock(neighborBlock);
+    return neighborClass != kRenderClassOpaque;
+}
+
+bool classifyRenderableBlockFace(uint owningBlock, uint neighborBlock, out uint owningClass)
+{
+    owningClass = kRenderClassOpaque;
+    if (owningBlock == kBlockAir)
+    {
+        return false;
+    }
+
+    owningClass = renderClassForBlock(owningBlock);
+    if (neighborBlock == kBlockAir)
+    {
+        return true;
+    }
+
+    const uint neighborClass = renderClassForBlock(neighborBlock);
+
+    if (owningClass == kRenderClassCutout)
+    {
+        if (neighborClass == kRenderClassCutout)
+        {
+            return owningBlock != neighborBlock;
+        }
+
+        return neighborClass == kRenderClassTranslucent;
+    }
+
+    if (owningClass == kRenderClassTranslucent)
+    {
+        if (neighborClass == kRenderClassTranslucent)
+        {
+            return owningBlock != neighborBlock;
+        }
+        return true;
+    }
+
+    return neighborClass != kRenderClassOpaque;
 }
 
 uint sampleHaloVoxel(StructuredBuffer<uint> haloBuffer, uint seamBit, int x, int y, int z)

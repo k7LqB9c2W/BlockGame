@@ -14,6 +14,7 @@ RWStructuredBuffer<uint> gFaceCounts : register(u0);
 RWStructuredBuffer<GpuExactFaceDescriptor> gFaceDescriptors : register(u1);
 RWStructuredBuffer<uint> gFacePrefixScratch : register(u2);
 RWStructuredBuffer<uint> gFaceTotalScratch : register(u3);
+RWStructuredBuffer<uint> gTranslucentFaceCounts : register(u4);
 
 static const uint kExactIndirectRootBufferAlignment = 256u;
 static const uint kExactFaceCountScratchStride =
@@ -125,6 +126,7 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
     decodePlane(planeIndex, axis, positiveFace, slice);
     const uint faceId = faceIdForAxis(axis, positiveFace);
     uint descriptorCount = 0u;
+    uint translucentDescriptorCount = 0u;
     const uint descriptorPlaneBase = faceDescriptorBase + planeIndex * kExactChunkMaxDescriptorsPerPlane;
 
     [loop]
@@ -181,9 +183,15 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
             const uint neighborBlock = positiveFace
                                            ? voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, positiveX, positiveY, positiveZ))
                                            : voxelBlock(sampleVoxelWithNeighbors(centerVoxels, haloVoxels, negativeX, negativeY, negativeZ));
-            if (!shouldRenderBlockFace(owningBlock, neighborBlock))
+            uint owningClass = 0u;
+            if (!classifyRenderableBlockFace(owningBlock, neighborBlock, owningClass))
             {
                 continue;
+            }
+
+            if (owningClass == kRenderClassTranslucent)
+            {
+                translucentDescriptorCount += 1u;
             }
 
             const uint descriptorIndex = descriptorPlaneBase + descriptorCount;
@@ -192,7 +200,7 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
                 GpuExactFaceDescriptor descriptor;
                 descriptor.packedLocal = packFaceLocal(uint(owningX), uint(owningY), uint(owningZ), faceId);
                 descriptor.blockFaceUvIndex = 0u;
-                descriptor.reserved0 = 0u;
+                descriptor.blockId = 0u;
                 descriptor.reserved1 = 0u;
                 descriptor.packedLighting0 = 0u;
                 descriptor.packedLighting1 = 0u;
@@ -205,4 +213,5 @@ void ExactChunkFaceCountMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : S
     }
 
     gFaceCounts[faceCountBase + planeIndex] = descriptorCount;
+    gTranslucentFaceCounts[faceCountBase + planeIndex] = translucentDescriptorCount;
 }

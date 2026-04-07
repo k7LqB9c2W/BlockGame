@@ -26,6 +26,7 @@ struct VSInput
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
     uint lighting : COLOR0;
+    uint blockId : COLOR1;
 };
 
 struct VSOutput
@@ -41,6 +42,7 @@ struct VSOutput
     uint materialFlags : TEXCOORD5;
     float farVoxelScale : TEXCOORD6;
     uint alphaCutout : TEXCOORD7;
+    uint blockId : TEXCOORD8;
 };
 
 VSOutput main(VSInput input)
@@ -58,6 +60,7 @@ VSOutput main(VSInput input)
     output.materialFlags = decodedLighting.flags;
     output.farVoxelScale = decodedLighting.farVoxelScale;
     output.alphaCutout = decodedLighting.alphaCutout;
+    output.blockId = input.blockId;
     output.position = mul(uViewProj, float4(input.position, 1.0f));
     return output;
 }

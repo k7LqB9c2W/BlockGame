@@ -1,3 +1,5 @@
+#include "world_lighting_common.hlsli"
+
 // Terrain shadow-map pixel shader. It alpha-tests the atlas so cutout foliage
 // shadows match the visible leaf texture instead of the full voxel cube.
 Texture2D gAtlas : register(t0);
@@ -10,10 +12,21 @@ struct PSInput
     float2 tileCoord : TEXCOORD0;
     float2 atlasBase : TEXCOORD1;
     float2 atlasSize : TEXCOORD2;
+    uint blockId : TEXCOORD3;
 };
 
 void main(PSInput input)
 {
+    if (isTranslucentBlockId(input.blockId))
+    {
+        clip(-1.0f);
+    }
+
+    if (!isAlphaCutoutBlockId(input.blockId))
+    {
+        return;
+    }
+
     const float2 wrappedTileUv = frac(input.tileCoord);
     const float2 atlasUv = input.atlasBase + input.atlasSize * wrappedTileUv;
     const float alpha = gAtlas.SampleLevel(gTerrainSampler, atlasUv, 0.0f).a;

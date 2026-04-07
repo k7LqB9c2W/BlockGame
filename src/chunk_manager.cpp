@@ -6327,6 +6327,17 @@ private:
     double denseResidencyMsLastFrame_{0.0};
     double verticalRadiusMsLastFrame_{0.0};
     double priorityUpdateMsLastFrame_{0.0};
+    double movementEnvelopeMsLastFrame_{0.0};
+    double queuedSkyLightColumnRefreshMsLastFrame_{0.0};
+    double pendingLocalEditBatchesMsLastFrame_{0.0};
+    double dedicatedLocalUploadMsLastFrame_{0.0};
+    double queuedRelightRequestsMsLastFrame_{0.0};
+    double farTerrainInvalidationMsLastFrame_{0.0};
+    double worldgenWindowPinMsLastFrame_{0.0};
+    double worldgenPrefetchMsLastFrame_{0.0};
+    double fullRadiusWorldgenDiscoveryMsLastFrame_{0.0};
+    double worldgenDependencyRefillMsLastFrame_{0.0};
+    double bulkShellOracleRefillMsLastFrame_{0.0};
     double uploadBudgetPrepMsLastFrame_{0.0};
     double missingScanMsLastFrame_{0.0};
     double ensureVolumeMsLastFrame_{0.0};
@@ -7082,12 +7093,60 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         previousCenterChunk = centerChunk;
     }
     lastCenterChunk_ = centerChunk;
-    updateMovementEnvelopeState(centerChunk, previousCenterChunk, frameSeconds);
-    applyQueuedSkyLightColumnVisualRefreshes();
-    processPendingLocalEditBatches();
-    uploadDedicatedLocalCpuMeshes();
-    applyQueuedRelightRequests();
-    applyQueuedFarTerrainInvalidations();
+    movementEnvelopeMsLastFrame_ = 0.0;
+    queuedSkyLightColumnRefreshMsLastFrame_ = 0.0;
+    pendingLocalEditBatchesMsLastFrame_ = 0.0;
+    dedicatedLocalUploadMsLastFrame_ = 0.0;
+    queuedRelightRequestsMsLastFrame_ = 0.0;
+    farTerrainInvalidationMsLastFrame_ = 0.0;
+    worldgenWindowPinMsLastFrame_ = 0.0;
+    worldgenPrefetchMsLastFrame_ = 0.0;
+    fullRadiusWorldgenDiscoveryMsLastFrame_ = 0.0;
+    worldgenDependencyRefillMsLastFrame_ = 0.0;
+    bulkShellOracleRefillMsLastFrame_ = 0.0;
+
+    {
+        const auto movementEnvelopeStart = std::chrono::steady_clock::now();
+        updateMovementEnvelopeState(centerChunk, previousCenterChunk, frameSeconds);
+        movementEnvelopeMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - movementEnvelopeStart)
+                .count();
+    }
+    {
+        const auto skyLightRefreshStart = std::chrono::steady_clock::now();
+        applyQueuedSkyLightColumnVisualRefreshes();
+        queuedSkyLightColumnRefreshMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - skyLightRefreshStart)
+                .count();
+    }
+    {
+        const auto localEditBatchesStart = std::chrono::steady_clock::now();
+        processPendingLocalEditBatches();
+        pendingLocalEditBatchesMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - localEditBatchesStart)
+                .count();
+    }
+    {
+        const auto dedicatedLocalUploadStart = std::chrono::steady_clock::now();
+        uploadDedicatedLocalCpuMeshes();
+        dedicatedLocalUploadMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - dedicatedLocalUploadStart)
+                .count();
+    }
+    {
+        const auto queuedRelightStart = std::chrono::steady_clock::now();
+        applyQueuedRelightRequests();
+        queuedRelightRequestsMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - queuedRelightStart)
+                .count();
+    }
+    {
+        const auto farInvalidationStart = std::chrono::steady_clock::now();
+        applyQueuedFarTerrainInvalidations();
+        farTerrainInvalidationMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - farInvalidationStart)
+                .count();
+    }
     glm::vec3 priorityForward(lastCameraForward_.x, lastCameraForward_.y, lastCameraForward_.z);
     if (movementEnvelopeIdleMode_ && !movementEnvelopeTurnActive_)
     {
@@ -7199,8 +7258,20 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     }
     viewDistance_ = targetViewDistance_;
 
-    pinWorldgenWindow(centerChunk, renderSettings_.exactChunks);
-    prefetchVisibleWorldgenPages(centerChunk, previousCenterChunk, targetViewDistance_);
+    {
+        const auto worldgenWindowPinStart = std::chrono::steady_clock::now();
+        pinWorldgenWindow(centerChunk, renderSettings_.exactChunks);
+        worldgenWindowPinMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldgenWindowPinStart)
+                .count();
+    }
+    {
+        const auto worldgenPrefetchStart = std::chrono::steady_clock::now();
+        prefetchVisibleWorldgenPages(centerChunk, previousCenterChunk, targetViewDistance_);
+        worldgenPrefetchMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - worldgenPrefetchStart)
+                .count();
+    }
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
     const bool needsFullExactCoverageMetrics = exactOnly;
 
@@ -7275,10 +7346,28 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                         std::memory_order_release);
     if (exactOnly)
     {
+        const auto fullRadiusDiscoveryStart = std::chrono::steady_clock::now();
         requestFullRadiusWorldgenPageDiscovery(centerChunk, currentExactWindowKey.preloadRadius);
+        fullRadiusWorldgenDiscoveryMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fullRadiusDiscoveryStart)
+                .count();
     }
-    refillWorldgenPageDependencyJobs();
-    refillBulkShellOracleJobs();
+    {
+        const auto worldgenDependencyRefillStart = std::chrono::steady_clock::now();
+        refillWorldgenPageDependencyJobs();
+        worldgenDependencyRefillMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                      worldgenDependencyRefillStart)
+                .count();
+    }
+    {
+        const auto bulkShellOracleRefillStart = std::chrono::steady_clock::now();
+        refillBulkShellOracleJobs();
+        bulkShellOracleRefillMsLastFrame_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                      bulkShellOracleRefillStart)
+                .count();
+    }
 
     const auto uploadBudgetStart = std::chrono::steady_clock::now();
     UploadBudgets uploadBudgets = computeUploadBudgets(verticalRadius);
@@ -7717,6 +7806,17 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     const double accountedUpdateMs =
         verticalRadiusMsLastFrame_ +
         priorityUpdateMsLastFrame_ +
+        movementEnvelopeMsLastFrame_ +
+        queuedSkyLightColumnRefreshMsLastFrame_ +
+        pendingLocalEditBatchesMsLastFrame_ +
+        dedicatedLocalUploadMsLastFrame_ +
+        queuedRelightRequestsMsLastFrame_ +
+        farTerrainInvalidationMsLastFrame_ +
+        worldgenWindowPinMsLastFrame_ +
+        worldgenPrefetchMsLastFrame_ +
+        fullRadiusWorldgenDiscoveryMsLastFrame_ +
+        worldgenDependencyRefillMsLastFrame_ +
+        bulkShellOracleRefillMsLastFrame_ +
         uploadBudgetPrepMsLastFrame_ +
         missingScanMsLastFrame_ +
         schedulingMsLastFrame_ +
@@ -10641,6 +10741,17 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.denseResidencyMsLastFrame = denseResidencyMsLastFrame_;
     snapshot.verticalRadiusMsLastFrame = verticalRadiusMsLastFrame_;
     snapshot.priorityUpdateMsLastFrame = priorityUpdateMsLastFrame_;
+    snapshot.movementEnvelopeMsLastFrame = movementEnvelopeMsLastFrame_;
+    snapshot.queuedSkyLightColumnRefreshMsLastFrame = queuedSkyLightColumnRefreshMsLastFrame_;
+    snapshot.pendingLocalEditBatchesMsLastFrame = pendingLocalEditBatchesMsLastFrame_;
+    snapshot.dedicatedLocalUploadMsLastFrame = dedicatedLocalUploadMsLastFrame_;
+    snapshot.queuedRelightRequestsMsLastFrame = queuedRelightRequestsMsLastFrame_;
+    snapshot.farTerrainInvalidationMsLastFrame = farTerrainInvalidationMsLastFrame_;
+    snapshot.worldgenWindowPinMsLastFrame = worldgenWindowPinMsLastFrame_;
+    snapshot.worldgenPrefetchMsLastFrame = worldgenPrefetchMsLastFrame_;
+    snapshot.fullRadiusWorldgenDiscoveryMsLastFrame = fullRadiusWorldgenDiscoveryMsLastFrame_;
+    snapshot.worldgenDependencyRefillMsLastFrame = worldgenDependencyRefillMsLastFrame_;
+    snapshot.bulkShellOracleRefillMsLastFrame = bulkShellOracleRefillMsLastFrame_;
     snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
     snapshot.missingScanMsLastFrame = missingScanMsLastFrame_;
     snapshot.ensureVolumeMsLastFrame = ensureVolumeMsLastFrame_;

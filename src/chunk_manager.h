@@ -302,6 +302,17 @@ struct ChunkProfilingSnapshot
     double denseResidencyMsLastFrame{0.0};
     double verticalRadiusMsLastFrame{0.0};
     double priorityUpdateMsLastFrame{0.0};
+    double movementEnvelopeMsLastFrame{0.0};
+    double queuedSkyLightColumnRefreshMsLastFrame{0.0};
+    double pendingLocalEditBatchesMsLastFrame{0.0};
+    double dedicatedLocalUploadMsLastFrame{0.0};
+    double queuedRelightRequestsMsLastFrame{0.0};
+    double farTerrainInvalidationMsLastFrame{0.0};
+    double worldgenWindowPinMsLastFrame{0.0};
+    double worldgenPrefetchMsLastFrame{0.0};
+    double fullRadiusWorldgenDiscoveryMsLastFrame{0.0};
+    double worldgenDependencyRefillMsLastFrame{0.0};
+    double bulkShellOracleRefillMsLastFrame{0.0};
     double uploadBudgetMsLastFrame{0.0};
     double missingScanMsLastFrame{0.0};
     double ensureVolumeMsLastFrame{0.0};

@@ -1160,6 +1160,32 @@ void appendRendererTimingCaptureSummary(std::uint64_t frameIndex,
         uiCpuMs +
         rendererSnapshot.endFrameMs;
     const double unaccountedCpuMs = std::max(0.0, frameCpuMs - accountedCpuMs);
+    const double chunkResidualKnownMs =
+        chunkSnapshot.ensureVolumeMsLastFrame +
+        chunkSnapshot.columnHeightLookupMsLastFrame +
+        chunkSnapshot.columnHeightSampleMsLastFrame +
+        chunkSnapshot.uploadContextBeginMsLastFrame +
+        chunkSnapshot.uploadFinalizeMsLastFrame +
+        chunkSnapshot.commitCollectMsLastFrame +
+        chunkSnapshot.commitChunkScanMsLastFrame +
+        chunkSnapshot.commitMeshStateMsLastFrame +
+        chunkSnapshot.commitPageStateMsLastFrame +
+        chunkSnapshot.commitReleaseMsLastFrame;
+    const double chunkResidualOtherMs =
+        std::max(0.0, chunkSnapshot.updateResidualMsLastFrame - chunkResidualKnownMs);
+    const double chunkFrontHalfMs =
+        chunkSnapshot.movementEnvelopeMsLastFrame +
+        chunkSnapshot.queuedSkyLightColumnRefreshMsLastFrame +
+        chunkSnapshot.pendingLocalEditBatchesMsLastFrame +
+        chunkSnapshot.dedicatedLocalUploadMsLastFrame +
+        chunkSnapshot.queuedRelightRequestsMsLastFrame +
+        chunkSnapshot.farTerrainInvalidationMsLastFrame;
+    const double chunkWorldgenSupportMs =
+        chunkSnapshot.worldgenWindowPinMsLastFrame +
+        chunkSnapshot.worldgenPrefetchMsLastFrame +
+        chunkSnapshot.fullRadiusWorldgenDiscoveryMsLastFrame +
+        chunkSnapshot.worldgenDependencyRefillMsLastFrame +
+        chunkSnapshot.bulkShellOracleRefillMsLastFrame;
 
     std::ostringstream header;
     header.setf(std::ios::fixed, std::ios::floatfield);
@@ -1232,6 +1258,8 @@ void appendRendererTimingCaptureSummary(std::uint64_t frameIndex,
                << " chunk_dense_residency=" << chunkSnapshot.denseResidencyMsLastFrame
                << " chunk_vertical_radius=" << chunkSnapshot.verticalRadiusMsLastFrame
                << " chunk_priority=" << chunkSnapshot.priorityUpdateMsLastFrame
+               << " chunk_front_half=" << chunkFrontHalfMs
+               << " chunk_worldgen_support=" << chunkWorldgenSupportMs
                << " chunk_upload_budget=" << chunkSnapshot.uploadBudgetMsLastFrame
                << " chunk_missing_scan=" << chunkSnapshot.missingScanMsLastFrame
                << " chunk_ensure_volume=" << chunkSnapshot.ensureVolumeMsLastFrame
@@ -1272,6 +1300,67 @@ void appendRendererTimingCaptureSummary(std::uint64_t frameIndex,
     appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
                            "renderertimingcapture.log",
                            timingLine.str());
+
+    std::ostringstream residualLine;
+    residualLine.setf(std::ios::fixed, std::ios::floatfield);
+    residualLine << std::setprecision(2);
+    residualLine << "  chunk_residual_ms total=" << chunkSnapshot.updateResidualMsLastFrame
+                 << " known=" << chunkResidualKnownMs
+                 << " other=" << chunkResidualOtherMs
+                 << " ensure_volume=" << chunkSnapshot.ensureVolumeMsLastFrame
+                 << " ensure_col_prep=" << chunkSnapshot.ensureVolumeColumnPrepMsLastFrame
+                 << " ensure_sort=" << chunkSnapshot.ensureVolumeSortMsLastFrame
+                 << " ensure_dispatch=" << chunkSnapshot.ensureVolumeDispatchMsLastFrame
+                 << " ensure_chunk_lookup=" << chunkSnapshot.ensureVolumeChunkLookupMsLastFrame
+                 << " ensure_enqueue=" << chunkSnapshot.ensureVolumeEnqueueMsLastFrame
+                 << " column_height_lookup=" << chunkSnapshot.columnHeightLookupMsLastFrame
+                 << " column_height_sample=" << chunkSnapshot.columnHeightSampleMsLastFrame
+                 << " upload_context_begin=" << chunkSnapshot.uploadContextBeginMsLastFrame
+                 << " upload_finalize=" << chunkSnapshot.uploadFinalizeMsLastFrame;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           residualLine.str());
+
+    std::ostringstream frontHalfLine;
+    frontHalfLine.setf(std::ios::fixed, std::ios::floatfield);
+    frontHalfLine << std::setprecision(2);
+    frontHalfLine << "  chunk_front_half_ms total=" << chunkFrontHalfMs
+                  << " movement_envelope=" << chunkSnapshot.movementEnvelopeMsLastFrame
+                  << " skylight_refresh=" << chunkSnapshot.queuedSkyLightColumnRefreshMsLastFrame
+                  << " local_edit_batches=" << chunkSnapshot.pendingLocalEditBatchesMsLastFrame
+                  << " dedicated_local_upload=" << chunkSnapshot.dedicatedLocalUploadMsLastFrame
+                  << " queued_relight=" << chunkSnapshot.queuedRelightRequestsMsLastFrame
+                  << " far_invalidation=" << chunkSnapshot.farTerrainInvalidationMsLastFrame;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           frontHalfLine.str());
+
+    std::ostringstream worldgenSupportLine;
+    worldgenSupportLine.setf(std::ios::fixed, std::ios::floatfield);
+    worldgenSupportLine << std::setprecision(2);
+    worldgenSupportLine << "  chunk_worldgen_support_ms total=" << chunkWorldgenSupportMs
+                        << " pin_window=" << chunkSnapshot.worldgenWindowPinMsLastFrame
+                        << " prefetch=" << chunkSnapshot.worldgenPrefetchMsLastFrame
+                        << " full_radius_discovery=" << chunkSnapshot.fullRadiusWorldgenDiscoveryMsLastFrame
+                        << " worldgen_dep_refill=" << chunkSnapshot.worldgenDependencyRefillMsLastFrame
+                        << " bulk_shell_refill=" << chunkSnapshot.bulkShellOracleRefillMsLastFrame;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           worldgenSupportLine.str());
+
+    std::ostringstream commitLine;
+    commitLine.setf(std::ios::fixed, std::ios::floatfield);
+    commitLine << std::setprecision(2);
+    commitLine << "  chunk_commit_ms collect=" << chunkSnapshot.commitCollectMsLastFrame
+               << " chunk_scan=" << chunkSnapshot.commitChunkScanMsLastFrame
+               << " mesh_state=" << chunkSnapshot.commitMeshStateMsLastFrame
+               << " mesh_wait=" << chunkSnapshot.commitMeshLockWaitMsLastFrame
+               << " mesh_locked=" << chunkSnapshot.commitMeshLockedMsLastFrame
+               << " page_state=" << chunkSnapshot.commitPageStateMsLastFrame
+               << " release=" << chunkSnapshot.commitReleaseMsLastFrame;
+    appendDebugLogFileLine("BLOCKGAME_RENDER_TIMING_CAPTURE_FILE",
+                           "renderertimingcapture.log",
+                           commitLine.str());
 
     std::ostringstream countLine;
     countLine << "  counts near_batches=" << rendererSnapshot.nearBatchCount

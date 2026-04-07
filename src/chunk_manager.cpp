@@ -5306,6 +5306,12 @@ private:
             return columns[index];
         }
     };
+    static_assert(WorldgenPage::kSize % kChunkSizeX == 0);
+    static_assert(WorldgenPage::kSize % kChunkSizeZ == 0);
+    static constexpr int kWorldgenPageChunkColumnsPerAxis = WorldgenPage::kSize / kChunkSizeX;
+    static constexpr int kWorldgenPageChunkColumnCount =
+        kWorldgenPageChunkColumnsPerAxis * kWorldgenPageChunkColumnsPerAxis;
+    static_assert(kWorldgenPageChunkColumnCount <= 32);
     enum class DependencyPriority : std::uint8_t
     {
         Background = 0,
@@ -5364,8 +5370,21 @@ private:
         bool buildOccupancy{false};
         bool warmStructures{false};
         bool dependencyJobQueued{false};
+        bool dependencyJobInFlight{false};
         std::shared_ptr<WorldgenPage> page{};
         std::exception_ptr lastError{};
+        std::uint32_t heightReadyBits{0};
+        std::uint32_t occupancyReadyBits{0};
+        int readyHeightColumns{0};
+        int readyOccupancyColumns{0};
+        int missingHeightColumns{kWorldgenPageChunkColumnCount};
+        int missingOccupancyColumns{kWorldgenPageChunkColumnCount};
+        int missingWarmStructureRegions{0};
+        bool supportsHeight{false};
+        bool supportsOccupancy{false};
+        bool supportsWarmStructures{false};
+        bool warmStructureRegionsInitialized{false};
+        std::unordered_set<StructureRegionKey, StructureRegionKeyHasher> warmStructureRegions{};
         std::uint64_t token{0};
     };
     struct StructureRegionDependencyEntry
@@ -5379,6 +5398,8 @@ private:
         std::exception_ptr lastError{};
         std::uint64_t token{0};
     };
+    struct PrefetchPageFrontierWindow;
+    struct PrefetchPageFrontierRequestLevel;
     [[nodiscard]] int adjustedSurfaceYForColumn(const WorldgenColumnValue& column,
                                                 float neighborAverage) const noexcept;
     [[nodiscard]] ExactGpuWorldgenPageWindow exactGpuWorldgenPageWindowForChunk(const glm::ivec3& chunkCoord) const noexcept;
@@ -5402,6 +5423,28 @@ private:
     static void worldgenPageChunkColumnBounds(const glm::ivec2& pageKey,
                                               glm::ivec2& outMinColumn,
                                               glm::ivec2& outMaxColumn) noexcept;
+    [[nodiscard]] static int worldgenPageLocalChunkColumnIndex(const glm::ivec2& pageKey,
+                                                               const glm::ivec2& column) noexcept;
+    void refreshWorldgenPageSupportStatusLocked(WorldgenPageDependencyEntry& entry) const noexcept;
+    void syncWorldgenPageColumnSupportFromCachesLocked(const glm::ivec2& pageKey,
+                                                       WorldgenPageDependencyEntry& entry) const;
+    void ensureWorldgenPageWarmStructureLinksLocked(const glm::ivec2& pageKey,
+                                                    WorldgenPageDependencyEntry& entry) const;
+    void refreshWorldgenPageWarmStructureSupportLocked(const glm::ivec2& pageKey,
+                                                       WorldgenPageDependencyEntry& entry) const;
+    void refreshWorldgenPageHeightSupportForColumn(const glm::ivec2& column, bool ready) const;
+    void refreshWorldgenPageOccupancySupportForColumn(const glm::ivec2& column, bool ready) const;
+    [[nodiscard]] bool worldgenPageSupportSatisfiedLocked(const WorldgenPageDependencyEntry& entry,
+                                                          bool buildOccupancy,
+                                                          bool warmStructures) const noexcept;
+    void enqueuePrefetchPageFrontierPageLocked(const glm::ivec2& pageKey) const;
+    void enqueueDirtyPrefetchPageLocked(const glm::ivec2& pageKey,
+                                        const WorldgenPageDependencyEntry& entry) const;
+    [[nodiscard]] static bool prefetchPageFrontierRequestUpgraded(
+        const PrefetchPageFrontierRequestLevel& desired,
+        const PrefetchPageFrontierRequestLevel& existing) noexcept;
+    void rebuildPrefetchPageFrontier(const PrefetchPageFrontierWindow& window);
+    void drainPrefetchPageFrontier(int requestBudget);
     [[nodiscard]] std::shared_ptr<const WorldgenPage> getOrBuildWorldgenPageBlocking(
         const glm::ivec2& pageKey,
         WorldgenPageAccessBenchmark* benchmark = nullptr) const;
@@ -5773,6 +5816,60 @@ private:
         int nextEdge{0};
         int nextOffset{0};
         bool initialized{false};
+    };
+    enum class PrefetchPageFrontierMode : std::uint8_t
+    {
+        Inactive = 0,
+        MovementCorridor,
+        StaticWarmup
+    };
+    struct PrefetchPageFrontierWindow
+    {
+        PrefetchPageFrontierMode mode{PrefetchPageFrontierMode::Inactive};
+        glm::ivec3 center{0};
+        glm::ivec2 movementDelta{0};
+        int horizontalRadius{0};
+        int viewDistance{0};
+        int targetViewDistance{0};
+        bool exactOnly{false};
+        bool stationaryExactFill{false};
+
+        [[nodiscard]] bool operator==(const PrefetchPageFrontierWindow& rhs) const noexcept
+        {
+            return mode == rhs.mode &&
+                   center.x == rhs.center.x &&
+                   center.y == rhs.center.y &&
+                   center.z == rhs.center.z &&
+                   movementDelta.x == rhs.movementDelta.x &&
+                   movementDelta.y == rhs.movementDelta.y &&
+                   horizontalRadius == rhs.horizontalRadius &&
+                   viewDistance == rhs.viewDistance &&
+                   targetViewDistance == rhs.targetViewDistance &&
+                   exactOnly == rhs.exactOnly &&
+                   stationaryExactFill == rhs.stationaryExactFill;
+        }
+    };
+    struct PrefetchPageFrontierRequestLevel
+    {
+        ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
+        DependencyPriority dependencyPriority{DependencyPriority::Background};
+        JobServiceClass serviceClass{JobServiceClass::Refinement};
+        bool buildOccupancy{false};
+        bool warmStructures{false};
+    };
+    struct PrefetchPageFrontierCandidate
+    {
+        glm::ivec2 pageKey{0};
+        PrefetchPageFrontierRequestLevel request{};
+        float score{0.0f};
+    };
+    struct PrefetchPageFrontierState
+    {
+        bool initialized{false};
+        PrefetchPageFrontierWindow window{};
+        std::unordered_map<glm::ivec2, PrefetchPageFrontierRequestLevel, ColumnHasher> desiredPages{};
+        std::deque<glm::ivec2> pendingPages{};
+        std::unordered_set<glm::ivec2, ColumnHasher> queuedPages{};
     };
     struct WorldgenPageDependencyRequestCompare
     {
@@ -6188,6 +6285,11 @@ private:
     mutable std::mutex worldgenPageMutex_;
     mutable std::unordered_map<glm::ivec2, WorldgenPageDependencyEntry, ColumnHasher> worldgenPageEntries_{};
     std::unordered_set<glm::ivec2, ColumnHasher> pinnedWorldgenPageKeys_{};
+    mutable PrefetchPageFrontierState prefetchPageFrontier_{};
+    mutable std::unordered_map<StructureRegionKey,
+                               std::unordered_set<glm::ivec2, ColumnHasher>,
+                               StructureRegionKeyHasher>
+        structureRegionWorldgenPages_{};
     mutable std::mutex streamingFrontierMutex_;
     std::unordered_map<glm::ivec3, FrontierChunkDemand, ChunkHasher> streamingFrontierDemands_{};
     std::unordered_map<glm::ivec3, FrontierChunkLifecycleState, ChunkHasher> streamingChunkLifecycleStates_{};
@@ -8298,6 +8400,8 @@ void ChunkManager::Impl::clear()
         std::lock_guard<std::mutex> lock(worldgenPageMutex_);
         worldgenPageEntries_.clear();
         pinnedWorldgenPageKeys_.clear();
+        prefetchPageFrontier_ = PrefetchPageFrontierState{};
+        structureRegionWorldgenPages_.clear();
     }
     invalidateAllColumnSlabOccupancy();
     resetStreamingFrontier();
@@ -11489,7 +11593,6 @@ bool ChunkManager::Impl::acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
 
         WorldgenPageDependencyEntry& entry = entryIt->second;
         if (!entry.dependencyJobQueued ||
-            entry.state != WorldgenPageState::Queued ||
             entry.token != request.token ||
             entry.priority != request.priority ||
             entry.serviceClass != request.serviceClass ||
@@ -11500,7 +11603,16 @@ bool ChunkManager::Impl::acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
         }
 
         entry.dependencyJobQueued = false;
-        entry.state = WorldgenPageState::Building;
+        if (worldgenPageSupportSatisfiedLocked(entry, entry.buildOccupancy, entry.warmStructures))
+        {
+            continue;
+        }
+
+        entry.dependencyJobInFlight = true;
+        if (entry.state != WorldgenPageState::Ready || !entry.page)
+        {
+            entry.state = WorldgenPageState::Building;
+        }
         pageKey = request.pageKey;
         token = request.token;
         priority = request.priority;
@@ -14473,6 +14585,8 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
         std::lock_guard<std::mutex> lock(worldgenPageMutex_);
         worldgenPageEntries_.clear();
         pinnedWorldgenPageKeys_.clear();
+        prefetchPageFrontier_ = PrefetchPageFrontierState{};
+        structureRegionWorldgenPages_.clear();
     }
     invalidateAllColumnSlabOccupancy();
     {
@@ -16330,7 +16444,20 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
 
     try
     {
-        const std::shared_ptr<WorldgenPage> page = buildWorldgenPage(pageKey);
+        std::shared_ptr<WorldgenPage> page{};
+        {
+            std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+            auto entryIt = worldgenPageEntries_.find(pageKey);
+            if (entryIt != worldgenPageEntries_.end())
+            {
+                page = entryIt->second.page;
+            }
+        }
+        if (!page)
+        {
+            page = buildWorldgenPage(pageKey);
+        }
+
         glm::ivec2 minColumn{0};
         glm::ivec2 maxColumn{0};
         worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
@@ -16338,8 +16465,7 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
         {
             std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
             auto entryIt = worldgenPageEntries_.find(pageKey);
-            if (entryIt == worldgenPageEntries_.end() ||
-                entryIt->second.state != WorldgenPageState::Building)
+            if (entryIt == worldgenPageEntries_.end())
             {
                 return;
             }
@@ -16403,7 +16529,7 @@ bool ChunkManager::Impl::processStructureRegionDependencyJob()
 
         for (const glm::ivec2& pageKey : missingPageKeys)
         {
-            requestWorldgenPageDependency(pageKey, priority, false, false, serviceClass);
+            requestWorldgenPageDependency(pageKey, priority, false, true, serviceClass);
         }
 
         std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
@@ -18057,7 +18183,7 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
             jobServiceClassIndex(serviceClass) < jobServiceClassIndex(entry.serviceClass);
         const bool buildOccupancyChanged = buildOccupancy && !entry.buildOccupancy;
         const bool warmStructuresChanged = warmStructures && !entry.warmStructures;
-        const bool alreadyQueued = entry.state == WorldgenPageState::Queued;
+        const bool alreadyQueued = entry.dependencyJobQueued;
         const bool upgradeQueuedRequest =
             alreadyQueued && (priorityChanged || serviceClassChanged || buildOccupancyChanged || warmStructuresChanged);
         const std::size_t queueLimit = worldgenPageDependencyQueueLimit(std::max(entry.priority, priority),
@@ -18065,26 +18191,33 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
         const bool latencySensitive = jobServiceClassIndex(serviceClass) <=
                                           jobServiceClassIndex(JobServiceClass::LocalInteraction) ||
                                       priority >= DependencyPriority::Critical;
-
-        if (entry.state == WorldgenPageState::Ready)
-        {
-            return false;
-        }
-
-        if (entry.state == WorldgenPageState::Building)
-        {
-            entry.priority = std::max(entry.priority, priority);
-            entry.serviceClass = mergeDependencyServiceClass(entry.serviceClass, serviceClass);
-            entry.buildOccupancy = entry.buildOccupancy || buildOccupancy;
-            entry.warmStructures = entry.warmStructures || warmStructures;
-            return false;
-        }
+        const bool pageReady = entry.state == WorldgenPageState::Ready && entry.page != nullptr;
 
         if (alreadyQueued &&
             !priorityChanged &&
             !serviceClassChanged &&
             !buildOccupancyChanged &&
             !warmStructuresChanged)
+        {
+            return false;
+        }
+
+        entry.priority = std::max(entry.priority, priority);
+        entry.serviceClass = mergeDependencyServiceClass(entry.serviceClass, serviceClass);
+        entry.buildOccupancy = entry.buildOccupancy || buildOccupancy;
+        entry.warmStructures = entry.warmStructures || warmStructures;
+
+        if (entry.warmStructures)
+        {
+            ensureWorldgenPageWarmStructureLinksLocked(pageKey, entry);
+        }
+
+        if (entry.dependencyJobInFlight || entry.state == WorldgenPageState::Building)
+        {
+            return false;
+        }
+
+        if (worldgenPageSupportSatisfiedLocked(entry, entry.buildOccupancy, entry.warmStructures))
         {
             return false;
         }
@@ -18096,13 +18229,12 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
             return false;
         }
 
-        entry.priority = std::max(entry.priority, priority);
-        entry.serviceClass = mergeDependencyServiceClass(entry.serviceClass, serviceClass);
-        entry.buildOccupancy = entry.buildOccupancy || buildOccupancy;
-        entry.warmStructures = entry.warmStructures || warmStructures;
-        entry.state = WorldgenPageState::Queued;
+        if (!pageReady)
+        {
+            entry.state = WorldgenPageState::Queued;
+            entry.page.reset();
+        }
         entry.dependencyJobQueued = true;
-        entry.page.reset();
         entry.lastError = {};
         entry.token = nextWorldgenPageDependencyToken_++;
         pendingWorldgenPageDependencyQueue_.push(
@@ -18171,7 +18303,7 @@ bool ChunkManager::Impl::requestStructureRegionDependency(const StructureRegionK
         if (!tryGetReadyWorldgenPage(pageKey))
         {
             missingPageKeys.push_back(pageKey);
-            requestWorldgenPageDependency(pageKey, priority, false, false, serviceClass);
+            requestWorldgenPageDependency(pageKey, priority, false, true, serviceClass);
         }
     }
 
@@ -18375,6 +18507,338 @@ void ChunkManager::Impl::requestFullRadiusWorldgenPageDiscovery(const glm::ivec3
     }
 }
 
+void ChunkManager::Impl::rebuildPrefetchPageFrontier(const PrefetchPageFrontierWindow& window)
+{
+    if (window.mode == PrefetchPageFrontierMode::Inactive)
+    {
+        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+        prefetchPageFrontier_.initialized = true;
+        prefetchPageFrontier_.window = window;
+        prefetchPageFrontier_.desiredPages.clear();
+        prefetchPageFrontier_.pendingPages.clear();
+        prefetchPageFrontier_.queuedPages.clear();
+        return;
+    }
+
+    std::vector<PrefetchPageFrontierCandidate> candidates;
+    candidates.reserve(96u);
+    std::unordered_map<glm::ivec2, std::size_t, ColumnHasher> candidatePages;
+    candidatePages.reserve(128u);
+
+    auto addCandidate = [&](const glm::ivec2& pageKey,
+                            ColumnHeightPrefetchPriority priority,
+                            float score)
+    {
+        PrefetchPageFrontierRequestLevel request{};
+        request.priority = priority;
+        request.dependencyPriority =
+            priority >= ColumnHeightPrefetchPriority::Critical ? DependencyPriority::Critical
+            : priority >= ColumnHeightPrefetchPriority::Visible ? DependencyPriority::Visible
+                                                                : DependencyPriority::Background;
+        request.serviceClass = supportDependencyServiceClass(priority);
+        request.buildOccupancy = priority >= ColumnHeightPrefetchPriority::Visible;
+        request.warmStructures =
+            priority >= ColumnHeightPrefetchPriority::Visible || window.stationaryExactFill;
+
+        auto queuedIt = candidatePages.find(pageKey);
+        if (queuedIt != candidatePages.end())
+        {
+            PrefetchPageFrontierCandidate& existing = candidates[queuedIt->second];
+            if (priority > existing.request.priority)
+            {
+                existing.request = request;
+                existing.score = score;
+            }
+            else if (priority == existing.request.priority)
+            {
+                existing.request.dependencyPriority = std::max(existing.request.dependencyPriority,
+                                                               request.dependencyPriority);
+                existing.request.serviceClass =
+                    mergeDependencyServiceClass(existing.request.serviceClass, request.serviceClass);
+                existing.request.buildOccupancy = existing.request.buildOccupancy || request.buildOccupancy;
+                existing.request.warmStructures = existing.request.warmStructures || request.warmStructures;
+                existing.score = std::min(existing.score, score);
+            }
+            return;
+        }
+
+        candidatePages.emplace(pageKey, candidates.size());
+        candidates.push_back(PrefetchPageFrontierCandidate{pageKey, request, score});
+    };
+
+    auto addCandidateColumn = [&](const glm::ivec2& column,
+                                  ColumnHeightPrefetchPriority priority,
+                                  float score)
+    {
+        addCandidate(worldgenPageKeyForChunkColumn(column), priority, score);
+    };
+
+    if (window.mode == PrefetchPageFrontierMode::MovementCorridor)
+    {
+        glm::vec2 forward = normalizePriorityForwardXZ(lastCameraForward_);
+        const glm::vec2 movementVector(static_cast<float>(window.movementDelta.x),
+                                       static_cast<float>(window.movementDelta.y));
+        if (glm::dot(movementVector, movementVector) > kEpsilon)
+        {
+            forward = glm::normalize(movementVector);
+        }
+        const glm::vec2 side{-forward.y, forward.x};
+        const int startDistance = std::max(window.horizontalRadius - 1, 1);
+        const int lookahead = std::clamp(window.horizontalRadius / 4, 4, 10);
+        const int endDistance = window.horizontalRadius + lookahead;
+        const int nearHalfWidth = std::clamp(window.horizontalRadius / 16, 1, 2);
+        const int farHalfWidth = std::clamp(window.horizontalRadius / 12, 2, 4);
+
+        for (int distance = startDistance; distance <= endDistance; distance += 2)
+        {
+            const bool insideExact = distance <= window.horizontalRadius;
+            const bool justOutside = distance <= window.horizontalRadius + 2;
+            const int sideHalfWidth = insideExact ? nearHalfWidth : farHalfWidth;
+            const glm::vec2 anchor = glm::vec2(static_cast<float>(window.center.x),
+                                               static_cast<float>(window.center.z)) +
+                                     forward * static_cast<float>(distance);
+
+            for (int sideOffset = -sideHalfWidth; sideOffset <= sideHalfWidth; ++sideOffset)
+            {
+                const glm::vec2 sample = anchor + side * static_cast<float>(sideOffset);
+                const glm::ivec2 column{static_cast<int>(std::lround(sample.x)),
+                                        static_cast<int>(std::lround(sample.y))};
+
+                ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
+                if (insideExact && std::abs(sideOffset) <= 1)
+                {
+                    priority = ColumnHeightPrefetchPriority::Critical;
+                }
+                else if (insideExact || justOutside)
+                {
+                    priority = ColumnHeightPrefetchPriority::Visible;
+                }
+
+                addCandidateColumn(column,
+                                   priority,
+                                   static_cast<float>(distance) +
+                                       static_cast<float>(std::abs(sideOffset)) * 0.4f);
+            }
+        }
+    }
+    else
+    {
+        auto addPerimeter = [&](int ring)
+        {
+            const int stride = ring < 16 ? 2 : 4;
+            for (int dx = -ring; dx <= ring; dx += stride)
+            {
+                addCandidateColumn(glm::ivec2{window.center.x + dx, window.center.z - ring},
+                                   ColumnHeightPrefetchPriority::Visible,
+                                   static_cast<float>(ring));
+                addCandidateColumn(glm::ivec2{window.center.x + dx, window.center.z + ring},
+                                   ColumnHeightPrefetchPriority::Visible,
+                                   static_cast<float>(ring));
+            }
+
+            for (int dz = -ring + stride; dz <= ring - stride; dz += stride)
+            {
+                addCandidateColumn(glm::ivec2{window.center.x - ring, window.center.z + dz},
+                                   ColumnHeightPrefetchPriority::Visible,
+                                   static_cast<float>(ring));
+                addCandidateColumn(glm::ivec2{window.center.x + ring, window.center.z + dz},
+                                   ColumnHeightPrefetchPriority::Visible,
+                                   static_cast<float>(ring));
+            }
+        };
+
+        const int ringStart = std::max(window.viewDistance + 1, 1);
+        const int ringEnd = std::min(window.targetViewDistance, ringStart + 2);
+        for (int ring = ringStart; ring <= ringEnd; ++ring)
+        {
+            addPerimeter(ring);
+        }
+    }
+
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const PrefetchPageFrontierCandidate& lhs, const PrefetchPageFrontierCandidate& rhs)
+              {
+                  if (lhs.request.priority != rhs.request.priority)
+                  {
+                      return lhs.request.priority > rhs.request.priority;
+                  }
+                  if (lhs.score != rhs.score)
+                  {
+                      return lhs.score < rhs.score;
+                  }
+                  if (lhs.pageKey.x != rhs.pageKey.x)
+                  {
+                      return lhs.pageKey.x < rhs.pageKey.x;
+                  }
+                  return lhs.pageKey.y < rhs.pageKey.y;
+              });
+
+    std::unordered_map<glm::ivec2, PrefetchPageFrontierRequestLevel, ColumnHasher> desiredPages{};
+    desiredPages.reserve(candidates.size());
+    for (const PrefetchPageFrontierCandidate& candidate : candidates)
+    {
+        desiredPages.emplace(candidate.pageKey, candidate.request);
+    }
+
+    std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+
+    std::deque<glm::ivec2> filteredPendingPages{};
+    std::unordered_set<glm::ivec2, ColumnHasher> filteredQueuedPages{};
+    filteredQueuedPages.reserve(prefetchPageFrontier_.queuedPages.size());
+    while (!prefetchPageFrontier_.pendingPages.empty())
+    {
+        const glm::ivec2 pageKey = prefetchPageFrontier_.pendingPages.front();
+        prefetchPageFrontier_.pendingPages.pop_front();
+        const auto desiredIt = desiredPages.find(pageKey);
+        const auto entryIt = worldgenPageEntries_.find(pageKey);
+        const bool keepPending =
+            desiredIt != desiredPages.end() ||
+            (entryIt != worldgenPageEntries_.end() &&
+             (entryIt->second.buildOccupancy || entryIt->second.warmStructures));
+        if (!keepPending || !filteredQueuedPages.insert(pageKey).second)
+        {
+            continue;
+        }
+        filteredPendingPages.push_back(pageKey);
+    }
+    prefetchPageFrontier_.pendingPages = std::move(filteredPendingPages);
+    prefetchPageFrontier_.queuedPages = std::move(filteredQueuedPages);
+
+    for (const PrefetchPageFrontierCandidate& candidate : candidates)
+    {
+        auto existingIt = prefetchPageFrontier_.desiredPages.find(candidate.pageKey);
+        const bool entering = existingIt == prefetchPageFrontier_.desiredPages.end();
+        const bool upgraded =
+            !entering && prefetchPageFrontierRequestUpgraded(candidate.request, existingIt->second);
+        WorldgenPageDependencyEntry& entry = worldgenPageEntries_[candidate.pageKey];
+        if (candidate.request.warmStructures)
+        {
+            ensureWorldgenPageWarmStructureLinksLocked(candidate.pageKey, entry);
+        }
+        if (entering || upgraded)
+        {
+            enqueuePrefetchPageFrontierPageLocked(candidate.pageKey);
+        }
+    }
+
+    prefetchPageFrontier_.initialized = true;
+    prefetchPageFrontier_.window = window;
+    prefetchPageFrontier_.desiredPages = std::move(desiredPages);
+}
+
+void ChunkManager::Impl::drainPrefetchPageFrontier(int requestBudget)
+{
+    int requested = 0;
+    while (requested < requestBudget)
+    {
+        glm::ivec2 pageKey{0};
+        PrefetchPageFrontierRequestLevel request{};
+        bool haveWork = false;
+        {
+            std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+            while (!prefetchPageFrontier_.pendingPages.empty())
+            {
+                pageKey = prefetchPageFrontier_.pendingPages.front();
+                prefetchPageFrontier_.pendingPages.pop_front();
+                prefetchPageFrontier_.queuedPages.erase(pageKey);
+
+                auto desiredIt = prefetchPageFrontier_.desiredPages.find(pageKey);
+                auto entryIt = worldgenPageEntries_.find(pageKey);
+                if (desiredIt == prefetchPageFrontier_.desiredPages.end() &&
+                    entryIt == worldgenPageEntries_.end())
+                {
+                    continue;
+                }
+
+                if (entryIt != worldgenPageEntries_.end())
+                {
+                    request.dependencyPriority = entryIt->second.priority;
+                    request.serviceClass = entryIt->second.serviceClass;
+                    request.buildOccupancy = entryIt->second.buildOccupancy;
+                    request.warmStructures = entryIt->second.warmStructures;
+                    request.priority =
+                        entryIt->second.priority >= DependencyPriority::Critical
+                            ? ColumnHeightPrefetchPriority::Critical
+                        : entryIt->second.priority >= DependencyPriority::Visible
+                            ? ColumnHeightPrefetchPriority::Visible
+                            : ColumnHeightPrefetchPriority::Background;
+                }
+                if (desiredIt != prefetchPageFrontier_.desiredPages.end())
+                {
+                    request.priority = std::max(request.priority, desiredIt->second.priority);
+                    request.dependencyPriority =
+                        std::max(request.dependencyPriority, desiredIt->second.dependencyPriority);
+                    request.serviceClass =
+                        mergeDependencyServiceClass(request.serviceClass, desiredIt->second.serviceClass);
+                    request.buildOccupancy = request.buildOccupancy || desiredIt->second.buildOccupancy;
+                    request.warmStructures = request.warmStructures || desiredIt->second.warmStructures;
+                }
+
+                if (entryIt != worldgenPageEntries_.end())
+                {
+                    WorldgenPageDependencyEntry& entry = entryIt->second;
+                    if (request.warmStructures)
+                    {
+                        ensureWorldgenPageWarmStructureLinksLocked(pageKey, entry);
+                    }
+                    if (worldgenPageSupportSatisfiedLocked(entry,
+                                                          request.buildOccupancy,
+                                                          request.warmStructures))
+                    {
+                        continue;
+                    }
+                    if (entry.dependencyJobQueued ||
+                        entry.dependencyJobInFlight ||
+                        entry.state == WorldgenPageState::Queued ||
+                        entry.state == WorldgenPageState::Building)
+                    {
+                        continue;
+                    }
+                }
+
+                haveWork = true;
+                break;
+            }
+        }
+
+        if (!haveWork)
+        {
+            break;
+        }
+
+        const bool queued = requestWorldgenPageDependency(pageKey,
+                                                          request.dependencyPriority,
+                                                          request.buildOccupancy,
+                                                          request.warmStructures,
+                                                          request.serviceClass);
+        if (!queued)
+        {
+            std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+            auto entryIt = worldgenPageEntries_.find(pageKey);
+            if (entryIt != worldgenPageEntries_.end())
+            {
+                WorldgenPageDependencyEntry& entry = entryIt->second;
+                if (request.warmStructures)
+                {
+                    ensureWorldgenPageWarmStructureLinksLocked(pageKey, entry);
+                }
+                if (!worldgenPageSupportSatisfiedLocked(entry,
+                                                       request.buildOccupancy,
+                                                       request.warmStructures) &&
+                    !entry.dependencyJobQueued &&
+                    !entry.dependencyJobInFlight &&
+                    entry.state != WorldgenPageState::Queued &&
+                    entry.state != WorldgenPageState::Building)
+                {
+                    enqueuePrefetchPageFrontierPageLocked(pageKey);
+                }
+            }
+        }
+        ++requested;
+    }
+}
+
 void ChunkManager::Impl::prefetchVisibleWorldgenPages(const glm::ivec3& center,
                                                       const glm::ivec3& previousCenter,
                                                       int horizontalRadius)
@@ -18396,252 +18860,47 @@ void ChunkManager::Impl::prefetchVisibleWorldgenPages(const glm::ivec3& center,
     const bool needsStaticWarmup = !horizontalDominant &&
                                    !verticalDominant &&
                                    targetViewDistance_ > viewDistance_ + 1;
-    const bool needsStaticDiscovery = !horizontalDominant &&
-                                      !verticalDominant &&
-                                      exactOnly &&
-                                      lastMissingChunks_ > 0;
-    if (!horizontalDominant && !needsStaticWarmup && !needsStaticDiscovery)
-    {
-        return;
-    }
-
-    struct PrefetchCandidate
-    {
-        glm::ivec2 pageKey{0};
-        ColumnHeightPrefetchPriority priority{ColumnHeightPrefetchPriority::Normal};
-        float score{0.0f};
-    };
-
-    const int requestBudget = horizontalDominant
-        ? (severeProtectedPressureActive_ ? 224 : (protectedPressureActive_ ? 176 : 128))
-        : (needsStaticDiscovery
-               ? ((movementEnvelopeIdleMode_ && exactOnly) ? 320 : 224)
-               : ((movementEnvelopeIdleMode_ && exactOnly) ? 96 : 64));
-    std::vector<PrefetchCandidate> candidates;
-    candidates.reserve(96u);
-    std::unordered_map<glm::ivec2, std::size_t, ColumnHasher> queuedPages;
-    queuedPages.reserve(128u);
-    const std::size_t candidateCap = needsStaticDiscovery
-        ? ((movementEnvelopeIdleMode_ && exactOnly) ? 512u : 320u)
-        : ((movementEnvelopeIdleMode_ && exactOnly) ? 224u : 160u);
-
-    auto addCandidate = [&](const glm::ivec2& column, ColumnHeightPrefetchPriority priority, float score)
-    {
-        const glm::ivec2 pageKey = worldgenPageKeyForChunkColumn(column);
-        auto queuedIt = queuedPages.find(pageKey);
-
-        const bool needsOccupancy = priority >= ColumnHeightPrefetchPriority::Visible;
-        bool pageNeedsWork = false;
-        glm::ivec2 minColumn{0};
-        glm::ivec2 maxColumn{0};
-        worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
-        for (int pageColumnZ = minColumn.y; pageColumnZ <= maxColumn.y && !pageNeedsWork; ++pageColumnZ)
-        {
-            for (int pageColumnX = minColumn.x; pageColumnX <= maxColumn.x; ++pageColumnX)
-            {
-                const glm::ivec2 pageColumn{pageColumnX, pageColumnZ};
-                const int worldX = pageColumn.x * kChunkSizeX + kChunkSizeX / 2;
-                const int worldZ = pageColumn.y * kChunkSizeZ + kChunkSizeZ / 2;
-                ColumnSlabOccupancy occupancy{};
-                const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(pageColumn, occupancy);
-                int cachedHeight = ColumnManager::kNoHeight;
-                if (!tryGetCachedColumnHeight(pageColumn, worldX, worldZ, cachedHeight))
-                {
-                    if (!haveOccupancy)
-                    {
-                        pageNeedsWork = true;
-                        break;
-                    }
-                }
-
-                if (needsOccupancy)
-                {
-                    if (!haveOccupancy)
-                    {
-                        pageNeedsWork = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (!pageNeedsWork)
-        {
-            return;
-        }
-
-        if (queuedIt != queuedPages.end())
-        {
-            PrefetchCandidate& existing = candidates[queuedIt->second];
-            if (priority > existing.priority)
-            {
-                existing.priority = priority;
-                existing.score = score;
-            }
-            else if (priority == existing.priority)
-            {
-                existing.score = std::min(existing.score, score);
-            }
-            return;
-        }
-
-        if (candidates.size() >= candidateCap && priority < ColumnHeightPrefetchPriority::Critical)
-        {
-            return;
-        }
-
-        queuedPages.emplace(pageKey, candidates.size());
-        candidates.push_back(PrefetchCandidate{pageKey, priority, score});
-    };
-
+    PrefetchPageFrontierWindow window{};
     if (horizontalDominant)
     {
-        glm::vec2 forward = normalizePriorityForwardXZ(lastCameraForward_);
-        const glm::vec2 movementVector(static_cast<float>(movementDelta.x), static_cast<float>(movementDelta.y));
-        if (glm::dot(movementVector, movementVector) > kEpsilon)
-        {
-            forward = glm::normalize(movementVector);
-        }
-        const glm::vec2 side{-forward.y, forward.x};
-        const int startDistance = std::max(horizontalRadius - 1, 1);
-        const int lookahead = std::clamp(horizontalRadius / 4, 4, 10);
-        const int endDistance = horizontalRadius + lookahead;
-        const int nearHalfWidth = std::clamp(horizontalRadius / 16, 1, 2);
-        const int farHalfWidth = std::clamp(horizontalRadius / 12, 2, 4);
-
-        for (int distance = startDistance; distance <= endDistance; distance += 2)
-        {
-            const bool insideExact = distance <= horizontalRadius;
-            const bool justOutside = distance <= horizontalRadius + 2;
-            const int sideHalfWidth = insideExact ? nearHalfWidth : farHalfWidth;
-            const glm::vec2 anchor = glm::vec2(static_cast<float>(center.x), static_cast<float>(center.z)) +
-                                     forward * static_cast<float>(distance);
-
-            for (int sideOffset = -sideHalfWidth; sideOffset <= sideHalfWidth; ++sideOffset)
-            {
-                const glm::vec2 sample = anchor + side * static_cast<float>(sideOffset);
-                const glm::ivec2 column{static_cast<int>(std::lround(sample.x)),
-                                        static_cast<int>(std::lround(sample.y))};
-
-                ColumnHeightPrefetchPriority priority = ColumnHeightPrefetchPriority::Normal;
-                if (insideExact && std::abs(sideOffset) <= 1)
-                {
-                    priority = ColumnHeightPrefetchPriority::Critical;
-                }
-                else if (insideExact || justOutside)
-                {
-                    priority = ColumnHeightPrefetchPriority::Visible;
-                }
-
-                addCandidate(column,
-                             priority,
-                             static_cast<float>(distance) + static_cast<float>(std::abs(sideOffset)) * 0.4f);
-            }
-        }
+        window.mode = PrefetchPageFrontierMode::MovementCorridor;
+    }
+    else if (needsStaticWarmup)
+    {
+        window.mode = PrefetchPageFrontierMode::StaticWarmup;
     }
     else
     {
-        auto addPerimeter = [&](int ring)
-        {
-            const int stride = ring < 16 ? 2 : 4;
-            for (int dx = -ring; dx <= ring; dx += stride)
-            {
-                addCandidate(glm::ivec2{center.x + dx, center.z - ring},
-                             ColumnHeightPrefetchPriority::Visible,
-                             static_cast<float>(ring));
-                addCandidate(glm::ivec2{center.x + dx, center.z + ring},
-                             ColumnHeightPrefetchPriority::Visible,
-                             static_cast<float>(ring));
-            }
+        window.mode = PrefetchPageFrontierMode::Inactive;
+    }
+    window.center = center;
+    window.movementDelta = movementDelta;
+    window.horizontalRadius = horizontalRadius;
+    window.viewDistance = viewDistance_;
+    window.targetViewDistance = targetViewDistance_;
+    window.exactOnly = exactOnly;
+    window.stationaryExactFill = stationaryExactFillModeActive_;
 
-            for (int dz = -ring + stride; dz <= ring - stride; dz += stride)
-            {
-                addCandidate(glm::ivec2{center.x - ring, center.z + dz},
-                             ColumnHeightPrefetchPriority::Visible,
-                             static_cast<float>(ring));
-                addCandidate(glm::ivec2{center.x + ring, center.z + dz},
-                             ColumnHeightPrefetchPriority::Visible,
-                             static_cast<float>(ring));
-            }
-        };
-
-        if (needsStaticDiscovery)
-        {
-            const int ringEnd = std::max(targetViewDistance_, 1);
-            const int ringStart = std::max(1, ringEnd - 6);
-            for (int ring = ringStart; ring <= ringEnd; ++ring)
-            {
-                addPerimeter(ring);
-            }
-
-            const int laneStep = std::max(4, ringEnd / 6);
-            const int lanePhase = static_cast<int>(updateFrameIndex_ % static_cast<std::uint64_t>(laneStep));
-            for (int offset = -ringEnd + lanePhase; offset <= ringEnd; offset += laneStep)
-            {
-                addCandidate(glm::ivec2{center.x + offset, center.z},
-                             ColumnHeightPrefetchPriority::Visible,
-                             static_cast<float>(std::abs(offset)));
-                addCandidate(glm::ivec2{center.x, center.z + offset},
-                             ColumnHeightPrefetchPriority::Visible,
-                             static_cast<float>(std::abs(offset)));
-            }
-        }
-        else
-        {
-            const int ringStart = std::max(viewDistance_ + 1, 1);
-            const int ringEnd = std::min(targetViewDistance_, ringStart + 2);
-            for (int ring = ringStart; ring <= ringEnd; ++ring)
-            {
-                addPerimeter(ring);
-            }
-        }
+    bool windowChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+        windowChanged = !prefetchPageFrontier_.initialized || !(prefetchPageFrontier_.window == window);
+    }
+    if (windowChanged)
+    {
+        rebuildPrefetchPageFrontier(window);
     }
 
-    if (candidates.empty())
+    if (window.mode == PrefetchPageFrontierMode::Inactive)
     {
         return;
     }
 
-    std::sort(candidates.begin(),
-              candidates.end(),
-              [](const PrefetchCandidate& lhs, const PrefetchCandidate& rhs)
-              {
-                  if (lhs.priority != rhs.priority)
-                  {
-                      return lhs.priority > rhs.priority;
-                  }
-                  if (lhs.score != rhs.score)
-                  {
-                      return lhs.score < rhs.score;
-                  }
-                  if (lhs.pageKey.x != rhs.pageKey.x)
-                  {
-                      return lhs.pageKey.x < rhs.pageKey.x;
-                  }
-                  return lhs.pageKey.y < rhs.pageKey.y;
-              });
-
-    int requested = 0;
-    for (const PrefetchCandidate& candidate : candidates)
-    {
-        if (requested >= requestBudget)
-        {
-            break;
-        }
-
-        const DependencyPriority dependencyPriority =
-            candidate.priority >= ColumnHeightPrefetchPriority::Critical ? DependencyPriority::Critical
-            : candidate.priority >= ColumnHeightPrefetchPriority::Visible ? DependencyPriority::Visible
-                                                                          : DependencyPriority::Background;
-        const bool warmStructures = candidate.priority >= ColumnHeightPrefetchPriority::Visible ||
-                                    stationaryExactFillModeActive_;
-        requestWorldgenPageDependency(candidate.pageKey,
-                                      dependencyPriority,
-                                      candidate.priority >= ColumnHeightPrefetchPriority::Visible,
-                                      warmStructures,
-                                      supportDependencyServiceClass(candidate.priority));
-        ++requested;
-    }
+    const int requestBudget =
+        window.mode == PrefetchPageFrontierMode::MovementCorridor
+            ? (severeProtectedPressureActive_ ? 224 : (protectedPressureActive_ ? 176 : 128))
+            : ((movementEnvelopeIdleMode_ && exactOnly) ? 96 : 64);
+    drainPrefetchPageFrontier(requestBudget);
 }
 
 int ChunkManager::Impl::ensureColumnHeightCached(const glm::ivec2& column,
@@ -18699,6 +18958,10 @@ void ChunkManager::Impl::mergePredictedColumnHeight(const glm::ivec2& column, in
     {
         markPlanDirtyColumn(column);
     }
+    if (changed)
+    {
+        refreshWorldgenPageHeightSupportForColumn(column, true);
+    }
 }
 
 void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::ivec2& column) const
@@ -18724,6 +18987,7 @@ void ChunkManager::Impl::refreshPredictedColumnHeightFromLoadedData(const glm::i
     {
         markPlanDirtyColumn(column);
     }
+    refreshWorldgenPageHeightSupportForColumn(column, highest != ColumnManager::kNoHeight);
 }
 
 bool ChunkManager::Impl::materializeChunkForLocalEdit(const glm::ivec3& coord, std::shared_ptr<Chunk>& outChunk)
@@ -18882,6 +19146,7 @@ void ChunkManager::Impl::invalidatePredictedColumn(const glm::ivec2& column) con
     {
         markPlanDirtyColumn(column);
     }
+    refreshWorldgenPageHeightSupportForColumn(column, false);
 }
 
 void ChunkManager::Impl::noteRecentEdit(const char* kind,
@@ -19518,6 +19783,240 @@ void ChunkManager::Impl::worldgenPageChunkColumnBounds(const glm::ivec2& pageKey
     outMaxColumn = {floorDiv(maxWorldX, kChunkSizeX), floorDiv(maxWorldZ, kChunkSizeZ)};
 }
 
+int ChunkManager::Impl::worldgenPageLocalChunkColumnIndex(const glm::ivec2& pageKey,
+                                                          const glm::ivec2& column) noexcept
+{
+    const int minColumnX = pageKey.x * kWorldgenPageChunkColumnsPerAxis;
+    const int minColumnZ = pageKey.y * kWorldgenPageChunkColumnsPerAxis;
+    const int localX = std::clamp(column.x - minColumnX, 0, kWorldgenPageChunkColumnsPerAxis - 1);
+    const int localZ = std::clamp(column.y - minColumnZ, 0, kWorldgenPageChunkColumnsPerAxis - 1);
+    return localZ * kWorldgenPageChunkColumnsPerAxis + localX;
+}
+
+void ChunkManager::Impl::refreshWorldgenPageSupportStatusLocked(WorldgenPageDependencyEntry& entry) const noexcept
+{
+    entry.missingHeightColumns = kWorldgenPageChunkColumnCount - entry.readyHeightColumns;
+    entry.missingOccupancyColumns = kWorldgenPageChunkColumnCount - entry.readyOccupancyColumns;
+    entry.supportsHeight = entry.missingHeightColumns == 0;
+    entry.supportsOccupancy = entry.missingOccupancyColumns == 0;
+    entry.supportsWarmStructures =
+        entry.warmStructureRegionsInitialized && entry.missingWarmStructureRegions == 0;
+}
+
+void ChunkManager::Impl::syncWorldgenPageColumnSupportFromCachesLocked(const glm::ivec2& pageKey,
+                                                                       WorldgenPageDependencyEntry& entry) const
+{
+    entry.heightReadyBits = 0;
+    entry.occupancyReadyBits = 0;
+    entry.readyHeightColumns = 0;
+    entry.readyOccupancyColumns = 0;
+
+    glm::ivec2 minColumn{0};
+    glm::ivec2 maxColumn{0};
+    worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
+    for (int columnZ = minColumn.y; columnZ <= maxColumn.y; ++columnZ)
+    {
+        for (int columnX = minColumn.x; columnX <= maxColumn.x; ++columnX)
+        {
+            const glm::ivec2 column{columnX, columnZ};
+            const int bitIndex = worldgenPageLocalChunkColumnIndex(pageKey, column);
+            const std::uint32_t bitMask = 1u << bitIndex;
+            const int worldX = column.x * kChunkSizeX + kChunkSizeX / 2;
+            const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
+
+            int cachedHeight = ColumnManager::kNoHeight;
+            if (tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight))
+            {
+                entry.heightReadyBits |= bitMask;
+                ++entry.readyHeightColumns;
+            }
+
+            ColumnSlabOccupancy occupancy{};
+            if (tryGetCachedColumnSlabOccupancy(column, occupancy))
+            {
+                entry.occupancyReadyBits |= bitMask;
+                ++entry.readyOccupancyColumns;
+            }
+        }
+    }
+
+    refreshWorldgenPageSupportStatusLocked(entry);
+}
+
+void ChunkManager::Impl::ensureWorldgenPageWarmStructureLinksLocked(const glm::ivec2& pageKey,
+                                                                    WorldgenPageDependencyEntry& entry) const
+{
+    if (entry.warmStructureRegionsInitialized)
+    {
+        return;
+    }
+
+    constexpr int kStructureWorldgenPadding = kMaxStructureHorizontalRadius + 4;
+    const int minWorldX = pageKey.x * WorldgenPage::kSize;
+    const int minWorldZ = pageKey.y * WorldgenPage::kSize;
+    const int maxWorldX = minWorldX + WorldgenPage::kSize - 1;
+    const int maxWorldZ = minWorldZ + WorldgenPage::kSize - 1;
+    const int minRegionX = floorDiv(minWorldX - kStructureWorldgenPadding, kStructureRegionSize);
+    const int maxRegionX = floorDiv(maxWorldX + kStructureWorldgenPadding, kStructureRegionSize);
+    const int minRegionZ = floorDiv(minWorldZ - kStructureWorldgenPadding, kStructureRegionSize);
+    const int maxRegionZ = floorDiv(maxWorldZ + kStructureWorldgenPadding, kStructureRegionSize);
+
+    entry.warmStructureRegions.clear();
+    for (int regionZ = minRegionZ; regionZ <= maxRegionZ; ++regionZ)
+    {
+        for (int regionX = minRegionX; regionX <= maxRegionX; ++regionX)
+        {
+            const StructureRegionKey regionKey{regionX, regionZ};
+            entry.warmStructureRegions.insert(regionKey);
+            structureRegionWorldgenPages_[regionKey].insert(pageKey);
+        }
+    }
+
+    entry.warmStructureRegionsInitialized = true;
+    refreshWorldgenPageWarmStructureSupportLocked(pageKey, entry);
+}
+
+void ChunkManager::Impl::refreshWorldgenPageWarmStructureSupportLocked(const glm::ivec2& pageKey,
+                                                                       WorldgenPageDependencyEntry& entry) const
+{
+    (void)pageKey;
+    if (!entry.warmStructureRegionsInitialized)
+    {
+        entry.missingWarmStructureRegions = 0;
+        entry.supportsWarmStructures = false;
+        return;
+    }
+
+    int missingRegionCount = 0;
+    for (const StructureRegionKey& regionKey : entry.warmStructureRegions)
+    {
+        if (!tryGetReadyRegion(regionKey))
+        {
+            ++missingRegionCount;
+        }
+    }
+
+    entry.missingWarmStructureRegions = missingRegionCount;
+    refreshWorldgenPageSupportStatusLocked(entry);
+}
+
+void ChunkManager::Impl::refreshWorldgenPageHeightSupportForColumn(const glm::ivec2& column, bool ready) const
+{
+    const glm::ivec2 pageKey = worldgenPageKeyForChunkColumn(column);
+    std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+    WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
+    const int bitIndex = worldgenPageLocalChunkColumnIndex(pageKey, column);
+    const std::uint32_t bitMask = 1u << bitIndex;
+    const bool alreadyReady = (entry.heightReadyBits & bitMask) != 0;
+    if (ready == alreadyReady)
+    {
+        return;
+    }
+
+    if (ready)
+    {
+        entry.heightReadyBits |= bitMask;
+        ++entry.readyHeightColumns;
+    }
+    else
+    {
+        entry.heightReadyBits &= ~bitMask;
+        entry.readyHeightColumns = std::max(entry.readyHeightColumns - 1, 0);
+    }
+
+    refreshWorldgenPageSupportStatusLocked(entry);
+    if (!ready)
+    {
+        enqueueDirtyPrefetchPageLocked(pageKey, entry);
+    }
+}
+
+void ChunkManager::Impl::refreshWorldgenPageOccupancySupportForColumn(const glm::ivec2& column, bool ready) const
+{
+    const glm::ivec2 pageKey = worldgenPageKeyForChunkColumn(column);
+    std::lock_guard<std::mutex> lock(worldgenPageMutex_);
+    WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
+    const int bitIndex = worldgenPageLocalChunkColumnIndex(pageKey, column);
+    const std::uint32_t bitMask = 1u << bitIndex;
+    const bool alreadyReady = (entry.occupancyReadyBits & bitMask) != 0;
+    if (ready == alreadyReady)
+    {
+        return;
+    }
+
+    if (ready)
+    {
+        entry.occupancyReadyBits |= bitMask;
+        ++entry.readyOccupancyColumns;
+    }
+    else
+    {
+        entry.occupancyReadyBits &= ~bitMask;
+        entry.readyOccupancyColumns = std::max(entry.readyOccupancyColumns - 1, 0);
+    }
+
+    refreshWorldgenPageSupportStatusLocked(entry);
+    if (!ready)
+    {
+        enqueueDirtyPrefetchPageLocked(pageKey, entry);
+    }
+}
+
+bool ChunkManager::Impl::worldgenPageSupportSatisfiedLocked(const WorldgenPageDependencyEntry& entry,
+                                                            bool buildOccupancy,
+                                                            bool warmStructures) const noexcept
+{
+    if (entry.state != WorldgenPageState::Ready || !entry.page || !entry.supportsHeight)
+    {
+        return false;
+    }
+    if (buildOccupancy && !entry.supportsOccupancy)
+    {
+        return false;
+    }
+    if (warmStructures && !entry.supportsWarmStructures)
+    {
+        return false;
+    }
+    return true;
+}
+
+void ChunkManager::Impl::enqueuePrefetchPageFrontierPageLocked(const glm::ivec2& pageKey) const
+{
+    if (prefetchPageFrontier_.queuedPages.insert(pageKey).second)
+    {
+        prefetchPageFrontier_.pendingPages.push_back(pageKey);
+    }
+}
+
+void ChunkManager::Impl::enqueueDirtyPrefetchPageLocked(const glm::ivec2& pageKey,
+                                                        const WorldgenPageDependencyEntry& entry) const
+{
+    if (!prefetchPageFrontier_.desiredPages.contains(pageKey) &&
+        !entry.buildOccupancy &&
+        !entry.warmStructures)
+    {
+        return;
+    }
+
+    if (entry.dependencyJobQueued || entry.dependencyJobInFlight)
+    {
+        return;
+    }
+
+    enqueuePrefetchPageFrontierPageLocked(pageKey);
+}
+
+bool ChunkManager::Impl::prefetchPageFrontierRequestUpgraded(
+    const PrefetchPageFrontierRequestLevel& desired,
+    const PrefetchPageFrontierRequestLevel& existing) noexcept
+{
+    return desired.priority > existing.priority ||
+           jobServiceClassIndex(desired.serviceClass) < jobServiceClassIndex(existing.serviceClass) ||
+           (desired.buildOccupancy && !existing.buildOccupancy) ||
+           (desired.warmStructures && !existing.warmStructures);
+}
+
 std::shared_ptr<const ChunkManager::Impl::WorldgenPage>
 ChunkManager::Impl::tryGetReadyWorldgenPage(const glm::ivec2& pageKey) const
 {
@@ -19649,6 +20148,13 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
         entry.page = page;
         entry.lastError = {};
         entry.dependencyJobQueued = false;
+        entry.dependencyJobInFlight = false;
+        syncWorldgenPageColumnSupportFromCachesLocked(pageKey, entry);
+        if (entry.warmStructures)
+        {
+            ensureWorldgenPageWarmStructureLinksLocked(pageKey, entry);
+        }
+        refreshWorldgenPageWarmStructureSupportLocked(pageKey, entry);
     }
 
     {
@@ -19740,12 +20246,17 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
 
 void ChunkManager::Impl::publishWorldgenPageFailure(const glm::ivec2& pageKey, std::exception_ptr error)
 {
-    std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
-    WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
-    entry.state = WorldgenPageState::Failed;
-    entry.page.reset();
-    entry.lastError = error;
-    entry.dependencyJobQueued = false;
+    {
+        std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+        WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
+        entry.state = WorldgenPageState::Failed;
+        entry.page.reset();
+        entry.lastError = error;
+        entry.dependencyJobQueued = false;
+        entry.dependencyJobInFlight = false;
+        refreshWorldgenPageSupportStatusLocked(entry);
+    }
+    markPlanDirtyWorldgenPage(pageKey);
 }
 
 std::shared_ptr<const StructureRegion> ChunkManager::Impl::tryGetReadyRegion(const StructureRegionKey& key) const
@@ -19823,6 +20334,23 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
     }
 
     structureRegistry_.publishReady(key, region);
+    {
+        std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+        auto linkedPagesIt = structureRegionWorldgenPages_.find(key);
+        if (linkedPagesIt != structureRegionWorldgenPages_.end())
+        {
+            for (const glm::ivec2& pageKey : linkedPagesIt->second)
+            {
+                auto entryIt = worldgenPageEntries_.find(pageKey);
+                if (entryIt == worldgenPageEntries_.end())
+                {
+                    continue;
+                }
+
+                refreshWorldgenPageWarmStructureSupportLocked(pageKey, entryIt->second);
+            }
+        }
+    }
     markPlanDirtyStructureRegion(key);
     for (const auto& [affectedColumn, span] : region->chunkColumnSpans)
     {
@@ -19871,28 +20399,50 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
 
 void ChunkManager::Impl::publishStructureRegionFailure(const StructureRegionKey& key, std::exception_ptr error)
 {
-    std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
-    StructureRegionDependencyEntry& entry = structureRegionEntries_[key];
-    for (const glm::ivec2& pageKey : entry.missingWorldgenPages)
     {
-        auto waiterIt = worldgenPageStructureRegionWaiters_.find(pageKey);
-        if (waiterIt == worldgenPageStructureRegionWaiters_.end())
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        StructureRegionDependencyEntry& entry = structureRegionEntries_[key];
+        for (const glm::ivec2& pageKey : entry.missingWorldgenPages)
         {
-            continue;
+            auto waiterIt = worldgenPageStructureRegionWaiters_.find(pageKey);
+            if (waiterIt == worldgenPageStructureRegionWaiters_.end())
+            {
+                continue;
+            }
+
+            waiterIt->second.erase(key);
+            if (waiterIt->second.empty())
+            {
+                worldgenPageStructureRegionWaiters_.erase(waiterIt);
+            }
         }
 
-        waiterIt->second.erase(key);
-        if (waiterIt->second.empty())
-        {
-            worldgenPageStructureRegionWaiters_.erase(waiterIt);
-        }
+        entry.state = StructureRegionState::Failed;
+        entry.dependencyJobQueued = false;
+        entry.region.reset();
+        entry.missingWorldgenPages.clear();
+        entry.lastError = error;
     }
 
-    entry.state = StructureRegionState::Failed;
-    entry.dependencyJobQueued = false;
-    entry.region.reset();
-    entry.missingWorldgenPages.clear();
-    entry.lastError = error;
+    {
+        std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+        auto linkedPagesIt = structureRegionWorldgenPages_.find(key);
+        if (linkedPagesIt != structureRegionWorldgenPages_.end())
+        {
+            for (const glm::ivec2& pageKey : linkedPagesIt->second)
+            {
+                auto entryIt = worldgenPageEntries_.find(pageKey);
+                if (entryIt == worldgenPageEntries_.end())
+                {
+                    continue;
+                }
+
+                refreshWorldgenPageWarmStructureSupportLocked(pageKey, entryIt->second);
+                enqueueDirtyPrefetchPageLocked(pageKey, entryIt->second);
+            }
+        }
+    }
+    markPlanDirtyStructureRegion(key);
 }
 
 void ChunkManager::Impl::pinWorldgenWindow(const glm::ivec3& center, int horizontalRadius)
@@ -19945,13 +20495,20 @@ void ChunkManager::Impl::trimWorldgenPages()
     {
         if (it->second.state != WorldgenPageState::Ready ||
             !it->second.page ||
+            it->second.dependencyJobQueued ||
+            it->second.dependencyJobInFlight ||
             pinnedWorldgenPageKeys_.contains(it->first))
         {
             ++it;
             continue;
         }
 
-        it = worldgenPageEntries_.erase(it);
+        it->second.state = WorldgenPageState::Unrequested;
+        it->second.page.reset();
+        it->second.dependencyJobQueued = false;
+        it->second.dependencyJobInFlight = false;
+        it->second.lastError = {};
+        ++it;
         if (--readyPageCount <= pinnedWorldgenPageKeys_.size() + keepSlack)
         {
             break;
@@ -20432,6 +20989,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::cachedColumnSlabOccu
             return it->second;
         }
     }
+    refreshWorldgenPageOccupancySupportForColumn(column, true);
     return built;
 }
 
@@ -20470,6 +21028,7 @@ void ChunkManager::Impl::invalidateColumnSlabOccupancy(const glm::ivec2& column)
         columnSlabOccupancyCache_.erase(column);
     }
     markPlanDirtyColumn(column);
+    refreshWorldgenPageOccupancySupportForColumn(column, false);
 }
 
 void ChunkManager::Impl::invalidateAllColumnSlabOccupancy() const
@@ -28761,7 +29320,10 @@ bool ChunkManager::Impl::worldgenPageDependencyHasOutstandingWork(const glm::ive
         return false;
     }
 
-    return it->second.state == WorldgenPageState::Queued || it->second.state == WorldgenPageState::Building;
+    return it->second.dependencyJobQueued ||
+           it->second.dependencyJobInFlight ||
+           it->second.state == WorldgenPageState::Queued ||
+           it->second.state == WorldgenPageState::Building;
 }
 
 bool ChunkManager::Impl::structureRegionDependencyHasOutstandingWork(const StructureRegionKey& key) const

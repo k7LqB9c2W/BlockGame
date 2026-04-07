@@ -3948,6 +3948,7 @@ struct Chunk
         pendingRetire.store(false, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident.store(false, std::memory_order_relaxed);
+        pendingExactGpuBuildCounted.store(false, std::memory_order_relaxed);
         lastDenseFrameTouched = 0;
         lastLocalEditMicros.store(0, std::memory_order_relaxed);
         handoffTargetRevision.store(0, std::memory_order_relaxed);
@@ -4068,6 +4069,7 @@ struct Chunk
     std::atomic<bool> exactGpuPreferDenseUpload{false};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     std::atomic<bool> cpuDataResident{false};
+    std::atomic<bool> pendingExactGpuBuildCounted{false};
     std::uint64_t lastDenseFrameTouched{0};
     std::atomic<std::uint64_t> lastLocalEditMicros{0};
     std::atomic<std::uint64_t> handoffTargetRevision{0};
@@ -5684,6 +5686,9 @@ private:
     [[nodiscard]] bool isChunkInsideEditBubble(const glm::ivec3& coord,
                                                const glm::ivec3& centerChunk) const noexcept;
     [[nodiscard]] bool chunkHasPendingLocalWork(const Chunk& chunk) const;
+    [[nodiscard]] bool chunkCountsTowardPendingExactGpuBuilds(const Chunk& chunk) const noexcept;
+    void refreshPendingExactGpuBuildCount(Chunk& chunk) noexcept;
+    void clearPendingExactGpuBuildCount(Chunk& chunk) noexcept;
     [[nodiscard]] bool chunkNeedsExactGpuHandoff(const Chunk& chunk) const;
     void recomputeChunkExactGpuHandoffReadiness(Chunk& chunk);
     [[nodiscard]] ChunkGameplayAuthority desiredChunkGameplayAuthorityFromState(
@@ -6237,6 +6242,7 @@ private:
     std::vector<PendingExactGpuBatch> pendingExactGpuBatches_{};
     std::mutex pendingExactGpuBuildMutex_;
     std::mutex pendingExactGpuBuildsMutex_;
+    std::atomic<std::size_t> pendingExactGpuBuildsCached_{0};
     std::mutex exactGpuExecutionMutex_;
     std::thread exactGpuWorkerThread_;
     std::thread exactPlanBuildThread_;
@@ -8295,6 +8301,7 @@ void ChunkManager::Impl::clear()
                 }
 
                 chunk = it->second;
+                clearPendingExactGpuBuildCount(*chunk);
                 unregisterChunkRenderRegistryEntry(coord);
                 chunks_.erase(it);
                 removedAny = true;
@@ -11460,6 +11467,7 @@ void ChunkManager::Impl::cancelPendingExactGpuBuildsForShutdown()
         pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
         pending.chunk->exactGpuPendingNeighborMask.store(0, std::memory_order_release);
         pending.chunk->exactGpu.reset();
+        clearPendingExactGpuBuildCount(*pending.chunk);
         pending.chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
     }
 
@@ -11478,6 +11486,7 @@ void ChunkManager::Impl::cancelPendingExactGpuBuildsForShutdown()
 
         const bool wasQueued = request.chunk->exactGpuBuildQueued.exchange(false, std::memory_order_acq_rel);
         request.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+        refreshPendingExactGpuBuildCount(*request.chunk);
         if (wasQueued)
         {
             request.chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
@@ -11865,6 +11874,7 @@ void ChunkManager::Impl::processJob(const Job& job)
         const ChunkGameplayAuthority gameplayAuthority =
             desiredChunkGameplayAuthority(*chunk, lastCenterChunk_, generatedChunkNowSeconds);
         chunk->gameplayAuthority.store(gameplayAuthority, std::memory_order_release);
+        refreshPendingExactGpuBuildCount(*chunk);
 
         if (chunk->hasBlocks.load(std::memory_order_acquire))
         {
@@ -17000,6 +17010,7 @@ void ChunkManager::Impl::recycleChunkGPU(Chunk& chunk)
         chunk.exactGpuPendingNeighborMask.store(0, std::memory_order_release);
         chunk.exactGpu.reset();
     }
+    refreshPendingExactGpuBuildCount(chunk);
 
     if (wasQueuedForUpload)
     {
@@ -17091,6 +17102,7 @@ void ChunkManager::Impl::recycleChunkObject(std::shared_ptr<Chunk> chunk)
     std::size_t retainedBytes = 0;
     {
         std::lock_guard<std::mutex> meshLock(chunk->meshMutex);
+        clearPendingExactGpuBuildCount(*chunk);
         chunk->reset(chunk->coord);
         retainedBytes = estimateChunkRetainedBytes(*chunk);
     }
@@ -17175,42 +17187,7 @@ std::size_t ChunkManager::Impl::estimateUploadQueueSize()
 
 std::size_t ChunkManager::Impl::estimatePendingExactGpuBuilds() const
 {
-    std::size_t pendingExactBuilds = 0;
-    std::vector<std::shared_ptr<Chunk>> chunks;
-    {
-        std::lock_guard<std::mutex> lock(chunksMutex);
-        chunks.reserve(chunks_.size());
-        for (const auto& [coord, chunk] : chunks_)
-        {
-            (void)coord;
-            chunks.push_back(chunk);
-        }
-    }
-
-    for (const std::shared_ptr<Chunk>& chunk : chunks)
-    {
-        if (!chunk || shouldKeepLoadedChunkInteractive(*chunk, lastCenterChunk_))
-        {
-            continue;
-        }
-
-        const bool hasRenderableContent = chunk->hasBlocks.load(std::memory_order_acquire);
-        const bool resident = chunk->exactGpuResident.load(std::memory_order_acquire);
-        const bool queued = chunk->exactGpuBuildQueued.load(std::memory_order_acquire);
-        const bool inFlight = chunk->exactGpuBuildInFlight.load(std::memory_order_acquire);
-        const bool dirtyInputs =
-            chunk->exactGpuInputsDirty.load(std::memory_order_acquire) ||
-            chunk->exactGpuReadyVersion.load(std::memory_order_acquire) !=
-                chunk->exactGpuInputsVersion.load(std::memory_order_acquire);
-
-        if ((hasRenderableContent && (!resident || queued || inFlight || dirtyInputs)) ||
-            (!hasRenderableContent && (queued || inFlight)))
-        {
-            ++pendingExactBuilds;
-        }
-    }
-
-    return pendingExactBuilds;
+    return pendingExactGpuBuildsCached_.load(std::memory_order_acquire);
 }
 
 std::size_t ChunkManager::Impl::estimateInitialReadyUploadQueueSize()
@@ -19036,6 +19013,7 @@ bool ChunkManager::Impl::materializeChunkForLocalEdit(const glm::ivec3& coord, s
     chunk->gameplayAuthority.store(ChunkGameplayAuthority::LocalGameplay, std::memory_order_release);
     chunk->residencyMode.store(ExactChunkResidencyMode::CpuAuthoritative, std::memory_order_release);
     chunk->lastDenseFrameTouched = updateFrameIndex_;
+    refreshPendingExactGpuBuildCount(*chunk);
 
     {
         std::lock_guard<std::mutex> lock(chunksMutex);
@@ -19104,6 +19082,7 @@ bool ChunkManager::Impl::applyLocalBlockEdit(const glm::ivec3& worldPos, BlockId
         chunk->lastDenseFrameTouched = updateFrameIndex_;
         chunk->gameplayAuthority.store(ChunkGameplayAuthority::LocalGameplay, std::memory_order_release);
         chunk->residencyMode.store(ExactChunkResidencyMode::CpuAuthoritative, std::memory_order_release);
+        refreshPendingExactGpuBuildCount(*chunk);
     }
     setDenseTrackedCoord(chunk->coord, true);
 
@@ -22323,6 +22302,7 @@ void ChunkManager::Impl::queueChunkForExactGpuBuild(const std::shared_ptr<Chunk>
 
     chunk->exactGpuBuildVersion.store(buildVersion, std::memory_order_release);
     const bool wasQueued = chunk->exactGpuBuildQueued.exchange(true, std::memory_order_acq_rel);
+    refreshPendingExactGpuBuildCount(*chunk);
     if (!wasQueued && !chunk->exactGpuBuildInFlight.load(std::memory_order_acquire))
     {
         chunk->inFlight.fetch_add(1, std::memory_order_relaxed);
@@ -22447,6 +22427,7 @@ bool ChunkManager::Impl::rebuildChunkGpuExactInputsLocked(
                            chunkHasPendingStructureEdits(chunk.coord) ||
                            chunkHasBlockEditOverlay(chunk.coord);
     chunk.hasBlocks.store(anyBlocks, std::memory_order_release);
+    refreshPendingExactGpuBuildCount(chunk);
     return true;
 }
 
@@ -22942,6 +22923,7 @@ void ChunkManager::Impl::restoreExactGpuNeighborStates(const std::array<Chunk*, 
         }
         pending.chunk->exactGpuBuildQueued.store(true, std::memory_order_release);
         pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+        refreshPendingExactGpuBuildCount(*pending.chunk);
         releasePendingExactBuildAllocation(pending, false);
         const bool prioritizeFront = shouldPrioritizeExactGpuBuild(*pending.chunk);
         std::lock_guard<std::mutex> lock(pendingExactGpuBuildMutex_);
@@ -23614,6 +23596,7 @@ void ChunkManager::Impl::restoreExactGpuNeighborStates(const std::array<Chunk*, 
         Chunk& chunk = *pending.chunk;
         chunk.exactGpuBuildQueued.store(false, std::memory_order_release);
         chunk.exactGpuBuildInFlight.store(true, std::memory_order_release);
+        refreshPendingExactGpuBuildCount(chunk);
         storeFirstBenchmarkTimestamp(chunk.uploadStartTimestampMicros, steadyMicrosNow());
         updateExactGpuChunkAllocationRecord(pending,
                                             0u,
@@ -23986,6 +23969,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             if (pending.chunk)
             {
                 pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+                refreshPendingExactGpuBuildCount(*pending.chunk);
                 if (!keepOutstandingWork)
                 {
                     pending.chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
@@ -24083,6 +24067,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
             releasePendingAllocation(pending, emittedRecordWritten);
             pending.chunk->exactGpuBuildQueued.store(true, std::memory_order_release);
             pending.chunk->exactGpuBuildInFlight.store(false, std::memory_order_release);
+            refreshPendingExactGpuBuildCount(*pending.chunk);
             pending.chunk->exactGpuRequeueCount.fetch_add(1, std::memory_order_relaxed);
             pending.chunk->exactGpuLastRequeueMicros.store(static_cast<long long>(steadyMicrosNow()),
                                                            std::memory_order_release);
@@ -24791,6 +24776,7 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                             chunk.handoffReady.store(false, std::memory_order_release);
                         }
                     }
+                    refreshPendingExactGpuBuildCount(chunk);
 
                     if (hasExactDrawAllocation)
                     {
@@ -26358,6 +26344,7 @@ bool ChunkManager::Impl::tryMarkChunkForRetire(const glm::ivec3& coord)
             return false;
         }
 
+        clearPendingExactGpuBuildCount(*chunk);
         chunk->queuedForUpload.store(false, std::memory_order_release);
         chunk->queuedUploadBucket.store(std::numeric_limits<std::uint8_t>::max(), std::memory_order_release);
         chunk->uploadQueueTicket.store(0, std::memory_order_release);
@@ -26970,8 +26957,9 @@ void ChunkManager::Impl::refreshExactGpuColumnVisualsAfterSkyLightChange(const g
             continue;
         }
 
-        chunk->exactGpuInputsVersion.fetch_add(1, std::memory_order_acq_rel);
-        chunk->exactGpuInputsDirty.store(true, std::memory_order_release);
+    chunk->exactGpuInputsVersion.fetch_add(1, std::memory_order_acq_rel);
+    chunk->exactGpuInputsDirty.store(true, std::memory_order_release);
+    refreshPendingExactGpuBuildCount(*chunk);
         requestChunkRemesh(chunk, localInteractionPriority);
     }
 }
@@ -28651,6 +28639,7 @@ void ChunkManager::Impl::publishResidentExactGpuPageChunksReady(std::uint32_t pa
                 readyToPublish = true;
             }
         }
+        refreshPendingExactGpuBuildCount(*chunk);
 
         if (replacedLiveAllocation.valid() &&
             (replacedLiveAllocation.pageIndex != pageIndex ||
@@ -28717,6 +28706,7 @@ bool ChunkManager::Impl::finalizeChunkExactGpuHandoff(const std::shared_ptr<Chun
         chunk->residencyMode.store(ExactChunkResidencyMode::GpuResidentNonlocal, std::memory_order_release);
         switched = true;
     }
+    refreshPendingExactGpuBuildCount(*chunk);
 
     if (switched &&
         replacedLiveAllocation.valid() &&
@@ -29380,6 +29370,7 @@ void ChunkManager::Impl::abandonChunkGenerationPlaceholder(const glm::ivec3& coo
             return;
         }
 
+        clearPendingExactGpuBuildCount(*it->second);
         unregisterChunkRenderRegistryEntry(coord);
         chunks_.erase(it);
         denseTrackedCoords_.erase(coord);
@@ -29690,6 +29681,7 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     const ChunkGameplayAuthority gameplayAuthority =
         desiredChunkGameplayAuthority(chunk, lastCenterChunk_, nowSeconds);
     chunk.gameplayAuthority.store(gameplayAuthority, std::memory_order_release);
+    refreshPendingExactGpuBuildCount(chunk);
     const bool localAuthoritative = gameplayAuthority != ChunkGameplayAuthority::GpuStreaming;
     const bool initialReadyPriority = chunkAwaitingInitialReady(chunk);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
@@ -29898,6 +29890,7 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
             chunk.releaseCpuData();
         }
     }
+    refreshPendingExactGpuBuildCount(chunk);
     if (benchmarkEnabled)
     {
         publishMicros += static_cast<std::uint64_t>(
@@ -30300,6 +30293,58 @@ bool ChunkManager::Impl::chunkHasPendingLocalWork(const Chunk& chunk) const
            chunk.meshReady.load(std::memory_order_acquire) ||
            chunk.queuedForUpload.load(std::memory_order_acquire) ||
            chunk.queuedForCommit.load(std::memory_order_acquire);
+}
+
+bool ChunkManager::Impl::chunkCountsTowardPendingExactGpuBuilds(const Chunk& chunk) const noexcept
+{
+    if (chunk.gameplayAuthority.load(std::memory_order_acquire) != ChunkGameplayAuthority::GpuStreaming)
+    {
+        return false;
+    }
+
+    const bool hasRenderableContent = chunk.hasBlocks.load(std::memory_order_acquire);
+    const bool resident = chunk.exactGpuResident.load(std::memory_order_acquire);
+    const bool queued = chunk.exactGpuBuildQueued.load(std::memory_order_acquire);
+    const bool inFlight = chunk.exactGpuBuildInFlight.load(std::memory_order_acquire);
+    const bool dirtyInputs =
+        chunk.exactGpuInputsDirty.load(std::memory_order_acquire) ||
+        chunk.exactGpuReadyVersion.load(std::memory_order_acquire) !=
+            chunk.exactGpuInputsVersion.load(std::memory_order_acquire);
+
+    return (hasRenderableContent && (!resident || queued || inFlight || dirtyInputs)) ||
+           (!hasRenderableContent && (queued || inFlight));
+}
+
+void ChunkManager::Impl::refreshPendingExactGpuBuildCount(Chunk& chunk) noexcept
+{
+    const bool shouldCount = chunkCountsTowardPendingExactGpuBuilds(chunk);
+    bool counted = chunk.pendingExactGpuBuildCounted.load(std::memory_order_acquire);
+    while (counted != shouldCount)
+    {
+        if (chunk.pendingExactGpuBuildCounted.compare_exchange_weak(counted,
+                                                                    shouldCount,
+                                                                    std::memory_order_acq_rel,
+                                                                    std::memory_order_acquire))
+        {
+            if (shouldCount)
+            {
+                pendingExactGpuBuildsCached_.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                pendingExactGpuBuildsCached_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+    }
+}
+
+void ChunkManager::Impl::clearPendingExactGpuBuildCount(Chunk& chunk) noexcept
+{
+    if (chunk.pendingExactGpuBuildCounted.exchange(false, std::memory_order_acq_rel))
+    {
+        pendingExactGpuBuildsCached_.fetch_sub(1, std::memory_order_relaxed);
+    }
 }
 
 bool ChunkManager::Impl::chunkNeedsExactGpuHandoff(const Chunk& chunk) const
@@ -30741,6 +30786,7 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
             {
                 requestChunkRemesh(chunk, true);
             }
+            refreshPendingExactGpuBuildCount(*chunk);
             continue;
         }
 
@@ -30770,6 +30816,8 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
                 toDemote.push_back(chunk);
             }
         }
+
+        refreshPendingExactGpuBuildCount(*chunk);
     }
 
     std::sort(toHydrate.begin(),
@@ -30963,6 +31011,7 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
             chunk->hasBlocks.store(true, std::memory_order_release);
             chunk->exactGpuInputsVersion.fetch_add(1, std::memory_order_acq_rel);
             chunk->exactGpuInputsDirty.store(true, std::memory_order_release);
+            refreshPendingExactGpuBuildCount(*chunk);
             queueChunkForExactGpuRefresh(chunk);
             continue;
         }
@@ -31005,6 +31054,7 @@ void ChunkManager::Impl::dispatchStructureEdits(const std::vector<PendingStructu
 
         chunk->exactGpuInputsVersion.fetch_add(1, std::memory_order_acq_rel);
         chunk->exactGpuInputsDirty.store(true, std::memory_order_release);
+        refreshPendingExactGpuBuildCount(*chunk);
         refreshExactGpuColumnVisualsAfterSkyLightChange({coord.x, coord.z}, true);
 
         (void)state;

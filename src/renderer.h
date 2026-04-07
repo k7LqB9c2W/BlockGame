@@ -127,6 +127,7 @@ struct RendererProfilingSnapshot
     double farOpaqueMs{0.0};
     double editOverlayMs{0.0};
     double mobDrawMs{0.0};
+    double waterMs{0.0};
     double nearTranslucentMs{0.0};
     double exactTranslucentMs{0.0};
     double translucencyCompositeMs{0.0};
@@ -152,6 +153,7 @@ struct RendererProfilingSnapshot
     std::uint32_t farGpuCullBatchCount{0};
     std::uint32_t farGpuCullRecordCount{0};
     std::uint32_t farFallbackDrawCount{0};
+    std::uint32_t waterDrawCount{0};
     std::uint32_t nearTranslucentDrawCount{0};
     std::uint32_t exactTranslucentGpuCullBatchCount{0};
     std::uint32_t exactTranslucentGpuCullRecordCount{0};
@@ -383,6 +385,15 @@ private:
                                  ID3D12Resource* exactBlockUvBuffer,
                                  bool shadowPass,
                                  std::uint32_t requiredRecordFlags);
+    void renderWaterBatch(ID3D12PipelineState* pipelineState,
+                          ID3D12RootSignature* rootSignature,
+                          D3D12_GPU_VIRTUAL_ADDRESS constantsGpuAddress,
+                          D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                          D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                          D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                          D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv,
+                          ID3D12Resource* descriptorBuffer,
+                          std::uint32_t quadCount);
     void renderShadowMap(const WorldRenderData& renderData,
                          const LoadedTexture& atlasTexture,
                          const glm::mat4& view,
@@ -428,6 +439,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> worldRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactShadowRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> exactWorldRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> waterRootSignature_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> exactWaterRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> fullscreenRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> depthPyramidRootSignature_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> lodCullRootSignature_;
@@ -441,6 +454,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactNearPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> exactNearTranslucentPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> farPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> nearWaterPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> exactWaterPipelineState_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> farWaterPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mobPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> blockOutlinePipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> depthPyramidPipelineState_;

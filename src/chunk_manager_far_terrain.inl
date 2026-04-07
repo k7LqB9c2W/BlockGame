@@ -360,6 +360,7 @@ public:
 
     void setBlockUvTable(const std::vector<GpuBlockFaceUv>& table)
     {
+        blockUvTableCpu_ = table;
         blockUvBuffer_.Reset();
         blockUvCount_ = 0;
         if (device_ == nullptr || table.empty())
@@ -671,6 +672,500 @@ public:
                    << " skipped_frustum=0";
             lodVisibilityDebugLog(stream.str());
         }
+        return batches;
+    }
+
+    [[nodiscard]] std::vector<WaterRenderBatch> buildWaterRenderBatches(const Frustum& frustum) const
+    {
+        std::lock_guard<std::mutex> lock(configMutex_);
+        frameWaterDescriptorBuffers_.clear();
+
+        std::vector<WaterRenderBatch> batches;
+        if (device_ == nullptr || blockUvTableCpu_.empty())
+        {
+            return batches;
+        }
+
+        constexpr std::uint32_t kWaterQuadFaceTop = 0u;
+        constexpr std::uint32_t kWaterQuadFaceWall = 1u;
+
+        const auto blockUvFor = [this](BlockId block, BlockFace face) -> std::pair<glm::vec2, glm::vec2>
+        {
+            const std::size_t uvIndex = toIndex(block) * kBlockFaceCount + toIndex(face);
+            if (uvIndex >= blockUvTableCpu_.size())
+            {
+                return {glm::vec2(0.0f), glm::vec2(1.0f)};
+            }
+
+            const GpuBlockFaceUv& uv = blockUvTableCpu_[uvIndex];
+            return {uv.base, uv.size};
+        };
+
+        const auto topUv = blockUvFor(BlockId::Water, BlockFace::Top);
+        const auto sideUv = blockUvFor(BlockId::Water, BlockFace::North);
+
+        const auto updateBounds = [](const glm::vec3& p0,
+                                     const glm::vec3& p1,
+                                     const glm::vec3& p2,
+                                     const glm::vec3& p3,
+                                     bool& boundsValid,
+                                     glm::vec3& boundsMin,
+                                     glm::vec3& boundsMax)
+        {
+            const glm::vec3 quadMin = glm::min(glm::min(p0, p1), glm::min(p2, p3));
+            const glm::vec3 quadMax = glm::max(glm::max(p0, p1), glm::max(p2, p3));
+            if (!boundsValid)
+            {
+                boundsValid = true;
+                boundsMin = quadMin;
+                boundsMax = quadMax;
+                return;
+            }
+
+            boundsMin = glm::min(boundsMin, quadMin);
+            boundsMax = glm::max(boundsMax, quadMax);
+        };
+
+        const auto appendWaterQuad = [&updateBounds](std::vector<WaterQuadDescriptor>& outQuads,
+                                                     const glm::vec3& origin,
+                                                     const glm::vec3& axisU,
+                                                     const glm::vec3& axisV,
+                                                     const glm::vec3& normal,
+                                                     float topY,
+                                                     float bottomY,
+                                                     std::uint32_t faceKind,
+                                                     const glm::vec2& atlasBase,
+                                                     const glm::vec2& atlasSize,
+                                                     bool& boundsValid,
+                                                     glm::vec3& boundsMin,
+                                                     glm::vec3& boundsMax)
+        {
+            WaterQuadDescriptor descriptor{};
+            descriptor.origin = origin;
+            descriptor.topY = topY;
+            descriptor.axisU = axisU;
+            descriptor.bottomY = bottomY;
+            descriptor.axisV = axisV;
+            descriptor.faceKind = faceKind;
+            descriptor.normal = normal;
+            descriptor.atlasBase = atlasBase;
+            descriptor.atlasSize = atlasSize;
+            outQuads.push_back(descriptor);
+
+            const glm::vec3 p0 = origin;
+            const glm::vec3 p1 = origin + axisU;
+            const glm::vec3 p2 = origin + axisU + axisV;
+            const glm::vec3 p3 = origin + axisV;
+            updateBounds(p0, p1, p2, p3, boundsValid, boundsMin, boundsMax);
+        };
+
+        const auto packWaterQuadDescriptor = [](const WaterQuadDescriptor& descriptor) noexcept
+        {
+            GpuWaterQuadDescriptor gpu{};
+            gpu.originTop = glm::vec4(descriptor.origin, descriptor.topY);
+            gpu.axisUBottom = glm::vec4(descriptor.axisU, descriptor.bottomY);
+            gpu.axisVFaceKind = glm::vec4(descriptor.axisV, static_cast<float>(descriptor.faceKind));
+            gpu.normalAtlasBaseX = glm::vec4(descriptor.normal, descriptor.atlasBase.x);
+            gpu.atlasRest = glm::vec4(descriptor.atlasBase.y, descriptor.atlasSize.x, descriptor.atlasSize.y, 0.0f);
+            return gpu;
+        };
+
+        const auto haloColumnIndex = [](int localX, int localZ) noexcept
+        {
+            return static_cast<std::size_t>(localZ + 1) * static_cast<std::size_t>(kLogicalSize + 2) +
+                   static_cast<std::size_t>(localX + 1);
+        };
+
+        for (const auto& [key, chunk] : chunks_)
+        {
+            (void)key;
+            if (!chunk.active)
+            {
+                continue;
+            }
+
+            const glm::vec3 drawBoundsMin = chunkDrawBoundsMin(chunk);
+            const glm::vec3 drawBoundsMax = chunkDrawBoundsMax(chunk);
+            if (!frustum.intersectsAABB(drawBoundsMin, drawBoundsMax))
+            {
+                continue;
+            }
+
+            const int blockScale = std::max(chunk.cpu.blockScale, 1);
+            const glm::ivec3 worldMin = chunk.cpu.worldMin;
+
+            const auto sampleVoxel = [this, &chunk](const glm::ivec3& localCoord) noexcept -> FarLodVoxel
+            {
+                if (localCoord.x >= 0 && localCoord.x < kLogicalSize &&
+                    localCoord.y >= 0 && localCoord.y < kLogicalSize &&
+                    localCoord.z >= 0 && localCoord.z < kLogicalSize)
+                {
+                    return chunk.cpu.voxels[voxelIndex(localCoord.x, localCoord.y, localCoord.z)];
+                }
+
+                const glm::ivec3 chunkOffset{
+                    floorDiv(localCoord.x, kLogicalSize),
+                    floorDiv(localCoord.y, kLogicalSize),
+                    floorDiv(localCoord.z, kLogicalSize)};
+                const glm::ivec3 wrappedLocal{
+                    wrapIndex(localCoord.x, kLogicalSize),
+                    wrapIndex(localCoord.y, kLogicalSize),
+                    wrapIndex(localCoord.z, kLogicalSize)};
+                const FarLodChunkKey neighborKey{
+                    chunk.key.level,
+                    chunk.key.coord + chunkOffset};
+                const auto neighborIt = chunks_.find(neighborKey);
+                if (neighborIt == chunks_.end())
+                {
+                    return {};
+                }
+
+                const FarLodChunkRecord& neighborChunk = neighborIt->second;
+                if (neighborChunk.cpu.blockScale != chunk.cpu.blockScale)
+                {
+                    return {};
+                }
+
+                return neighborChunk.cpu.voxels[voxelIndex(wrappedLocal.x, wrappedLocal.y, wrappedLocal.z)];
+            };
+
+            const auto isWaterVoxel = [&sampleVoxel](int localX, int localY, int localZ) noexcept
+            {
+                const FarLodVoxel voxel = sampleVoxel(glm::ivec3(localX, localY, localZ));
+                return voxel.occupied != 0 && voxel.material == BlockId::Water;
+            };
+
+            std::array<WaterColumnField, static_cast<std::size_t>((kLogicalSize + 2) * (kLogicalSize + 2))> fields{};
+            bool hasChunkWater = false;
+            bool failed = false;
+            for (int localZ = -1; localZ <= kLogicalSize && !failed; ++localZ)
+            {
+                for (int localX = -1; localX <= kLogicalSize; ++localX)
+                {
+                    WaterColumnField& field = fields[haloColumnIndex(localX, localZ)];
+                    bool inSpan = false;
+                    int spanBottomWorld = 0;
+                    for (int localY = 0; localY < kLogicalSize; ++localY)
+                    {
+                        const bool isWater = isWaterVoxel(localX, localY, localZ);
+                        if (localX >= 0 && localX < kLogicalSize &&
+                            localZ >= 0 && localZ < kLogicalSize &&
+                            isWater)
+                        {
+                            hasChunkWater = true;
+                        }
+
+                        if (isWater)
+                        {
+                            if (!inSpan)
+                            {
+                                inSpan = true;
+                                spanBottomWorld = worldMin.y + localY * blockScale;
+                            }
+                            continue;
+                        }
+
+                        if (!inSpan)
+                        {
+                            continue;
+                        }
+
+                        if (field.spanCount >= kMaxWaterSpansPerColumn)
+                        {
+                            failed = true;
+                            break;
+                        }
+
+                        WaterSpan& span = field.spans[field.spanCount++];
+                        span.bottomY = spanBottomWorld;
+                        span.topY = worldMin.y + (localY * blockScale) - 1;
+                        span.material = static_cast<std::uint32_t>(BlockId::Water);
+                        inSpan = false;
+                    }
+
+                    if (failed)
+                    {
+                        break;
+                    }
+
+                    if (inSpan)
+                    {
+                        if (field.spanCount >= kMaxWaterSpansPerColumn)
+                        {
+                            failed = true;
+                            break;
+                        }
+
+                        WaterSpan& span = field.spans[field.spanCount++];
+                        span.bottomY = spanBottomWorld;
+                        span.topY = worldMin.y + ((kLogicalSize - 1) * blockScale) + (blockScale - 1);
+                        span.material = static_cast<std::uint32_t>(BlockId::Water);
+                    }
+                }
+            }
+
+            if (failed || !hasChunkWater)
+            {
+                continue;
+            }
+
+            std::vector<WaterQuadDescriptor> quads;
+            glm::vec3 boundsMin(0.0f);
+            glm::vec3 boundsMax(0.0f);
+            bool boundsValid = false;
+
+            struct TopMaskCell
+            {
+                bool exists{false};
+                WaterSpan span{};
+            };
+
+            for (std::uint32_t spanSlot = 0; spanSlot < kMaxWaterSpansPerColumn; ++spanSlot)
+            {
+                std::array<TopMaskCell, static_cast<std::size_t>(kLogicalSize * kLogicalSize)> mask{};
+                const auto maskIndex = [](int localX, int localZ) noexcept
+                {
+                    return static_cast<std::size_t>(localZ * kLogicalSize + localX);
+                };
+
+                for (int localZ = 0; localZ < kLogicalSize; ++localZ)
+                {
+                    for (int localX = 0; localX < kLogicalSize; ++localX)
+                    {
+                        const WaterColumnField& field = fields[haloColumnIndex(localX, localZ)];
+                        if (field.spanCount <= spanSlot)
+                        {
+                            continue;
+                        }
+
+                        const WaterSpan& span = field.spans[spanSlot];
+                        const int topLocalY = (span.topY - worldMin.y) / blockScale;
+                        if (isWaterVoxel(localX, topLocalY + 1, localZ))
+                        {
+                            continue;
+                        }
+
+                        TopMaskCell& cell = mask[maskIndex(localX, localZ)];
+                        cell.exists = true;
+                        cell.span = span;
+                    }
+                }
+
+                for (int localZ = 0; localZ < kLogicalSize; ++localZ)
+                {
+                    int localX = 0;
+                    while (localX < kLogicalSize)
+                    {
+                        TopMaskCell& cell = mask[maskIndex(localX, localZ)];
+                        if (!cell.exists)
+                        {
+                            ++localX;
+                            continue;
+                        }
+
+                        int width = 1;
+                        while (localX + width < kLogicalSize)
+                        {
+                            const TopMaskCell& next = mask[maskIndex(localX + width, localZ)];
+                            if (!next.exists ||
+                                next.span.bottomY != cell.span.bottomY ||
+                                next.span.topY != cell.span.topY ||
+                                next.span.material != cell.span.material)
+                            {
+                                break;
+                            }
+                            ++width;
+                        }
+
+                        int height = 1;
+                        while (localZ + height < kLogicalSize)
+                        {
+                            bool rowMatches = true;
+                            for (int offsetX = 0; offsetX < width; ++offsetX)
+                            {
+                                const TopMaskCell& next = mask[maskIndex(localX + offsetX, localZ + height)];
+                                if (!next.exists ||
+                                    next.span.bottomY != cell.span.bottomY ||
+                                    next.span.topY != cell.span.topY ||
+                                    next.span.material != cell.span.material)
+                                {
+                                    rowMatches = false;
+                                    break;
+                                }
+                            }
+                            if (!rowMatches)
+                            {
+                                break;
+                            }
+                            ++height;
+                        }
+
+                        appendWaterQuad(quads,
+                                        glm::vec3(static_cast<float>(worldMin.x + localX * blockScale),
+                                                  static_cast<float>(cell.span.topY + 1),
+                                                  static_cast<float>(worldMin.z + localZ * blockScale)),
+                                        glm::vec3(static_cast<float>(width * blockScale), 0.0f, 0.0f),
+                                        glm::vec3(0.0f, 0.0f, static_cast<float>(height * blockScale)),
+                                        glm::vec3(0.0f, 1.0f, 0.0f),
+                                        static_cast<float>(cell.span.topY),
+                                        static_cast<float>(cell.span.bottomY),
+                                        kWaterQuadFaceTop,
+                                        topUv.first,
+                                        topUv.second,
+                                        boundsValid,
+                                        boundsMin,
+                                        boundsMax);
+
+                        for (int clearZ = 0; clearZ < height; ++clearZ)
+                        {
+                            for (int clearX = 0; clearX < width; ++clearX)
+                            {
+                                mask[maskIndex(localX + clearX, localZ + clearZ)].exists = false;
+                            }
+                        }
+
+                        localX += width;
+                    }
+                }
+            }
+
+            std::vector<std::pair<int, int>> visibleIntervals;
+            const std::array<glm::ivec2, 4> neighborOffsets{
+                glm::ivec2(1, 0),
+                glm::ivec2(-1, 0),
+                glm::ivec2(0, 1),
+                glm::ivec2(0, -1)};
+            const std::array<glm::vec3, 4> normals{
+                glm::vec3(1.0f, 0.0f, 0.0f),
+                glm::vec3(-1.0f, 0.0f, 0.0f),
+                glm::vec3(0.0f, 0.0f, 1.0f),
+                glm::vec3(0.0f, 0.0f, -1.0f)};
+
+            for (int localZ = 0; localZ < kLogicalSize; ++localZ)
+            {
+                for (int localX = 0; localX < kLogicalSize; ++localX)
+                {
+                    const WaterColumnField& field = fields[haloColumnIndex(localX, localZ)];
+                    for (std::uint8_t spanIndex = 0; spanIndex < field.spanCount; ++spanIndex)
+                    {
+                        const WaterSpan& span = field.spans[spanIndex];
+                        const int worldX = worldMin.x + localX * blockScale;
+                        const int worldZ = worldMin.z + localZ * blockScale;
+
+                        for (int faceIndex = 0; faceIndex < 4; ++faceIndex)
+                        {
+                            const glm::ivec2 offset = neighborOffsets[faceIndex];
+                            const WaterColumnField& neighborField =
+                                fields[haloColumnIndex(localX + offset.x, localZ + offset.y)];
+
+                            visibleIntervals.clear();
+                            visibleIntervals.emplace_back(span.bottomY, span.topY);
+                            for (std::uint8_t neighborSpanIndex = 0; neighborSpanIndex < neighborField.spanCount; ++neighborSpanIndex)
+                            {
+                                const WaterSpan& neighborSpan = neighborField.spans[neighborSpanIndex];
+                                std::vector<std::pair<int, int>> next;
+                                next.reserve(visibleIntervals.size() + 1u);
+                                for (const auto& interval : visibleIntervals)
+                                {
+                                    const int overlapBottom = std::max(interval.first, neighborSpan.bottomY);
+                                    const int overlapTop = std::min(interval.second, neighborSpan.topY);
+                                    if (overlapBottom > overlapTop)
+                                    {
+                                        next.push_back(interval);
+                                        continue;
+                                    }
+                                    if (interval.first < overlapBottom)
+                                    {
+                                        next.emplace_back(interval.first, overlapBottom - 1);
+                                    }
+                                    if (overlapTop < interval.second)
+                                    {
+                                        next.emplace_back(overlapTop + 1, interval.second);
+                                    }
+                                }
+                                visibleIntervals.swap(next);
+                                if (visibleIntervals.empty())
+                                {
+                                    break;
+                                }
+                            }
+
+                            for (const auto& interval : visibleIntervals)
+                            {
+                                const float bottom = static_cast<float>(interval.first);
+                                const float top = static_cast<float>(interval.second);
+                                const glm::vec3 axisU(0.0f, top - bottom + 1.0f, 0.0f);
+                                glm::vec3 origin(0.0f);
+                                glm::vec3 axisV(0.0f);
+                                switch (faceIndex)
+                                {
+                                case 0:
+                                    origin = glm::vec3(worldX + blockScale, interval.first, worldZ);
+                                    axisV = glm::vec3(0.0f, 0.0f, static_cast<float>(blockScale));
+                                    break;
+                                case 1:
+                                    origin = glm::vec3(worldX, interval.first, worldZ + blockScale);
+                                    axisV = glm::vec3(0.0f, 0.0f, static_cast<float>(-blockScale));
+                                    break;
+                                case 2:
+                                    origin = glm::vec3(worldX + blockScale, interval.first, worldZ + blockScale);
+                                    axisV = glm::vec3(static_cast<float>(-blockScale), 0.0f, 0.0f);
+                                    break;
+                                case 3:
+                                default:
+                                    origin = glm::vec3(worldX, interval.first, worldZ);
+                                    axisV = glm::vec3(static_cast<float>(blockScale), 0.0f, 0.0f);
+                                    break;
+                                }
+
+                                appendWaterQuad(quads,
+                                                origin,
+                                                axisU,
+                                                axisV,
+                                                normals[faceIndex],
+                                                top,
+                                                bottom,
+                                                kWaterQuadFaceWall,
+                                                sideUv.first,
+                                                sideUv.second,
+                                                boundsValid,
+                                                boundsMin,
+                                                boundsMax);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (quads.empty() || !boundsValid)
+            {
+                continue;
+            }
+
+            const std::uint64_t bufferBytes =
+                static_cast<std::uint64_t>(quads.size() * sizeof(GpuWaterQuadDescriptor));
+            std::byte* mapped = nullptr;
+            Microsoft::WRL::ComPtr<ID3D12Resource> buffer =
+                createUploadBuffer(device_.Get(), bufferBytes, mapped);
+            if (buffer == nullptr || mapped == nullptr)
+            {
+                continue;
+            }
+
+            auto* gpuDescriptors = reinterpret_cast<GpuWaterQuadDescriptor*>(mapped);
+            for (std::size_t i = 0; i < quads.size(); ++i)
+            {
+                gpuDescriptors[i] = packWaterQuadDescriptor(quads[i]);
+            }
+            buffer->Unmap(0, nullptr);
+            frameWaterDescriptorBuffers_.push_back(buffer);
+            batches.push_back(WaterRenderBatch{
+                frameWaterDescriptorBuffers_.back().Get(),
+                static_cast<std::uint32_t>(quads.size()),
+                boundsMin,
+                boundsMax});
+        }
+
         return batches;
     }
 
@@ -5920,7 +6415,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> worldgenPermutationBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> blockUvBuffer_;
     std::uint32_t blockUvCount_{0};
+    std::vector<GpuBlockFaceUv> blockUvTableCpu_;
     Microsoft::WRL::ComPtr<ID3D12Resource> emptyVoxelBuffer_;
+    mutable std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> frameWaterDescriptorBuffers_;
     std::unordered_map<int, FarLodLevelAtlasState> levelAtlases_;
     std::uint64_t atlasRevisionCounter_{1};
     mutable std::mutex structureRegionMutex_;

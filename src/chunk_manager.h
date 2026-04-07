@@ -199,6 +199,60 @@ struct LightSample
     std::uint8_t block{0};
 };
 
+inline constexpr std::uint32_t kMaxWaterSpansPerColumn = 4u;
+
+struct WaterSpan
+{
+    std::int32_t bottomY{0};
+    std::int32_t topY{-1};
+    std::uint32_t material{0};
+};
+
+struct WaterColumnField
+{
+    std::uint8_t spanCount{0};
+    std::array<WaterSpan, kMaxWaterSpansPerColumn> spans{};
+};
+
+struct WaterQuadDescriptor
+{
+    glm::vec3 origin{0.0f};
+    float topY{0.0f};
+    glm::vec3 axisU{0.0f};
+    float bottomY{0.0f};
+    glm::vec3 axisV{0.0f};
+    std::uint32_t faceKind{0};
+    glm::vec3 normal{0.0f};
+    float reserved{0.0f};
+    glm::vec2 atlasBase{0.0f};
+    glm::vec2 atlasSize{1.0f};
+};
+
+struct GpuWaterQuadDescriptor
+{
+    glm::vec4 originTop{0.0f};
+    glm::vec4 axisUBottom{0.0f};
+    glm::vec4 axisVFaceKind{0.0f};
+    glm::vec4 normalAtlasBaseX{0.0f};
+    glm::vec4 atlasRest{0.0f};
+};
+
+struct WaterRenderBatch
+{
+    ID3D12Resource* descriptorBuffer{nullptr};
+    std::uint32_t quadCount{0};
+    glm::vec3 boundsMin{0.0f};
+    glm::vec3 boundsMax{0.0f};
+};
+
+struct ExactWaterRenderBatch
+{
+    ID3D12Resource* descriptorBuffer{nullptr};
+    std::uint32_t quadCount{0};
+    glm::vec3 boundsMin{0.0f};
+    glm::vec3 boundsMax{0.0f};
+};
+
 struct ChunkRenderBatch
 {
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView{};
@@ -277,11 +331,15 @@ struct WorldRenderData
     std::vector<ChunkRenderBatch> nearBatches;
     std::vector<ExactChunkRenderBatch> exactNearBatches;
     std::vector<ChunkRenderBatch> farBatches;
+    std::vector<WaterRenderBatch> nearWaterBatches;
+    std::vector<ExactWaterRenderBatch> exactWaterBatches;
+    std::vector<WaterRenderBatch> farWaterBatches;
     std::vector<MobRenderBatch> mobBatches;
     std::vector<WorldVertex> editOverlayVertices;
     std::vector<std::uint32_t> editOverlayIndices;
     ID3D12Resource* exactBlockUvBuffer{nullptr};
     std::uint32_t exactBlockUvCount{0};
+    bool cameraSubmergedInWater{false};
 };
 
 struct RenderDistanceSettings

@@ -2387,6 +2387,55 @@ void Renderer::createPipelines()
                                                IID_PPV_ARGS(&exactWorldRootSignature_)),
                   "failed to create exact world root signature");
 
+    std::array<D3D12_ROOT_PARAMETER, 6> waterRootParams{};
+    waterRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    waterRootParams[0].Descriptor.ShaderRegister = 0;
+    waterRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    waterRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    waterRootParams[1].Descriptor.ShaderRegister = 0;
+    waterRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    waterRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    waterRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    waterRootParams[2].DescriptorTable.pDescriptorRanges = &worldAtlasRange;
+    waterRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    waterRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    waterRootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    waterRootParams[3].DescriptorTable.pDescriptorRanges = &worldAerialRange;
+    waterRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    waterRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    waterRootParams[4].DescriptorTable.NumDescriptorRanges = 1;
+    waterRootParams[4].DescriptorTable.pDescriptorRanges = &worldShadowRange;
+    waterRootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    waterRootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    waterRootParams[5].DescriptorTable.NumDescriptorRanges = 1;
+    waterRootParams[5].DescriptorTable.pDescriptorRanges = &worldSkyBackgroundRange;
+    waterRootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC waterRootDesc{};
+    waterRootDesc.NumParameters = static_cast<UINT>(waterRootParams.size());
+    waterRootDesc.pParameters = waterRootParams.data();
+    waterRootDesc.NumStaticSamplers = static_cast<UINT>(worldSamplers.size());
+    waterRootDesc.pStaticSamplers = worldSamplers.data();
+    waterRootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    serializedRoot.Reset();
+    errors.Reset();
+    throwIfFailed(D3D12SerializeRootSignature(&waterRootDesc,
+                                              D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &serializedRoot,
+                                              &errors),
+                  "failed to serialize water root signature");
+    throwIfFailed(device_->CreateRootSignature(0,
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&waterRootSignature_)),
+                  "failed to create water root signature");
+    throwIfFailed(device_->CreateRootSignature(0,
+                                               serializedRoot->GetBufferPointer(),
+                                               serializedRoot->GetBufferSize(),
+                                               IID_PPV_ARGS(&exactWaterRootSignature_)),
+                  "failed to create exact water root signature");
+
     D3D12_DESCRIPTOR_RANGE fullscreenRange0{};
     fullscreenRange0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     fullscreenRange0.NumDescriptors = 1;
@@ -2447,6 +2496,8 @@ void Renderer::createPipelines()
         loadShaderBytecode(shaderPath("world_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> exactWorldVs =
         loadShaderBytecode(shaderPath("exact_world_vs.hlsl"), "main", "vs_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> waterVs =
+        loadShaderBytecode(shaderPath("water_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> mobVs =
         loadShaderBytecode(shaderPath("mob_vs.hlsl"), "main", "vs_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> blockOutlineVs =
@@ -2459,6 +2510,8 @@ void Renderer::createPipelines()
         loadShaderBytecode(shaderPath("shadow_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> nearPs =
         loadShaderBytecode(shaderPath("world_near_ps.hlsl"), "main", "ps_5_0");
+    Microsoft::WRL::ComPtr<ID3DBlob> waterPs =
+        loadShaderBytecode(shaderPath("water_ps.hlsl"), "main", "ps_5_0");
     Microsoft::WRL::ComPtr<ID3DBlob> translucentPs =
         loadShaderBytecode(shaderPath("world_translucent_ps.hlsl"), "main", "ps_5_0");
       Microsoft::WRL::ComPtr<ID3DBlob> farPs =
@@ -2613,6 +2666,43 @@ void Renderer::createPipelines()
     throwIfFailed(device_->CreateGraphicsPipelineState(&exactTranslucentWorldPso,
                                                        IID_PPV_ARGS(&exactNearTranslucentPipelineState_)),
                   "failed to create exact near translucent pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC waterPso = worldPso;
+    waterPso.InputLayout = {nullptr, 0};
+    waterPso.pRootSignature = waterRootSignature_.Get();
+    waterPso.VS = {waterVs->GetBufferPointer(), waterVs->GetBufferSize()};
+    waterPso.PS = {waterPs->GetBufferPointer(), waterPs->GetBufferSize()};
+    waterPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    waterPso.BlendState.AlphaToCoverageEnable = FALSE;
+    waterPso.BlendState.IndependentBlendEnable = FALSE;
+    waterPso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    waterPso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    waterPso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    waterPso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    waterPso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    waterPso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    waterPso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    waterPso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    waterPso.NumRenderTargets = 1;
+    waterPso.RTVFormats[0] = kSceneColorFormat;
+    waterPso.DepthStencilState.DepthEnable = TRUE;
+    waterPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    waterPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    throwIfFailed(device_->CreateGraphicsPipelineState(&waterPso,
+                                                       IID_PPV_ARGS(&nearWaterPipelineState_)),
+                  "failed to create near water pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC exactWaterPso = waterPso;
+    exactWaterPso.pRootSignature = exactWaterRootSignature_.Get();
+    throwIfFailed(device_->CreateGraphicsPipelineState(&exactWaterPso,
+                                                       IID_PPV_ARGS(&exactWaterPipelineState_)),
+                  "failed to create exact water pipeline");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC farWaterPso = waterPso;
+    farWaterPso.pRootSignature = waterRootSignature_.Get();
+    throwIfFailed(device_->CreateGraphicsPipelineState(&farWaterPso,
+                                                       IID_PPV_ARGS(&farWaterPipelineState_)),
+                  "failed to create far water pipeline");
 
     worldPso.PS = {farPs->GetBufferPointer(), farPs->GetBufferSize()};
     throwIfFailed(device_->CreateGraphicsPipelineState(&worldPso, IID_PPV_ARGS(&farPipelineState_)),
@@ -3890,6 +3980,36 @@ void Renderer::renderExactBatchGpuCull(const ExactChunkRenderBatch& batch,
                                   0);
 }
 
+void Renderer::renderWaterBatch(ID3D12PipelineState* pipelineState,
+                                ID3D12RootSignature* rootSignature,
+                                D3D12_GPU_VIRTUAL_ADDRESS constantsGpuAddress,
+                                D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv,
+                                D3D12_GPU_DESCRIPTOR_HANDLE aerialPerspectiveSrv,
+                                D3D12_GPU_DESCRIPTOR_HANDLE shadowSrv,
+                                D3D12_GPU_DESCRIPTOR_HANDLE skyBackgroundSrv,
+                                ID3D12Resource* descriptorBuffer,
+                                std::uint32_t quadCount)
+{
+    if (pipelineState == nullptr ||
+        rootSignature == nullptr ||
+        descriptorBuffer == nullptr ||
+        quadCount == 0u)
+    {
+        return;
+    }
+
+    commandList_->SetGraphicsRootSignature(rootSignature);
+    commandList_->SetPipelineState(pipelineState);
+    commandList_->SetGraphicsRootConstantBufferView(0, constantsGpuAddress);
+    commandList_->SetGraphicsRootShaderResourceView(1, descriptorBuffer->GetGPUVirtualAddress());
+    commandList_->SetGraphicsRootDescriptorTable(2, atlasSrv);
+    commandList_->SetGraphicsRootDescriptorTable(3, aerialPerspectiveSrv);
+    commandList_->SetGraphicsRootDescriptorTable(4, shadowSrv);
+    commandList_->SetGraphicsRootDescriptorTable(5, skyBackgroundSrv);
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->DrawInstanced(6u, quadCount, 0u, 0u);
+}
+
 std::string Renderer::collectDebugMessages() const
 {
     return collectRendererInfoQueueMessages();
@@ -4163,7 +4283,10 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                                             static_cast<float>(static_cast<int>(environment.debug.terrainDebugView)),
                                             skyPassEnabled ? 1.0f : 0.0f,
                                             environment.debug.aoIntensity);
-    nearConstants->translucencyParams = glm::vec4(0.35f, 0.0f, 0.0f, 0.0f);
+    nearConstants->translucencyParams = glm::vec4(0.35f,
+                                                  renderData.cameraSubmergedInWater ? 1.0f : 0.0f,
+                                                  0.0f,
+                                                  0.0f);
     const D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = depthDsv_;
 
     const auto drawBaseSkyToTarget = [&](D3D12_CPU_DESCRIPTOR_HANDLE rtv,
@@ -4688,6 +4811,84 @@ void Renderer::renderWorld(const WorldRenderData& renderData,
                            sceneColorState_,
                            cloudPipelineState_.Get(),
                            true);
+    }
+
+    if (!renderData.nearWaterBatches.empty() ||
+        !renderData.exactWaterBatches.empty() ||
+        !renderData.farWaterBatches.empty())
+    {
+        if (sceneColorState_ != D3D12_RESOURCE_STATE_RENDER_TARGET)
+        {
+            const D3D12_RESOURCE_BARRIER barrier =
+                transitionBarrier(sceneColor_.Get(), sceneColorState_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandList_->ResourceBarrier(1, &barrier);
+            sceneColorState_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+
+        commandList_->OMSetRenderTargets(1, &sceneColorRtv_, FALSE, &depthHandle);
+        commandList_->RSSetViewports(1, &viewport_);
+        commandList_->RSSetScissorRects(1, &scissorRect_);
+
+        void* farWaterCpu = nullptr;
+        const std::uint64_t farWaterCb = allocateFrameConstantBytes(sizeof(WorldConstants), &farWaterCpu);
+        auto* farWaterConstants = static_cast<WorldConstants*>(farWaterCpu);
+        *farWaterConstants = *nearConstants;
+        farWaterConstants->shadowParams.w = 0.0f;
+
+        const auto waterStart = std::chrono::steady_clock::now();
+        for (const WaterRenderBatch& batch : renderData.nearWaterBatches)
+        {
+            if (batch.descriptorBuffer == nullptr || batch.quadCount == 0u)
+            {
+                continue;
+            }
+            ++profilingSnapshot_.waterDrawCount;
+            renderWaterBatch(nearWaterPipelineState_.Get(),
+                             waterRootSignature_.Get(),
+                             worldCb,
+                             atlasTexture.srvGpu,
+                             atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                             shadowMapSrvGpu_,
+                             skyBackgroundSrvGpu_,
+                             batch.descriptorBuffer,
+                             batch.quadCount);
+        }
+        for (const ExactWaterRenderBatch& batch : renderData.exactWaterBatches)
+        {
+            if (batch.descriptorBuffer == nullptr || batch.quadCount == 0u)
+            {
+                continue;
+            }
+            ++profilingSnapshot_.waterDrawCount;
+            renderWaterBatch(exactWaterPipelineState_.Get(),
+                             exactWaterRootSignature_.Get(),
+                             worldCb,
+                             atlasTexture.srvGpu,
+                             atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                             shadowMapSrvGpu_,
+                             skyBackgroundSrvGpu_,
+                             batch.descriptorBuffer,
+                             batch.quadCount);
+        }
+        for (const WaterRenderBatch& batch : renderData.farWaterBatches)
+        {
+            if (batch.descriptorBuffer == nullptr || batch.quadCount == 0u)
+            {
+                continue;
+            }
+            ++profilingSnapshot_.waterDrawCount;
+            renderWaterBatch(farWaterPipelineState_.Get(),
+                             waterRootSignature_.Get(),
+                             farWaterCb,
+                             atlasTexture.srvGpu,
+                             atmosphere_ ? atmosphere_->aerialPerspectiveSrv() : sceneColorSrvGpu_,
+                             shadowMapSrvGpu_,
+                             skyBackgroundSrvGpu_,
+                             batch.descriptorBuffer,
+                             batch.quadCount);
+        }
+        profilingSnapshot_.waterMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waterStart).count();
     }
 
     if (translucencyAccum_ != nullptr && translucencyReveal_ != nullptr)

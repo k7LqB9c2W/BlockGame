@@ -18,7 +18,7 @@ Scope:
 - Terrain shape, biome blending, or worldgen tuning: start with `src/terrain/`, then read `assets/worldgen.toml` and `assets/biomes/`.
 - Exact chunk loading, block edits, lighting propagation, or startup streaming: start with `src/chunk_manager.h`, `src/chunk_manager.cpp`, and `src/chunk_manager_support.h`.
 - Far distance terrain or horizon continuity: start with `src/chunk_manager_far_terrain.inl`, `src/chunk_manager_gpu_contexts.inl`, `src/terrain/far_lod_worldgen.*`, and the `assets/shaders/far_lod_*` plus `assets/shaders/lod_gpu_cull.hlsl` files.
-- Renderer, fog, sky, atmosphere, or tone mapping: start with `src/renderer.h`, `src/renderer.cpp`, and `assets/shaders/`.
+- Renderer, fog, sky, atmosphere, tone mapping, or the dedicated water pass: start with `src/renderer.h`, `src/renderer.cpp`, and `assets/shaders/`.
 - Player controls, UI toggles, teleport, or debug windows: start with `src/main.cpp`, `src/input_context.*`, and `src/camera.*`.
 - Mob import, animation, or AI: start with `src/mob_model.*`, `src/mob_system.*`, and `assets/mobs/`.
 - Benchmarks, capture automation, or reproducible screenshots: start with `src/main.cpp` benchmark/capture structs and the `tools/` PowerShell/Python helpers.
@@ -80,6 +80,12 @@ Scope:
   `MobVertex`
   `BlockTextureAtlasConfig`
   `LightSample`
+  `WaterSpan`
+  `WaterColumnField`
+  `WaterQuadDescriptor`
+  `GpuWaterQuadDescriptor`
+  `WaterRenderBatch`
+  `ExactWaterRenderBatch`
   `ChunkRenderBatch`
   `ExactChunkRenderBatch`
   `MobRenderBatch`
@@ -134,6 +140,7 @@ Scope:
   Major responsibilities inside this file:
   exact chunk lifecycle and startup preload
   CPU terrain generation and chunk meshing
+  dedicated water span extraction and water-quad resource builds for near/exact chunks
   exact-GPU chunk descriptor/synthesis/light/emit orchestration
   chunk upload, commit, and residency page management
   relighting, skylight propagation, and block-light debug
@@ -198,7 +205,7 @@ Scope:
   `GpuStructureRegionState`
   `FarLodChunkCpu`
   `FarLodChunkGpuState`
-  This file owns far-LOD tile levels, CPU/GPU shell state, distant structure injection, and far draw record residency.
+  This file owns far-LOD tile levels, CPU/GPU shell state, distant structure injection, far draw record residency, and far water batch extraction.
 
 - `src/lod_page_compute_context.inl`: standalone compute-context helper for the older page-based LOD synthesis path.
   Main component names:
@@ -327,10 +334,13 @@ Scope:
   command queues and frame resources
   descriptor heaps and SRV allocation
   depth buffer, depth pyramid, and shadow map resources
-  pipeline creation for terrain, exact terrain, mobs, sky, clouds, tonemap, cull, and indirect draws
+  pipeline creation for terrain, exact terrain, dedicated water, mobs, sky, clouds, tonemap, cull, and indirect draws
   GPU culling for far batches and exact batches
   screenshot readback
   atmosphere LUT generation and sky rendering
+
+- `assets/shaders/water_vs.hlsl`: dedicated water quad expansion vertex shader shared by near, exact, and far water batches.
+- `assets/shaders/water_ps.hlsl`: dedicated water pixel shader that keeps the existing tint/fresnel/fog look without using OIT.
 
 - `src/shader_manifest.h`: shader build manifest and compiled shader naming helpers.
   Main component names:

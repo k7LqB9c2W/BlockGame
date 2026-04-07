@@ -16529,7 +16529,7 @@ bool ChunkManager::Impl::processStructureRegionDependencyJob()
 
         for (const glm::ivec2& pageKey : missingPageKeys)
         {
-            requestWorldgenPageDependency(pageKey, priority, false, true, serviceClass);
+            requestWorldgenPageDependency(pageKey, priority, false, false, serviceClass);
         }
 
         std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
@@ -18303,7 +18303,7 @@ bool ChunkManager::Impl::requestStructureRegionDependency(const StructureRegionK
         if (!tryGetReadyWorldgenPage(pageKey))
         {
             missingPageKeys.push_back(pageKey);
-            requestWorldgenPageDependency(pageKey, priority, false, true, serviceClass);
+            requestWorldgenPageDependency(pageKey, priority, false, false, serviceClass);
         }
     }
 

@@ -5539,6 +5539,8 @@ private:
                                                     const ColumnChunkIntervals& oldIntervals);
     void refreshStreamingFrontierCoverageCountsLocked();
     void updateExactCoverageCountsLocked(ExactCoverageCacheState& state);
+    [[nodiscard]] bool exactCoverageCommittedWithinRadiusLocked(const ExactCoverageCacheState& state,
+                                                                int radius) const;
     void updatePlayerSafetyOverlay(const glm::ivec3& center,
                                    int verticalRadius,
                                    bool reconciling);
@@ -7793,7 +7795,15 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (startupEnabled_ && startupState_.preloadStarted)
     {
         const bool exactOnlyMode = renderSettings_.totalChunks <= renderSettings_.exactChunks;
-        const bool exactCoverageCommittedForCurrentWindow = !exactCoverageCache_.reconciling;
+        bool schedulingCoverageCommitted = false;
+        bool configuredCoverageCommitted = false;
+        {
+            std::lock_guard<std::mutex> lock(exactPlanMutex_);
+            schedulingCoverageCommitted =
+                exactCoverageCommittedWithinRadiusLocked(exactCoverageCache_, targetViewDistance_);
+            configuredCoverageCommitted =
+                exactCoverageCommittedWithinRadiusLocked(exactCoverageCache_, renderSettings_.exactChunks);
+        }
         const bool nearReady = missingChunks == 0;
         const bool protectedCoverageReady =
             visibleCoverage.protectedRequired <= 0 || visibleCoverage.protectedMissing == 0;
@@ -7819,17 +7829,15 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         // ramp can plateau below the configured exact radius while outer rings stay
         // unscheduled waiting for the near-upload queue to drain almost completely.
         const bool exactRampReady =
-            exactCoverageCommittedForCurrentWindow &&
             (exactOnlyMode ? schedulingCoverageMostlyReady
-                           : (uploadReady && nearReleaseReady));
-        const bool exactReleaseReady =
-            exactCoverageCommittedForCurrentWindow &&
-            uploadReady &&
+                           : (configuredCoverageCommitted && uploadReady && nearReleaseReady)) &&
+            (exactOnlyMode ? schedulingCoverageCommitted : true);
+        const bool exactReleaseReady = uploadReady &&
             (exactOnlyMode
                  ? ((targetViewDistance_ < renderSettings_.exactChunks)
-                        ? nearReleaseReady
-                        : configuredCoverageMostlyReady)
-                 : nearReleaseReady);
+                        ? (schedulingCoverageCommitted && nearReleaseReady)
+                        : (configuredCoverageCommitted && configuredCoverageMostlyReady))
+                 : (configuredCoverageCommitted && nearReleaseReady));
         switch (startupState_.phase)
         {
         case StreamingPhase::ExactPreload:
@@ -15097,6 +15105,81 @@ void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState
     }
     state.authoritativeCountsValid = true;
     state.reconciling = !noCoverageWorkQueued;
+}
+
+bool ChunkManager::Impl::exactCoverageCommittedWithinRadiusLocked(const ExactCoverageCacheState& state,
+                                                                  int radius) const
+{
+    if (!state.active)
+    {
+        return false;
+    }
+
+    const int clampedRadius = std::clamp(radius, 0, state.trackedRadiusChunks);
+    const auto columnWithinRadius = [&state, clampedRadius](const glm::ivec2& column) noexcept
+    {
+        return std::abs(column.x - state.centerColumn.x) <= clampedRadius &&
+               std::abs(column.y - state.centerColumn.y) <= clampedRadius;
+    };
+
+    for (int dz = -clampedRadius; dz <= clampedRadius; ++dz)
+    {
+        for (int dx = -clampedRadius; dx <= clampedRadius; ++dx)
+        {
+            const glm::ivec2 column{state.centerColumn.x + dx, state.centerColumn.y + dz};
+            const auto it = state.columnSummaries.find(column);
+            if (it == state.columnSummaries.end() || !it->second.authoritative)
+            {
+                return false;
+            }
+        }
+    }
+
+    for (const glm::ivec2& column : state.batch.pendingColumns)
+    {
+        if (columnWithinRadius(column))
+        {
+            return false;
+        }
+    }
+    for (const glm::ivec2& column : state.batch.queuedColumns)
+    {
+        if (columnWithinRadius(column))
+        {
+            return false;
+        }
+    }
+    for (const glm::ivec2& column : state.dirtyColumns)
+    {
+        if (columnWithinRadius(column))
+        {
+            return false;
+        }
+    }
+
+    const ExactWindowKey radiusWindowKey{
+        state.centerColumn,
+        state.cameraChunkY,
+        clampedRadius,
+        clampedRadius,
+        clampedRadius,
+        state.verticalRadius};
+    for (const glm::ivec2& pageKey : state.dirtyPages)
+    {
+        if (windowOverlapsWorldgenPage(radiusWindowKey, pageKey))
+        {
+            return false;
+        }
+    }
+    for (const StructureRegionKey& regionKey : state.dirtyRegions)
+    {
+        if (windowOverlapsStructureRegion(radiusWindowKey, regionKey))
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,

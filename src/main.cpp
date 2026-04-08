@@ -234,6 +234,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     bool enableGpuValidation = false;
     bool enableLodVisibilityDebug = false;
     bool enableExactUploadDebug = false;
+    bool enableExactPlanDebug = false;
     bool enableExactDependencyStallDebug = false;
     bool enableRendererTimingCapture = false;
     bool enableTerrainLogDebug = false;
@@ -278,9 +279,16 @@ void applyLaunchDebugOptions(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--exact-plan-debug" || arg == "--chunk-plan-debug")
+        {
+            enableExactPlanDebug = true;
+            continue;
+        }
+
         if (arg == "--exact-stall-capture" || arg == "--chunk-stall-capture")
         {
             enableExactUploadDebug = true;
+            enableExactPlanDebug = true;
             enableExactDependencyStallDebug = true;
             continue;
         }
@@ -312,6 +320,7 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (!enableGpuDebug &&
         !enableLodVisibilityDebug &&
         !enableExactUploadDebug &&
+        !enableExactPlanDebug &&
         !enableExactDependencyStallDebug &&
         !enableRendererTimingCapture &&
         !enableTerrainLogDebug)
@@ -353,6 +362,14 @@ void applyLaunchDebugOptions(int argc, char** argv)
         resetDebugLogFile("BLOCKGAME_EXACT_UPLOAD_DEBUG_FILE",
                           "exactuploaddebug.log",
                           "exact upload debug enabled");
+    }
+
+    if (enableExactPlanDebug)
+    {
+        setProcessEnvironmentVariable("BLOCKGAME_EXACT_PLAN_DEBUG", "1");
+        resetDebugLogFile("BLOCKGAME_EXACT_PLAN_DEBUG_FILE",
+                          "exactplandebug.log",
+                          "exact plan debug enabled");
     }
 
     if (enableExactDependencyStallDebug)
@@ -401,6 +418,10 @@ void applyLaunchDebugOptions(int argc, char** argv)
     if (enableExactUploadDebug)
     {
         enabledOptions.emplace_back("exact upload debug (exactuploaddebug.log)");
+    }
+    if (enableExactPlanDebug)
+    {
+        enabledOptions.emplace_back("exact plan debug (exactplandebug.log)");
     }
     if (enableExactDependencyStallDebug)
     {

@@ -1326,6 +1326,8 @@ void chunkManagerDebugLog(const std::string& message);
 void exactUploadDebugLog(const std::string& message);
 [[nodiscard]] bool lodVisibilityDebugLoggingEnabled() noexcept;
 void lodVisibilityDebugLog(const std::string& message);
+[[nodiscard]] bool exactPlanDebugLoggingEnabled() noexcept;
+void exactPlanDebugLog(const std::string& message);
 [[nodiscard]] bool exactDependencyStallDebugLoggingEnabled() noexcept;
 void exactDependencyStallDebugLog(const std::string& message);
 [[nodiscard]] std::string hexU32(std::uint32_t value);
@@ -1527,6 +1529,27 @@ void lodVisibilityDebugLog(const std::string& message)
 
     std::cerr << message << std::endl;
     appendDebugLogLine("BLOCKGAME_LOD_VIS_DEBUG_FILE", "loddebug.log", message);
+}
+
+[[nodiscard]] bool exactPlanDebugLoggingEnabled() noexcept
+{
+    static const bool enabled = []()
+    {
+        const char* value = std::getenv("BLOCKGAME_EXACT_PLAN_DEBUG");
+        return value != nullptr && std::string_view(value) != "0" && std::string_view(value) != "false";
+    }();
+    return enabled;
+}
+
+void exactPlanDebugLog(const std::string& message)
+{
+    if (!exactPlanDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    std::cerr << message << std::endl;
+    appendDebugLogLine("BLOCKGAME_EXACT_PLAN_DEBUG_FILE", "exactplandebug.log", message);
 }
 
 [[nodiscard]] bool exactDependencyStallDebugLoggingEnabled() noexcept
@@ -5113,34 +5136,31 @@ private:
         int highestOccupiedChunkY{-1};
         bool supportComplete{true};
     };
-    struct ExactWindowKey
+    struct ExactWindowBuildKey
     {
         glm::ivec2 centerColumn{0};
         int cameraChunkY{0};
         int exactRadius{0};
-        int visibleRadius{0};
         int preloadRadius{0};
         int verticalRadius{0};
 
-        bool operator==(const ExactWindowKey& other) const noexcept
+        bool operator==(const ExactWindowBuildKey& other) const noexcept
         {
             return centerColumn == other.centerColumn &&
                    cameraChunkY == other.cameraChunkY &&
                    exactRadius == other.exactRadius &&
-                   visibleRadius == other.visibleRadius &&
                    preloadRadius == other.preloadRadius &&
                    verticalRadius == other.verticalRadius;
         }
     };
-    struct ExactWindowKeyHasher
+    struct ExactWindowBuildKeyHasher
     {
-        std::size_t operator()(const ExactWindowKey& key) const noexcept
+        std::size_t operator()(const ExactWindowBuildKey& key) const noexcept
         {
             std::size_t hash = std::hash<int>{}(key.centerColumn.x);
             hash ^= std::hash<int>{}(key.centerColumn.y) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
             hash ^= std::hash<int>{}(key.cameraChunkY) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
             hash ^= std::hash<int>{}(key.exactRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
-            hash ^= std::hash<int>{}(key.visibleRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
             hash ^= std::hash<int>{}(key.preloadRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
             hash ^= std::hash<int>{}(key.verticalRadius) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
             return hash;
@@ -5148,8 +5168,6 @@ private:
     };
     struct PlannedChunkEntry
     {
-        bool countedExact{false};
-        bool countedVisible{false};
         bool forceResident{false};
         bool required{true};
     };
@@ -5160,59 +5178,22 @@ private:
         ColumnSlabOccupancy occupancy{};
         bool supportComplete{false};
     };
-    struct ExactCoverageCacheColumnState
-    {
-        ColumnPlanSummary summary{};
-        ColumnChunkIntervals materializedRequiredIntervals{};
-        int requiredChunkCount{0};
-        bool authoritative{false};
-    };
-    struct ExactCoverageCacheBatchState
-    {
-        std::deque<glm::ivec2> pendingColumns{};
-        std::unordered_set<glm::ivec2, ColumnHasher> queuedColumns{};
-        int columnsProcessedLastUpdate{0};
-    };
-    struct ExactCoverageCacheState
-    {
-        bool active{false};
-        glm::ivec2 centerColumn{0};
-        int cameraChunkY{0};
-        int verticalRadius{0};
-        int trackedRadiusChunks{0};
-        std::unordered_map<glm::ivec2, ExactCoverageCacheColumnState, ColumnHasher> columnSummaries{};
-        std::unordered_set<glm::ivec2, ColumnHasher> dirtyColumns{};
-        std::unordered_set<glm::ivec2, ColumnHasher> dirtyPages{};
-        std::unordered_set<StructureRegionKey, StructureRegionKeyHasher> dirtyRegions{};
-        std::array<int, static_cast<std::size_t>(kMaxExactRenderDistanceChunks + 1)> displayRequiredByRadius{};
-        std::array<int, static_cast<std::size_t>(kMaxExactRenderDistanceChunks + 1)> authoritativeRequiredByRadius{};
-        bool authoritativeCountsValid{false};
-        bool reconciling{false};
-        bool lastMovingWindow{true};
-        int lastCoverageColumnsBudget{96};
-        int lastPendingColumnsBeforeUpdate{0};
-        int lastPendingColumnsAfterUpdate{0};
-        int lastQueuedColumnCount{0};
-        int lastDirtyColumnCount{0};
-        int lastDirtyPageCount{0};
-        int lastDirtyRegionCount{0};
-        double lastSmoothedFrameMs{16.0};
-        ExactCoverageCacheBatchState batch{};
-    };
     enum class ExactWindowPlanStatus : std::uint8_t
     {
         Idle = 0,
         Building,
+        WaitingDependencies,
         Ready,
         Failed
     };
     struct ExactWindowPlan
     {
-        ExactWindowKey key{};
+        ExactWindowBuildKey key{};
         std::uint64_t generation{0};
         ExactWindowPlanStatus status{ExactWindowPlanStatus::Idle};
         int exactRequiredCount{0};
-        int visibleRequiredCount{0};
+        std::vector<glm::ivec2> missingWorldgenPages{};
+        std::vector<StructureRegionKey> missingStructureRegions{};
         std::unordered_map<glm::ivec3, PlannedChunkEntry, ChunkHasher> requiredChunks{};
         std::unordered_map<glm::ivec2, ColumnPlanSummary, ColumnHasher> columnSummaries{};
     };
@@ -5220,6 +5201,7 @@ private:
     {
         std::shared_ptr<const ExactWindowPlan> activePlan{};
         bool replanning{false};
+        bool waitingDependencies{false};
     };
     struct RenderSpatialBucketKey
     {
@@ -5516,56 +5498,35 @@ private:
     void trimWorldgenPages();
     void warmWorldgenPagesForChunk(const glm::ivec3& chunkCoord) const;
     void warmWorldgenPagesForColumn(const glm::ivec2& column) const;
-    void resetExactCoverageCache() noexcept;
-    void ensureExactCoverageCache(const glm::ivec3& center,
-                                  int trackedRadius,
-                                  int verticalRadius,
-                                  int schedulingRadius,
-                                  int exactRadius);
-    [[nodiscard]] ColumnPlanSummary buildExactCoverageColumnSummary(const glm::ivec2& column,
-                                                                    const glm::ivec2& cameraColumn,
-                                                                    int cameraChunkY,
-                                                                    int verticalRadius) const;
-    [[nodiscard]] ColumnChunkIntervals materializeRequiredIntervals(const ColumnPlanSummary& summary) const;
-    [[nodiscard]] static int countRequiredChunks(const ColumnChunkIntervals& intervals) noexcept;
-    void syncStreamingFrontierColumnDemandsLocked(const glm::ivec2& column,
-                                                  const ColumnChunkIntervals& oldIntervals,
-                                                  const ColumnChunkIntervals& newIntervals,
-                                                  const ColumnChunkIntervals& forceResidentIntervals,
-                                                  const glm::ivec2& centerColumn,
-                                                  int visibleRadius,
-                                                  int exactRadius);
-    void removeStreamingFrontierColumnDemandsLocked(const glm::ivec2& column,
-                                                    const ColumnChunkIntervals& oldIntervals);
-    void refreshStreamingFrontierCoverageCountsLocked();
-    void updateExactCoverageCountsLocked(ExactCoverageCacheState& state);
-    [[nodiscard]] bool exactCoverageCommittedWithinRadiusLocked(const ExactCoverageCacheState& state,
-                                                                int radius) const;
     void updatePlayerSafetyOverlay(const glm::ivec3& center,
-                                   int verticalRadius,
-                                   bool reconciling);
+                                   const ExactWindowBuildKey& currentKey,
+                                   bool currentKeyCommitted,
+                                   bool rebuildPending);
     void markPlanDirtyColumn(const glm::ivec2& column) const;
     void markPlanDirtyWorldgenPage(const glm::ivec2& pageKey) const;
     void markPlanDirtyStructureRegion(const StructureRegionKey& key) const;
-    void requestExactWindowPlan(const ExactWindowKey& key);
-    void tryCommitReadyExactPlan(const ExactWindowKey& key);
+    void requestExactWindowPlan(const ExactWindowBuildKey& key);
+    void tryCommitReadyExactPlan(const ExactWindowBuildKey& key);
     [[nodiscard]] ExactPlanSnapshot activePlanSnapshot() const;
-    [[nodiscard]] std::shared_ptr<ExactWindowPlan> buildExactWindowPlan(const ExactWindowKey& key,
+    [[nodiscard]] std::shared_ptr<ExactWindowPlan> buildExactWindowPlan(const ExactWindowBuildKey& key,
                                                                         std::uint64_t generation,
                                                                         bool startupCritical) const;
-    void launchExactWindowPlanBuild(const ExactWindowKey& key,
+    void launchExactWindowPlanBuild(const ExactWindowBuildKey& key,
                                     std::uint64_t generation,
                                     bool startupCritical);
     void applyPlanDiff(const std::shared_ptr<const ExactWindowPlan>& oldPlan,
                        const std::shared_ptr<const ExactWindowPlan>& newPlan);
+    [[nodiscard]] bool waitingPlanDependenciesStillOutstanding(const ExactWindowPlan& plan) const;
+    void retagActivePlanFrontierDemands(const glm::ivec3& center, int visibleRadius, int exactRadius);
+    void recomputeStreamingFrontierCoverageCountsLocked();
     void markActiveWindowReplanNeeded(const char* reason = nullptr) const;
-    [[nodiscard]] bool windowContainsColumn(const ExactWindowKey& key,
+    [[nodiscard]] bool windowContainsColumn(const ExactWindowBuildKey& key,
                                             const glm::ivec2& column,
                                             int margin = 0) const noexcept;
-    [[nodiscard]] bool windowOverlapsWorldgenPage(const ExactWindowKey& key,
+    [[nodiscard]] bool windowOverlapsWorldgenPage(const ExactWindowBuildKey& key,
                                                   const glm::ivec2& pageKey,
                                                   int marginChunks = 0) const noexcept;
-    [[nodiscard]] bool windowOverlapsStructureRegion(const ExactWindowKey& key,
+    [[nodiscard]] bool windowOverlapsStructureRegion(const ExactWindowBuildKey& key,
                                                      const StructureRegionKey& regionKey,
                                                      int marginChunks = 0) const noexcept;
     ColumnSlabOccupancy buildColumnSlabOccupancy(const glm::ivec2& column) const;
@@ -5820,7 +5781,7 @@ private:
     bool finalizeChunkExactGpuHandoff(const std::shared_ptr<Chunk>& chunk);
     void noteChunkReadyLatency(Chunk& chunk);
     [[nodiscard]] bool generateChunkBlocks(Chunk& chunk, std::uint32_t generationEpoch);
-    void buildChunkCpuBlocks(const Chunk& chunk,
+    bool buildChunkCpuBlocks(const Chunk& chunk,
                              ChunkBuildScratch& scratch,
                              bool includePendingStructureEdits,
                              std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)>&
@@ -6026,6 +5987,7 @@ private:
     [[nodiscard]] bool worldgenPageDependencyHasOutstandingWork(const glm::ivec2& pageKey) const;
     [[nodiscard]] bool structureRegionDependencyHasOutstandingWork(const StructureRegionKey& key) const;
     void abandonChunkGenerationPlaceholder(const glm::ivec3& coord, std::uint32_t generationEpoch);
+    void maybeLogExactPlanDebug(const StreamingStatusSnapshot& snapshot) const;
     void maybeLogExactDependencyStallDebug(const StreamingStatusSnapshot& snapshot) const;
     void clearDeferredChunkDependencies(const glm::ivec3& coord);
     void queueDeferredChunkGenerateIfReady(const glm::ivec3& coord,
@@ -6372,6 +6334,7 @@ private:
     int streamingFrontierExactRequired_{0};
     int streamingFrontierExactReady_{0};
     std::uint64_t nextStreamingFrontierSequence_{1};
+    mutable std::atomic<std::uint64_t> exactPlanDebugLastLogMicros_{0};
     mutable std::atomic<std::uint64_t> exactDependencyStallDebugLastLogMicros_{0};
     mutable std::atomic<int> exactDependencyStallDebugLastReadyChunks_{-1};
     mutable std::atomic<std::uint64_t> exactDependencyStallDebugLastReadyProgressMicros_{0};
@@ -6384,19 +6347,26 @@ private:
     mutable std::mutex columnSlabOccupancyMutex_;
     mutable std::unordered_map<glm::ivec2, ColumnSlabOccupancy, ColumnHasher> columnSlabOccupancyCache_{};
     mutable std::mutex exactPlanMutex_;
-    mutable ExactCoverageCacheState exactCoverageCache_{};
     std::shared_ptr<const ExactWindowPlan> activeExactPlan_{};
     std::shared_ptr<const ExactWindowPlan> pendingExactPlan_{};
-    ExactWindowKey pendingExactPlanKey_{};
+    ExactWindowBuildKey pendingExactPlanKey_{};
     bool pendingExactPlanKeyValid_{false};
     ExactWindowPlanStatus pendingExactPlanStatus_{ExactWindowPlanStatus::Idle};
     std::uint64_t nextExactPlanGeneration_{1};
+    mutable std::uint64_t exactPlanInvalidationSerial_{1};
+    std::uint64_t pendingExactPlanWaitInvalidationSerial_{0};
     mutable bool activeWindowReplanNeeded_{false};
     mutable std::unordered_set<glm::ivec2, ColumnHasher> dirtyPlanColumns_{};
     mutable std::unordered_set<glm::ivec2, ColumnHasher> dirtyPlanPages_{};
     mutable std::unordered_set<StructureRegionKey, StructureRegionKeyHasher> dirtyPlanRegions_{};
     mutable std::string activeWindowReplanReason_{};
     std::atomic<int> exactPlanSupportBuildDepth_{0};
+    ExactWindowBuildKey currentExactPlanKey_{};
+    bool currentExactPlanKeyValid_{false};
+    int currentExactPlanVisibleRadius_{0};
+    std::uint64_t activeExactPlanRetagGeneration_{0};
+    int activeExactPlanRetagVisibleRadius_{-1};
+    int activeExactPlanRetagExactRadius_{-1};
     mutable std::mutex columnHeightPrefetchMutex_;
     mutable std::priority_queue<WorldgenPageDependencyRequest,
                                 std::vector<WorldgenPageDependencyRequest>,
@@ -6732,7 +6702,16 @@ ChunkManager::Impl::Impl(unsigned seed)
     farTerrainManager_.setStructureFieldSources(
         [this](int worldX, int worldZ)
         {
-            return this->sampleColumnReadyOrThrow(worldX, worldZ);
+            ColumnSample sample{};
+            (void)this->trySampleColumnOrRequest(sample,
+                                                worldX,
+                                                worldZ,
+                                                std::numeric_limits<int>::min(),
+                                                std::numeric_limits<int>::max(),
+                                                true,
+                                                DependencyPriority::Visible,
+                                                JobServiceClass::Standard);
+            return sample;
         },
         [this](int worldX, int worldZ, const ColumnSample& sample)
         {
@@ -7464,24 +7443,44 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         ? std::max(verticalRadius, computeVerticalRadius(centerChunk, exactMetricRadius, clampedWorldY))
         : verticalRadius;
     const int frontierRadius = std::max(preloadTargetViewDistance, exactMetricRadius);
-    const ExactWindowKey currentExactWindowKey{
+    const ExactWindowBuildKey currentExactWindowKey{
         {centerChunk.x, centerChunk.z},
         centerChunk.y,
         exactMetricRadius,
-        targetViewDistance_,
         frontierRadius,
         frontierVerticalRadius};
+    bool currentPlanCommitted = false;
+    bool currentPlanBuildPending = false;
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        currentExactPlanKey_ = currentExactWindowKey;
+        currentExactPlanKeyValid_ = true;
+        currentExactPlanVisibleRadius_ = targetViewDistance_;
+    }
     const auto frontierRefreshStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
     if (benchmarkEnabled)
     {
         ensureVolumeMsLastFrame_ +=
             std::chrono::duration<double, std::milli>(SteadyClock::now() - frontierRefreshStart).count();
     }
-    ensureExactCoverageCache(centerChunk,
-                             kMaxExactRenderDistanceChunks,
-                             currentExactWindowKey.verticalRadius,
-                             currentExactWindowKey.visibleRadius,
-                             currentExactWindowKey.exactRadius);
+    tryCommitReadyExactPlan(currentExactWindowKey);
+    requestExactWindowPlan(currentExactWindowKey);
+    retagActivePlanFrontierDemands(centerChunk, targetViewDistance_, exactMetricRadius);
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        const bool activeMatchesCurrent = activeExactPlan_ && activeExactPlan_->key == currentExactWindowKey;
+        const bool pendingMatchesCurrent = pendingExactPlanKeyValid_ && pendingExactPlanKey_ == currentExactWindowKey;
+        currentPlanBuildPending =
+            pendingMatchesCurrent &&
+            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+             pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr));
+        currentPlanCommitted = activeMatchesCurrent && !activeWindowReplanNeeded_ && !currentPlanBuildPending;
+    }
+    updatePlayerSafetyOverlay(centerChunk,
+                              currentExactWindowKey,
+                              currentPlanCommitted,
+                              currentPlanBuildPending);
     const FrontierCoverage frontierCoverage = streamingFrontierCoverageSnapshot();
     VisibleChunkCoverage visibleCoverage{};
     visibleCoverage.ready = frontierCoverage.visibleReady;
@@ -7666,9 +7665,7 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     cachedExactReadyChunks_ = metricCoverage.ready;
     {
         std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        const std::size_t configuredIndex =
-            static_cast<std::size_t>(std::clamp(renderSettings_.exactChunks, 0, kMaxExactRenderDistanceChunks));
-        cachedExactRequiredChunks_ = exactCoverageCache_.displayRequiredByRadius[configuredIndex];
+        cachedExactRequiredChunks_ = activeExactPlan_ ? activeExactPlan_->exactRequiredCount : 0;
     }
 
     const bool runEvictionThisFrame = !stationaryExactFillModeActive_;
@@ -7780,7 +7777,16 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                                   lodUploadBudgetMs,
                                   [this](int worldX, int worldZ, int slabMinWorldY, int slabMaxWorldY)
                                   {
-                                      return sampleColumnReadyOrThrow(worldX, worldZ, slabMinWorldY, slabMaxWorldY);
+                                      ColumnSample sample{};
+                                      (void)trySampleColumnOrRequest(sample,
+                                                                     worldX,
+                                                                     worldZ,
+                                                                     slabMinWorldY,
+                                                                     slabMaxWorldY,
+                                                                     true,
+                                                                     DependencyPriority::Visible,
+                                                                     JobServiceClass::Standard);
+                                      return sample;
                                   });
     }
     else
@@ -7795,15 +7801,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (startupEnabled_ && startupState_.preloadStarted)
     {
         const bool exactOnlyMode = renderSettings_.totalChunks <= renderSettings_.exactChunks;
-        bool schedulingCoverageCommitted = false;
-        bool configuredCoverageCommitted = false;
-        {
-            std::lock_guard<std::mutex> lock(exactPlanMutex_);
-            schedulingCoverageCommitted =
-                exactCoverageCommittedWithinRadiusLocked(exactCoverageCache_, targetViewDistance_);
-            configuredCoverageCommitted =
-                exactCoverageCommittedWithinRadiusLocked(exactCoverageCache_, renderSettings_.exactChunks);
-        }
         const bool nearReady = missingChunks == 0;
         const bool protectedCoverageReady =
             visibleCoverage.protectedRequired <= 0 || visibleCoverage.protectedMissing == 0;
@@ -7830,14 +7827,14 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         // unscheduled waiting for the near-upload queue to drain almost completely.
         const bool exactRampReady =
             (exactOnlyMode ? schedulingCoverageMostlyReady
-                           : (configuredCoverageCommitted && uploadReady && nearReleaseReady)) &&
-            (exactOnlyMode ? schedulingCoverageCommitted : true);
+                           : (currentPlanCommitted && uploadReady && nearReleaseReady)) &&
+            (exactOnlyMode ? currentPlanCommitted : true);
         const bool exactReleaseReady = uploadReady &&
             (exactOnlyMode
                  ? ((targetViewDistance_ < renderSettings_.exactChunks)
-                        ? (schedulingCoverageCommitted && nearReleaseReady)
-                        : (configuredCoverageCommitted && configuredCoverageMostlyReady))
-                 : (configuredCoverageCommitted && nearReleaseReady));
+                        ? (currentPlanCommitted && nearReleaseReady)
+                        : (currentPlanCommitted && configuredCoverageMostlyReady))
+                 : (currentPlanCommitted && nearReleaseReady));
         switch (startupState_.phase)
         {
         case StreamingPhase::ExactPreload:
@@ -8375,10 +8372,6 @@ ColumnSample ChunkManager::Impl::sampleColumnAt(const glm::vec3& worldPos,
 void ChunkManager::Impl::clear()
 {
     stopExactPlanBuild();
-    {
-        std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        activeExactPlan_.reset();
-    }
     while (true)
     {
         std::vector<glm::ivec3> coords;
@@ -9363,10 +9356,6 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     lastCenterChunk_ = startupState_.spawnChunk;
     schedulingPriorityOrigin_ = startupState_.spawnChunk;
     stopExactPlanBuild();
-    {
-        std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        activeExactPlan_.reset();
-    }
     stopBulkShellOracle();
     resetStreamingFrontier();
     farTerrainManager_.setDistanceBlocks(startupState_.farCurrentBlocks);
@@ -9374,7 +9363,6 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     if (renderSettings_.totalChunks <= renderSettings_.exactChunks)
     {
         pinWorldgenWindow(startupState_.spawnChunk, renderSettings_.exactChunks);
-        resetExactCoverageCache();
     }
 }
 
@@ -9442,21 +9430,33 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
     snapshot.exactSchedulingRadiusChunks = targetViewDistance_;
     {
         std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        snapshot.exactTrackedRadiusChunks = exactCoverageCache_.trackedRadiusChunks;
-        const std::size_t configuredIndex =
-            static_cast<std::size_t>(std::clamp(renderSettings_.exactChunks, 0, kMaxExactRenderDistanceChunks));
+        const bool activeMatchesCurrent =
+            currentExactPlanKeyValid_ && activeExactPlan_ && activeExactPlan_->key == currentExactPlanKey_;
+        const bool pendingMatchesCurrent =
+            currentExactPlanKeyValid_ && pendingExactPlanKeyValid_ && pendingExactPlanKey_ == currentExactPlanKey_;
+        const bool rebuildPending =
+            pendingMatchesCurrent &&
+            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+             pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr));
+        const bool currentCommitted = activeMatchesCurrent && !activeWindowReplanNeeded_ && !rebuildPending;
+        snapshot.exactTrackedRadiusChunks =
+            pendingExactPlanKeyValid_ ? pendingExactPlanKey_.preloadRadius
+            : activeExactPlan_       ? activeExactPlan_->key.preloadRadius
+            : currentExactPlanKeyValid_ ? currentExactPlanKey_.preloadRadius
+                                        : 0;
         snapshot.exactRequiredChunks =
-            exactCoverageCache_.displayRequiredByRadius[configuredIndex];
-        snapshot.exactRequiredChunksApproximate = !exactCoverageCache_.authoritativeCountsValid;
+            currentCommitted ? activeExactPlan_->exactRequiredCount
+            : activeExactPlan_ ? activeExactPlan_->exactRequiredCount
+                               : 0;
+        snapshot.exactRequiredChunksApproximate = !currentCommitted;
         snapshot.exactRequiredChunksAuthoritative =
-            exactCoverageCache_.authoritativeCountsValid
-                ? exactCoverageCache_.authoritativeRequiredByRadius[configuredIndex]
-                : 0;
-        snapshot.exactCoverageReconciling = exactCoverageCache_.reconciling || snapshot.exactRequiredChunksApproximate;
+            currentCommitted && activeExactPlan_ ? activeExactPlan_->exactRequiredCount : 0;
+        snapshot.exactCoverageReconciling = !currentCommitted || rebuildPending;
+        snapshot.exactPlanVisibleRadius = currentExactPlanKeyValid_ ? currentExactPlanVisibleRadius_ : targetViewDistance_;
+        snapshot.exactPlanPreloadRadius = snapshot.exactTrackedRadiusChunks;
     }
     snapshot.exactPlanRadius = snapshot.exactConfiguredRadiusChunks;
-    snapshot.exactPlanVisibleRadius = snapshot.exactSchedulingRadiusChunks;
-    snapshot.exactPlanPreloadRadius = snapshot.exactTrackedRadiusChunks;
     snapshot.exactProtectedReadyChunks = frontierCoverage.protectedReady;
     snapshot.exactProtectedRequiredChunks = frontierCoverage.protectedRequired;
     snapshot.exactMissingStateChunks = frontierCoverage.exactMissingState;
@@ -9486,6 +9486,7 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
         snapshot.blockingReason = "stabilizing preload";
     }
 
+    maybeLogExactPlanDebug(snapshot);
     maybeLogExactDependencyStallDebug(snapshot);
     return snapshot;
 }
@@ -9493,6 +9494,299 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
 StreamingStatusSnapshot ChunkManager::Impl::streamingStatusSnapshot() const noexcept
 {
     return computeStreamingStatusSnapshot();
+}
+
+void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& snapshot) const
+{
+    if (!exactPlanDebugLoggingEnabled())
+    {
+        return;
+    }
+
+    constexpr std::uint64_t kLogIntervalMicros = 2'000'000ull;
+    const std::uint64_t nowMicros = steadyMicrosNow();
+    std::uint64_t previousMicros = exactPlanDebugLastLogMicros_.load(std::memory_order_relaxed);
+    while (previousMicros != 0 && nowMicros > previousMicros && nowMicros - previousMicros < kLogIntervalMicros)
+    {
+        return;
+    }
+    while (!exactPlanDebugLastLogMicros_.compare_exchange_weak(previousMicros,
+                                                               nowMicros,
+                                                               std::memory_order_relaxed,
+                                                               std::memory_order_relaxed))
+    {
+        if (previousMicros != 0 && nowMicros > previousMicros && nowMicros - previousMicros < kLogIntervalMicros)
+        {
+            return;
+        }
+    }
+
+    auto statusLabel = [](ExactWindowPlanStatus status) noexcept
+    {
+        switch (status)
+        {
+        case ExactWindowPlanStatus::Idle: return "Idle";
+        case ExactWindowPlanStatus::Building: return "Building";
+        case ExactWindowPlanStatus::WaitingDependencies: return "WaitingDependencies";
+        case ExactWindowPlanStatus::Ready: return "Ready";
+        case ExactWindowPlanStatus::Failed: return "Failed";
+        default: return "Unknown";
+        }
+    };
+    auto phaseName = [](StreamingPhase phase) noexcept
+    {
+        switch (phase)
+        {
+        case StreamingPhase::SpawnResolve: return "SpawnResolve";
+        case StreamingPhase::ExactPreload: return "ExactPreload";
+        case StreamingPhase::InteractiveNearOnly: return "InteractiveNearOnly";
+        case StreamingPhase::FarRamp: return "FarRamp";
+        case StreamingPhase::SteadyState: return "SteadyState";
+        default: return "Unknown";
+        }
+    };
+    auto worldgenPageStateLabel = [](WorldgenPageState state) noexcept
+    {
+        switch (state)
+        {
+        case WorldgenPageState::Unrequested: return "Unrequested";
+        case WorldgenPageState::Queued: return "Queued";
+        case WorldgenPageState::Building: return "Building";
+        case WorldgenPageState::Ready: return "Ready";
+        case WorldgenPageState::Failed: return "Failed";
+        default: return "Unknown";
+        }
+    };
+    auto formatKey = [](const ExactWindowBuildKey& key)
+    {
+        std::ostringstream stream;
+        stream << "(" << key.centerColumn.x
+               << "," << key.centerColumn.y
+               << " y=" << key.cameraChunkY
+               << " exact=" << key.exactRadius
+               << " preload=" << key.preloadRadius
+               << " vertical=" << key.verticalRadius
+               << ")";
+        return stream.str();
+    };
+
+    ExactWindowBuildKey currentKey{};
+    bool currentKeyValid = false;
+    std::shared_ptr<const ExactWindowPlan> activePlan{};
+    std::shared_ptr<const ExactWindowPlan> pendingPlan{};
+    ExactWindowBuildKey pendingKey{};
+    bool pendingKeyValid = false;
+    ExactWindowPlanStatus pendingStatus = ExactWindowPlanStatus::Idle;
+    bool replanNeeded = false;
+    std::size_t dirtyColumns = 0;
+    std::size_t dirtyPages = 0;
+    std::size_t dirtyRegions = 0;
+    std::string replanReason;
+    std::uint64_t invalidationSerial = 0;
+    std::uint64_t waitInvalidationSerial = 0;
+    bool buildThreadJoinable = false;
+    int visibleRadius = 0;
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        currentKey = currentExactPlanKey_;
+        currentKeyValid = currentExactPlanKeyValid_;
+        activePlan = activeExactPlan_;
+        pendingPlan = pendingExactPlan_;
+        pendingKey = pendingExactPlanKey_;
+        pendingKeyValid = pendingExactPlanKeyValid_;
+        pendingStatus = pendingExactPlanStatus_;
+        replanNeeded = activeWindowReplanNeeded_;
+        dirtyColumns = dirtyPlanColumns_.size();
+        dirtyPages = dirtyPlanPages_.size();
+        dirtyRegions = dirtyPlanRegions_.size();
+        replanReason = activeWindowReplanReason_;
+        invalidationSerial = exactPlanInvalidationSerial_;
+        waitInvalidationSerial = pendingExactPlanWaitInvalidationSerial_;
+        buildThreadJoinable = exactPlanBuildThread_.joinable();
+        visibleRadius = currentExactPlanVisibleRadius_;
+    }
+
+    const bool activeMatchesCurrent = currentKeyValid && activePlan && activePlan->key == currentKey;
+    const bool pendingMatchesCurrent = currentKeyValid && pendingKeyValid && pendingKey == currentKey;
+    const std::size_t pendingMissingPages = pendingPlan ? pendingPlan->missingWorldgenPages.size() : 0u;
+    const std::size_t pendingMissingRegions = pendingPlan ? pendingPlan->missingStructureRegions.size() : 0u;
+    std::vector<glm::ivec2> sampledMissingPageKeys;
+    if (pendingPlan)
+    {
+        constexpr std::size_t kSampleLimit = 4;
+        const std::size_t sampleCount = std::min<std::size_t>(pendingPlan->missingWorldgenPages.size(), kSampleLimit);
+        sampledMissingPageKeys.reserve(sampleCount);
+        for (std::size_t i = 0; i < sampleCount; ++i)
+        {
+            sampledMissingPageKeys.push_back(pendingPlan->missingWorldgenPages[i]);
+        }
+    }
+
+    std::size_t worldgenQueueSize = 0;
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        worldgenQueueSize = pendingWorldgenPageDependencyQueue_.size();
+    }
+    const std::size_t worldgenOutstanding = jobQueue_.outstanding(JobType::WorldgenPageDependency);
+    std::size_t structureQueueSize = 0;
+    {
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        structureQueueSize = pendingStructureRegionDependencyQueue_.size();
+    }
+    const std::size_t structureOutstanding = jobQueue_.outstanding(JobType::StructureRegionDependency);
+
+    struct SampledWorldgenPageState
+    {
+        glm::ivec2 key{0};
+        bool present{false};
+        WorldgenPageState state{WorldgenPageState::Unrequested};
+        bool dependencyJobQueued{false};
+        bool dependencyJobInFlight{false};
+        bool hasPage{false};
+        bool buildOccupancy{false};
+        bool warmStructures{false};
+        bool supportsHeight{false};
+        bool supportsOccupancy{false};
+        bool supportsWarmStructures{false};
+        int missingHeightColumns{0};
+        int missingOccupancyColumns{0};
+        int missingWarmStructureRegions{0};
+    };
+    std::vector<SampledWorldgenPageState> sampledPageStates;
+    if (!sampledMissingPageKeys.empty())
+    {
+        std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+        sampledPageStates.reserve(sampledMissingPageKeys.size());
+        for (const glm::ivec2& pageKey : sampledMissingPageKeys)
+        {
+            SampledWorldgenPageState sample{};
+            sample.key = pageKey;
+            auto it = worldgenPageEntries_.find(pageKey);
+            if (it != worldgenPageEntries_.end())
+            {
+                sample.present = true;
+                sample.state = it->second.state;
+                sample.dependencyJobQueued = it->second.dependencyJobQueued;
+                sample.dependencyJobInFlight = it->second.dependencyJobInFlight;
+                sample.hasPage = it->second.page != nullptr;
+                sample.buildOccupancy = it->second.buildOccupancy;
+                sample.warmStructures = it->second.warmStructures;
+                sample.supportsHeight = it->second.supportsHeight;
+                sample.supportsOccupancy = it->second.supportsOccupancy;
+                sample.supportsWarmStructures = it->second.supportsWarmStructures;
+                sample.missingHeightColumns = it->second.missingHeightColumns;
+                sample.missingOccupancyColumns = it->second.missingOccupancyColumns;
+                sample.missingWarmStructureRegions = it->second.missingWarmStructureRegions;
+            }
+            sampledPageStates.push_back(sample);
+        }
+    }
+
+    std::ostringstream stream;
+    stream << "exact_plan_debug"
+           << " phase=" << phaseName(snapshot.phase)
+           << " blocking=" << (snapshot.blockingReason ? snapshot.blockingReason : "unknown")
+           << " reconciling=" << (snapshot.exactCoverageReconciling ? 1 : 0)
+           << " ready=" << snapshot.exactReadyChunks << "/" << snapshot.exactRequiredChunks;
+    if (snapshot.exactRequiredChunksApproximate)
+    {
+        stream << "~";
+    }
+    stream << " protected_required=" << snapshot.exactProtectedRequiredChunks
+           << " protected_ready=" << snapshot.exactProtectedReadyChunks
+           << " waiting_chunks=" << snapshot.exactWaitingDependenciesChunks
+           << " tracked_radius=" << snapshot.exactTrackedRadiusChunks
+           << " visible_radius=" << visibleRadius
+           << " current_key=" << (currentKeyValid ? formatKey(currentKey) : std::string("(invalid)"))
+           << " active_key=" << (activePlan ? formatKey(activePlan->key) : std::string("(none)"))
+           << " active_gen=" << (activePlan ? activePlan->generation : 0u)
+           << " active_required=" << (activePlan ? activePlan->exactRequiredCount : 0)
+           << " active_matches_current=" << (activeMatchesCurrent ? 1 : 0)
+           << " pending_key=" << (pendingKeyValid ? formatKey(pendingKey) : std::string("(none)"))
+           << " pending_gen=" << (pendingPlan ? pendingPlan->generation : 0u)
+           << " pending_status=" << statusLabel(pendingStatus)
+           << " pending_matches_current=" << (pendingMatchesCurrent ? 1 : 0)
+           << " pending_required=" << (pendingPlan ? pendingPlan->exactRequiredCount : 0)
+           << " pending_missing_pages=" << pendingMissingPages
+           << " pending_missing_regions=" << pendingMissingRegions
+           << " replan=" << (replanNeeded ? 1 : 0)
+           << " dirty_columns=" << dirtyColumns
+           << " dirty_pages=" << dirtyPages
+           << " dirty_regions=" << dirtyRegions
+           << " invalidation_serial=" << invalidationSerial
+           << " wait_serial=" << waitInvalidationSerial
+           << " build_thread=" << (buildThreadJoinable ? 1 : 0)
+           << " worldgen_q=" << worldgenQueueSize
+           << " worldgen_outstanding=" << worldgenOutstanding
+           << " structure_q=" << structureQueueSize
+           << " structure_outstanding=" << structureOutstanding
+           << " prefetch_workers=" << columnHeightPrefetchWorkerCount_
+           << " workers=" << workerThreadCount_;
+    if (!replanReason.empty())
+    {
+        stream << " replan_reason=" << replanReason;
+    }
+
+    if (pendingPlan && pendingStatus == ExactWindowPlanStatus::WaitingDependencies)
+    {
+        constexpr std::size_t kSampleLimit = 4;
+        stream << "\n  pending_wait_pages";
+        std::size_t sampleCount = 0;
+        for (const glm::ivec2& pageKey : pendingPlan->missingWorldgenPages)
+        {
+            if (sampleCount++ >= kSampleLimit)
+            {
+                break;
+            }
+            stream << " (" << pageKey.x << "," << pageKey.y << ")";
+        }
+        if (pendingPlan->missingWorldgenPages.size() > kSampleLimit)
+        {
+            stream << " ...";
+        }
+
+        stream << "\n  pending_wait_regions";
+        sampleCount = 0;
+        for (const StructureRegionKey& regionKey : pendingPlan->missingStructureRegions)
+        {
+            if (sampleCount++ >= kSampleLimit)
+            {
+                break;
+            }
+            stream << " (" << regionKey.regionX << "," << regionKey.regionZ << ")";
+        }
+        if (pendingPlan->missingStructureRegions.size() > kSampleLimit)
+        {
+            stream << " ...";
+        }
+    }
+
+    if (!sampledPageStates.empty())
+    {
+        for (const SampledWorldgenPageState& sample : sampledPageStates)
+        {
+            stream << "\n  page_state (" << sample.key.x << "," << sample.key.y << ")"
+                   << " present=" << (sample.present ? 1 : 0);
+            if (!sample.present)
+            {
+                continue;
+            }
+            stream << " state=" << worldgenPageStateLabel(sample.state)
+                   << " queued=" << (sample.dependencyJobQueued ? 1 : 0)
+                   << " inflight=" << (sample.dependencyJobInFlight ? 1 : 0)
+                   << " has_page=" << (sample.hasPage ? 1 : 0)
+                   << " build_occ=" << (sample.buildOccupancy ? 1 : 0)
+                   << " warm=" << (sample.warmStructures ? 1 : 0)
+                   << " support_h=" << (sample.supportsHeight ? 1 : 0)
+                   << " support_occ=" << (sample.supportsOccupancy ? 1 : 0)
+                   << " support_warm=" << (sample.supportsWarmStructures ? 1 : 0)
+                   << " missing_h=" << sample.missingHeightColumns
+                   << " missing_occ=" << sample.missingOccupancyColumns
+                   << " missing_warm_regions=" << sample.missingWarmStructureRegions;
+        }
+    }
+
+    exactPlanDebugLog(stream.str());
 }
 
 void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatusSnapshot& snapshot) const
@@ -9640,16 +9934,17 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
     struct ExactCoverageDebugSnapshot
     {
         bool active{false};
-        bool authoritativeCountsValid{false};
+        bool currentCommitted{false};
+        bool buildPending{false};
+        bool waitingDependencies{false};
         bool reconciling{false};
         bool movingWindow{false};
+        bool replanNeeded{false};
         int trackedRadiusChunks{0};
         int verticalRadius{0};
-        int coverageColumnsBudget{0};
-        int columnsProcessedLastUpdate{0};
-        int pendingColumnsBeforeUpdate{0};
-        int pendingColumnsAfterUpdate{0};
-        int queuedColumns{0};
+        int visibleRadius{0};
+        std::uint64_t activeGeneration{0};
+        std::uint64_t pendingGeneration{0};
         int dirtyColumns{0};
         int dirtyPages{0};
         int dirtyRegions{0};
@@ -9679,22 +9974,39 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
     ExactCoverageDebugSnapshot coverageDebug{};
     {
         std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        coverageDebug.active = exactCoverageCache_.active;
-        coverageDebug.authoritativeCountsValid = exactCoverageCache_.authoritativeCountsValid;
-        coverageDebug.reconciling = exactCoverageCache_.reconciling;
-        coverageDebug.movingWindow = exactCoverageCache_.lastMovingWindow;
-        coverageDebug.trackedRadiusChunks = exactCoverageCache_.trackedRadiusChunks;
-        coverageDebug.verticalRadius = exactCoverageCache_.verticalRadius;
-        coverageDebug.coverageColumnsBudget = exactCoverageCache_.lastCoverageColumnsBudget;
-        coverageDebug.columnsProcessedLastUpdate = exactCoverageCache_.batch.columnsProcessedLastUpdate;
-        coverageDebug.pendingColumnsBeforeUpdate = exactCoverageCache_.lastPendingColumnsBeforeUpdate;
-        coverageDebug.pendingColumnsAfterUpdate = exactCoverageCache_.lastPendingColumnsAfterUpdate;
-        coverageDebug.queuedColumns = exactCoverageCache_.lastQueuedColumnCount;
-        coverageDebug.dirtyColumns = exactCoverageCache_.lastDirtyColumnCount;
-        coverageDebug.dirtyPages = exactCoverageCache_.lastDirtyPageCount;
-        coverageDebug.dirtyRegions = exactCoverageCache_.lastDirtyRegionCount;
-        coverageDebug.cachedColumns = exactCoverageCache_.columnSummaries.size();
-        coverageDebug.smoothedFrameMs = exactCoverageCache_.lastSmoothedFrameMs;
+        const bool activeMatchesCurrent =
+            currentExactPlanKeyValid_ && activeExactPlan_ && activeExactPlan_->key == currentExactPlanKey_;
+        const bool pendingMatchesCurrent =
+            currentExactPlanKeyValid_ && pendingExactPlanKeyValid_ && pendingExactPlanKey_ == currentExactPlanKey_;
+        coverageDebug.active = activeExactPlan_ != nullptr;
+        coverageDebug.buildPending =
+            pendingMatchesCurrent &&
+            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+             pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr));
+        coverageDebug.waitingDependencies = pendingMatchesCurrent &&
+            pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies;
+        coverageDebug.currentCommitted = activeMatchesCurrent && !activeWindowReplanNeeded_ && !coverageDebug.buildPending;
+        coverageDebug.reconciling = !coverageDebug.currentCommitted || coverageDebug.buildPending;
+        coverageDebug.movingWindow = currentExactPlanKeyValid_ && !activeMatchesCurrent;
+        coverageDebug.replanNeeded = activeWindowReplanNeeded_;
+        coverageDebug.trackedRadiusChunks =
+            pendingExactPlanKeyValid_ ? pendingExactPlanKey_.preloadRadius
+            : activeExactPlan_       ? activeExactPlan_->key.preloadRadius
+            : currentExactPlanKeyValid_ ? currentExactPlanKey_.preloadRadius
+                                        : 0;
+        coverageDebug.verticalRadius =
+            currentExactPlanKeyValid_ ? currentExactPlanKey_.verticalRadius
+            : activeExactPlan_       ? activeExactPlan_->key.verticalRadius
+                                     : 0;
+        coverageDebug.visibleRadius = currentExactPlanKeyValid_ ? currentExactPlanVisibleRadius_ : targetViewDistance_;
+        coverageDebug.activeGeneration = activeExactPlan_ ? activeExactPlan_->generation : 0;
+        coverageDebug.pendingGeneration = pendingExactPlan_ ? pendingExactPlan_->generation : 0;
+        coverageDebug.dirtyColumns = static_cast<int>(dirtyPlanColumns_.size());
+        coverageDebug.dirtyPages = static_cast<int>(dirtyPlanPages_.size());
+        coverageDebug.dirtyRegions = static_cast<int>(dirtyPlanRegions_.size());
+        coverageDebug.cachedColumns = activeExactPlan_ ? activeExactPlan_->columnSummaries.size() : 0;
+        coverageDebug.smoothedFrameMs = smoothedFrameMs_;
     }
 
     std::vector<WaitingChunkDebugEntry> waitingEntries;
@@ -10549,16 +10861,18 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << "@" << (emitSummary.oldestAgeMicros / 1000u)
            << " exact_gpu_chunk_samples=" << exactGpuChunkEntries.size()
            << "\n  exact_coverage frame_ms=" << std::fixed << std::setprecision(2) << coverageDebug.smoothedFrameMs
+           << " active=" << (coverageDebug.active ? 1 : 0)
            << " moving_window=" << (coverageDebug.movingWindow ? 1 : 0)
-           << " authoritative=" << (coverageDebug.authoritativeCountsValid ? 1 : 0)
+           << " committed=" << (coverageDebug.currentCommitted ? 1 : 0)
+           << " pending=" << (coverageDebug.buildPending ? 1 : 0)
+           << " waiting=" << (coverageDebug.waitingDependencies ? 1 : 0)
            << " reconciling=" << (coverageDebug.reconciling ? 1 : 0)
+           << " replan=" << (coverageDebug.replanNeeded ? 1 : 0)
            << " tracked_radius=" << coverageDebug.trackedRadiusChunks
            << " vertical_radius=" << coverageDebug.verticalRadius
-           << " budget=" << coverageDebug.coverageColumnsBudget
-           << " processed=" << coverageDebug.columnsProcessedLastUpdate
-           << " pending_before=" << coverageDebug.pendingColumnsBeforeUpdate
-           << " pending_after=" << coverageDebug.pendingColumnsAfterUpdate
-           << " queued=" << coverageDebug.queuedColumns
+           << " visible_radius=" << coverageDebug.visibleRadius
+           << " active_generation=" << coverageDebug.activeGeneration
+           << " pending_generation=" << coverageDebug.pendingGeneration
            << " dirty_columns=" << coverageDebug.dirtyColumns
            << " dirty_pages=" << coverageDebug.dirtyPages
            << " dirty_regions=" << coverageDebug.dirtyRegions
@@ -11514,15 +11828,23 @@ void ChunkManager::Impl::stopExactPlanBuild()
     }
 
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    activeExactPlan_.reset();
     pendingExactPlan_.reset();
     pendingExactPlanKeyValid_ = false;
     pendingExactPlanStatus_ = ExactWindowPlanStatus::Idle;
+    exactPlanInvalidationSerial_ = 1;
+    pendingExactPlanWaitInvalidationSerial_ = 0;
+    currentExactPlanKey_ = ExactWindowBuildKey{};
+    currentExactPlanKeyValid_ = false;
+    currentExactPlanVisibleRadius_ = 0;
+    activeExactPlanRetagGeneration_ = 0;
+    activeExactPlanRetagVisibleRadius_ = -1;
+    activeExactPlanRetagExactRadius_ = -1;
     activeWindowReplanNeeded_ = false;
     dirtyPlanColumns_.clear();
     dirtyPlanPages_.clear();
     dirtyPlanRegions_.clear();
     activeWindowReplanReason_.clear();
-    exactCoverageCache_ = ExactCoverageCacheState{};
 }
 
 void ChunkManager::Impl::stopWorkerThreads()
@@ -11881,9 +12203,15 @@ void ChunkManager::Impl::workerThreadFunction()
                 processPendingRelightRequests(1);
             }
         }
-        catch (const std::runtime_error&)
+        catch (const std::runtime_error& ex)
         {
-            break;
+            if (shouldStop_.load(std::memory_order_acquire) ||
+                std::string_view(ex.what()) == "Job queue stopped")
+            {
+                break;
+            }
+
+            std::cerr << "Worker thread runtime error: " << ex.what() << std::endl;
         }
         catch (const std::exception& ex)
         {
@@ -14573,7 +14901,7 @@ void ChunkManager::Impl::precomputeFullRadiusWorldgenPageWindow(const glm::ivec3
     }
 }
 
-bool ChunkManager::Impl::windowContainsColumn(const ExactWindowKey& key,
+bool ChunkManager::Impl::windowContainsColumn(const ExactWindowBuildKey& key,
                                               const glm::ivec2& column,
                                               int margin) const noexcept
 {
@@ -14582,7 +14910,7 @@ bool ChunkManager::Impl::windowContainsColumn(const ExactWindowKey& key,
            std::abs(column.y - key.centerColumn.y) <= effectiveRadius;
 }
 
-bool ChunkManager::Impl::windowOverlapsWorldgenPage(const ExactWindowKey& key,
+bool ChunkManager::Impl::windowOverlapsWorldgenPage(const ExactWindowBuildKey& key,
                                                     const glm::ivec2& pageKey,
                                                     int marginChunks) const noexcept
 {
@@ -14597,7 +14925,7 @@ bool ChunkManager::Impl::windowOverlapsWorldgenPage(const ExactWindowKey& key,
              maxColumn.y < minWindowZ || minColumn.y > maxWindowZ);
 }
 
-bool ChunkManager::Impl::windowOverlapsStructureRegion(const ExactWindowKey& key,
+bool ChunkManager::Impl::windowOverlapsStructureRegion(const ExactWindowBuildKey& key,
                                                        const StructureRegionKey& regionKey,
                                                        int marginChunks) const noexcept
 {
@@ -14615,12 +14943,6 @@ bool ChunkManager::Impl::windowOverlapsStructureRegion(const ExactWindowKey& key
     const int maxWindowZ = key.centerColumn.y + key.preloadRadius + 1 + marginChunks;
     return !(maxChunkX < minWindowX || minChunkX > maxWindowX ||
              maxChunkZ < minWindowZ || minChunkZ > maxWindowZ);
-}
-
-void ChunkManager::Impl::resetExactCoverageCache() noexcept
-{
-    std::lock_guard<std::mutex> lock(exactPlanMutex_);
-    exactCoverageCache_ = ExactCoverageCacheState{};
 }
 
 void ChunkManager::Impl::notifyDiscontinuousCameraMove() noexcept
@@ -14655,10 +14977,6 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
     stopWorkerThreads();
     uploadContext_.waitForIdle();
     stopExactPlanBuild();
-    {
-        std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        activeExactPlan_.reset();
-    }
     stopBulkShellOracle();
 
     {
@@ -14772,7 +15090,6 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
 
     resetStreamingFrontier();
     clearStreamingChunkLifecycleStates();
-    resetExactCoverageCache();
     fullRadiusWorldgenPageDiscovery_ = FullRadiusWorldgenPageDiscoveryState{};
     evictionCenterChunkY_ = centerChunk.y;
     evictionCenterInitialized_ = false;
@@ -14836,173 +15153,7 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
     startExactGpuWorkerThread();
 }
 
-ChunkManager::Impl::ColumnPlanSummary
-ChunkManager::Impl::buildExactCoverageColumnSummary(const glm::ivec2& column,
-                                                    const glm::ivec2& cameraColumn,
-                                                    int cameraChunkY,
-                                                    int verticalRadius) const
-{
-    const ColumnSlabOccupancy occupancy = cachedColumnSlabOccupancy(column);
-    const ColumnChunkIntervals playerBand =
-        playerBandIntervalsForColumn(column, cameraColumn, cameraChunkY, verticalRadius);
-    ColumnChunkIntervals requiredIntervals{};
-    mergeColumnChunkIntervals(requiredIntervals, playerBand);
-    if (!playerBand.empty())
-    {
-        mergeColumnChunkIntervals(requiredIntervals, occupancy.occupiedIntervals);
-    }
-    else
-    {
-        mergeColumnChunkIntervals(requiredIntervals, occupancy.surfaceShellIntervals);
-        mergeColumnChunkIntervals(requiredIntervals, occupancy.waterIntervals);
-        mergeColumnChunkIntervals(requiredIntervals, occupancy.structureIntervals);
-        mergeColumnChunkIntervals(requiredIntervals, occupancy.editIntervals);
-    }
-    mergeColumnChunkIntervals(requiredIntervals, occupancy.maybeIntervals);
-    return ColumnPlanSummary{playerBand, requiredIntervals, occupancy, occupancy.supportComplete};
-}
-
-ColumnChunkIntervals ChunkManager::Impl::materializeRequiredIntervals(const ColumnPlanSummary& summary) const
-{
-    ColumnChunkIntervals materialized{};
-    if (summary.requiredIntervals.empty())
-    {
-        return materialized;
-    }
-
-    for (int chunkY = summary.requiredIntervals.minChunkY(); chunkY <= summary.requiredIntervals.maxChunkY(); ++chunkY)
-    {
-        if (!chunkYWithinIntervals(chunkY, summary.requiredIntervals))
-        {
-            continue;
-        }
-
-        const bool forceResident = chunkYWithinIntervals(chunkY, summary.playerBand);
-        const bool required =
-            forceResident ||
-            !summary.supportComplete ||
-            classifyColumnSlab(summary.occupancy, chunkY) != ColumnSlabOccupancyState::DefinitelyEmpty;
-        if (required)
-        {
-            addColumnChunkInterval(materialized, chunkY, chunkY);
-        }
-    }
-
-    return materialized;
-}
-
-int ChunkManager::Impl::countRequiredChunks(const ColumnChunkIntervals& intervals) noexcept
-{
-    int total = 0;
-    for (std::uint8_t i = 0; i < intervals.count; ++i)
-    {
-        total += intervals.intervals[i].maxChunkY - intervals.intervals[i].minChunkY + 1;
-    }
-    return total;
-}
-
-void ChunkManager::Impl::removeStreamingFrontierColumnDemandsLocked(const glm::ivec2& column,
-                                                                    const ColumnChunkIntervals& oldIntervals)
-{
-    if (oldIntervals.empty())
-    {
-        return;
-    }
-
-    for (int chunkY = oldIntervals.minChunkY(); chunkY <= oldIntervals.maxChunkY(); ++chunkY)
-    {
-        if (!chunkYWithinIntervals(chunkY, oldIntervals))
-        {
-            continue;
-        }
-
-        const glm::ivec3 coord{column.x, chunkY, column.y};
-        auto it = streamingFrontierDemands_.find(coord);
-        if (it == streamingFrontierDemands_.end() || it->second.planGeneration == 0)
-        {
-            continue;
-        }
-        streamingFrontierDemands_.erase(it);
-    }
-}
-
-void ChunkManager::Impl::syncStreamingFrontierColumnDemandsLocked(const glm::ivec2& column,
-                                                                  const ColumnChunkIntervals& oldIntervals,
-                                                                  const ColumnChunkIntervals& newIntervals,
-                                                                  const ColumnChunkIntervals& forceResidentIntervals,
-                                                                  const glm::ivec2& centerColumn,
-                                                                  int visibleRadius,
-                                                                  int exactRadius)
-{
-    const int horizontalDistance =
-        std::max(std::abs(column.x - centerColumn.x), std::abs(column.y - centerColumn.y));
-    const bool countedVisible = horizontalDistance <= visibleRadius;
-    const bool countedExact = horizontalDistance <= exactRadius;
-    const int minChunkY = std::min(oldIntervals.empty() ? std::numeric_limits<int>::max() : oldIntervals.minChunkY(),
-                                   newIntervals.empty() ? std::numeric_limits<int>::max() : newIntervals.minChunkY());
-    const int maxChunkY = std::max(oldIntervals.empty() ? std::numeric_limits<int>::min() : oldIntervals.maxChunkY(),
-                                   newIntervals.empty() ? std::numeric_limits<int>::min() : newIntervals.maxChunkY());
-    if (minChunkY > maxChunkY)
-    {
-        return;
-    }
-
-    for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
-    {
-        const bool wasRequired = chunkYWithinIntervals(chunkY, oldIntervals);
-        const bool isRequired = chunkYWithinIntervals(chunkY, newIntervals);
-        const glm::ivec3 coord{column.x, chunkY, column.y};
-        if (!isRequired)
-        {
-            if (wasRequired)
-            {
-                auto it = streamingFrontierDemands_.find(coord);
-                if (it != streamingFrontierDemands_.end() && it->second.planGeneration != 0)
-                {
-                    streamingFrontierDemands_.erase(it);
-                }
-            }
-            continue;
-        }
-
-        auto demandIt = streamingFrontierDemands_.find(coord);
-        if (demandIt == streamingFrontierDemands_.end())
-        {
-            FrontierChunkDemand demand{};
-            demand.forceResident = chunkYWithinIntervals(chunkY, forceResidentIntervals);
-            demand.countedVisible = countedVisible;
-            demand.countedExact = countedExact;
-            demand.planGeneration = 1;
-            auto stateIt = streamingChunkLifecycleStates_.find(coord);
-            if (stateIt != streamingChunkLifecycleStates_.end())
-            {
-                demand.state = stateIt->second.state;
-            }
-            auto [insertIt, inserted] = streamingFrontierDemands_.emplace(coord, demand);
-            (void)inserted;
-            demandIt = insertIt;
-        }
-
-        FrontierChunkDemand& demand = demandIt->second;
-        const bool forceResident = chunkYWithinIntervals(chunkY, forceResidentIntervals);
-        const bool flagsChanged =
-            demand.forceResident != forceResident ||
-            demand.countedVisible != countedVisible ||
-            demand.countedExact != countedExact ||
-            demand.planGeneration == 0;
-        demand.forceResident = forceResident;
-        demand.countedVisible = countedVisible;
-        demand.countedExact = countedExact;
-        demand.planGeneration = 1;
-        if ((!wasRequired || flagsChanged) && demand.state == FrontierDemandState::Missing)
-        {
-            ++demand.version;
-            queueStreamingFrontierDispatchEntryLocked(coord, demand);
-        }
-    }
-}
-
-void ChunkManager::Impl::refreshStreamingFrontierCoverageCountsLocked()
+void ChunkManager::Impl::recomputeStreamingFrontierCoverageCountsLocked()
 {
     streamingFrontierVisibleRequired_ = 0;
     streamingFrontierExactRequired_ = 0;
@@ -15033,469 +15184,81 @@ void ChunkManager::Impl::refreshStreamingFrontierCoverageCountsLocked()
     }
 }
 
-void ChunkManager::Impl::updateExactCoverageCountsLocked(ExactCoverageCacheState& state)
-{
-    std::array<int, static_cast<std::size_t>(kMaxExactRenderDistanceChunks + 1)> ringDelta{};
-    ringDelta.fill(0);
-    bool complete = state.active;
-    int cachedColumnsInRange = 0;
-    for (const auto& [column, entry] : state.columnSummaries)
-    {
-        const int distance =
-            std::max(std::abs(column.x - state.centerColumn.x), std::abs(column.y - state.centerColumn.y));
-        if (distance > state.trackedRadiusChunks)
-        {
-            continue;
-        }
-        ++cachedColumnsInRange;
-        if (!entry.authoritative)
-        {
-            complete = false;
-            continue;
-        }
-        ringDelta[static_cast<std::size_t>(distance)] += entry.requiredChunkCount;
-    }
-    const bool noCoverageWorkQueued =
-        state.batch.pendingColumns.empty() &&
-        state.batch.queuedColumns.empty() &&
-        state.dirtyColumns.empty() &&
-        state.dirtyPages.empty() &&
-        state.dirtyRegions.empty();
-    const int trackedDiameter = state.trackedRadiusChunks * 2 + 1;
-    const int expectedColumnsInRange = trackedDiameter * trackedDiameter;
-    if (!complete &&
-        state.active &&
-        noCoverageWorkQueued &&
-        cachedColumnsInRange >= expectedColumnsInRange)
-    {
-        complete = true;
-        ringDelta.fill(0);
-        for (auto& [column, entry] : state.columnSummaries)
-        {
-            const int distance =
-                std::max(std::abs(column.x - state.centerColumn.x), std::abs(column.y - state.centerColumn.y));
-            if (distance > state.trackedRadiusChunks)
-            {
-                continue;
-            }
-            entry.authoritative = true;
-            ringDelta[static_cast<std::size_t>(distance)] += entry.requiredChunkCount;
-        }
-    }
-
-    int running = 0;
-    for (int radius = 0; radius <= kMaxExactRenderDistanceChunks; ++radius)
-    {
-        running += ringDelta[static_cast<std::size_t>(radius)];
-        state.displayRequiredByRadius[static_cast<std::size_t>(radius)] = running;
-    }
-
-    if (!complete)
-    {
-        state.authoritativeCountsValid = false;
-        state.reconciling = true;
-        return;
-    }
-
-    running = 0;
-    for (int radius = 0; radius <= kMaxExactRenderDistanceChunks; ++radius)
-    {
-        running += ringDelta[static_cast<std::size_t>(radius)];
-        state.authoritativeRequiredByRadius[static_cast<std::size_t>(radius)] = running;
-    }
-    state.authoritativeCountsValid = true;
-    state.reconciling = !noCoverageWorkQueued;
-}
-
-bool ChunkManager::Impl::exactCoverageCommittedWithinRadiusLocked(const ExactCoverageCacheState& state,
-                                                                  int radius) const
-{
-    if (!state.active)
-    {
-        return false;
-    }
-
-    const int clampedRadius = std::clamp(radius, 0, state.trackedRadiusChunks);
-    const auto columnWithinRadius = [&state, clampedRadius](const glm::ivec2& column) noexcept
-    {
-        return std::abs(column.x - state.centerColumn.x) <= clampedRadius &&
-               std::abs(column.y - state.centerColumn.y) <= clampedRadius;
-    };
-
-    for (int dz = -clampedRadius; dz <= clampedRadius; ++dz)
-    {
-        for (int dx = -clampedRadius; dx <= clampedRadius; ++dx)
-        {
-            const glm::ivec2 column{state.centerColumn.x + dx, state.centerColumn.y + dz};
-            const auto it = state.columnSummaries.find(column);
-            if (it == state.columnSummaries.end() || !it->second.authoritative)
-            {
-                return false;
-            }
-        }
-    }
-
-    for (const glm::ivec2& column : state.batch.pendingColumns)
-    {
-        if (columnWithinRadius(column))
-        {
-            return false;
-        }
-    }
-    for (const glm::ivec2& column : state.batch.queuedColumns)
-    {
-        if (columnWithinRadius(column))
-        {
-            return false;
-        }
-    }
-    for (const glm::ivec2& column : state.dirtyColumns)
-    {
-        if (columnWithinRadius(column))
-        {
-            return false;
-        }
-    }
-
-    const ExactWindowKey radiusWindowKey{
-        state.centerColumn,
-        state.cameraChunkY,
-        clampedRadius,
-        clampedRadius,
-        clampedRadius,
-        state.verticalRadius};
-    for (const glm::ivec2& pageKey : state.dirtyPages)
-    {
-        if (windowOverlapsWorldgenPage(radiusWindowKey, pageKey))
-        {
-            return false;
-        }
-    }
-    for (const StructureRegionKey& regionKey : state.dirtyRegions)
-    {
-        if (windowOverlapsStructureRegion(radiusWindowKey, regionKey))
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-void ChunkManager::Impl::ensureExactCoverageCache(const glm::ivec3& center,
-                                                  int trackedRadius,
-                                                  int verticalRadius,
-                                                  int schedulingRadius,
-                                                  int exactRadius)
-{
-    int coverageColumnsPerUpdate = 96;
-    const glm::ivec2 centerColumn{center.x, center.z};
-    std::unique_lock<std::mutex> exactLock(exactPlanMutex_);
-    ExactCoverageCacheState& state = exactCoverageCache_;
-    const bool firstActivation = !state.active;
-    const glm::ivec2 previousCenter = state.centerColumn;
-    const int previousCameraChunkY = state.cameraChunkY;
-    const int previousVerticalRadius = state.verticalRadius;
-    const int previousTrackedRadius = state.trackedRadiusChunks;
-    const bool movingWindow =
-        firstActivation ||
-        previousCenter != centerColumn ||
-        previousCameraChunkY != center.y ||
-        previousVerticalRadius != verticalRadius ||
-        previousTrackedRadius != trackedRadius;
-    if (!movingWindow)
-    {
-        // Coverage discovery uses cached column occupancy and should keep moving even when
-        // the renderer is heavy; otherwise denominator growth gets pinned behind render cost.
-        coverageColumnsPerUpdate = 192;
-        if (smoothedFrameMs_ >= 50.0)
-        {
-            coverageColumnsPerUpdate = 96;
-        }
-        else if (smoothedFrameMs_ >= 40.0)
-        {
-            coverageColumnsPerUpdate = 128;
-        }
-        else if (smoothedFrameMs_ >= 28.0)
-        {
-            coverageColumnsPerUpdate = 160;
-        }
-    }
-    if (firstActivation)
-    {
-        state.active = true;
-        state.displayRequiredByRadius.fill(0);
-        state.authoritativeRequiredByRadius.fill(0);
-    }
-
-    trackedRadius = std::clamp(trackedRadius, 0, kMaxExactRenderDistanceChunks);
-    state.centerColumn = centerColumn;
-    state.cameraChunkY = center.y;
-    state.verticalRadius = verticalRadius;
-    state.trackedRadiusChunks = trackedRadius;
-    state.lastMovingWindow = movingWindow;
-    state.lastCoverageColumnsBudget = coverageColumnsPerUpdate;
-    state.lastSmoothedFrameMs = smoothedFrameMs_;
-
-    auto queueColumn = [&state, centerColumn, trackedRadius](const glm::ivec2& column)
-    {
-        const int distance = std::max(std::abs(column.x - centerColumn.x), std::abs(column.y - centerColumn.y));
-        if (distance > trackedRadius)
-        {
-            return;
-        }
-        if (state.batch.queuedColumns.insert(column).second)
-        {
-            state.batch.pendingColumns.push_back(column);
-        }
-    };
-
-    if (firstActivation || previousTrackedRadius != trackedRadius || previousCenter != centerColumn)
-    {
-        state.authoritativeCountsValid = false;
-        for (auto it = state.columnSummaries.begin(); it != state.columnSummaries.end();)
-        {
-            const int distance =
-                std::max(std::abs(it->first.x - centerColumn.x), std::abs(it->first.y - centerColumn.y));
-            if (distance > trackedRadius)
-            {
-                {
-                    std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
-                    removeStreamingFrontierColumnDemandsLocked(it->first, it->second.materializedRequiredIntervals);
-                }
-                it = state.columnSummaries.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
-
-        for (int dz = -trackedRadius; dz <= trackedRadius; ++dz)
-        {
-            for (int dx = -trackedRadius; dx <= trackedRadius; ++dx)
-            {
-                const glm::ivec2 column{centerColumn.x + dx, centerColumn.y + dz};
-                if (state.columnSummaries.find(column) == state.columnSummaries.end())
-                {
-                    queueColumn(column);
-                }
-            }
-        }
-    }
-
-    auto queueBandColumns = [&queueColumn](const glm::ivec2& bandCenter)
-    {
-        for (int dz = -kExactPlayerBandHorizontalRadius; dz <= kExactPlayerBandHorizontalRadius; ++dz)
-        {
-            for (int dx = -kExactPlayerBandHorizontalRadius; dx <= kExactPlayerBandHorizontalRadius; ++dx)
-            {
-                queueColumn({bandCenter.x + dx, bandCenter.y + dz});
-            }
-        }
-    };
-    if (firstActivation ||
-        previousCenter != centerColumn ||
-        previousCameraChunkY != center.y ||
-        previousVerticalRadius != verticalRadius)
-    {
-        state.authoritativeCountsValid = false;
-        queueBandColumns(centerColumn);
-        if (!firstActivation)
-        {
-            queueBandColumns(previousCenter);
-        }
-    }
-
-    state.lastDirtyPageCount = static_cast<int>(state.dirtyPages.size());
-    if (!state.dirtyPages.empty())
-    {
-        for (const glm::ivec2& pageKey : state.dirtyPages)
-        {
-            glm::ivec2 minColumn{0};
-            glm::ivec2 maxColumn{0};
-            worldgenPageChunkColumnBounds(pageKey, minColumn, maxColumn);
-            for (int chunkZ = minColumn.y; chunkZ <= maxColumn.y; ++chunkZ)
-            {
-                for (int chunkX = minColumn.x; chunkX <= maxColumn.x; ++chunkX)
-                {
-                    state.dirtyColumns.insert({chunkX, chunkZ});
-                }
-            }
-        }
-        state.dirtyPages.clear();
-    }
-    state.lastDirtyRegionCount = static_cast<int>(state.dirtyRegions.size());
-    if (!state.dirtyRegions.empty())
-    {
-        for (const StructureRegionKey& key : state.dirtyRegions)
-        {
-            const int minChunkX = floorDiv(key.regionX * kStructureRegionSize - kMaxStructureHorizontalRadius, kChunkSizeX);
-            const int maxChunkX =
-                floorDiv((key.regionX + 1) * kStructureRegionSize - 1 + kMaxStructureHorizontalRadius, kChunkSizeX);
-            const int minChunkZ = floorDiv(key.regionZ * kStructureRegionSize - kMaxStructureHorizontalRadius, kChunkSizeZ);
-            const int maxChunkZ =
-                floorDiv((key.regionZ + 1) * kStructureRegionSize - 1 + kMaxStructureHorizontalRadius, kChunkSizeZ);
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; ++chunkZ)
-            {
-                for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX)
-                {
-                    state.dirtyColumns.insert({chunkX, chunkZ});
-                }
-            }
-        }
-        state.dirtyRegions.clear();
-    }
-    state.lastDirtyColumnCount = static_cast<int>(state.dirtyColumns.size());
-    for (const glm::ivec2& column : state.dirtyColumns)
-    {
-        queueColumn(column);
-    }
-    state.dirtyColumns.clear();
-
-    if ((state.reconciling || !state.authoritativeCountsValid) &&
-        state.batch.pendingColumns.empty() &&
-        state.batch.queuedColumns.empty() &&
-        state.dirtyColumns.empty() &&
-        state.dirtyPages.empty() &&
-        state.dirtyRegions.empty())
-    {
-        int cachedColumnsInRange = 0;
-        for (const auto& [column, entry] : state.columnSummaries)
-        {
-            (void)entry;
-            const int distance =
-                std::max(std::abs(column.x - centerColumn.x), std::abs(column.y - centerColumn.y));
-            if (distance <= trackedRadius)
-            {
-                ++cachedColumnsInRange;
-            }
-        }
-        const int trackedDiameter = trackedRadius * 2 + 1;
-        const int expectedColumnsInRange = trackedDiameter * trackedDiameter;
-        if (cachedColumnsInRange < expectedColumnsInRange)
-        {
-            state.authoritativeCountsValid = false;
-            for (int dz = -trackedRadius; dz <= trackedRadius; ++dz)
-            {
-                for (int dx = -trackedRadius; dx <= trackedRadius; ++dx)
-                {
-                    const glm::ivec2 column{centerColumn.x + dx, centerColumn.y + dz};
-                    if (state.columnSummaries.find(column) == state.columnSummaries.end())
-                    {
-                        queueColumn(column);
-                    }
-                }
-            }
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
-        if (previousCenter != centerColumn || schedulingRadius != exactRadius || firstActivation)
-        {
-            for (auto& [column, entry] : state.columnSummaries)
-            {
-                syncStreamingFrontierColumnDemandsLocked(column,
-                                                         entry.materializedRequiredIntervals,
-                                                         entry.materializedRequiredIntervals,
-                                                         entry.summary.playerBand,
-                                                         centerColumn,
-                                                         schedulingRadius,
-                                                         exactRadius);
-            }
-        }
-    }
-
-    state.lastPendingColumnsBeforeUpdate = static_cast<int>(state.batch.pendingColumns.size());
-    state.batch.columnsProcessedLastUpdate = 0;
-    while (state.batch.columnsProcessedLastUpdate < coverageColumnsPerUpdate)
-    {
-        if (state.batch.pendingColumns.empty())
-        {
-            break;
-        }
-
-        const glm::ivec2 column = state.batch.pendingColumns.front();
-        state.batch.pendingColumns.pop_front();
-        state.batch.queuedColumns.erase(column);
-        ExactCoverageCacheColumnState oldState{};
-        bool hadOldState = false;
-        if (auto it = state.columnSummaries.find(column); it != state.columnSummaries.end())
-        {
-            oldState = it->second;
-            hadOldState = true;
-        }
-
-        exactLock.unlock();
-        ExactCoverageCacheColumnState newState{};
-        newState.summary = buildExactCoverageColumnSummary(column, centerColumn, center.y, verticalRadius);
-        newState.materializedRequiredIntervals = materializeRequiredIntervals(newState.summary);
-        newState.requiredChunkCount = countRequiredChunks(newState.materializedRequiredIntervals);
-        newState.authoritative = true;
-        exactLock.lock();
-        state.columnSummaries[column] = newState;
-
-        {
-            std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
-            syncStreamingFrontierColumnDemandsLocked(column,
-                                                     hadOldState ? oldState.materializedRequiredIntervals : ColumnChunkIntervals{},
-                                                     newState.materializedRequiredIntervals,
-                                                     newState.summary.playerBand,
-                                                     centerColumn,
-                                                     schedulingRadius,
-                                                     exactRadius);
-        }
-        ++state.batch.columnsProcessedLastUpdate;
-    }
-
-    state.lastPendingColumnsAfterUpdate = static_cast<int>(state.batch.pendingColumns.size());
-    state.lastQueuedColumnCount = static_cast<int>(state.batch.queuedColumns.size());
-    state.reconciling = !state.batch.pendingColumns.empty();
-    updateExactCoverageCountsLocked(state);
-    const bool reconciling = state.reconciling;
-    exactLock.unlock();
-    {
-        std::lock_guard<std::mutex> frontierLock(streamingFrontierMutex_);
-        refreshStreamingFrontierCoverageCountsLocked();
-    }
-    updatePlayerSafetyOverlay(center, verticalRadius, reconciling);
-}
-
 void ChunkManager::Impl::markPlanDirtyColumn(const glm::ivec2& column) const
 {
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
-    exactCoverageCache_.dirtyColumns.insert(column);
-    exactCoverageCache_.authoritativeCountsValid = false;
-    exactCoverageCache_.reconciling = true;
+    dirtyPlanColumns_.insert(column);
+    const bool overlapsActive = activeExactPlan_ && windowContainsColumn(activeExactPlan_->key, column, 1);
+    const bool overlapsPending =
+        pendingExactPlanKeyValid_ &&
+        (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+         pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+         (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)) &&
+        windowContainsColumn(pendingExactPlanKey_, column, 1);
+    if (overlapsActive || overlapsPending)
+    {
+        activeWindowReplanNeeded_ = true;
+        ++exactPlanInvalidationSerial_;
+        if (activeWindowReplanReason_.empty())
+        {
+            activeWindowReplanReason_ = "exact_plan_dirty_column";
+        }
+    }
 }
 
 void ChunkManager::Impl::markPlanDirtyWorldgenPage(const glm::ivec2& pageKey) const
 {
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
-    exactCoverageCache_.dirtyPages.insert(pageKey);
-    exactCoverageCache_.authoritativeCountsValid = false;
-    exactCoverageCache_.reconciling = true;
+    dirtyPlanPages_.insert(pageKey);
+    const bool overlapsActive = activeExactPlan_ && windowOverlapsWorldgenPage(activeExactPlan_->key, pageKey, 1);
+    const bool overlapsPending =
+        pendingExactPlanKeyValid_ &&
+        (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+         pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+         (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)) &&
+        windowOverlapsWorldgenPage(pendingExactPlanKey_, pageKey, 1);
+    if (overlapsActive || overlapsPending)
+    {
+        activeWindowReplanNeeded_ = true;
+        ++exactPlanInvalidationSerial_;
+        if (activeWindowReplanReason_.empty())
+        {
+            activeWindowReplanReason_ = "exact_plan_dirty_worldgen_page";
+        }
+    }
 }
 
 void ChunkManager::Impl::markPlanDirtyStructureRegion(const StructureRegionKey& key) const
 {
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
-    exactCoverageCache_.dirtyRegions.insert(key);
-    exactCoverageCache_.authoritativeCountsValid = false;
-    exactCoverageCache_.reconciling = true;
+    dirtyPlanRegions_.insert(key);
+    const bool overlapsActive =
+        activeExactPlan_ && windowOverlapsStructureRegion(activeExactPlan_->key, key, 1);
+    const bool overlapsPending =
+        pendingExactPlanKeyValid_ &&
+        (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
+         pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+         (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)) &&
+        windowOverlapsStructureRegion(pendingExactPlanKey_, key, 1);
+    if (overlapsActive || overlapsPending)
+    {
+        activeWindowReplanNeeded_ = true;
+        ++exactPlanInvalidationSerial_;
+        if (activeWindowReplanReason_.empty())
+        {
+            activeWindowReplanReason_ = "exact_plan_dirty_structure_region";
+        }
+    }
 }
 
 void ChunkManager::Impl::markActiveWindowReplanNeeded(const char* reason) const
 {
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
-    (void)reason;
-    exactCoverageCache_.authoritativeCountsValid = false;
-    exactCoverageCache_.reconciling = true;
-    for (const auto& [column, entry] : exactCoverageCache_.columnSummaries)
+    activeWindowReplanNeeded_ = true;
+    ++exactPlanInvalidationSerial_;
+    if (reason && *reason)
     {
-        (void)entry;
-        exactCoverageCache_.dirtyColumns.insert(column);
+        activeWindowReplanReason_ = reason;
     }
 }
 
@@ -15506,10 +15269,12 @@ ChunkManager::Impl::ExactPlanSnapshot ChunkManager::Impl::activePlanSnapshot() c
         activeExactPlan_,
         activeWindowReplanNeeded_ ||
             pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)};
+            pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
+            (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr),
+        pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies};
 }
 
-void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowKey& key,
+void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowBuildKey& key,
                                                     std::uint64_t generation,
                                                     bool startupCritical)
 {
@@ -15532,6 +15297,10 @@ void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowKey& key,
 
                 pendingExactPlan_ = plan;
                 pendingExactPlanStatus_ = plan ? plan->status : ExactWindowPlanStatus::Failed;
+                if (pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies)
+                {
+                    pendingExactPlanWaitInvalidationSerial_ = exactPlanInvalidationSerial_;
+                }
             }
             catch (...)
             {
@@ -15547,21 +15316,41 @@ void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowKey& key,
         });
 }
 
-void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
+void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowBuildKey& key)
 {
     if (shouldStop_.load(std::memory_order_acquire))
     {
         return;
     }
 
-    bool joinCompletedThread = false;
+    bool shouldJoinFinishedThread = false;
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        shouldJoinFinishedThread =
+            exactPlanBuildThread_.joinable() &&
+            pendingExactPlanStatus_ != ExactWindowPlanStatus::Building;
+    }
+    if (shouldJoinFinishedThread)
+    {
+        exactPlanBuildThread_.join();
+    }
+
     bool startupCritical = false;
+    bool shouldLaunch = false;
     std::uint64_t generation = 0;
     {
         std::lock_guard<std::mutex> lock(exactPlanMutex_);
         const bool sameActive = activeExactPlan_ && activeExactPlan_->key == key;
         const bool samePendingKey = pendingExactPlanKeyValid_ && pendingExactPlanKey_ == key;
         if (samePendingKey && pendingExactPlanStatus_ == ExactWindowPlanStatus::Building)
+        {
+            return;
+        }
+        if (samePendingKey &&
+            pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies &&
+            pendingExactPlanWaitInvalidationSerial_ == exactPlanInvalidationSerial_ &&
+            pendingExactPlan_ &&
+            waitingPlanDependenciesStillOutstanding(*pendingExactPlan_))
         {
             return;
         }
@@ -15581,11 +15370,12 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
             return;
         }
 
-        joinCompletedThread = exactPlanBuildThread_.joinable();
+        shouldLaunch = true;
         pendingExactPlan_.reset();
         pendingExactPlanKey_ = key;
         pendingExactPlanKeyValid_ = true;
         pendingExactPlanStatus_ = ExactWindowPlanStatus::Building;
+        pendingExactPlanWaitInvalidationSerial_ = exactPlanInvalidationSerial_;
         generation = nextExactPlanGeneration_++;
         startupCritical =
             startupEnabled_ &&
@@ -15598,15 +15388,13 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowKey& key)
         activeWindowReplanReason_.clear();
     }
 
-    if (joinCompletedThread)
+    if (shouldLaunch)
     {
-        exactPlanBuildThread_.join();
+        launchExactWindowPlanBuild(key, generation, startupCritical);
     }
-
-    launchExactWindowPlanBuild(key, generation, startupCritical);
 }
 
-void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
+void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowBuildKey& key)
 {
     std::shared_ptr<const ExactWindowPlan> oldPlan{};
     std::shared_ptr<const ExactWindowPlan> newPlan{};
@@ -15622,6 +15410,14 @@ void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
                 oldPlan = activeExactPlan_;
                 activeExactPlan_ = pendingExactPlan_;
                 newPlan = activeExactPlan_;
+                activeExactPlanRetagGeneration_ = 0;
+                activeExactPlanRetagVisibleRadius_ = -1;
+                activeExactPlanRetagExactRadius_ = -1;
+                activeWindowReplanNeeded_ = false;
+                dirtyPlanColumns_.clear();
+                dirtyPlanPages_.clear();
+                dirtyPlanRegions_.clear();
+                activeWindowReplanReason_.clear();
             }
             else if (staleReadyPlan)
             {
@@ -15634,6 +15430,10 @@ void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
             pendingExactPlan_.reset();
             pendingExactPlanKeyValid_ = false;
             pendingExactPlanStatus_ = ExactWindowPlanStatus::Idle;
+        }
+        else if (pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies)
+        {
+            shouldJoin = exactPlanBuildThread_.joinable();
         }
         else if (pendingExactPlanStatus_ == ExactWindowPlanStatus::Failed)
         {
@@ -15661,7 +15461,7 @@ void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowKey& key)
 }
 
 std::shared_ptr<ChunkManager::Impl::ExactWindowPlan>
-ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
+ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
                                          std::uint64_t generation,
                                          bool startupCritical) const
 {
@@ -15866,6 +15666,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
         }
 
         missingPlannerDependencies = true;
+        plan->missingWorldgenPages.push_back(pageKey);
         (void)requestWorldgenPageDependency(pageKey,
                                             plannerDependencyPriority,
                                             true,
@@ -15874,7 +15675,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
     }
     if (missingPlannerDependencies)
     {
-        plan->status = ExactWindowPlanStatus::Failed;
+        plan->status = ExactWindowPlanStatus::WaitingDependencies;
         return plan;
     }
 
@@ -15896,7 +15697,7 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
     {
         if (!readyPageValues[index])
         {
-            plan->status = ExactWindowPlanStatus::Failed;
+            plan->status = ExactWindowPlanStatus::WaitingDependencies;
             return plan;
         }
 
@@ -16092,13 +15893,14 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
         }
 
         missingPlannerRegions = true;
+        plan->missingStructureRegions.push_back(structureRegionKeys[index]);
         (void)requestStructureRegionDependency(structureRegionKeys[index],
                                               plannerDependencyPriority,
                                               plannerServiceClass);
     }
     if (missingPlannerRegions)
     {
-        plan->status = ExactWindowPlanStatus::Failed;
+        plan->status = ExactWindowPlanStatus::WaitingDependencies;
         return plan;
     }
 
@@ -16285,10 +16087,6 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
         for (int chunkX = preloadMinChunkX; chunkX <= preloadMaxChunkX; ++chunkX)
         {
             const glm::ivec2 column{chunkX, chunkZ};
-            const int horizontalDistance =
-                std::max(std::abs(column.x - key.centerColumn.x), std::abs(column.y - key.centerColumn.y));
-            const bool countedVisible = horizontalDistance <= key.visibleRadius;
-            const bool countedExact = horizontalDistance <= key.exactRadius;
             const ColumnSlabOccupancy& occupancy = analysisOccupancies[analysisColumnIndex(chunkX, chunkZ)];
             const ColumnChunkIntervals playerBand =
                 playerBandIntervalsForColumn(column, cameraColumn, key.cameraChunkY, key.verticalRadius);
@@ -16336,17 +16134,12 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowKey& key,
 
                 plan->requiredChunks.emplace(glm::ivec3{column.x, chunkY, column.y},
                                              PlannedChunkEntry{
-                                                 countedExact,
-                                                 countedVisible,
                                                  forceResident,
                                                  true});
-                if (countedExact)
+                if (std::max(std::abs(column.x - key.centerColumn.x), std::abs(column.y - key.centerColumn.y)) <=
+                    key.exactRadius)
                 {
                     ++plan->exactRequiredCount;
-                }
-                if (countedVisible)
-                {
-                    ++plan->visibleRequiredCount;
                 }
             }
         }
@@ -17868,8 +17661,6 @@ void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPl
             {
                 FrontierChunkDemand demand{};
                 demand.forceResident = entry.forceResident;
-                demand.countedVisible = entry.countedVisible;
-                demand.countedExact = entry.countedExact;
                 demand.planGeneration = newGeneration;
                 auto stateIt = streamingChunkLifecycleStates_.find(coord);
                 if (stateIt != streamingChunkLifecycleStates_.end())
@@ -17889,12 +17680,10 @@ void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPl
             FrontierChunkDemand& demand = demandIt->second;
             const bool flagsChanged =
                 demand.forceResident != entry.forceResident ||
-                demand.countedVisible != entry.countedVisible ||
-                demand.countedExact != entry.countedExact ||
                 demand.planGeneration != newGeneration;
             demand.forceResident = entry.forceResident;
-            demand.countedVisible = entry.countedVisible;
-            demand.countedExact = entry.countedExact;
+            demand.countedVisible = false;
+            demand.countedExact = false;
             demand.planGeneration = newGeneration;
             if (flagsChanged && demand.state == FrontierDemandState::Missing)
             {
@@ -17916,38 +17705,100 @@ void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPl
         it = streamingFrontierDemands_.erase(it);
     }
 
-    streamingFrontierVisibleRequired_ = newPlan ? newPlan->visibleRequiredCount : 0;
-    streamingFrontierExactRequired_ = newPlan ? newPlan->exactRequiredCount : 0;
-    streamingFrontierVisibleReady_ = 0;
-    streamingFrontierExactReady_ = 0;
-    for (const auto& [coord, demand] : streamingFrontierDemands_)
+    (void)oldPlan;
+    recomputeStreamingFrontierCoverageCountsLocked();
+}
+
+bool ChunkManager::Impl::waitingPlanDependenciesStillOutstanding(const ExactWindowPlan& plan) const
+{
+    for (const glm::ivec2& pageKey : plan.missingWorldgenPages)
     {
-        (void)coord;
-        if (demand.state != FrontierDemandState::Ready)
+        if (tryGetReadyWorldgenPage(pageKey))
         {
-            continue;
+            return false;
         }
-        if (demand.countedVisible)
+        if (!worldgenPageDependencyHasOutstandingWork(pageKey))
         {
-            ++streamingFrontierVisibleReady_;
-        }
-        if (demand.countedExact)
-        {
-            ++streamingFrontierExactReady_;
+            return false;
         }
     }
 
-    (void)oldPlan;
+    for (const StructureRegionKey& key : plan.missingStructureRegions)
+    {
+        if (tryGetReadyRegion(key))
+        {
+            return false;
+        }
+        if (!structureRegionDependencyHasOutstandingWork(key))
+        {
+            return false;
+        }
+    }
+
+    return !plan.missingWorldgenPages.empty() || !plan.missingStructureRegions.empty();
+}
+
+void ChunkManager::Impl::retagActivePlanFrontierDemands(const glm::ivec3& center, int visibleRadius, int exactRadius)
+{
+    std::shared_ptr<const ExactWindowPlan> activePlan{};
+    {
+        std::lock_guard<std::mutex> lock(exactPlanMutex_);
+        activePlan = activeExactPlan_;
+        if (!activePlan)
+        {
+            activeExactPlanRetagGeneration_ = 0;
+            activeExactPlanRetagVisibleRadius_ = -1;
+            activeExactPlanRetagExactRadius_ = -1;
+            return;
+        }
+        if (activeExactPlanRetagGeneration_ == activePlan->generation &&
+            activeExactPlanRetagVisibleRadius_ == visibleRadius &&
+            activeExactPlanRetagExactRadius_ == exactRadius)
+        {
+            return;
+        }
+    }
+
+    const glm::ivec2 centerColumn{center.x, center.z};
+    {
+        std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+        for (auto& [coord, demand] : streamingFrontierDemands_)
+        {
+            if (demand.planGeneration != activePlan->generation)
+            {
+                continue;
+            }
+
+            const int horizontalDistance =
+                std::max(std::abs(coord.x - centerColumn.x), std::abs(coord.z - centerColumn.y));
+            demand.countedVisible = horizontalDistance <= visibleRadius;
+            demand.countedExact = horizontalDistance <= exactRadius;
+        }
+        recomputeStreamingFrontierCoverageCountsLocked();
+    }
+
+    std::lock_guard<std::mutex> lock(exactPlanMutex_);
+    if (activeExactPlan_ && activeExactPlan_->generation == activePlan->generation)
+    {
+        activeExactPlanRetagGeneration_ = activePlan->generation;
+        activeExactPlanRetagVisibleRadius_ = visibleRadius;
+        activeExactPlanRetagExactRadius_ = exactRadius;
+    }
 }
 
 void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
-                                                   int verticalRadius,
-                                                   bool reconciling)
+                                                   const ExactWindowBuildKey& currentKey,
+                                                   bool currentKeyCommitted,
+                                                   bool rebuildPending)
 {
     std::unordered_set<glm::ivec3, ChunkHasher> desiredOverlay{};
-    if (reconciling)
+    if (!currentKeyCommitted || rebuildPending)
     {
-        std::lock_guard<std::mutex> exactLock(exactPlanMutex_);
+        std::shared_ptr<const ExactWindowPlan> activePlan{};
+        {
+            std::lock_guard<std::mutex> exactLock(exactPlanMutex_);
+            activePlan = activeExactPlan_;
+        }
         desiredOverlay.reserve(static_cast<std::size_t>((kExactPlayerBandHorizontalRadius * 2 + 1) *
                                                         (kExactPlayerBandHorizontalRadius * 2 + 1) *
                                                         (kExactPlayerBandRadiusMax * 2 + 1)));
@@ -17961,7 +17812,7 @@ void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
                     playerBandIntervalsForColumn(column,
                                                  cameraColumn,
                                                  center.y,
-                                                 verticalRadius);
+                                                 currentKey.verticalRadius);
                 if (playerBand.empty())
                 {
                     continue;
@@ -17975,12 +17826,10 @@ void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
                     }
 
                     const glm::ivec3 coord{column.x, chunkY, column.y};
-                    const auto it = exactCoverageCache_.columnSummaries.find(column);
-                    const bool alreadyTracked =
-                        it != exactCoverageCache_.columnSummaries.end() &&
-                        it->second.authoritative &&
-                        chunkYWithinIntervals(chunkY, it->second.materializedRequiredIntervals);
-                    if (!alreadyTracked)
+                    const bool coveredByCommittedPlan =
+                        activePlan &&
+                        activePlan->requiredChunks.find(coord) != activePlan->requiredChunks.end();
+                    if (!coveredByCommittedPlan)
                     {
                         desiredOverlay.insert(coord);
                     }
@@ -19217,7 +19066,10 @@ bool ChunkManager::Impl::materializeChunkForLocalEdit(const glm::ivec3& coord, s
     std::shared_ptr<Chunk> chunk = acquireChunk(coord);
     ChunkBuildScratch scratch(*chunk);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-    buildChunkCpuBlocks(*chunk, scratch, false, columnResults, nullptr);
+    if (!buildChunkCpuBlocks(*chunk, scratch, false, columnResults, nullptr))
+    {
+        return false;
+    }
 
     chunk->ensureCpuDataAllocated();
     chunk->blocks = std::move(scratch.blocks);
@@ -25568,7 +25420,10 @@ ChunkManager::Impl::ChunkNeighborhoodSnapshot ChunkManager::Impl::captureChunkNe
 
         ChunkBuildScratch scratch(*sampleChunk);
         std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-        buildChunkCpuBlocks(*sampleChunk, scratch, false, columnResults, nullptr);
+        if (!buildChunkCpuBlocks(*sampleChunk, scratch, false, columnResults, nullptr))
+        {
+            continue;
+        }
         std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
         {
             std::lock_guard<std::mutex> lock(sampleChunk->meshMutex);
@@ -26176,7 +26031,11 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     {
         ChunkBuildScratch scratch(chunk);
         std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-        buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr);
+        if (!buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr))
+        {
+            chunk.pendingMeshRefresh.store(true, std::memory_order_release);
+            return;
+        }
         chunkBlocks = std::move(scratch.blocks);
         rebuildChunkBaseLighting(chunkBlocks, incomingSky, chunkLightLevels);
     }
@@ -26203,10 +26062,19 @@ void ChunkManager::Impl::buildChunkMeshAsync(Chunk& chunk)
     {
         for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
         {
-            const ColumnSample columnSample = sampleColumnReadyOrThrow(baseWorldX + localX,
-                                                                       baseWorldZ + localZ,
-                                                                       baseWorldY,
-                                                                       baseWorldY + kChunkSizeY - 1);
+            ColumnSample columnSample{};
+            if (!trySampleColumnOrRequest(columnSample,
+                                          baseWorldX + localX,
+                                          baseWorldZ + localZ,
+                                          baseWorldY,
+                                          baseWorldY + kChunkSizeY - 1,
+                                          false,
+                                          DependencyPriority::Visible,
+                                          JobServiceClass::Standard))
+            {
+                chunk.pendingMeshRefresh.store(true, std::memory_order_release);
+                return;
+            }
             grassTintByColumn[static_cast<std::size_t>(localZ * kChunkSizeX + localX)] =
                 static_cast<std::uint8_t>(grassTintIndexForBiome(columnSample.dominantBiome));
         }
@@ -28149,7 +28017,10 @@ void ChunkManager::Impl::ensureSkyLightColumnCacheForChunks(const std::vector<st
 
         ChunkBuildScratch scratch(*chunk);
         std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-        buildChunkCpuBlocks(*chunk, scratch, false, columnResults, nullptr);
+        if (!buildChunkCpuBlocks(*chunk, scratch, false, columnResults, nullptr))
+        {
+            continue;
+        }
         transientBlocks.emplace(chunk->coord, std::move(scratch.blocks));
     }
 
@@ -30805,7 +30676,10 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
 
     if (!localAuthoritative)
     {
-        buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr);
+        if (!buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr))
+        {
+            return false;
+        }
         std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> incomingSky{};
         {
             std::lock_guard<std::mutex> lock(chunk.meshMutex);
@@ -30819,7 +30693,10 @@ bool ChunkManager::Impl::generateChunkBlocks(Chunk& chunk, std::uint32_t generat
     if (localAuthoritative)
     {
         const auto cpuMaterializeStart = phaseNow();
-        buildChunkCpuBlocks(chunk, scratch, true, columnResults, &pendingEdits);
+        if (!buildChunkCpuBlocks(chunk, scratch, true, columnResults, &pendingEdits))
+        {
+            return false;
+        }
         recordPhase(benchmarkMetrics_.generateCpuMaterializeStage, cpuMaterializeStart, phaseNow());
 
         const auto secondPublishStart = phaseNow();
@@ -31025,7 +30902,7 @@ bool ChunkManager::Impl::exactGpuWorkerNeedsLifecycleMaintenance()
     return false;
 }
 
-void ChunkManager::Impl::buildChunkCpuBlocks(
+bool ChunkManager::Impl::buildChunkCpuBlocks(
     const Chunk& chunk,
     ChunkBuildScratch& scratch,
     bool includePendingStructureEdits,
@@ -31053,6 +30930,49 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     const auto warmPagesStart = phaseNow();
     warmWorldgenPagesForChunk(chunk.coord);
     recordPhase(benchmarkMetrics_.buildChunkCpuWarmPagesStage, warmPagesStart, phaseNow());
+
+    const bool initialReadyPriority = chunkAwaitingInitialReady(chunk);
+    const bool localInteractionPriority = shouldKeepLoadedChunkInteractive(chunk, lastCenterChunk_);
+    const DependencyPriority dependencyPriority =
+        (initialReadyPriority || localInteractionPriority) ? DependencyPriority::Critical
+                                                           : DependencyPriority::Visible;
+    const JobServiceClass dependencyServiceClass =
+        classifyJobServiceClass(initialReadyPriority, localInteractionPriority, false);
+    const int baseWorldX = chunk.coord.x * kChunkSizeX;
+    const int baseWorldZ = chunk.coord.z * kChunkSizeZ;
+
+    std::vector<glm::ivec2> missingWorldgenPages;
+    missingWorldgenPages.reserve(4);
+    for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
+    {
+        for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
+        {
+            const glm::ivec2 pageKey = worldgenPageKeyForWorld(baseWorldX + sampleX, baseWorldZ + sampleZ);
+            if (tryGetReadyWorldgenPage(pageKey))
+            {
+                continue;
+            }
+            if (std::find(missingWorldgenPages.begin(), missingWorldgenPages.end(), pageKey) !=
+                missingWorldgenPages.end())
+            {
+                continue;
+            }
+            missingWorldgenPages.push_back(pageKey);
+        }
+    }
+
+    if (!missingWorldgenPages.empty())
+    {
+        for (const glm::ivec2& pageKey : missingWorldgenPages)
+        {
+            requestWorldgenPageDependency(pageKey,
+                                          dependencyPriority,
+                                          true,
+                                          true,
+                                          dependencyServiceClass);
+        }
+        return false;
+    }
 
     std::array<terrain::ExactChunkColumnDescriptor, Chunk::kColumnCount> columnDescriptors{};
     std::vector<StructureVoxelEdit> structureVoxelEdits;
@@ -31114,9 +31034,17 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     if (!haveStoredStructureEdits)
     {
         bool allStructureRegionsReady = true;
-        structureVoxelEdits = queryStructureVoxelEditsForChunkReady(chunk.coord, &allStructureRegionsReady, nullptr);
-        assert(allStructureRegionsReady &&
-               "buildChunkCpuBlocks expects structure regions to be ready when cached edits are unavailable");
+        std::vector<StructureRegionKey> missingStructureRegions;
+        structureVoxelEdits =
+            queryStructureVoxelEditsForChunkReady(chunk.coord, &allStructureRegionsReady, &missingStructureRegions);
+        if (!allStructureRegionsReady)
+        {
+            for (const StructureRegionKey& regionKey : missingStructureRegions)
+            {
+                requestStructureRegionDependency(regionKey, dependencyPriority, dependencyServiceClass);
+            }
+            return false;
+        }
     }
 
     for (const StructureVoxelEdit& edit : structureVoxelEdits)
@@ -31147,6 +31075,8 @@ void ChunkManager::Impl::buildChunkCpuBlocks(
     {
         *consumedPendingEdits = std::move(pendingEdits);
     }
+
+    return true;
 }
 
 void ChunkManager::Impl::rebuildChunkBaseLighting(
@@ -31558,7 +31488,10 @@ bool ChunkManager::Impl::ensureChunkCpuDataResident(Chunk& chunk)
 
     ChunkBuildScratch scratch(chunk);
     std::array<ColumnBuildResult, static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)> columnResults{};
-    buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr);
+    if (!buildChunkCpuBlocks(chunk, scratch, false, columnResults, nullptr))
+    {
+        return false;
+    }
 
     {
         std::lock_guard<std::mutex> lock(chunk.meshMutex);

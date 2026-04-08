@@ -378,6 +378,27 @@ void applyLaunchDebugOptions(int argc, char** argv)
         resetDebugLogFile("BLOCKGAME_EXACT_DEP_STALL_DEBUG_FILE",
                           "exactdepstalldebug.log",
                           "exact dependency stall debug enabled");
+
+        std::error_code exeEc;
+        std::filesystem::path exePath;
+        if (argc > 0 && argv[0] != nullptr)
+        {
+            exePath = std::filesystem::canonical(argv[0], exeEc);
+            if (exeEc)
+            {
+                exeEc.clear();
+                exePath = std::filesystem::absolute(argv[0], exeEc);
+            }
+        }
+        std::error_code cwdEc;
+        const std::filesystem::path cwd = std::filesystem::current_path(cwdEc);
+        std::ostringstream stream;
+        stream << "exact dependency stall debug context"
+               << " exe=" << (exePath.empty() ? std::string("(unresolved)") : exePath.string())
+               << " cwd=" << (cwdEc ? std::string("(unresolved)") : cwd.string());
+        appendDebugLogFileLine("BLOCKGAME_EXACT_DEP_STALL_DEBUG_FILE",
+                               "exactdepstalldebug.log",
+                               stream.str());
     }
 
     if (enableTerrainLogDebug)

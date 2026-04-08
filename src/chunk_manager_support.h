@@ -134,6 +134,8 @@ public:
     bool tryPop(Job& job);
     Job waitAndPop();
     std::vector<Job> stop();
+    void restart() noexcept;
+    [[nodiscard]] bool stopped() const noexcept;
     bool empty() const;
     std::size_t size() const;
     std::size_t size(JobType type) const;

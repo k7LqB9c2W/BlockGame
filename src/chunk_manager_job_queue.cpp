@@ -213,6 +213,18 @@ std::vector<Job> JobQueue::stop()
     return cancelledJobs;
 }
 
+void JobQueue::restart() noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    shouldStop_.store(false, std::memory_order_release);
+    condition_.notify_all();
+}
+
+bool JobQueue::stopped() const noexcept
+{
+    return shouldStop_.load(std::memory_order_acquire);
+}
+
 bool JobQueue::empty() const
 {
     return queuedJobCount_.load(std::memory_order_relaxed) == 0;

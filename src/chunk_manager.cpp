@@ -33,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <random>
 #include <sstream>
@@ -1571,6 +1572,35 @@ void exactDependencyStallDebugLog(const std::string& message)
 
     std::cerr << message << std::endl;
     appendDebugLogLine("BLOCKGAME_EXACT_DEP_STALL_DEBUG_FILE", "exactdepstalldebug.log", message);
+}
+
+[[nodiscard]] std::string describeException(std::exception_ptr error)
+{
+    if (!error)
+    {
+        return {};
+    }
+
+    try
+    {
+        std::rethrow_exception(error);
+    }
+    catch (const std::exception& ex)
+    {
+        std::string text = ex.what();
+        for (char& ch : text)
+        {
+            if (ch == '\r' || ch == '\n')
+            {
+                ch = ' ';
+            }
+        }
+        return text;
+    }
+    catch (...)
+    {
+        return "non-std exception";
+    }
 }
 
 [[nodiscard]] std::string hexU32(std::uint32_t value)
@@ -7424,7 +7454,11 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                 .count();
     }
     const bool exactOnly = renderSettings_.totalChunks <= renderSettings_.exactChunks;
-    const bool needsFullExactCoverageMetrics = exactOnly;
+    const bool startupExactPreloadPhase =
+        startupEnabled_ &&
+        startupState_.preloadStarted &&
+        startupState_.phase == StreamingPhase::ExactPreload;
+    const bool needsFullExactCoverageMetrics = exactOnly && !startupExactPreloadPhase;
 
     ensureVolumeMsLastFrame_ = 0.0;
     ensureVolumeColumnPrepMsLastFrame_ = 0.0;
@@ -7438,7 +7472,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     ensureVolumeColumnCapSkipsLastFrame_ = 0;
 
     const auto missingScanStart = std::chrono::steady_clock::now();
-    const int exactMetricRadius = renderSettings_.exactChunks;
+    const int exactMetricRadius = needsFullExactCoverageMetrics
+        ? renderSettings_.exactChunks
+        : targetViewDistance_;
     const int frontierVerticalRadius = needsFullExactCoverageMetrics
         ? std::max(verticalRadius, computeVerticalRadius(centerChunk, exactMetricRadius, clampedWorldY))
         : verticalRadius;
@@ -9652,7 +9688,26 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
         int missingOccupancyColumns{0};
         int missingWarmStructureRegions{0};
     };
+    struct SampledWorldgenQueueRequest
+    {
+        glm::ivec2 key{0};
+        int priority{0};
+        int serviceClass{0};
+        bool buildOccupancy{false};
+        bool warmStructures{false};
+    };
+    struct SampledStructureRegionState
+    {
+        StructureRegionKey key{};
+        StructureRegionState state{StructureRegionState::Unrequested};
+        bool dependencyQueued{false};
+        std::size_t missingPageCount{0};
+        bool regionPresent{false};
+    };
     std::vector<SampledWorldgenPageState> sampledPageStates;
+    std::vector<SampledWorldgenQueueRequest> sampledQueueRequests;
+    std::optional<SampledWorldgenPageState> centerPageState;
+    std::vector<SampledStructureRegionState> centerWarmRegionSamples;
     if (!sampledMissingPageKeys.empty())
     {
         std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
@@ -9679,6 +9734,80 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
                 sample.missingWarmStructureRegions = it->second.missingWarmStructureRegions;
             }
             sampledPageStates.push_back(sample);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        auto queueCopy = pendingWorldgenPageDependencyQueue_;
+        constexpr std::size_t kQueueSampleLimit = 8;
+        while (!queueCopy.empty() && sampledQueueRequests.size() < kQueueSampleLimit)
+        {
+            const WorldgenPageDependencyRequest& request = queueCopy.top();
+            sampledQueueRequests.push_back(SampledWorldgenQueueRequest{
+                request.pageKey,
+                static_cast<int>(request.priority),
+                static_cast<int>(request.serviceClass),
+                request.buildOccupancy,
+                request.warmStructures});
+            queueCopy.pop();
+        }
+    }
+    const glm::ivec2 centerPage =
+        currentKeyValid ? worldgenPageKeyForChunkColumn(currentKey.centerColumn)
+                        : worldgenPageKeyForChunkColumn({lastCenterChunk_.x, lastCenterChunk_.z});
+    std::vector<StructureRegionKey> sampledCenterWarmRegions;
+    {
+        std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+        auto it = worldgenPageEntries_.find(centerPage);
+        if (it != worldgenPageEntries_.end())
+        {
+            SampledWorldgenPageState sample{};
+            sample.key = centerPage;
+            sample.present = true;
+            sample.state = it->second.state;
+            sample.dependencyJobQueued = it->second.dependencyJobQueued;
+            sample.dependencyJobInFlight = it->second.dependencyJobInFlight;
+            sample.hasPage = it->second.page != nullptr;
+            sample.buildOccupancy = it->second.buildOccupancy;
+            sample.warmStructures = it->second.warmStructures;
+            sample.supportsHeight = it->second.supportsHeight;
+            sample.supportsOccupancy = it->second.supportsOccupancy;
+            sample.supportsWarmStructures = it->second.supportsWarmStructures;
+            sample.missingHeightColumns = it->second.missingHeightColumns;
+            sample.missingOccupancyColumns = it->second.missingOccupancyColumns;
+            sample.missingWarmStructureRegions = it->second.missingWarmStructureRegions;
+            centerPageState = sample;
+            constexpr std::size_t kWarmRegionSampleLimit = 8;
+            if (it->second.warmStructureRegionsInitialized)
+            {
+                for (const StructureRegionKey& regionKey : it->second.warmStructureRegions)
+                {
+                    if (sampledCenterWarmRegions.size() >= kWarmRegionSampleLimit)
+                    {
+                        break;
+                    }
+                    sampledCenterWarmRegions.push_back(regionKey);
+                }
+            }
+        }
+    }
+    if (!sampledCenterWarmRegions.empty())
+    {
+        std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
+        centerWarmRegionSamples.reserve(sampledCenterWarmRegions.size());
+        for (const StructureRegionKey& regionKey : sampledCenterWarmRegions)
+        {
+            SampledStructureRegionState sample{};
+            sample.key = regionKey;
+            auto it = structureRegionEntries_.find(regionKey);
+            if (it != structureRegionEntries_.end())
+            {
+                sample.state = it->second.state;
+                sample.dependencyQueued = it->second.dependencyJobQueued;
+                sample.missingPageCount = it->second.missingWorldgenPages.size();
+                sample.regionPresent = static_cast<bool>(it->second.region);
+            }
+            centerWarmRegionSamples.push_back(sample);
         }
     }
 
@@ -9783,6 +9912,47 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
                    << " missing_h=" << sample.missingHeightColumns
                    << " missing_occ=" << sample.missingOccupancyColumns
                    << " missing_warm_regions=" << sample.missingWarmStructureRegions;
+        }
+    }
+    if (!sampledQueueRequests.empty())
+    {
+        stream << "\n  worldgen_queue_heads";
+        for (const SampledWorldgenQueueRequest& request : sampledQueueRequests)
+        {
+            stream << " (" << request.key.x << "," << request.key.y
+                   << " p=" << request.priority
+                   << " svc=" << request.serviceClass
+                   << " occ=" << (request.buildOccupancy ? 1 : 0)
+                   << " warm=" << (request.warmStructures ? 1 : 0)
+                   << ")";
+        }
+    }
+    if (centerPageState)
+    {
+        const SampledWorldgenPageState& sample = *centerPageState;
+        stream << "\n  center_page_state (" << sample.key.x << "," << sample.key.y << ")"
+               << " state=" << worldgenPageStateLabel(sample.state)
+               << " queued=" << (sample.dependencyJobQueued ? 1 : 0)
+               << " inflight=" << (sample.dependencyJobInFlight ? 1 : 0)
+               << " has_page=" << (sample.hasPage ? 1 : 0)
+               << " build_occ=" << (sample.buildOccupancy ? 1 : 0)
+               << " warm=" << (sample.warmStructures ? 1 : 0)
+               << " support_h=" << (sample.supportsHeight ? 1 : 0)
+               << " support_occ=" << (sample.supportsOccupancy ? 1 : 0)
+               << " support_warm=" << (sample.supportsWarmStructures ? 1 : 0)
+               << " missing_h=" << sample.missingHeightColumns
+               << " missing_occ=" << sample.missingOccupancyColumns
+               << " missing_warm_regions=" << sample.missingWarmStructureRegions;
+    }
+    if (!centerWarmRegionSamples.empty())
+    {
+        for (const SampledStructureRegionState& sample : centerWarmRegionSamples)
+        {
+            stream << "\n  center_warm_region (" << sample.key.regionX << "," << sample.key.regionZ << ")"
+                   << " state=" << static_cast<int>(sample.state)
+                   << " queued=" << (sample.dependencyQueued ? 1 : 0)
+                   << " missing_pages=" << sample.missingPageCount
+                   << " region_present=" << (sample.regionPresent ? 1 : 0);
         }
     }
 
@@ -11676,6 +11846,7 @@ std::string ChunkManager::Impl::biomeNameAt(const glm::vec3& worldPos) const
 void ChunkManager::Impl::startWorkerThreads()
 {
     shouldStop_.store(false, std::memory_order_release);
+    jobQueue_.restart();
 
     unsigned concurrency = std::thread::hardware_concurrency();
     if (concurrency == 0)
@@ -12074,6 +12245,11 @@ bool ChunkManager::Impl::acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
                                                            bool& buildOccupancy,
                                                            bool& warmStructures)
 {
+    std::size_t poppedRequests = 0;
+    std::size_t skippedMissingEntry = 0;
+    std::size_t skippedNotQueued = 0;
+    std::size_t skippedMismatch = 0;
+    std::size_t skippedSupportSatisfied = 0;
     while (true)
     {
         WorldgenPageDependencyRequest request{};
@@ -12081,17 +12257,32 @@ bool ChunkManager::Impl::acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
             std::lock_guard<std::mutex> queueLock(columnHeightPrefetchMutex_);
             if (pendingWorldgenPageDependencyQueue_.empty())
             {
+                if (exactDependencyStallDebugLoggingEnabled() &&
+                    (poppedRequests > 0 || skippedMissingEntry > 0 || skippedNotQueued > 0 || skippedMismatch > 0 ||
+                     skippedSupportSatisfied > 0))
+                {
+                    std::ostringstream stream;
+                    stream << "exact_dep_acquire_exhausted"
+                           << " popped=" << poppedRequests
+                           << " missing_entry=" << skippedMissingEntry
+                           << " not_queued=" << skippedNotQueued
+                           << " mismatch=" << skippedMismatch
+                           << " support_satisfied=" << skippedSupportSatisfied;
+                    exactDependencyStallDebugLog(stream.str());
+                }
                 return false;
             }
 
             request = pendingWorldgenPageDependencyQueue_.top();
             pendingWorldgenPageDependencyQueue_.pop();
+            ++poppedRequests;
         }
 
         std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
         auto entryIt = worldgenPageEntries_.find(request.pageKey);
         if (entryIt == worldgenPageEntries_.end())
         {
+            ++skippedMissingEntry;
             continue;
         }
 
@@ -12103,12 +12294,21 @@ bool ChunkManager::Impl::acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
             entry.buildOccupancy != request.buildOccupancy ||
             entry.warmStructures != request.warmStructures)
         {
+            if (!entry.dependencyJobQueued)
+            {
+                ++skippedNotQueued;
+            }
+            else
+            {
+                ++skippedMismatch;
+            }
             continue;
         }
 
         entry.dependencyJobQueued = false;
         if (worldgenPageSupportSatisfiedLocked(entry, entry.buildOccupancy, entry.warmStructures))
         {
+            ++skippedSupportSatisfied;
             continue;
         }
 
@@ -12123,6 +12323,19 @@ bool ChunkManager::Impl::acquireNextWorldgenPageDependency(glm::ivec2& pageKey,
         serviceClass = request.serviceClass;
         buildOccupancy = request.buildOccupancy;
         warmStructures = request.warmStructures;
+        if (exactDependencyStallDebugLoggingEnabled() &&
+            (skippedMissingEntry > 0 || skippedNotQueued > 0 || skippedMismatch > 0 || skippedSupportSatisfied > 0))
+        {
+            std::ostringstream stream;
+            stream << "exact_dep_acquire_recovered"
+                   << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                   << " popped=" << poppedRequests
+                   << " missing_entry=" << skippedMissingEntry
+                   << " not_queued=" << skippedNotQueued
+                   << " mismatch=" << skippedMismatch
+                   << " support_satisfied=" << skippedSupportSatisfied;
+            exactDependencyStallDebugLog(stream.str());
+        }
         return true;
     }
 }
@@ -12238,6 +12451,16 @@ void ChunkManager::Impl::enqueueJob(const std::shared_ptr<Chunk>& chunk,
     }
     if (!jobQueue_.push(Job(type, coord, chunk, generationEpoch, initialReadyPriority, serviceClass)))
     {
+        if (type == JobType::WorldgenPageDependency && exactDependencyStallDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact_dep_job_enqueue_failed"
+                   << " impl_stop=" << (shouldStop_.load(std::memory_order_acquire) ? 1 : 0)
+                   << " queue_stopped=" << (jobQueue_.stopped() ? 1 : 0)
+                   << " service=" << static_cast<int>(serviceClass)
+                   << " coord=(" << coord.x << "," << coord.y << "," << coord.z << ")";
+            exactDependencyStallDebugLog(stream.str());
+        }
         if (chunk)
         {
             chunk->inFlight.fetch_sub(1, std::memory_order_relaxed);
@@ -16156,14 +16379,43 @@ void ChunkManager::Impl::refillWorldgenPageDependencyJobs()
         return;
     }
 
+    const std::size_t pendingQueueSize = [&]()
+    {
+        std::lock_guard<std::mutex> lock(columnHeightPrefetchMutex_);
+        return pendingWorldgenPageDependencyQueue_.size();
+    }();
     const std::size_t targetJobs = targetWorldgenPageDependencyJobs();
     const std::size_t outstandingJobs = jobQueue_.outstanding(JobType::WorldgenPageDependency);
     const JobServiceClass serviceClass = highestQueuedWorldgenDependencyServiceClass();
+    if (exactDependencyStallDebugLoggingEnabled() && pendingQueueSize > 0 && targetJobs > 0 && outstandingJobs == 0)
+    {
+        static std::atomic<std::uint64_t> lastRefillDebugMicros{0};
+        const std::uint64_t nowMicros = steadyMicrosNow();
+        std::uint64_t previousMicros = lastRefillDebugMicros.load(std::memory_order_relaxed);
+        if (previousMicros == 0u || nowMicros - previousMicros >= 500000u)
+        {
+            if (lastRefillDebugMicros.compare_exchange_strong(previousMicros, nowMicros, std::memory_order_relaxed))
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_refill_idle"
+                       << " pending_q=" << pendingQueueSize
+                       << " target_jobs=" << targetJobs
+                       << " outstanding_jobs=" << outstandingJobs
+                       << " queue_stopped=" << (jobQueue_.stopped() ? 1 : 0)
+                       << " impl_stop=" << (shouldStop_.load(std::memory_order_acquire) ? 1 : 0)
+                       << " prefetch_workers=" << columnHeightPrefetchWorkerCount_
+                       << " workers=" << workerThreadCount_
+                       << " service=" << static_cast<int>(serviceClass);
+                exactDependencyStallDebugLog(stream.str());
+            }
+        }
+    }
     if (outstandingJobs >= targetJobs)
     {
         return;
     }
 
+    std::size_t enqueuedJobs = 0;
     for (std::size_t i = outstandingJobs; i < targetJobs; ++i)
     {
         enqueueJob(nullptr,
@@ -16172,6 +16424,38 @@ void ChunkManager::Impl::refillWorldgenPageDependencyJobs()
                    0,
                    false,
                    serviceClass);
+        ++enqueuedJobs;
+    }
+
+    if (exactDependencyStallDebugLoggingEnabled() && pendingQueueSize > 0)
+    {
+        static std::atomic<std::uint64_t> lastRefillAttemptDebugMicros{0};
+        const std::uint64_t nowMicros = steadyMicrosNow();
+        std::uint64_t previousMicros = lastRefillAttemptDebugMicros.load(std::memory_order_relaxed);
+        if (previousMicros == 0u || nowMicros - previousMicros >= 500000u)
+        {
+            if (lastRefillAttemptDebugMicros.compare_exchange_strong(previousMicros,
+                                                                    nowMicros,
+                                                                    std::memory_order_relaxed))
+            {
+                const JobQueueSnapshot snapshot = jobQueue_.snapshot();
+                std::ostringstream stream;
+                stream << "exact_dep_refill_attempt"
+                       << " pending_q=" << pendingQueueSize
+                       << " target_jobs=" << targetJobs
+                       << " outstanding_before=" << outstandingJobs
+                       << " enqueued_attempts=" << enqueuedJobs
+                       << " queued_type=" << snapshot.queuedByType[jobTypeIndex(JobType::WorldgenPageDependency)]
+                       << " active_type=" << snapshot.activeByType[jobTypeIndex(JobType::WorldgenPageDependency)]
+                       << " queued_total=" << snapshot.totalQueued
+                       << " queued_init_visible="
+                       << snapshot.queuedByService[jobServiceClassIndex(JobServiceClass::InitialVisible)]
+                       << " active_init_visible="
+                       << snapshot.activeByService[jobServiceClassIndex(JobServiceClass::InitialVisible)]
+                       << " service=" << static_cast<int>(serviceClass);
+                exactDependencyStallDebugLog(stream.str());
+            }
+        }
     }
 }
 
@@ -16447,9 +16731,65 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
                                            buildOccupancy,
                                            warmStructures))
     {
+        if (exactDependencyStallDebugLoggingEnabled())
+        {
+            static std::atomic<std::uint64_t> lastNoRequestDebugMicros{0};
+            const std::uint64_t nowMicros = steadyMicrosNow();
+            std::uint64_t previousMicros = lastNoRequestDebugMicros.load(std::memory_order_relaxed);
+            if (previousMicros == 0u || nowMicros - previousMicros >= 500000u)
+            {
+                if (lastNoRequestDebugMicros.compare_exchange_strong(previousMicros,
+                                                                     nowMicros,
+                                                                     std::memory_order_relaxed))
+                {
+                    std::size_t pendingQueueSize = 0;
+                    {
+                        std::lock_guard<std::mutex> queueLock(columnHeightPrefetchMutex_);
+                        pendingQueueSize = pendingWorldgenPageDependencyQueue_.size();
+                    }
+                    const JobQueueSnapshot snapshot = jobQueue_.snapshot();
+                    std::ostringstream stream;
+                    stream << "exact_dep_process_no_request"
+                           << " pending_q=" << pendingQueueSize
+                           << " queued_type=" << snapshot.queuedByType[jobTypeIndex(JobType::WorldgenPageDependency)]
+                           << " active_type=" << snapshot.activeByType[jobTypeIndex(JobType::WorldgenPageDependency)]
+                           << " queued_total=" << snapshot.totalQueued;
+                    exactDependencyStallDebugLog(stream.str());
+                }
+            }
+        }
         return false;
     }
     (void)token;
+
+    if (exactDependencyStallDebugLoggingEnabled())
+    {
+        static std::atomic<std::uint64_t> lastJobStartDebugMicros{0};
+        const std::uint64_t nowMicros = steadyMicrosNow();
+        std::uint64_t previousMicros = lastJobStartDebugMicros.load(std::memory_order_relaxed);
+        if (previousMicros == 0u || nowMicros - previousMicros >= 250000u)
+        {
+            if (lastJobStartDebugMicros.compare_exchange_strong(previousMicros,
+                                                                nowMicros,
+                                                                std::memory_order_relaxed))
+            {
+                std::size_t pendingQueueSize = 0;
+                {
+                    std::lock_guard<std::mutex> queueLock(columnHeightPrefetchMutex_);
+                    pendingQueueSize = pendingWorldgenPageDependencyQueue_.size();
+                }
+                std::ostringstream stream;
+                stream << "exact_dep_job_started"
+                       << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                       << " priority=" << static_cast<int>(priority)
+                       << " service=" << static_cast<int>(serviceClass)
+                       << " build_occ=" << (buildOccupancy ? 1 : 0)
+                       << " warm=" << (warmStructures ? 1 : 0)
+                       << " pending_q=" << pendingQueueSize;
+                exactDependencyStallDebugLog(stream.str());
+            }
+        }
+    }
 
     try
     {
@@ -16497,6 +16837,27 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
 
         publishWorldgenPageReady(pageKey, page);
 
+        if (exactDependencyStallDebugLoggingEnabled())
+        {
+            static std::atomic<std::uint64_t> lastJobReadyDebugMicros{0};
+            const std::uint64_t nowMicros = steadyMicrosNow();
+            std::uint64_t previousMicros = lastJobReadyDebugMicros.load(std::memory_order_relaxed);
+            if (previousMicros == 0u || nowMicros - previousMicros >= 250000u)
+            {
+                if (lastJobReadyDebugMicros.compare_exchange_strong(previousMicros,
+                                                                    nowMicros,
+                                                                    std::memory_order_relaxed))
+                {
+                    std::ostringstream stream;
+                    stream << "exact_dep_job_ready"
+                           << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                           << " build_occ=" << (buildOccupancy ? 1 : 0)
+                           << " warm=" << (warmStructures ? 1 : 0);
+                    exactDependencyStallDebugLog(stream.str());
+                }
+            }
+        }
+
         if (warmStructures)
         {
             for (int columnZ = minColumn.y; columnZ <= maxColumn.y; ++columnZ)
@@ -16512,7 +16873,20 @@ bool ChunkManager::Impl::processWorldgenPageDependencyJob()
     }
     catch (...)
     {
-        publishWorldgenPageFailure(pageKey, std::current_exception());
+        std::exception_ptr error = std::current_exception();
+        if (exactDependencyStallDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact_dep_job_failed"
+                   << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                   << " priority=" << static_cast<int>(priority)
+                   << " service=" << static_cast<int>(serviceClass)
+                   << " build_occ=" << (buildOccupancy ? 1 : 0)
+                   << " warm=" << (warmStructures ? 1 : 0)
+                   << " error=\"" << describeException(error) << "\"";
+            exactDependencyStallDebugLog(stream.str());
+        }
+        publishWorldgenPageFailure(pageKey, error);
         return false;
     }
 }
@@ -18235,6 +18609,8 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
 
     bool shouldNotify = false;
     bool enqueued = false;
+    std::string debugMessage;
+    std::vector<StructureRegionKey> missingWarmRegionRequests;
     {
         std::lock_guard<std::mutex> queueLock(columnHeightPrefetchMutex_);
         std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
@@ -18253,6 +18629,7 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                                           jobServiceClassIndex(JobServiceClass::LocalInteraction) ||
                                       priority >= DependencyPriority::Critical;
         const bool pageReady = entry.state == WorldgenPageState::Ready && entry.page != nullptr;
+        const bool focusedPage = distance <= 3u;
 
         if (alreadyQueued &&
             !priorityChanged &&
@@ -18260,6 +18637,21 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
             !buildOccupancyChanged &&
             !warmStructuresChanged)
         {
+            if (focusedPage && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_request_skip_already_queued"
+                       << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                       << " state=" << static_cast<int>(entry.state)
+                       << " has_page=" << (entry.page ? 1 : 0)
+                       << " support_h=" << (entry.supportsHeight ? 1 : 0)
+                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
+                       << " missing_h=" << entry.missingHeightColumns
+                       << " missing_occ=" << entry.missingOccupancyColumns
+                       << " missing_warm_regions=" << entry.missingWarmStructureRegions;
+                exactDependencyStallDebugLog(stream.str());
+            }
             return false;
         }
 
@@ -18273,13 +18665,66 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
             ensureWorldgenPageWarmStructureLinksLocked(pageKey, entry);
         }
 
+        if (pageReady &&
+            entry.warmStructures &&
+            !entry.supportsWarmStructures)
+        {
+            missingWarmRegionRequests.reserve(entry.warmStructureRegions.size());
+            for (const StructureRegionKey& regionKey : entry.warmStructureRegions)
+            {
+                missingWarmRegionRequests.push_back(regionKey);
+            }
+            if (focusedPage && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_request_defer_to_regions"
+                       << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                       << " support_h=" << (entry.supportsHeight ? 1 : 0)
+                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
+                       << " missing_warm_regions=" << entry.missingWarmStructureRegions;
+                debugMessage = stream.str();
+            }
+            // The page payload is already resident. Re-running the page job before the linked warm
+            // structure regions are ready only starves genuinely missing pages. Once the regions
+            // resolve, publishStructureRegionReady() explicitly requeues any ready page that still
+            // needs occupancy support.
+            goto finish_worldgen_request;
+        }
+
         if (entry.dependencyJobInFlight || entry.state == WorldgenPageState::Building)
         {
+            if (focusedPage && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_request_skip_inflight"
+                       << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                       << " state=" << static_cast<int>(entry.state)
+                       << " has_page=" << (entry.page ? 1 : 0)
+                       << " support_h=" << (entry.supportsHeight ? 1 : 0)
+                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
+                       << " missing_h=" << entry.missingHeightColumns
+                       << " missing_occ=" << entry.missingOccupancyColumns
+                       << " missing_warm_regions=" << entry.missingWarmStructureRegions;
+                exactDependencyStallDebugLog(stream.str());
+            }
             return false;
         }
 
         if (worldgenPageSupportSatisfiedLocked(entry, entry.buildOccupancy, entry.warmStructures))
         {
+            if (focusedPage && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_request_skip_satisfied"
+                       << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                       << " has_page=" << (entry.page ? 1 : 0)
+                       << " support_h=" << (entry.supportsHeight ? 1 : 0)
+                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0);
+                exactDependencyStallDebugLog(stream.str());
+            }
             return false;
         }
 
@@ -18287,6 +18732,15 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
             pendingWorldgenPageDependencyQueue_.size() >= queueLimit &&
             !latencySensitive)
         {
+            if (focusedPage && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_request_skip_queue_limit"
+                       << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                       << " pending_q=" << pendingWorldgenPageDependencyQueue_.size()
+                       << " queue_limit=" << queueLimit;
+                exactDependencyStallDebugLog(stream.str());
+            }
             return false;
         }
 
@@ -18310,8 +18764,45 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                 entry.warmStructures});
         shouldNotify = true;
         enqueued = true;
+        if (focusedPage && exactDependencyStallDebugLoggingEnabled())
+        {
+            std::ostringstream stream;
+            stream << "exact_dep_request_enqueued"
+                   << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                   << " page_ready=" << (pageReady ? 1 : 0)
+                   << " state=" << static_cast<int>(entry.state)
+                   << " has_page=" << (entry.page ? 1 : 0)
+                   << " support_h=" << (entry.supportsHeight ? 1 : 0)
+                   << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                   << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
+                   << " missing_h=" << entry.missingHeightColumns
+                   << " missing_occ=" << entry.missingOccupancyColumns
+                   << " missing_warm_regions=" << entry.missingWarmStructureRegions
+                   << " build_occ=" << (entry.buildOccupancy ? 1 : 0)
+                   << " warm=" << (entry.warmStructures ? 1 : 0)
+                   << " pending_q=" << pendingWorldgenPageDependencyQueue_.size();
+            debugMessage = stream.str();
+        }
     }
 
+finish_worldgen_request:
+    if (!debugMessage.empty())
+    {
+        exactDependencyStallDebugLog(debugMessage);
+    }
+    if (!missingWarmRegionRequests.empty())
+    {
+        for (const StructureRegionKey& regionKey : missingWarmRegionRequests)
+        {
+            if (!tryGetReadyRegion(regionKey))
+            {
+                const_cast<ChunkManager::Impl*>(this)->requestStructureRegionDependency(regionKey,
+                                                                                        priority,
+                                                                                        serviceClass);
+            }
+        }
+        return false;
+    }
     if (shouldNotify)
     {
         const_cast<ChunkManager::Impl*>(this)->refillWorldgenPageDependencyJobs();
@@ -18374,9 +18865,11 @@ bool ChunkManager::Impl::requestStructureRegionDependency(const StructureRegionK
     const std::uint32_t distance =
         static_cast<std::uint32_t>(std::max(std::abs(key.regionX - centerRegion.regionX),
                                             std::abs(key.regionZ - centerRegion.regionZ)));
+    const bool focusedRegion = distance <= 3u;
 
     bool shouldNotify = false;
     bool enqueued = false;
+    std::string debugMessage;
     {
         std::lock_guard<std::mutex> lock(structureRegionDependencyMutex_);
         StructureRegionDependencyEntry& entry = structureRegionEntries_[key];
@@ -18416,6 +18909,19 @@ bool ChunkManager::Impl::requestStructureRegionDependency(const StructureRegionK
                 }
             }
             shouldNotify = false;
+            if (focusedRegion && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_region_waiting_pages"
+                       << " region=(" << key.regionX << "," << key.regionZ << ")"
+                       << " missing_pages=" << missingPageKeys.size();
+                constexpr std::size_t kMissingPageSampleLimit = 8;
+                for (std::size_t i = 0; i < std::min<std::size_t>(missingPageKeys.size(), kMissingPageSampleLimit); ++i)
+                {
+                    stream << " (" << missingPageKeys[i].x << "," << missingPageKeys[i].y << ")";
+                }
+                debugMessage = stream.str();
+            }
         }
         else
         {
@@ -18444,9 +18950,22 @@ bool ChunkManager::Impl::requestStructureRegionDependency(const StructureRegionK
                     entry.serviceClass});
             shouldNotify = true;
             enqueued = true;
+            if (focusedRegion && exactDependencyStallDebugLoggingEnabled())
+            {
+                std::ostringstream stream;
+                stream << "exact_dep_region_enqueued"
+                       << " region=(" << key.regionX << "," << key.regionZ << ")"
+                       << " state=" << static_cast<int>(entry.state)
+                       << " queued=" << (entry.dependencyJobQueued ? 1 : 0);
+                debugMessage = stream.str();
+            }
         }
     }
 
+    if (!debugMessage.empty())
+    {
+        exactDependencyStallDebugLog(debugMessage);
+    }
     if (shouldNotify)
     {
         const_cast<ChunkManager::Impl*>(this)->refillStructureRegionDependencyJobs();
@@ -20259,7 +20778,34 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
     {
         for (int columnX = minColumn.x - 1; columnX <= maxColumn.x + 1; ++columnX)
         {
+            if (columnX >= minColumn.x && columnX <= maxColumn.x &&
+                columnZ >= minColumn.y && columnZ <= maxColumn.y)
+            {
+                continue;
+            }
             invalidateColumnSlabOccupancy({columnX, columnZ});
+        }
+    }
+
+    if (exactDependencyStallDebugLoggingEnabled())
+    {
+        const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn({lastCenterChunk_.x, lastCenterChunk_.z});
+        if (std::max(std::abs(pageKey.x - centerPage.x), std::abs(pageKey.y - centerPage.y)) <= 3)
+        {
+            std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+            const WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
+            std::ostringstream stream;
+            stream << "exact_dep_page_ready_state"
+                   << " page=(" << pageKey.x << "," << pageKey.y << ")"
+                   << " republished=" << (republishedReadyPage ? 1 : 0)
+                   << " support_h=" << (entry.supportsHeight ? 1 : 0)
+                   << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                   << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
+                   << " missing_h=" << entry.missingHeightColumns
+                   << " missing_occ=" << entry.missingOccupancyColumns
+                   << " missing_warm_regions=" << entry.missingWarmStructureRegions
+                   << " warm_regions=" << entry.warmStructureRegions.size();
+            exactDependencyStallDebugLog(stream.str());
         }
     }
     markPlanDirtyWorldgenPage(pageKey);
@@ -20276,6 +20822,14 @@ void ChunkManager::Impl::publishWorldgenPageFailure(const glm::ivec2& pageKey, s
         entry.dependencyJobQueued = false;
         entry.dependencyJobInFlight = false;
         refreshWorldgenPageSupportStatusLocked(entry);
+    }
+    if (exactDependencyStallDebugLoggingEnabled())
+    {
+        std::ostringstream stream;
+        stream << "exact_dep_page_failure_published"
+               << " page=(" << pageKey.x << "," << pageKey.y << ")"
+               << " error=\"" << describeException(error) << "\"";
+        exactDependencyStallDebugLog(stream.str());
     }
     markPlanDirtyWorldgenPage(pageKey);
 }
@@ -20350,6 +20904,7 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
     }
 
     structureRegistry_.publishReady(key, region);
+    std::vector<glm::ivec2> occupancyRequeuePages;
     {
         std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
         auto linkedPagesIt = structureRegionWorldgenPages_.find(key);
@@ -20363,8 +20918,60 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
                     continue;
                 }
 
-                refreshWorldgenPageWarmStructureSupportLocked(pageKey, entryIt->second);
+                WorldgenPageDependencyEntry& entry = entryIt->second;
+                refreshWorldgenPageWarmStructureSupportLocked(pageKey, entry);
+                if (entry.state == WorldgenPageState::Ready &&
+                    entry.page &&
+                    entry.buildOccupancy &&
+                    !entry.supportsOccupancy &&
+                    entry.supportsWarmStructures)
+                {
+                    enqueueDirtyPrefetchPageLocked(pageKey, entry);
+                    occupancyRequeuePages.push_back(pageKey);
+                }
             }
+        }
+    }
+    if (exactDependencyStallDebugLoggingEnabled())
+    {
+        const StructureRegionKey centerRegion{
+            floorDiv(lastCenterChunk_.x * kChunkSizeX, kStructureRegionSize),
+            floorDiv(lastCenterChunk_.z * kChunkSizeZ, kStructureRegionSize)};
+        if (std::max(std::abs(key.regionX - centerRegion.regionX), std::abs(key.regionZ - centerRegion.regionZ)) <= 3)
+        {
+            std::size_t linkedPageCount = 0;
+            {
+                std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
+                auto linkedPagesIt = structureRegionWorldgenPages_.find(key);
+                if (linkedPagesIt != structureRegionWorldgenPages_.end())
+                {
+                    linkedPageCount = linkedPagesIt->second.size();
+                }
+            }
+            std::ostringstream stream;
+            stream << "exact_dep_region_ready"
+                   << " region=(" << key.regionX << "," << key.regionZ << ")"
+                   << " linked_pages=" << linkedPageCount
+                   << " spans=" << region->chunkColumnSpans.size()
+                   << " occupancy_requeues=" << occupancyRequeuePages.size();
+            exactDependencyStallDebugLog(stream.str());
+        }
+    }
+    if (exactDependencyStallDebugLoggingEnabled())
+    {
+        const glm::ivec2 centerPage = worldgenPageKeyForChunkColumn({lastCenterChunk_.x, lastCenterChunk_.z});
+        for (const glm::ivec2& pageKey : occupancyRequeuePages)
+        {
+            if (std::max(std::abs(pageKey.x - centerPage.x), std::abs(pageKey.y - centerPage.y)) > 3)
+            {
+                continue;
+            }
+
+            std::ostringstream stream;
+            stream << "exact_dep_region_requeue_page"
+                   << " region=(" << key.regionX << "," << key.regionZ << ")"
+                   << " page=(" << pageKey.x << "," << pageKey.y << ")";
+            exactDependencyStallDebugLog(stream.str());
         }
     }
     markPlanDirtyStructureRegion(key);

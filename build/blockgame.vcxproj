@@ -129,7 +129,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
+      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/Debug/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/debug/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -172,15 +172,6 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -DBUILD_CONFIG=Debug -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Debug/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -251,7 +242,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
+      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/Release/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -294,15 +285,6 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -DBUILD_CONFIG=Release -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/Release/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/Release/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -376,7 +358,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
+      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -419,15 +401,6 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -DBUILD_CONFIG=MinSizeRel -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/MinSizeRel/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -498,7 +471,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets	Precompiling Release shaders</Message>
+      <Message>	Copying runtime DLLs	Copying DirectX 12 Agility SDK runtime	Copying block atlas	Copying runtime assets</Message>
       <Command>setlocal
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -noprofile -executionpolicy Bypass -file C:/vcpkg/scripts/buildsystems/msbuild/applocal.ps1 -targetBinary C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/blockgame.exe -installedDir C:/vcpkg/installed/x64-windows/bin -OutVariable out
 if %errorlevel% neq 0 goto :cmEnd
@@ -541,15 +514,6 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
 "C:\Program Files\CMake\bin\cmake.exe" -E copy_directory C:/Users/Jacob/Documents/code/BlockGame/assets C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -DBUILD_CONFIG=RelWithDebInfo -DSHADER_COMPILER_EXE=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/blockgame_shader_precompiler.exe -DSHADER_SOURCE_DIR=C:/Users/Jacob/Documents/code/BlockGame/assets/shaders -DSHADER_OUTPUT_DIR=C:/Users/Jacob/Documents/code/BlockGame/build/RelWithDebInfo/assets/shaders/compiled -DSHADER_DXC_EXE=D:/dxc_2026_02_20/bin/x64/dxc.exe -P C:/Users/Jacob/Documents/code/BlockGame/cmake/precompile_shaders.cmake
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -662,6 +626,12 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ProjectReference Include="C:\Users\Jacob\Documents\code\BlockGame\build\ZERO_CHECK.vcxproj">
       <Project>{C89F50DE-583C-3E40-A149-D8A16578E627}</Project>
       <Name>ZERO_CHECK</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+    <ProjectReference Include="C:\Users\Jacob\Documents\code\BlockGame\build\blockgame_precompiled_shaders.vcxproj">
+      <Project>{A283906F-FCFA-3DA6-9707-B1777AB70AB1}</Project>
+      <Name>blockgame_precompiled_shaders</Name>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </ProjectReference>

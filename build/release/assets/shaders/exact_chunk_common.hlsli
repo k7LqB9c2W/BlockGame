@@ -433,6 +433,11 @@ bool shouldRenderBlockFace(uint owningBlock, uint neighborBlock)
         return false;
     }
 
+    if (owningBlock == kBlockWater)
+    {
+        return false;
+    }
+
     if (neighborBlock == kBlockAir)
     {
         return true;
@@ -467,6 +472,11 @@ bool classifyRenderableBlockFace(uint owningBlock, uint neighborBlock, out uint 
 {
     owningClass = kRenderClassOpaque;
     if (owningBlock == kBlockAir)
+    {
+        return false;
+    }
+
+    if (owningBlock == kBlockWater)
     {
         return false;
     }

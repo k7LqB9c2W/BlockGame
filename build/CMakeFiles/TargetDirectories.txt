@@ -1,4 +1,5 @@
 C:/Users/Jacob/Documents/code/BlockGame/build/CMakeFiles/blockgame.dir
 C:/Users/Jacob/Documents/code/BlockGame/build/CMakeFiles/blockgame_shader_precompiler.dir
+C:/Users/Jacob/Documents/code/BlockGame/build/CMakeFiles/blockgame_precompiled_shaders.dir
 C:/Users/Jacob/Documents/code/BlockGame/build/CMakeFiles/ALL_BUILD.dir
 C:/Users/Jacob/Documents/code/BlockGame/build/CMakeFiles/ZERO_CHECK.dir

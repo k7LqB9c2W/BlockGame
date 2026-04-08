@@ -279,6 +279,14 @@ int compileShader(const fs::path& shaderRoot,
     std::cout << "compiled " << spec.relativePath << " -> " << outputPath.filename().string() << std::endl;
     return 0;
 }
+
+bool compiledShaderOutputExists(const fs::path& outputRoot, const ShaderCompileSpec& spec)
+{
+    std::error_code ec;
+    const fs::path outputPath =
+        outputRoot / compiledShaderFileName(spec.relativePath, spec.entryPoint, spec.target);
+    return fs::exists(outputPath, ec) && !ec;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -320,6 +328,28 @@ int main(int argc, char** argv)
     if (failures != 0)
     {
         std::cerr << "shader precompile failures: " << failures << '\n';
+        return 1;
+    }
+
+    int missingOutputs = 0;
+    for (const ShaderCompileSpec& spec : kBlockGameShaderCompileSpecs)
+    {
+        if (compiledShaderOutputExists(outputRoot, spec))
+        {
+            continue;
+        }
+
+        ++missingOutputs;
+        std::cerr << "missing compiled shader output: "
+                  << (outputRoot
+                      / compiledShaderFileName(spec.relativePath, spec.entryPoint, spec.target))
+                         .string()
+                  << '\n';
+    }
+
+    if (missingOutputs != 0)
+    {
+        std::cerr << "shader precompile missing outputs: " << missingOutputs << '\n';
         return 1;
     }
 

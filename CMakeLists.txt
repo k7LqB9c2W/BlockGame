@@ -75,6 +75,7 @@ add_executable(blockgame ${BLOCKGAME_SOURCES})
 
 add_executable(blockgame_shader_precompiler
     ${CMAKE_SOURCE_DIR}/tools/shader_precompiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_manifest.h
 )
 
 target_include_directories(blockgame
@@ -231,7 +232,7 @@ if (EXISTS "${CMAKE_SOURCE_DIR}/assets")
     )
 endif()
 
-add_custom_command(TARGET blockgame POST_BUILD
+add_custom_target(blockgame_precompiled_shaders ALL
     COMMAND ${CMAKE_COMMAND}
         -DBUILD_CONFIG=$<CONFIG>
         -DSHADER_COMPILER_EXE=$<TARGET_FILE:blockgame_shader_precompiler>
@@ -239,7 +240,10 @@ add_custom_command(TARGET blockgame POST_BUILD
         -DSHADER_OUTPUT_DIR=$<TARGET_FILE_DIR:blockgame>/assets/shaders/compiled
         -DSHADER_DXC_EXE=${BLOCKGAME_DXC_EXE}
         -P "${CMAKE_SOURCE_DIR}/cmake/precompile_shaders.cmake"
-    COMMENT "Precompiling Release shaders"
+    DEPENDS blockgame_shader_precompiler
+    COMMENT "Ensuring Release shaders are precompiled"
 )
+
+add_dependencies(blockgame blockgame_precompiled_shaders)
 
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${BLOCKGAME_SOURCES})

@@ -2224,6 +2224,14 @@ void Renderer::createPipelines()
     worldSkyBackgroundRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     worldSkyBackgroundRange.NumDescriptors = 1;
     worldSkyBackgroundRange.BaseShaderRegister = 3;
+    D3D12_DESCRIPTOR_RANGE waterAtlasRange = worldAtlasRange;
+    waterAtlasRange.BaseShaderRegister = 1;
+    D3D12_DESCRIPTOR_RANGE waterAerialRange = worldAerialRange;
+    waterAerialRange.BaseShaderRegister = 2;
+    D3D12_DESCRIPTOR_RANGE waterShadowRange = worldShadowRange;
+    waterShadowRange.BaseShaderRegister = 3;
+    D3D12_DESCRIPTOR_RANGE waterSkyBackgroundRange = worldSkyBackgroundRange;
+    waterSkyBackgroundRange.BaseShaderRegister = 4;
 
     std::array<D3D12_ROOT_PARAMETER, 5> worldRootParams{};
     worldRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -2396,19 +2404,19 @@ void Renderer::createPipelines()
     waterRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     waterRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     waterRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
-    waterRootParams[2].DescriptorTable.pDescriptorRanges = &worldAtlasRange;
+    waterRootParams[2].DescriptorTable.pDescriptorRanges = &waterAtlasRange;
     waterRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     waterRootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     waterRootParams[3].DescriptorTable.NumDescriptorRanges = 1;
-    waterRootParams[3].DescriptorTable.pDescriptorRanges = &worldAerialRange;
+    waterRootParams[3].DescriptorTable.pDescriptorRanges = &waterAerialRange;
     waterRootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     waterRootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     waterRootParams[4].DescriptorTable.NumDescriptorRanges = 1;
-    waterRootParams[4].DescriptorTable.pDescriptorRanges = &worldShadowRange;
+    waterRootParams[4].DescriptorTable.pDescriptorRanges = &waterShadowRange;
     waterRootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     waterRootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     waterRootParams[5].DescriptorTable.NumDescriptorRanges = 1;
-    waterRootParams[5].DescriptorTable.pDescriptorRanges = &worldSkyBackgroundRange;
+    waterRootParams[5].DescriptorTable.pDescriptorRanges = &waterSkyBackgroundRange;
     waterRootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC waterRootDesc{};

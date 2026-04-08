@@ -182,6 +182,10 @@ uint layerMaterialFlags(GpuTerrainColumnDescriptor column, uint layerId, bool si
 
 bool topFaceVisible(GpuTerrainColumnDescriptor column, uint layerId)
 {
+    if (layerId == kLayerWater)
+    {
+        return false;
+    }
     if (!layerActive(column, layerId))
     {
         return false;
@@ -223,6 +227,10 @@ bool sideSegment(GpuTerrainColumnDescriptor current,
 {
     segmentBottom = 0;
     segmentTopExclusive = 0;
+    if (layerId == kLayerWater)
+    {
+        return false;
+    }
     if (!layerActive(current, layerId))
     {
         return false;

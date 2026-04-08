@@ -6,9 +6,17 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="C:\Users\Jacob\Documents\code\BlockGame\src\shader_manifest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
     <CustomBuild Include="C:\Users\Jacob\Documents\code\BlockGame\CMakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{3F6A891B-9FBB-3256-A5C5-E021A6776B85}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Source Files">
       <UniqueIdentifier>{2EEBBACC-99F6-35EF-8228-88D6E6286BFB}</UniqueIdentifier>
     </Filter>

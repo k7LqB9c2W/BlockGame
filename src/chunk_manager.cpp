@@ -7458,7 +7458,16 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         startupEnabled_ &&
         startupState_.preloadStarted &&
         startupState_.phase == StreamingPhase::ExactPreload;
-    const bool needsFullExactCoverageMetrics = exactOnly && !startupExactPreloadPhase;
+    const bool startupExactRampPhase =
+        exactOnly &&
+        startupEnabled_ &&
+        startupState_.preloadStarted &&
+        startupState_.phase == StreamingPhase::FarRamp &&
+        targetViewDistance_ < renderSettings_.exactChunks;
+    const bool needsFullExactCoverageMetrics =
+        exactOnly &&
+        !startupExactPreloadPhase &&
+        !startupExactRampPhase;
 
     ensureVolumeMsLastFrame_ = 0.0;
     ensureVolumeColumnPrepMsLastFrame_ = 0.0;
@@ -7554,7 +7563,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     if (exactOnly)
     {
         const auto fullRadiusDiscoveryStart = std::chrono::steady_clock::now();
-        requestFullRadiusWorldgenPageDiscovery(centerChunk, currentExactWindowKey.preloadRadius);
+        requestFullRadiusWorldgenPageDiscovery(centerChunk,
+                                              std::max(currentExactWindowKey.preloadRadius,
+                                                       renderSettings_.exactChunks));
         fullRadiusWorldgenDiscoveryMsLastFrame_ =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fullRadiusDiscoveryStart)
                 .count();

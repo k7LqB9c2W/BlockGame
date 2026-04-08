@@ -682,6 +682,7 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
 
     const std::array<std::size_t, kJobTypeCount> targets = computeStageTargetsLocked();
     std::size_t bestUnderTarget = kJobTypeCount;
+    std::size_t bestUnderTargetDeficit = 0;
     std::size_t bestReady = kJobTypeCount;
     for (std::size_t queueIndex = 0; queueIndex < queues_.size(); ++queueIndex)
     {
@@ -702,10 +703,14 @@ std::size_t JobQueue::pickNextQueueIndexLocked() const noexcept
             continue;
         }
 
+        const std::size_t deficit = targets[queueIndex] - activeCounts_[queueIndex];
         if (bestUnderTarget == kJobTypeCount ||
-            comparePrioritizedJobs(candidate, queues_[bestUnderTarget].top()) < 0)
+            deficit > bestUnderTargetDeficit ||
+            (deficit == bestUnderTargetDeficit &&
+             comparePrioritizedJobs(candidate, queues_[bestUnderTarget].top()) < 0))
         {
             bestUnderTarget = queueIndex;
+            bestUnderTargetDeficit = deficit;
         }
     }
 

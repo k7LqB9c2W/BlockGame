@@ -5946,7 +5946,7 @@ private:
             }
             if (lhs.buildOccupancy != rhs.buildOccupancy)
             {
-                return lhs.buildOccupancy > rhs.buildOccupancy;
+                return lhs.buildOccupancy < rhs.buildOccupancy;
             }
             if (lhs.serviceClass != rhs.serviceClass)
             {
@@ -20209,9 +20209,13 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
     std::vector<DeferredChunkDependencies> readyDependencies;
     std::vector<glm::ivec3> readyCoords;
     bool shouldRefillStructureJobs = false;
+    bool republishedReadyPage = false;
     {
         std::lock_guard<std::mutex> pageLock(worldgenPageMutex_);
         WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
+        republishedReadyPage =
+            entry.state == WorldgenPageState::Ready &&
+            entry.page == page;
         entry.state = WorldgenPageState::Ready;
         entry.page = page;
         entry.lastError = {};
@@ -20306,6 +20310,11 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
     if (shouldRefillStructureJobs)
     {
         refillStructureRegionDependencyJobs();
+    }
+
+    if (republishedReadyPage)
+    {
+        return;
     }
 
     glm::ivec2 minColumn{0};
@@ -20535,19 +20544,12 @@ bool ChunkManager::Impl::requestColumnOccupancyDependencies(const glm::ivec2& co
                                                             JobServiceClass serviceClass) const
 {
     bool ready = true;
-    const auto pageSupportReady = [this](const glm::ivec2& pageKey) -> bool
-    {
-        std::lock_guard<std::mutex> lock(worldgenPageMutex_);
-        auto it = worldgenPageEntries_.find(pageKey);
-        return it != worldgenPageEntries_.end() &&
-               worldgenPageSupportSatisfiedLocked(it->second, true, true);
-    };
 
     std::array<glm::ivec2, 4> pageKeys{};
     const std::size_t pageCount = collectChunkWorldgenPageKeys({column.x, 0, column.y}, pageKeys);
     for (std::size_t i = 0; i < pageCount; ++i)
     {
-        if (pageSupportReady(pageKeys[i]))
+        if (tryGetReadyWorldgenPage(pageKeys[i]))
         {
             continue;
         }
@@ -31649,6 +31651,23 @@ void ChunkManager::Impl::updateDenseChunkResidency(const glm::ivec3& centerChunk
             chunk->handoffTargetRevision.store(0, std::memory_order_release);
             chunk->handoffReady.store(false, std::memory_order_release);
             chunk->lastLocalEditMicros.store(0, std::memory_order_release);
+        }
+
+        const bool needsNonlocalExactGpuRefresh =
+            device_ != nullptr &&
+            exactGpuContext_.ready() &&
+            chunk->state.load(std::memory_order_acquire) == ChunkState::Uploaded &&
+            chunk->hasBlocks.load(std::memory_order_acquire) &&
+            !chunk->cpuDataResident.load(std::memory_order_acquire) &&
+            (!chunk->exactGpuResident.load(std::memory_order_acquire) ||
+             chunk->exactGpuInputsDirty.load(std::memory_order_acquire) ||
+             chunk->exactGpuReadyVersion.load(std::memory_order_acquire) !=
+                 chunk->exactGpuInputsVersion.load(std::memory_order_acquire));
+        if (needsNonlocalExactGpuRefresh &&
+            !chunk->exactGpuBuildQueued.load(std::memory_order_acquire) &&
+            !chunk->exactGpuBuildInFlight.load(std::memory_order_acquire))
+        {
+            queueChunkForExactGpuRefresh(chunk);
         }
 
         if (chunk->cpuDataResident.load(std::memory_order_acquire))

@@ -73,6 +73,10 @@ constexpr int kRelightMinBatchBudget = 4;
 constexpr int kRelightMaxBatchBudget = 24;
 constexpr int kStartupInteractiveExactChunks = 8;
 constexpr int kStartupExactRampStepChunks = 4;
+constexpr std::size_t kExactFillDefaultBatchSize = 64u;
+constexpr std::size_t kExactFillMaxBatchSize = 128u;
+constexpr int kExactFillMaxSupportRequestsPerUpdate = 24;
+constexpr int kExactFillMaxBatchJobsPerRefill = 4;
 using SteadyClock = std::chrono::steady_clock;
 thread_local bool gChunkManagerInsideGenerateJob = false;
 
@@ -814,6 +818,13 @@ struct ChunkBenchmarkMetrics
         exactGpuBuildQueueWaitStage.reset();
         exactGpuBuildQueueDepthEnqueue.reset();
         exactGpuBuildQueueDepthStart.reset();
+        exactFillDispatchStage.reset();
+        exactFillSupportDiscoveryStage.reset();
+        exactFillSupportPreparationStage.reset();
+        exactFillBatchCpuPreparationStage.reset();
+        exactFillBatchQueueWaitStage.reset();
+        exactFillBatchExactGpuEnqueueStage.reset();
+        exactGpuFeedBatchSize.reset();
         chunkReadyLatency.reset();
         chunkReadyWaitGenerateStage.reset();
         chunkReadyRequestQueuedGenerateStage.reset();
@@ -884,6 +895,17 @@ struct ChunkBenchmarkMetrics
         uploadedChunks.store(0, std::memory_order_relaxed);
         farBuiltTiles.store(0, std::memory_order_relaxed);
         uploadedBytes.store(0, std::memory_order_relaxed);
+        exactFillSupportPagesQueued.store(0, std::memory_order_relaxed);
+        exactFillSupportPagesReady.store(0, std::memory_order_relaxed);
+        exactFillSupportPagesBlocked.store(0, std::memory_order_relaxed);
+        exactFillBatchesQueued.store(0, std::memory_order_relaxed);
+        exactFillBatchesPreparing.store(0, std::memory_order_relaxed);
+        exactFillBatchesPrepared.store(0, std::memory_order_relaxed);
+        exactFillChunksPrepared.store(0, std::memory_order_relaxed);
+        exactFillChunksSubmittedToExactGpu.store(0, std::memory_order_relaxed);
+        exactFillChunksCommitted.store(0, std::memory_order_relaxed);
+        exactFillStaleBatchesDropped.store(0, std::memory_order_relaxed);
+        exactFillFallbackChunks.store(0, std::memory_order_relaxed);
     }
 
     [[nodiscard]] ChunkBenchmarkReport snapshot() const noexcept
@@ -969,6 +991,13 @@ struct ChunkBenchmarkMetrics
         report.exactGpuBuildQueueWaitStage = exactGpuBuildQueueWaitStage.snapshot();
         report.exactGpuBuildQueueDepthEnqueue = exactGpuBuildQueueDepthEnqueue.snapshot();
         report.exactGpuBuildQueueDepthStart = exactGpuBuildQueueDepthStart.snapshot();
+        report.exactFillDispatchStage = exactFillDispatchStage.snapshot();
+        report.exactFillSupportDiscoveryStage = exactFillSupportDiscoveryStage.snapshot();
+        report.exactFillSupportPreparationStage = exactFillSupportPreparationStage.snapshot();
+        report.exactFillBatchCpuPreparationStage = exactFillBatchCpuPreparationStage.snapshot();
+        report.exactFillBatchQueueWaitStage = exactFillBatchQueueWaitStage.snapshot();
+        report.exactFillBatchExactGpuEnqueueStage = exactFillBatchExactGpuEnqueueStage.snapshot();
+        report.exactGpuFeedBatchSize = exactGpuFeedBatchSize.snapshot();
         report.chunkReadyLatency = chunkReadyLatency.snapshot();
         report.chunkReadyWaitGenerateStage = chunkReadyWaitGenerateStage.snapshot();
         report.chunkReadyRequestQueuedGenerateStage = chunkReadyRequestQueuedGenerateStage.snapshot();
@@ -1040,6 +1069,17 @@ struct ChunkBenchmarkMetrics
         report.uploadedChunks = uploadedChunks.load(std::memory_order_relaxed);
         report.farBuiltTiles = farBuiltTiles.load(std::memory_order_relaxed);
         report.uploadedBytes = uploadedBytes.load(std::memory_order_relaxed);
+        report.exactFillSupportPagesQueued = exactFillSupportPagesQueued.load(std::memory_order_relaxed);
+        report.exactFillSupportPagesReady = exactFillSupportPagesReady.load(std::memory_order_relaxed);
+        report.exactFillSupportPagesBlocked = exactFillSupportPagesBlocked.load(std::memory_order_relaxed);
+        report.exactFillBatchesQueued = exactFillBatchesQueued.load(std::memory_order_relaxed);
+        report.exactFillBatchesPreparing = exactFillBatchesPreparing.load(std::memory_order_relaxed);
+        report.exactFillBatchesPrepared = exactFillBatchesPrepared.load(std::memory_order_relaxed);
+        report.exactFillChunksPrepared = exactFillChunksPrepared.load(std::memory_order_relaxed);
+        report.exactFillChunksSubmittedToExactGpu = exactFillChunksSubmittedToExactGpu.load(std::memory_order_relaxed);
+        report.exactFillChunksCommitted = exactFillChunksCommitted.load(std::memory_order_relaxed);
+        report.exactFillStaleBatchesDropped = exactFillStaleBatchesDropped.load(std::memory_order_relaxed);
+        report.exactFillFallbackChunks = exactFillFallbackChunks.load(std::memory_order_relaxed);
         return report;
     }
 
@@ -1123,6 +1163,13 @@ struct ChunkBenchmarkMetrics
     AtomicLatencyHistogram exactGpuBuildQueueWaitStage{};
     AtomicCountHistogram exactGpuBuildQueueDepthEnqueue{};
     AtomicCountHistogram exactGpuBuildQueueDepthStart{};
+    AtomicLatencyHistogram exactFillDispatchStage{};
+    AtomicLatencyHistogram exactFillSupportDiscoveryStage{};
+    AtomicLatencyHistogram exactFillSupportPreparationStage{};
+    AtomicLatencyHistogram exactFillBatchCpuPreparationStage{};
+    AtomicLatencyHistogram exactFillBatchQueueWaitStage{};
+    AtomicLatencyHistogram exactFillBatchExactGpuEnqueueStage{};
+    AtomicCountHistogram exactGpuFeedBatchSize{};
     AtomicLatencyHistogram chunkReadyLatency{};
     AtomicLatencyHistogram chunkReadyWaitGenerateStage{};
     AtomicCountHistogram chunkReadyRequestQueuedGenerateStage{};
@@ -1193,6 +1240,17 @@ struct ChunkBenchmarkMetrics
     std::atomic<std::uint64_t> uploadedChunks{0};
     std::atomic<std::uint64_t> farBuiltTiles{0};
     std::atomic<std::uint64_t> uploadedBytes{0};
+    std::atomic<std::uint64_t> exactFillSupportPagesQueued{0};
+    std::atomic<std::uint64_t> exactFillSupportPagesReady{0};
+    std::atomic<std::uint64_t> exactFillSupportPagesBlocked{0};
+    std::atomic<std::uint64_t> exactFillBatchesQueued{0};
+    std::atomic<std::uint64_t> exactFillBatchesPreparing{0};
+    std::atomic<std::uint64_t> exactFillBatchesPrepared{0};
+    std::atomic<std::uint64_t> exactFillChunksPrepared{0};
+    std::atomic<std::uint64_t> exactFillChunksSubmittedToExactGpu{0};
+    std::atomic<std::uint64_t> exactFillChunksCommitted{0};
+    std::atomic<std::uint64_t> exactFillStaleBatchesDropped{0};
+    std::atomic<std::uint64_t> exactFillFallbackChunks{0};
 
 private:
     std::atomic<bool> enabled_{false};
@@ -4032,6 +4090,7 @@ struct Chunk
         exactGpuLastFenceDeferredMicros.store(0, std::memory_order_relaxed);
         exactGpuLastRequeueMicros.store(0, std::memory_order_relaxed);
         exactGpuPreferDenseUpload.store(false, std::memory_order_relaxed);
+        exactFillPreparedGeneration.store(0, std::memory_order_relaxed);
         pendingRetire.store(false, std::memory_order_relaxed);
         skyLightFromAboveCache.fill(kMaxLightLevel);
         cpuDataResident.store(false, std::memory_order_relaxed);
@@ -4155,6 +4214,7 @@ struct Chunk
     std::atomic<long long> exactGpuLastFenceDeferredMicros{0};
     std::atomic<long long> exactGpuLastRequeueMicros{0};
     std::atomic<bool> exactGpuPreferDenseUpload{false};
+    std::atomic<std::uint64_t> exactFillPreparedGeneration{0};
     std::array<std::uint8_t, kChunkSizeX * kChunkSizeZ> skyLightFromAboveCache{};
     std::atomic<bool> cpuDataResident{false};
     std::atomic<bool> pendingExactGpuBuildCounted{false};
@@ -5088,6 +5148,8 @@ private:
                                                         bool prioritizeFront = false);
     [[nodiscard]] bool queueChunkForPreparedExactGpuBuild(const std::shared_ptr<Chunk>& chunk,
                                                           bool prioritizeFront = false);
+    int queuePreparedExactGpuBuildBatch(std::span<const std::shared_ptr<Chunk>> chunks,
+                                        bool prioritizeFront = false);
     void queueChunkForExactGpuRefresh(const std::shared_ptr<Chunk>& chunk, bool prioritizeFront = false);
     void queueChunkForExactGpuBorderRefresh(const std::shared_ptr<Chunk>& chunk);
     void recordExactGpuResourceFailure(ExactGpuResourceFailureReason reason) noexcept;
@@ -5212,7 +5274,6 @@ private:
     {
         Idle = 0,
         Building,
-        WaitingDependencies,
         Ready,
         Failed
     };
@@ -5221,7 +5282,9 @@ private:
         ExactWindowBuildKey key{};
         std::uint64_t generation{0};
         ExactWindowPlanStatus status{ExactWindowPlanStatus::Idle};
+        bool approximate{false};
         int exactRequiredCount{0};
+        int incompleteColumnCount{0};
         std::vector<glm::ivec2> missingWorldgenPages{};
         std::vector<StructureRegionKey> missingStructureRegions{};
         std::unordered_map<glm::ivec3, PlannedChunkEntry, ChunkHasher> requiredChunks{};
@@ -5231,7 +5294,7 @@ private:
     {
         std::shared_ptr<const ExactWindowPlan> activePlan{};
         bool replanning{false};
-        bool waitingDependencies{false};
+        bool approximate{false};
     };
     struct RenderSpatialBucketKey
     {
@@ -5343,13 +5406,30 @@ private:
     };
     struct WorldgenPage
     {
+        struct ChunkColumnSupport
+        {
+            ColumnChunkIntervals terrainIntervals{};
+            ColumnChunkIntervals surfaceShellIntervals{};
+            ColumnChunkIntervals waterIntervals{};
+            int highestOccupiedChunkY{-1};
+            int highestTerrainChunkY{-1};
+            int highestTerrainWorld{ColumnManager::kNoHeight};
+            bool hasTerrain{false};
+            bool hasWater{false};
+            bool definitelyEmpty{true};
+        };
+
         static constexpr int kSize = terrain::SurfaceFragment::kSize;
         static constexpr std::size_t kColumnCount = static_cast<std::size_t>(kSize * kSize);
+        static constexpr int kChunkColumnsPerAxis = kSize / kChunkSizeX;
+        static constexpr std::size_t kChunkColumnSupportCount =
+            static_cast<std::size_t>(kChunkColumnsPerAxis * kChunkColumnsPerAxis);
 
         glm::ivec2 key{0};
         glm::ivec2 baseWorld{0};
         std::array<WorldgenColumnValue, kColumnCount> columns{};
         std::array<GpuWorldgenPageColumn, kColumnCount> gpuColumns{};
+        std::array<ChunkColumnSupport, kChunkColumnSupportCount> chunkColumnSupport{};
 
         [[nodiscard]] const WorldgenColumnValue& column(int localX, int localZ) const noexcept
         {
@@ -5357,6 +5437,16 @@ private:
             const int clampedZ = std::clamp(localZ, 0, kSize - 1);
             const std::size_t index = static_cast<std::size_t>(clampedZ) * kSize + static_cast<std::size_t>(clampedX);
             return columns[index];
+        }
+
+        [[nodiscard]] const ChunkColumnSupport& supportForChunkColumn(int localChunkColumnX,
+                                                                      int localChunkColumnZ) const noexcept
+        {
+            const int clampedX = std::clamp(localChunkColumnX, 0, kChunkColumnsPerAxis - 1);
+            const int clampedZ = std::clamp(localChunkColumnZ, 0, kChunkColumnsPerAxis - 1);
+            const std::size_t index =
+                static_cast<std::size_t>(clampedZ) * kChunkColumnsPerAxis + static_cast<std::size_t>(clampedX);
+            return chunkColumnSupport[index];
         }
     };
     static_assert(WorldgenPage::kSize % kChunkSizeX == 0);
@@ -5427,14 +5517,14 @@ private:
         std::shared_ptr<WorldgenPage> page{};
         std::exception_ptr lastError{};
         std::uint32_t heightReadyBits{0};
-        std::uint32_t occupancyReadyBits{0};
+        std::uint32_t columnSupportReadyBits{0};
         int readyHeightColumns{0};
-        int readyOccupancyColumns{0};
+        int readySupportColumns{0};
         int missingHeightColumns{kWorldgenPageChunkColumnCount};
-        int missingOccupancyColumns{kWorldgenPageChunkColumnCount};
+        int missingSupportColumns{kWorldgenPageChunkColumnCount};
         int missingWarmStructureRegions{0};
         bool supportsHeight{false};
-        bool supportsOccupancy{false};
+        bool supportsColumnSupport{false};
         bool supportsWarmStructures{false};
         bool warmStructureRegionsInitialized{false};
         std::unordered_set<StructureRegionKey, StructureRegionKeyHasher> warmStructureRegions{};
@@ -5450,6 +5540,56 @@ private:
         std::unordered_set<glm::ivec2, ColumnHasher> missingWorldgenPages{};
         std::exception_ptr lastError{};
         std::uint64_t token{0};
+    };
+    enum class ExactFillSupportPageState : std::uint8_t
+    {
+        Missing = 0,
+        Queued,
+        Preparing,
+        Ready,
+        Blocked,
+        Stale
+    };
+    struct ExactFillSupportPage
+    {
+        glm::ivec2 pageKey{0};
+        ExactFillSupportPageState state{ExactFillSupportPageState::Missing};
+        std::uint64_t generation{0};
+        std::uint64_t lastRequestFrame{0};
+        std::vector<glm::ivec3> waitingChunks{};
+    };
+    enum class ExactFillBatchState : std::uint8_t
+    {
+        PendingSupport = 0,
+        ReadyToPrepare,
+        Preparing,
+        Prepared,
+        SubmittedToExactGpu,
+        Completed,
+        Stale
+    };
+    struct ExactFillBatch
+    {
+        std::uint64_t id{0};
+        glm::ivec2 supportPage{0};
+        ExactFillBatchState state{ExactFillBatchState::PendingSupport};
+        std::uint64_t exactWindowGeneration{0};
+        std::uint64_t queuedTimestampMicros{0};
+        std::vector<glm::ivec3> chunks{};
+    };
+    struct ExactFillTrackerSnapshot
+    {
+        int supportPagesQueued{0};
+        int supportPagesReady{0};
+        int supportPagesBlocked{0};
+        int batchesQueued{0};
+        int batchesPreparing{0};
+        int batchesPrepared{0};
+        int chunksPrepared{0};
+        int chunksSubmittedToExactGpu{0};
+        int chunksCommitted{0};
+        int staleBatchesDropped{0};
+        int fallbackChunks{0};
     };
     struct PrefetchPageFrontierWindow;
     struct PrefetchPageFrontierRequestLevel;
@@ -5478,13 +5618,19 @@ private:
                                               glm::ivec2& outMaxColumn) noexcept;
     [[nodiscard]] static int worldgenPageLocalChunkColumnIndex(const glm::ivec2& pageKey,
                                                                const glm::ivec2& column) noexcept;
+    void fillWorldgenColumnValue(WorldgenColumnValue& outColumn,
+                                 int worldX,
+                                 int worldZ,
+                                 const terrain::SurfaceColumn& surfaceColumn) const noexcept;
+    [[nodiscard]] WorldgenPage::ChunkColumnSupport buildWorldgenPageChunkColumnSupport(const glm::ivec2& chunkColumn,
+                                                                                       const WorldgenPage* ownerPage) const;
     void refreshWorldgenPageSupportStatusLocked(WorldgenPageDependencyEntry& entry) const noexcept;
     void ensureWorldgenPageWarmStructureLinksLocked(const glm::ivec2& pageKey,
                                                     WorldgenPageDependencyEntry& entry) const;
     void refreshWorldgenPageWarmStructureSupportLocked(const glm::ivec2& pageKey,
                                                        WorldgenPageDependencyEntry& entry) const;
     void refreshWorldgenPageHeightSupportForColumn(const glm::ivec2& column, bool ready) const;
-    void refreshWorldgenPageOccupancySupportForColumn(const glm::ivec2& column, bool ready) const;
+    void refreshWorldgenPageColumnSupportForColumn(const glm::ivec2& column, bool ready) const;
     [[nodiscard]] bool worldgenPageSupportSatisfiedLocked(const WorldgenPageDependencyEntry& entry,
                                                           bool buildOccupancy,
                                                           bool warmStructures) const noexcept;
@@ -5517,6 +5663,23 @@ private:
     [[nodiscard]] bool requestExactGpuPageWindowDependencies(const glm::ivec3& chunkCoord,
                                                              DependencyPriority priority,
                                                              JobServiceClass serviceClass) const;
+    [[nodiscard]] glm::ivec2 exactFillSupportPageKeyForChunk(const glm::ivec3& chunkCoord) const noexcept;
+    [[nodiscard]] bool exactFillChunkSupportReady(const glm::ivec3& chunkCoord) const;
+    [[nodiscard]] bool chunkEligibleForExactFillBatch(const glm::ivec3& coord,
+                                                      const glm::ivec3& center) const;
+    [[nodiscard]] bool deferExactFillChunkForSupport(const glm::ivec3& coord,
+                                                     const glm::ivec3& center);
+    void notifyExactFillSupportProgress(const glm::ivec2& pageKey);
+    void formExactFillBatchesForReadySupportLocked(ExactFillSupportPage& page);
+    void refillExactFillBatchPrepareJobs();
+    [[nodiscard]] bool acquireNextExactFillBatch(ExactFillBatch& outBatch);
+    bool processExactFillBatchPrepareJob();
+    [[nodiscard]] bool prepareExactGpuInputsForChunk(const std::shared_ptr<Chunk>& chunk,
+                                                     std::uint32_t generationEpoch);
+    [[nodiscard]] bool publishPreparedExactGpuInputs(const std::shared_ptr<Chunk>& chunk,
+                                                     std::uint64_t exactWindowGeneration);
+    [[nodiscard]] ExactFillTrackerSnapshot exactFillTrackerSnapshot() const;
+    void resetExactFillTracker();
     [[nodiscard]] bool requestSpawnFootprintDependencies(int worldX,
                                                          int worldZ,
                                                          DependencyPriority priority,
@@ -5546,9 +5709,7 @@ private:
                                     bool startupCritical);
     void applyPlanDiff(const std::shared_ptr<const ExactWindowPlan>& oldPlan,
                        const std::shared_ptr<const ExactWindowPlan>& newPlan);
-    [[nodiscard]] bool waitingPlanDependenciesStillOutstanding(const ExactWindowPlan& plan) const;
     void retagActivePlanFrontierDemands(const glm::ivec3& center, int visibleRadius, int exactRadius);
-    void recomputeStreamingFrontierCoverageCountsLocked();
     void markActiveWindowReplanNeeded(const char* reason = nullptr) const;
     [[nodiscard]] bool windowContainsColumn(const ExactWindowBuildKey& key,
                                             const glm::ivec2& column,
@@ -5697,7 +5858,13 @@ private:
     int dispatchStreamingFrontierGenerateJobs(const glm::ivec3& center,
                                               const glm::vec3& priorityForward,
                                               int jobBudget);
+    void applyStreamingFrontierDemandCountersLocked(const FrontierChunkDemand& demand, int delta) noexcept;
+    void overwriteStreamingFrontierDemandLocked(FrontierChunkDemand& demand,
+                                                const FrontierChunkDemand& updated) noexcept;
+    void eraseStreamingFrontierDemandLocked(
+        std::unordered_map<glm::ivec3, FrontierChunkDemand, ChunkHasher>::iterator it) noexcept;
     void setStreamingFrontierDemandState(const glm::ivec3& coord, FrontierDemandState state);
+    bool rebuildStreamingFrontierMissingDispatchEntry(const glm::ivec3& coord, FrontierDispatchEntry& outEntry);
     void queueStreamingFrontierDispatchEntryLocked(const glm::ivec3& coord,
                                                    const FrontierChunkDemand& demand);
     void refreshStreamingFrontierDispatchPriorityStateLocked(const glm::ivec3& center,
@@ -5711,6 +5878,7 @@ private:
     enum class EnsureChunkAsyncResult : std::uint8_t
     {
         NoAction = 0,
+        RetryMissing,
         WaitingDependencies,
         EnqueuedGenerate
     };
@@ -6348,6 +6516,29 @@ private:
     mutable std::unordered_map<glm::ivec2, WorldgenPageDependencyEntry, ColumnHasher> worldgenPageEntries_{};
     std::unordered_set<glm::ivec2, ColumnHasher> pinnedWorldgenPageKeys_{};
     mutable PrefetchPageFrontierState prefetchPageFrontier_{};
+    mutable std::mutex exactFillMutex_;
+    std::unordered_map<glm::ivec2, ExactFillSupportPage, ColumnHasher> exactFillSupportPages_{};
+    std::unordered_map<std::uint64_t, ExactFillBatch> exactFillBatches_{};
+    std::deque<std::uint64_t> exactFillReadyBatchIds_{};
+    std::uint64_t nextExactFillBatchId_{1};
+    std::uint64_t exactFillWindowGeneration_{1};
+    int exactFillSupportPagesQueued_{0};
+    int exactFillSupportPagesReady_{0};
+    int exactFillSupportPagesBlocked_{0};
+    int exactFillBatchesQueued_{0};
+    int exactFillBatchesPreparing_{0};
+    int exactFillBatchesPrepared_{0};
+    int exactFillChunksPrepared_{0};
+    int exactFillChunksSubmittedToExactGpu_{0};
+    int exactFillChunksCommitted_{0};
+    int exactFillStaleBatchesDropped_{0};
+    int exactFillFallbackChunks_{0};
+    double exactFillDispatchMsLastFrame_{0.0};
+    double exactFillSupportDiscoveryMsLastFrame_{0.0};
+    double exactFillSupportPreparationMsLastFrame_{0.0};
+    double exactFillBatchCpuPreparationMsLastFrame_{0.0};
+    double exactFillBatchQueueWaitMsLastFrame_{0.0};
+    double exactFillBatchExactGpuEnqueueMsLastFrame_{0.0};
     mutable std::unordered_map<StructureRegionKey,
                                std::unordered_set<glm::ivec2, ColumnHasher>,
                                StructureRegionKeyHasher>
@@ -6363,6 +6554,13 @@ private:
     int streamingFrontierVisibleReady_{0};
     int streamingFrontierExactRequired_{0};
     int streamingFrontierExactReady_{0};
+    int streamingFrontierProtectedRequired_{0};
+    int streamingFrontierProtectedReady_{0};
+    int streamingFrontierExactMissingState_{0};
+    int streamingFrontierExactWaitingDependencies_{0};
+    int streamingFrontierExactQueuedGenerate_{0};
+    int streamingFrontierExactGenerating_{0};
+    int streamingFrontierExactMeshing_{0};
     std::uint64_t nextStreamingFrontierSequence_{1};
     mutable std::atomic<std::uint64_t> exactPlanDebugLastLogMicros_{0};
     mutable std::atomic<std::uint64_t> exactDependencyStallDebugLastLogMicros_{0};
@@ -6565,8 +6763,6 @@ private:
     int lastRingBudget_{kVerticalStreamingConfig.generationBudget.minRingExpansionsPerFrame};
     int lastRingExpansionsUsed_{0};
     int lastMissingChunks_{0};
-    int cachedExactReadyChunks_{0};
-    int cachedExactRequiredChunks_{0};
     int lastProtectedMissingChunks_{0};
     int lastProtectedReadyChunks_{0};
     int lastProtectedRequiredChunks_{0};
@@ -7285,6 +7481,12 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     fullRadiusWorldgenDiscoveryMsLastFrame_ = 0.0;
     worldgenDependencyRefillMsLastFrame_ = 0.0;
     bulkShellOracleRefillMsLastFrame_ = 0.0;
+    exactFillDispatchMsLastFrame_ = 0.0;
+    exactFillSupportDiscoveryMsLastFrame_ = 0.0;
+    exactFillSupportPreparationMsLastFrame_ = 0.0;
+    exactFillBatchCpuPreparationMsLastFrame_ = 0.0;
+    exactFillBatchQueueWaitMsLastFrame_ = 0.0;
+    exactFillBatchExactGpuEnqueueMsLastFrame_ = 0.0;
 
     {
         const auto movementEnvelopeStart = std::chrono::steady_clock::now();
@@ -7518,9 +7720,8 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
         currentPlanBuildPending =
             pendingMatchesCurrent &&
             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-             pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
              (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr));
-        currentPlanCommitted = activeMatchesCurrent && !activeWindowReplanNeeded_ && !currentPlanBuildPending;
+        currentPlanCommitted = activeMatchesCurrent;
     }
     updatePlayerSafetyOverlay(centerChunk,
                               currentExactWindowKey,
@@ -7585,6 +7786,9 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                       bulkShellOracleRefillStart)
                 .count();
+    }
+    {
+        refillExactFillBatchPrepareJobs();
     }
 
     const auto uploadBudgetStart = std::chrono::steady_clock::now();
@@ -7709,12 +7913,6 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
     lastGenerationJobsIssued_ = dispatchedGenerationJobs;
     lastRingExpansionsUsed_ = 0;
     lastMissingChunks_ = missingChunks;
-    cachedExactReadyChunks_ = metricCoverage.ready;
-    {
-        std::lock_guard<std::mutex> lock(exactPlanMutex_);
-        cachedExactRequiredChunks_ = activeExactPlan_ ? activeExactPlan_->exactRequiredCount : 0;
-    }
-
     const bool runEvictionThisFrame = !stationaryExactFillModeActive_;
     if (runEvictionThisFrame)
     {
@@ -7894,10 +8092,12 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                     startupState_.phaseTimeSeconds = 0.0;
                     startupState_.healthyTimeSeconds = 0.0;
                     startupState_.playerReleaseReady = true;
-                    startupState_.phase =
-                        (startupState_.exactNearCurrentChunks < renderSettings_.exactChunks)
-                            ? StreamingPhase::FarRamp
-                            : StreamingPhase::SteadyState;
+                    // In exact-only mode the startup system should only gate safe player release.
+                    // After that point, exact fill belongs to steady-state streaming rather than
+                    // a lingering small-radius startup ramp that can strand the scheduler at its
+                    // protected/preload window.
+                    startupState_.phase = StreamingPhase::SteadyState;
+                    startupState_.exactNearCurrentChunks = renderSettings_.exactChunks;
                 }
             }
             else if (exactReady)
@@ -8621,8 +8821,6 @@ void ChunkManager::Impl::clear()
     lastUploadBytesUsed_ = 0;
     pendingUploadsLastFrame_ = 0;
     lastMissingChunks_ = 0;
-    cachedExactReadyChunks_ = 0;
-    cachedExactRequiredChunks_ = 0;
     lastProtectedMissingChunks_ = 0;
     lastProtectedReadyChunks_ = 0;
     lastProtectedRequiredChunks_ = 0;
@@ -9377,8 +9575,6 @@ void ChunkManager::Impl::beginSpawnPreload(const glm::vec3& spawnPos)
     startupState_.exactNearCurrentChunks = std::clamp(startupExactPreloadChunks_, 1, renderSettings_.exactChunks);
     startupState_.farCurrentBlocks = 0;
     lastMissingChunks_ = 0;
-    cachedExactReadyChunks_ = 0;
-    cachedExactRequiredChunks_ = 0;
     lastProtectedMissingChunks_ = 0;
     lastProtectedReadyChunks_ = 0;
     lastProtectedRequiredChunks_ = 0;
@@ -9472,7 +9668,7 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
     snapshot.farQueuedTiles = farTerrainManager_.queuedTileCount();
     snapshot.farPendingUploadTiles = farTerrainManager_.pendingUploadTileCount();
 
-    snapshot.exactReadyChunks = cachedExactReadyChunks_;
+    snapshot.exactReadyChunks = frontierCoverage.exactReady;
     snapshot.exactConfiguredRadiusChunks = renderSettings_.exactChunks;
     snapshot.exactSchedulingRadiusChunks = targetViewDistance_;
     {
@@ -9484,22 +9680,20 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
         const bool rebuildPending =
             pendingMatchesCurrent &&
             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-             pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
              (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr));
-        const bool currentCommitted = activeMatchesCurrent && !activeWindowReplanNeeded_ && !rebuildPending;
+        const bool currentCommitted = activeMatchesCurrent;
+        const bool committedApproximate = !currentCommitted || (activeExactPlan_ && activeExactPlan_->approximate);
         snapshot.exactTrackedRadiusChunks =
             pendingExactPlanKeyValid_ ? pendingExactPlanKey_.preloadRadius
             : activeExactPlan_       ? activeExactPlan_->key.preloadRadius
             : currentExactPlanKeyValid_ ? currentExactPlanKey_.preloadRadius
                                         : 0;
-        snapshot.exactRequiredChunks =
-            currentCommitted ? activeExactPlan_->exactRequiredCount
-            : activeExactPlan_ ? activeExactPlan_->exactRequiredCount
-                               : 0;
-        snapshot.exactRequiredChunksApproximate = !currentCommitted;
+        snapshot.exactRequiredChunks = frontierCoverage.exactRequired;
+        snapshot.exactRequiredChunksApproximate = committedApproximate;
         snapshot.exactRequiredChunksAuthoritative =
-            currentCommitted && activeExactPlan_ ? activeExactPlan_->exactRequiredCount : 0;
-        snapshot.exactCoverageReconciling = !currentCommitted || rebuildPending;
+            currentCommitted && activeExactPlan_ && !activeExactPlan_->approximate ? frontierCoverage.exactRequired : 0;
+        snapshot.exactCoverageReconciling =
+            !currentCommitted || committedApproximate || rebuildPending || activeWindowReplanNeeded_;
         snapshot.exactPlanVisibleRadius = currentExactPlanKeyValid_ ? currentExactPlanVisibleRadius_ : targetViewDistance_;
         snapshot.exactPlanPreloadRadius = snapshot.exactTrackedRadiusChunks;
     }
@@ -9511,6 +9705,20 @@ StreamingStatusSnapshot ChunkManager::Impl::computeStreamingStatusSnapshot() con
     snapshot.exactQueuedGenerateChunks = frontierCoverage.exactQueuedGenerate;
     snapshot.exactGeneratingChunks = frontierCoverage.exactGenerating;
     snapshot.exactMeshingChunks = frontierCoverage.exactMeshing;
+    {
+        const ExactFillTrackerSnapshot exactFill = exactFillTrackerSnapshot();
+        snapshot.exactFillSupportPagesQueued = exactFill.supportPagesQueued;
+        snapshot.exactFillSupportPagesReady = exactFill.supportPagesReady;
+        snapshot.exactFillSupportPagesBlocked = exactFill.supportPagesBlocked;
+        snapshot.exactFillBatchesQueued = exactFill.batchesQueued;
+        snapshot.exactFillBatchesPreparing = exactFill.batchesPreparing;
+        snapshot.exactFillBatchesPrepared = exactFill.batchesPrepared;
+        snapshot.exactFillChunksPrepared = exactFill.chunksPrepared;
+        snapshot.exactFillChunksSubmittedToExactGpu = exactFill.chunksSubmittedToExactGpu;
+        snapshot.exactFillChunksCommitted = exactFill.chunksCommitted;
+        snapshot.exactFillStaleBatchesDropped = exactFill.staleBatchesDropped;
+        snapshot.exactFillFallbackChunks = exactFill.fallbackChunks;
+    }
 
     if (snapshot.exactCoverageReconciling)
     {
@@ -9574,7 +9782,6 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
         {
         case ExactWindowPlanStatus::Idle: return "Idle";
         case ExactWindowPlanStatus::Building: return "Building";
-        case ExactWindowPlanStatus::WaitingDependencies: return "WaitingDependencies";
         case ExactWindowPlanStatus::Ready: return "Ready";
         case ExactWindowPlanStatus::Failed: return "Failed";
         default: return "Unknown";
@@ -9693,10 +9900,10 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
         bool buildOccupancy{false};
         bool warmStructures{false};
         bool supportsHeight{false};
-        bool supportsOccupancy{false};
+        bool supportsColumnSupport{false};
         bool supportsWarmStructures{false};
         int missingHeightColumns{0};
-        int missingOccupancyColumns{0};
+        int missingSupportColumns{0};
         int missingWarmStructureRegions{0};
     };
     struct SampledWorldgenQueueRequest
@@ -9738,10 +9945,10 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
                 sample.buildOccupancy = it->second.buildOccupancy;
                 sample.warmStructures = it->second.warmStructures;
                 sample.supportsHeight = it->second.supportsHeight;
-                sample.supportsOccupancy = it->second.supportsOccupancy;
+                sample.supportsColumnSupport = it->second.supportsColumnSupport;
                 sample.supportsWarmStructures = it->second.supportsWarmStructures;
                 sample.missingHeightColumns = it->second.missingHeightColumns;
-                sample.missingOccupancyColumns = it->second.missingOccupancyColumns;
+                sample.missingSupportColumns = it->second.missingSupportColumns;
                 sample.missingWarmStructureRegions = it->second.missingWarmStructureRegions;
             }
             sampledPageStates.push_back(sample);
@@ -9782,10 +9989,10 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
             sample.buildOccupancy = it->second.buildOccupancy;
             sample.warmStructures = it->second.warmStructures;
             sample.supportsHeight = it->second.supportsHeight;
-            sample.supportsOccupancy = it->second.supportsOccupancy;
+            sample.supportsColumnSupport = it->second.supportsColumnSupport;
             sample.supportsWarmStructures = it->second.supportsWarmStructures;
             sample.missingHeightColumns = it->second.missingHeightColumns;
-            sample.missingOccupancyColumns = it->second.missingOccupancyColumns;
+            sample.missingSupportColumns = it->second.missingSupportColumns;
             sample.missingWarmStructureRegions = it->second.missingWarmStructureRegions;
             centerPageState = sample;
             constexpr std::size_t kWarmRegionSampleLimit = 8;
@@ -9867,7 +10074,7 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
         stream << " replan_reason=" << replanReason;
     }
 
-    if (pendingPlan && pendingStatus == ExactWindowPlanStatus::WaitingDependencies)
+    if (pendingPlan && pendingPlan->approximate)
     {
         constexpr std::size_t kSampleLimit = 4;
         stream << "\n  pending_wait_pages";
@@ -9918,10 +10125,10 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
                    << " build_occ=" << (sample.buildOccupancy ? 1 : 0)
                    << " warm=" << (sample.warmStructures ? 1 : 0)
                    << " support_h=" << (sample.supportsHeight ? 1 : 0)
-                   << " support_occ=" << (sample.supportsOccupancy ? 1 : 0)
+                   << " support_occ=" << (sample.supportsColumnSupport ? 1 : 0)
                    << " support_warm=" << (sample.supportsWarmStructures ? 1 : 0)
                    << " missing_h=" << sample.missingHeightColumns
-                   << " missing_occ=" << sample.missingOccupancyColumns
+                   << " missing_occ=" << sample.missingSupportColumns
                    << " missing_warm_regions=" << sample.missingWarmStructureRegions;
         }
     }
@@ -9949,10 +10156,10 @@ void ChunkManager::Impl::maybeLogExactPlanDebug(const StreamingStatusSnapshot& s
                << " build_occ=" << (sample.buildOccupancy ? 1 : 0)
                << " warm=" << (sample.warmStructures ? 1 : 0)
                << " support_h=" << (sample.supportsHeight ? 1 : 0)
-               << " support_occ=" << (sample.supportsOccupancy ? 1 : 0)
+               << " support_occ=" << (sample.supportsColumnSupport ? 1 : 0)
                << " support_warm=" << (sample.supportsWarmStructures ? 1 : 0)
                << " missing_h=" << sample.missingHeightColumns
-               << " missing_occ=" << sample.missingOccupancyColumns
+               << " missing_occ=" << sample.missingSupportColumns
                << " missing_warm_regions=" << sample.missingWarmStructureRegions;
     }
     if (!centerWarmRegionSamples.empty())
@@ -10117,7 +10324,7 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         bool active{false};
         bool currentCommitted{false};
         bool buildPending{false};
-        bool waitingDependencies{false};
+        bool approximatePlan{false};
         bool reconciling{false};
         bool movingWindow{false};
         bool replanNeeded{false};
@@ -10163,12 +10370,12 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
         coverageDebug.buildPending =
             pendingMatchesCurrent &&
             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-             pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
              (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr));
-        coverageDebug.waitingDependencies = pendingMatchesCurrent &&
-            pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies;
-        coverageDebug.currentCommitted = activeMatchesCurrent && !activeWindowReplanNeeded_ && !coverageDebug.buildPending;
-        coverageDebug.reconciling = !coverageDebug.currentCommitted || coverageDebug.buildPending;
+        coverageDebug.approximatePlan = activeMatchesCurrent && activeExactPlan_ && activeExactPlan_->approximate;
+        coverageDebug.currentCommitted = activeMatchesCurrent;
+        coverageDebug.reconciling =
+            !coverageDebug.currentCommitted || coverageDebug.approximatePlan || coverageDebug.buildPending ||
+            activeWindowReplanNeeded_;
         coverageDebug.movingWindow = currentExactPlanKeyValid_ && !activeMatchesCurrent;
         coverageDebug.replanNeeded = activeWindowReplanNeeded_;
         coverageDebug.trackedRadiusChunks =
@@ -11046,7 +11253,7 @@ void ChunkManager::Impl::maybeLogExactDependencyStallDebug(const StreamingStatus
            << " moving_window=" << (coverageDebug.movingWindow ? 1 : 0)
            << " committed=" << (coverageDebug.currentCommitted ? 1 : 0)
            << " pending=" << (coverageDebug.buildPending ? 1 : 0)
-           << " waiting=" << (coverageDebug.waitingDependencies ? 1 : 0)
+           << " approximate=" << (coverageDebug.approximatePlan ? 1 : 0)
            << " reconciling=" << (coverageDebug.reconciling ? 1 : 0)
            << " replan=" << (coverageDebug.replanNeeded ? 1 : 0)
            << " tracked_radius=" << coverageDebug.trackedRadiusChunks
@@ -11520,6 +11727,12 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
     snapshot.fullRadiusWorldgenDiscoveryMsLastFrame = fullRadiusWorldgenDiscoveryMsLastFrame_;
     snapshot.worldgenDependencyRefillMsLastFrame = worldgenDependencyRefillMsLastFrame_;
     snapshot.bulkShellOracleRefillMsLastFrame = bulkShellOracleRefillMsLastFrame_;
+    snapshot.exactFillDispatchMsLastFrame = exactFillDispatchMsLastFrame_;
+    snapshot.exactFillSupportDiscoveryMsLastFrame = exactFillSupportDiscoveryMsLastFrame_;
+    snapshot.exactFillSupportPreparationMsLastFrame = exactFillSupportPreparationMsLastFrame_;
+    snapshot.exactFillBatchCpuPreparationMsLastFrame = exactFillBatchCpuPreparationMsLastFrame_;
+    snapshot.exactFillBatchQueueWaitMsLastFrame = exactFillBatchQueueWaitMsLastFrame_;
+    snapshot.exactFillBatchExactGpuEnqueueMsLastFrame = exactFillBatchExactGpuEnqueueMsLastFrame_;
     snapshot.uploadBudgetMsLastFrame = uploadBudgetPrepMsLastFrame_;
     snapshot.missingScanMsLastFrame = missingScanMsLastFrame_;
     snapshot.ensureVolumeMsLastFrame = ensureVolumeMsLastFrame_;
@@ -11589,6 +11802,20 @@ ChunkProfilingSnapshot ChunkManager::Impl::sampleProfilingSnapshot()
         exactGpuBuildsCommitted_.load(std::memory_order_relaxed);
     snapshot.exactGpuMeshReplacements =
         exactGpuMeshReplacements_.load(std::memory_order_relaxed);
+    {
+        const ExactFillTrackerSnapshot exactFill = exactFillTrackerSnapshot();
+        snapshot.exactFillSupportPagesQueued = exactFill.supportPagesQueued;
+        snapshot.exactFillSupportPagesReady = exactFill.supportPagesReady;
+        snapshot.exactFillSupportPagesBlocked = exactFill.supportPagesBlocked;
+        snapshot.exactFillBatchesQueued = exactFill.batchesQueued;
+        snapshot.exactFillBatchesPreparing = exactFill.batchesPreparing;
+        snapshot.exactFillBatchesPrepared = exactFill.batchesPrepared;
+        snapshot.exactFillChunksPrepared = exactFill.chunksPrepared;
+        snapshot.exactFillChunksSubmittedToExactGpu = exactFill.chunksSubmittedToExactGpu;
+        snapshot.exactFillChunksCommitted = exactFill.chunksCommitted;
+        snapshot.exactFillStaleBatchesDropped = exactFill.staleBatchesDropped;
+        snapshot.exactFillFallbackChunks = exactFill.fallbackChunks;
+    }
     {
         std::lock_guard<std::mutex> statsLock(exactGpuStatsMutex_);
         snapshot.exactGpuSynthMs = lastExactGpuPassTimings_.synthMs;
@@ -12497,6 +12724,12 @@ void ChunkManager::Impl::processJob(const Job& job)
     {
         (void)processBulkShellOracleJob();
         refillBulkShellOracleJobs();
+        return;
+    }
+    if (job.type == JobType::ExactFillBatchPrepare)
+    {
+        (void)processExactFillBatchPrepareJob();
+        refillExactFillBatchPrepareJobs();
         return;
     }
 
@@ -15329,8 +15562,6 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
     evictionCenterInitialized_ = false;
 
     lastMissingChunks_ = 0;
-    cachedExactReadyChunks_ = 0;
-    cachedExactRequiredChunks_ = 0;
     lastProtectedMissingChunks_ = 0;
     lastProtectedReadyChunks_ = 0;
     lastProtectedRequiredChunks_ = 0;
@@ -15387,37 +15618,6 @@ void ChunkManager::Impl::resetStreamingForDiscontinuousMove(const glm::ivec3& ce
     startExactGpuWorkerThread();
 }
 
-void ChunkManager::Impl::recomputeStreamingFrontierCoverageCountsLocked()
-{
-    streamingFrontierVisibleRequired_ = 0;
-    streamingFrontierExactRequired_ = 0;
-    streamingFrontierVisibleReady_ = 0;
-    streamingFrontierExactReady_ = 0;
-    for (const auto& [coord, demand] : streamingFrontierDemands_)
-    {
-        (void)coord;
-        if (demand.countedVisible)
-        {
-            ++streamingFrontierVisibleRequired_;
-        }
-        if (demand.countedExact)
-        {
-            ++streamingFrontierExactRequired_;
-        }
-        if (demand.state == FrontierDemandState::Ready)
-        {
-            if (demand.countedVisible)
-            {
-                ++streamingFrontierVisibleReady_;
-            }
-            if (demand.countedExact)
-            {
-                ++streamingFrontierExactReady_;
-            }
-        }
-    }
-}
-
 void ChunkManager::Impl::markPlanDirtyColumn(const glm::ivec2& column) const
 {
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
@@ -15426,7 +15626,6 @@ void ChunkManager::Impl::markPlanDirtyColumn(const glm::ivec2& column) const
     const bool overlapsPending =
         pendingExactPlanKeyValid_ &&
         (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-         pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
          (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)) &&
         windowContainsColumn(pendingExactPlanKey_, column, 1);
     if (overlapsActive || overlapsPending)
@@ -15448,7 +15647,6 @@ void ChunkManager::Impl::markPlanDirtyWorldgenPage(const glm::ivec2& pageKey) co
     const bool overlapsPending =
         pendingExactPlanKeyValid_ &&
         (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-         pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
          (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)) &&
         windowOverlapsWorldgenPage(pendingExactPlanKey_, pageKey, 1);
     if (overlapsActive || overlapsPending)
@@ -15471,7 +15669,6 @@ void ChunkManager::Impl::markPlanDirtyStructureRegion(const StructureRegionKey& 
     const bool overlapsPending =
         pendingExactPlanKeyValid_ &&
         (pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-         pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
          (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr)) &&
         windowOverlapsStructureRegion(pendingExactPlanKey_, key, 1);
     if (overlapsActive || overlapsPending)
@@ -15503,9 +15700,8 @@ ChunkManager::Impl::ExactPlanSnapshot ChunkManager::Impl::activePlanSnapshot() c
         activeExactPlan_,
         activeWindowReplanNeeded_ ||
             pendingExactPlanStatus_ == ExactWindowPlanStatus::Building ||
-            pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies ||
             (pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready && pendingExactPlan_ != nullptr),
-        pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies};
+        activeExactPlan_ ? activeExactPlan_->approximate : false};
 }
 
 void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowBuildKey& key,
@@ -15531,10 +15727,6 @@ void ChunkManager::Impl::launchExactWindowPlanBuild(const ExactWindowBuildKey& k
 
                 pendingExactPlan_ = plan;
                 pendingExactPlanStatus_ = plan ? plan->status : ExactWindowPlanStatus::Failed;
-                if (pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies)
-                {
-                    pendingExactPlanWaitInvalidationSerial_ = exactPlanInvalidationSerial_;
-                }
             }
             catch (...)
             {
@@ -15581,14 +15773,6 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowBuildKey& key)
             return;
         }
         if (samePendingKey &&
-            pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies &&
-            pendingExactPlanWaitInvalidationSerial_ == exactPlanInvalidationSerial_ &&
-            pendingExactPlan_ &&
-            waitingPlanDependenciesStillOutstanding(*pendingExactPlan_))
-        {
-            return;
-        }
-        if (samePendingKey &&
             pendingExactPlanStatus_ == ExactWindowPlanStatus::Ready &&
             pendingExactPlan_ &&
             !activeWindowReplanNeeded_)
@@ -15609,7 +15793,6 @@ void ChunkManager::Impl::requestExactWindowPlan(const ExactWindowBuildKey& key)
         pendingExactPlanKey_ = key;
         pendingExactPlanKeyValid_ = true;
         pendingExactPlanStatus_ = ExactWindowPlanStatus::Building;
-        pendingExactPlanWaitInvalidationSerial_ = exactPlanInvalidationSerial_;
         generation = nextExactPlanGeneration_++;
         startupCritical =
             startupEnabled_ &&
@@ -15665,10 +15848,6 @@ void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowBuildKey& key)
             pendingExactPlanKeyValid_ = false;
             pendingExactPlanStatus_ = ExactWindowPlanStatus::Idle;
         }
-        else if (pendingExactPlanStatus_ == ExactWindowPlanStatus::WaitingDependencies)
-        {
-            shouldJoin = exactPlanBuildThread_.joinable();
-        }
         else if (pendingExactPlanStatus_ == ExactWindowPlanStatus::Failed)
         {
             shouldJoin = exactPlanBuildThread_.joinable();
@@ -15690,6 +15869,7 @@ void ChunkManager::Impl::tryCommitReadyExactPlan(const ExactWindowBuildKey& key)
 
     if (newPlan)
     {
+        resetExactFillTracker();
         applyPlanDiff(oldPlan, newPlan);
     }
 }
@@ -15891,7 +16071,6 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
         startupCritical ? DependencyPriority::Critical : DependencyPriority::Visible;
     const JobServiceClass plannerServiceClass =
         startupCritical ? JobServiceClass::InitialVisible : JobServiceClass::Standard;
-    bool missingPlannerDependencies = false;
     for (const glm::ivec2& pageKey : requiredPageKeys)
     {
         if (tryGetReadyWorldgenPage(pageKey))
@@ -15899,18 +16078,12 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
             continue;
         }
 
-        missingPlannerDependencies = true;
         plan->missingWorldgenPages.push_back(pageKey);
         (void)requestWorldgenPageDependency(pageKey,
                                             plannerDependencyPriority,
                                             true,
                                             true,
                                             plannerServiceClass);
-    }
-    if (missingPlannerDependencies)
-    {
-        plan->status = ExactWindowPlanStatus::WaitingDependencies;
-        return plan;
     }
 
     std::vector<std::shared_ptr<const WorldgenPage>> readyPageValues(requiredPageKeys.size());
@@ -15929,27 +16102,11 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
     readyPages.reserve(requiredPageKeys.size());
     for (std::size_t index = 0; index < requiredPageKeys.size(); ++index)
     {
-        if (!readyPageValues[index])
+        if (readyPageValues[index])
         {
-            plan->status = ExactWindowPlanStatus::WaitingDependencies;
-            return plan;
+            readyPages.emplace(requiredPageKeys[index], std::move(readyPageValues[index]));
         }
-
-        readyPages.emplace(requiredPageKeys[index], std::move(readyPageValues[index]));
     }
-
-    const auto findReadyWorldgenColumn = [&readyPages](int worldX, int worldZ) -> const WorldgenColumnValue*
-    {
-        const glm::ivec2 pageKey = worldgenPageKeyForWorld(worldX, worldZ);
-        auto it = readyPages.find(pageKey);
-        if (it == readyPages.end() || !it->second)
-        {
-            return nullptr;
-        }
-
-        const std::shared_ptr<const WorldgenPage>& page = it->second;
-        return &page->column(worldX - page->baseWorld.x, worldZ - page->baseWorld.y);
-    };
 
     std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher> editSpans{};
     {
@@ -15994,270 +16151,85 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
         }
     }
 
-    struct PlannerColumnData
+    for (std::size_t index = 0; index < structureRegionKeys.size(); ++index)
     {
-        int highestTerrainWorld{ColumnManager::kNoHeight};
-        int lowestTerrainWorld{ColumnManager::kNoHeight};
-        int minWaterBottomWorld{std::numeric_limits<int>::max()};
-        int maxWaterTopWorld{std::numeric_limits<int>::min()};
-    };
+        if (tryGetReadyRegion(structureRegionKeys[index]))
+        {
+            continue;
+        }
 
-    std::vector<PlannerColumnData> columnData(analysisColumnCount);
+        plan->missingStructureRegions.push_back(structureRegionKeys[index]);
+        (void)requestStructureRegionDependency(structureRegionKeys[index],
+                                              plannerDependencyPriority,
+                                              plannerServiceClass);
+    }
+
+    std::vector<ColumnSlabOccupancy> analysisOccupancies(analysisColumnCount);
+    std::vector<int> analysisPredictedHeights(analysisColumnCount, ColumnManager::kNoHeight);
+    std::vector<int> incompleteColumnFlags(analysisColumnCount, 0);
     runPlannerParallel(analysisColumnCount,
                        [analysisMinChunkX,
                         analysisMinChunkZ,
                         analysisWidth,
-                        &findReadyWorldgenColumn,
-                        &columnData,
+                        &readyPages,
+                        &analysisOccupancies,
+                        &analysisPredictedHeights,
+                        &incompleteColumnFlags,
+                        &editSpans,
                         this](std::size_t index)
                        {
                            const int chunkX = analysisMinChunkX +
                                               static_cast<int>(index % static_cast<std::size_t>(analysisWidth));
                            const int chunkZ = analysisMinChunkZ +
                                               static_cast<int>(index / static_cast<std::size_t>(analysisWidth));
-                           const int baseWorldX = chunkX * kChunkSizeX;
-                           const int baseWorldZ = chunkZ * kChunkSizeZ;
-                           constexpr int kSampleExtentX = kChunkSizeX + 2;
-                           constexpr int kSampleExtentZ = kChunkSizeZ + 2;
-                           std::array<WorldgenColumnValue, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)>
-                               worldgenColumns{};
-                           auto sampleIndex = [](int sampleX, int sampleZ) noexcept
-                           {
-                               return static_cast<std::size_t>(sampleZ * kSampleExtentX + sampleX);
-                           };
-
-                           for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
-                           {
-                               for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
-                               {
-                                   const WorldgenColumnValue* worldgenColumn =
-                                       findReadyWorldgenColumn(baseWorldX + sampleX, baseWorldZ + sampleZ);
-                                   if (worldgenColumn == nullptr)
-                                   {
-                                       return;
-                                   }
-                                   worldgenColumns[sampleIndex(sampleX + 1, sampleZ + 1)] = *worldgenColumn;
-                               }
-                           }
-
-                           auto computeNeighborAverage = [&](int localX, int localZ) noexcept
-                           {
-                               float sum = 0.0f;
-                               int count = 0;
-                               for (int dx = -1; dx <= 1; ++dx)
-                               {
-                                   for (int dz = -1; dz <= 1; ++dz)
-                                   {
-                                       if (dx == 0 && dz == 0)
-                                       {
-                                           continue;
-                                       }
-                                       sum += static_cast<float>(
-                                           worldgenColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surface.surfaceY);
-                                       ++count;
-                                   }
-                               }
-                               return count > 0 ? sum / static_cast<float>(count) : 0.0f;
-                           };
-
-                           int highestTerrainWorld = std::numeric_limits<int>::min();
-                           int lowestTerrainWorld = std::numeric_limits<int>::max();
-                           int minWaterBottomWorld = std::numeric_limits<int>::max();
-                           int maxWaterTopWorld = std::numeric_limits<int>::min();
-                           for (int localX = 0; localX < kChunkSizeX; ++localX)
-                           {
-                               for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
-                               {
-                                   const WorldgenColumnValue& worldgenColumn =
-                                       worldgenColumns[sampleIndex(localX + 1, localZ + 1)];
-                                   if (worldgenColumn.surface.dominantBiome == nullptr)
-                                   {
-                                       continue;
-                                   }
-
-                                   const int adjustedSurfaceY =
-                                       adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
-                                   highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
-                                   lowestTerrainWorld = std::min(lowestTerrainWorld, adjustedSurfaceY);
-
-                                   if (!worldgenColumn.waterFillEnabled || adjustedSurfaceY >= globalSeaLevel_)
-                                   {
-                                       continue;
-                                   }
-
-                                   int waterBottomWorld = adjustedSurfaceY + 1;
-                                   int waterTopWorld = globalSeaLevel_;
-                                   if (worldgenColumn.waterFillMaxDepth > 0)
-                                   {
-                                       waterBottomWorld = std::max(
-                                           waterBottomWorld,
-                                           waterTopWorld - static_cast<int>(worldgenColumn.waterFillMaxDepth) + 1);
-                                   }
-                                   minWaterBottomWorld = std::min(minWaterBottomWorld, waterBottomWorld);
-                                   maxWaterTopWorld = std::max(maxWaterTopWorld, waterTopWorld);
-                               }
-                           }
-
-                           PlannerColumnData& data = columnData[index];
-                           if (highestTerrainWorld != std::numeric_limits<int>::min())
-                           {
-                               data.highestTerrainWorld = highestTerrainWorld;
-                               data.lowestTerrainWorld = lowestTerrainWorld;
-                           }
-                           if (maxWaterTopWorld >= 0 && minWaterBottomWorld <= maxWaterTopWorld)
-                           {
-                               data.minWaterBottomWorld = minWaterBottomWorld;
-                               data.maxWaterTopWorld = maxWaterTopWorld;
-                           }
-                       });
-    if (plannerCancelled())
-    {
-        plan->status = ExactWindowPlanStatus::Failed;
-        return plan;
-    }
-
-    std::vector<std::shared_ptr<const StructureRegion>> readyStructureRegions(structureRegionKeys.size());
-    bool missingPlannerRegions = false;
-    for (std::size_t index = 0; index < structureRegionKeys.size(); ++index)
-    {
-        readyStructureRegions[index] = tryGetReadyRegion(structureRegionKeys[index]);
-        if (readyStructureRegions[index])
-        {
-            continue;
-        }
-
-        missingPlannerRegions = true;
-        plan->missingStructureRegions.push_back(structureRegionKeys[index]);
-        (void)requestStructureRegionDependency(structureRegionKeys[index],
-                                              plannerDependencyPriority,
-                                              plannerServiceClass);
-    }
-    if (missingPlannerRegions)
-    {
-        plan->status = ExactWindowPlanStatus::WaitingDependencies;
-        return plan;
-    }
-
-    std::unordered_map<glm::ivec2, StructureChunkColumnSpan, StructureChunkColumnHasher> plannerStructureSpans{};
-    plannerStructureSpans.reserve(analysisColumnCount);
-    const auto mergeStructureSpans = [&plannerStructureSpans,
-                                      analysisMinChunkX,
-                                      analysisMaxChunkX,
-                                      analysisMinChunkZ,
-                                      analysisMaxChunkZ](const auto& spans)
-    {
-        for (const auto& [column, span] : spans)
-        {
-            if (!span.valid() ||
-                column.x < analysisMinChunkX ||
-                column.x > analysisMaxChunkX ||
-                column.y < analysisMinChunkZ ||
-                column.y > analysisMaxChunkZ)
-            {
-                continue;
-            }
-
-            plannerStructureSpans[column].include(span.minChunkY, span.maxChunkY);
-        }
-    };
-    for (std::size_t index = 0; index < structureRegionKeys.size(); ++index)
-    {
-        mergeStructureSpans(readyStructureRegions[index]->chunkColumnSpans);
-    }
-
-    std::vector<ColumnSlabOccupancy> analysisOccupancies(analysisColumnCount);
-    runPlannerParallel(analysisColumnCount,
-                       [analysisMinChunkX,
-                        analysisMinChunkZ,
-                        analysisWidth,
-                        analysisMaxChunkX,
-                        analysisMaxChunkZ,
-                        &columnData,
-                        &plannerStructureSpans,
-                        &analysisOccupancies,
-                        &editSpans,
-                        analysisColumnIndex](std::size_t index)
-                       {
-                           const int chunkX = analysisMinChunkX +
-                                              static_cast<int>(index % static_cast<std::size_t>(analysisWidth));
-                           const int chunkZ = analysisMinChunkZ +
-                                              static_cast<int>(index / static_cast<std::size_t>(analysisWidth));
                            const glm::ivec2 column{chunkX, chunkZ};
-                           const PlannerColumnData& data = columnData[index];
                            ColumnSlabOccupancy occupancy{};
-                           occupancy.supportComplete = true;
-                           auto noteChunkInterval = [&](int minChunkY, int maxChunkY)
+                           int predictedHeight = ColumnManager::kNoHeight;
+                           bool supportComplete = true;
+                           const glm::ivec2 pageKey = worldgenPageKeyForChunkColumn(column);
+                           auto pageIt = readyPages.find(pageKey);
+                           if (pageIt != readyPages.end() && pageIt->second)
                            {
-                               occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, maxChunkY);
-                               addColumnChunkInterval(occupancy.terrainIntervals, minChunkY, maxChunkY);
-                           };
-
-                           if (data.highestTerrainWorld != ColumnManager::kNoHeight)
+                               const int localChunkColumnX = column.x - pageKey.x * WorldgenPage::kChunkColumnsPerAxis;
+                               const int localChunkColumnZ = column.y - pageKey.y * WorldgenPage::kChunkColumnsPerAxis;
+                               const WorldgenPage::ChunkColumnSupport& pageSupport =
+                                   pageIt->second->supportForChunkColumn(localChunkColumnX, localChunkColumnZ);
+                               mergeColumnChunkIntervals(occupancy.terrainIntervals, pageSupport.terrainIntervals);
+                               mergeColumnChunkIntervals(occupancy.surfaceShellIntervals, pageSupport.surfaceShellIntervals);
+                               mergeColumnChunkIntervals(occupancy.waterIntervals, pageSupport.waterIntervals);
+                               occupancy.highestOccupiedChunkY =
+                                   std::max(occupancy.highestOccupiedChunkY, pageSupport.highestOccupiedChunkY);
+                               predictedHeight = pageSupport.highestTerrainWorld;
+                           }
+                           else
                            {
-                               const int highestChunkY = floorDiv(data.highestTerrainWorld, kChunkSizeY);
-                               noteChunkInterval(0, highestChunkY);
-
-                               int minNeighborHeight = data.highestTerrainWorld;
-                               constexpr std::array<glm::ivec2, 4> kNeighborOffsets{
-                                   glm::ivec2{1, 0},
-                                   glm::ivec2{-1, 0},
-                                   glm::ivec2{0, 1},
-                                   glm::ivec2{0, -1},
-                               };
-                               for (const glm::ivec2& offset : kNeighborOffsets)
-                               {
-                                   const int neighborX = chunkX + offset.x;
-                                   const int neighborZ = chunkZ + offset.y;
-                                   if (neighborX < analysisMinChunkX ||
-                                       neighborX > analysisMaxChunkX ||
-                                       neighborZ < analysisMinChunkZ ||
-                                       neighborZ > analysisMaxChunkZ)
-                                   {
-                                       continue;
-                                   }
-
-                                   const PlannerColumnData& neighborData =
-                                       columnData[analysisColumnIndex(neighborX, neighborZ)];
-                                   if (neighborData.highestTerrainWorld != ColumnManager::kNoHeight)
-                                   {
-                                       minNeighborHeight = std::min(minNeighborHeight, neighborData.highestTerrainWorld);
-                                   }
-                               }
-
-                               const int lowestExposedWorldY = std::min(data.highestTerrainWorld, minNeighborHeight + 1);
-                               int shellFloorWorldY = lowestExposedWorldY;
-                               if (data.lowestTerrainWorld != ColumnManager::kNoHeight &&
-                                   data.highestTerrainWorld - data.lowestTerrainWorld >=
-                                       kExactSurfaceShellInternalReliefThresholdBlocks)
-                               {
-                                   shellFloorWorldY = std::min(shellFloorWorldY, data.lowestTerrainWorld);
-                               }
-                               const int shellFloorChunk =
-                                   std::max(0,
-                                            floorDiv(std::max(0, shellFloorWorldY), kChunkSizeY) -
-                                                kExactSurfaceShellBelowSlackChunks);
-                               addColumnChunkInterval(occupancy.surfaceShellIntervals,
-                                                      shellFloorChunk,
-                                                      std::max(highestChunkY,
-                                                               highestChunkY + kExactSurfaceShellAirAboveChunks));
+                               occupancy = conservativeIncompleteColumnSlabOccupancy(column);
+                               predictedHeight = columnManager_.highestSolidBlockInChunkColumn(column);
+                               supportComplete = false;
                            }
 
-                           if (data.maxWaterTopWorld >= 0 && data.minWaterBottomWorld <= data.maxWaterTopWorld)
-                           {
-                               const int minChunkY = floorDiv(std::max(0, data.minWaterBottomWorld), kChunkSizeY);
-                               const int maxChunkY = floorDiv(std::max(0, data.maxWaterTopWorld), kChunkSizeY);
-                               occupancy.highestOccupiedChunkY = std::max(occupancy.highestOccupiedChunkY, maxChunkY);
-                               addColumnChunkInterval(occupancy.waterIntervals, minChunkY, maxChunkY);
-                           }
-
-                           auto structureIt = plannerStructureSpans.find(column);
-                           if (structureIt != plannerStructureSpans.end() && structureIt->second.valid())
+                           bool allStructureRegionsReady = true;
+                           const StructureChunkColumnSpan structureSpan =
+                               structureRegistry_.queryChunkColumnSpanReady(column, &allStructureRegionsReady);
+                           if (structureSpan.valid())
                            {
                                occupancy.highestOccupiedChunkY =
-                                   std::max(occupancy.highestOccupiedChunkY, structureIt->second.maxChunkY);
+                                   std::max(occupancy.highestOccupiedChunkY, structureSpan.maxChunkY);
                                addColumnChunkInterval(occupancy.structureIntervals,
-                                                      structureIt->second.minChunkY,
-                                                      structureIt->second.maxChunkY);
+                                                      structureSpan.minChunkY,
+                                                      structureSpan.maxChunkY);
+                           }
+                           if (!allStructureRegionsReady)
+                           {
+                               supportComplete = false;
+                               ColumnSlabOccupancy conservative = conservativeIncompleteColumnSlabOccupancy(column);
+                               mergeColumnChunkIntervals(occupancy.maybeIntervals, conservative.maybeIntervals);
+                               occupancy.highestOccupiedChunkY =
+                                   std::max(occupancy.highestOccupiedChunkY, conservative.highestOccupiedChunkY);
+                               if (predictedHeight == ColumnManager::kNoHeight)
+                               {
+                                   predictedHeight = columnManager_.highestSolidBlockInChunkColumn(column);
+                               }
                            }
 
                            const auto editIt = editSpans.find(column);
@@ -16274,7 +16246,10 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
                            mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.waterIntervals);
                            mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.structureIntervals);
                            mergeColumnChunkIntervals(occupancy.occupiedIntervals, occupancy.editIntervals);
+                           occupancy.supportComplete = supportComplete;
                            analysisOccupancies[index] = occupancy;
+                           analysisPredictedHeights[index] = predictedHeight;
+                           incompleteColumnFlags[index] = supportComplete ? 0 : 1;
                        });
     if (plannerCancelled())
     {
@@ -16288,29 +16263,18 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
         {
             for (int chunkX = analysisMinChunkX; chunkX <= analysisMaxChunkX; ++chunkX)
             {
-                const PlannerColumnData& data = columnData[analysisColumnIndex(chunkX, chunkZ)];
-                if (data.highestTerrainWorld == ColumnManager::kNoHeight)
+                const int predictedHeight = analysisPredictedHeights[analysisColumnIndex(chunkX, chunkZ)];
+                if (predictedHeight == ColumnManager::kNoHeight)
                 {
                     continue;
                 }
 
                 auto [it, inserted] = predictedColumnHeights_.try_emplace(glm::ivec2{chunkX, chunkZ},
-                                                                          data.highestTerrainWorld);
+                                                                          predictedHeight);
                 if (!inserted)
                 {
-                    it->second = std::max(it->second, data.highestTerrainWorld);
+                    it->second = std::max(it->second, predictedHeight);
                 }
-            }
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(columnSlabOccupancyMutex_);
-        for (int chunkZ = analysisMinChunkZ; chunkZ <= analysisMaxChunkZ; ++chunkZ)
-        {
-            for (int chunkX = analysisMinChunkX; chunkX <= analysisMaxChunkX; ++chunkX)
-            {
-                columnSlabOccupancyCache_[glm::ivec2{chunkX, chunkZ}] =
-                    analysisOccupancies[analysisColumnIndex(chunkX, chunkZ)];
             }
         }
     }
@@ -16344,6 +16308,10 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
                                               requiredIntervals,
                                               occupancy,
                                               occupancy.supportComplete});
+            if (!occupancy.supportComplete)
+            {
+                ++plan->incompleteColumnCount;
+            }
             if (requiredIntervals.empty())
             {
                 continue;
@@ -16379,6 +16347,10 @@ ChunkManager::Impl::buildExactWindowPlan(const ExactWindowBuildKey& key,
         }
     }
 
+    plan->approximate =
+        !plan->missingWorldgenPages.empty() ||
+        !plan->missingStructureRegions.empty() ||
+        plan->incompleteColumnCount > 0;
     plan->status = ExactWindowPlanStatus::Ready;
     return plan;
 }
@@ -16660,7 +16632,7 @@ void ChunkManager::Impl::warmReadyWorldgenPageColumns(const glm::ivec2& pageKey,
                                                       const std::shared_ptr<const WorldgenPage>& page,
                                                       bool buildOccupancy) const
 {
-    (void)pageKey;
+    (void)buildOccupancy;
     if (!page)
     {
         return;
@@ -16678,42 +16650,22 @@ void ChunkManager::Impl::warmReadyWorldgenPageColumns(const glm::ivec2& pageKey,
             const int worldZ = column.y * kChunkSizeZ + kChunkSizeZ / 2;
             int cachedHeight = ColumnManager::kNoHeight;
             const bool haveHeight = tryGetCachedColumnHeight(column, worldX, worldZ, cachedHeight);
-            ColumnSlabOccupancy occupancy{};
-            const bool haveOccupancy = tryGetCachedColumnSlabOccupancy(column, occupancy);
 
             if (haveHeight)
             {
                 refreshWorldgenPageHeightSupportForColumn(column, true);
             }
-            if (haveOccupancy)
-            {
-                refreshWorldgenPageOccupancySupportForColumn(column, true);
-            }
-
-            ColumnSlabOccupancy resolvedOccupancy = occupancy;
-            bool resolvedHaveOccupancy = haveOccupancy;
-            if (buildOccupancy && !haveOccupancy)
-            {
-                resolvedOccupancy = cachedColumnSlabOccupancy(column);
-                resolvedHaveOccupancy = resolvedOccupancy.supportComplete;
-            }
-
-            if (resolvedHaveOccupancy)
-            {
-                refreshWorldgenPageOccupancySupportForColumn(column, true);
-            }
-            else if (buildOccupancy)
-            {
-                refreshWorldgenPageOccupancySupportForColumn(column, false);
-            }
+            refreshWorldgenPageColumnSupportForColumn(column, true);
 
             if (!haveHeight)
             {
-                if (resolvedHaveOccupancy && resolvedOccupancy.highestOccupiedChunkY >= 0)
+                const int localChunkX = column.x - minColumn.x;
+                const int localChunkZ = column.y - minColumn.y;
+                const WorldgenPage::ChunkColumnSupport& support =
+                    page->supportForChunkColumn(localChunkX, localChunkZ);
+                if (support.highestTerrainWorld != ColumnManager::kNoHeight)
                 {
-                    mergePredictedColumnHeight(
-                        column,
-                        resolvedOccupancy.highestOccupiedChunkY * kChunkSizeY + (kChunkSizeY - 1));
+                    mergePredictedColumnHeight(column, support.highestTerrainWorld);
                 }
                 else
                 {
@@ -17842,10 +17794,18 @@ void ChunkManager::Impl::resetStreamingFrontier() noexcept
     streamingFrontierVisibleReady_ = 0;
     streamingFrontierExactRequired_ = 0;
     streamingFrontierExactReady_ = 0;
+    streamingFrontierProtectedRequired_ = 0;
+    streamingFrontierProtectedReady_ = 0;
+    streamingFrontierExactMissingState_ = 0;
+    streamingFrontierExactWaitingDependencies_ = 0;
+    streamingFrontierExactQueuedGenerate_ = 0;
+    streamingFrontierExactGenerating_ = 0;
+    streamingFrontierExactMeshing_ = 0;
     nextStreamingFrontierSequence_ = 1;
     streamingFrontierDispatchOrigin_ = glm::ivec3{0};
     streamingFrontierDispatchForwardXZ_ = glm::vec2{0.0f, -1.0f};
     streamingFrontierDispatchPriorityEpoch_ = 1;
+    resetExactFillTracker();
 }
 
 void ChunkManager::Impl::clearStreamingChunkLifecycleStates() noexcept
@@ -17857,51 +17817,596 @@ void ChunkManager::Impl::clearStreamingChunkLifecycleStates() noexcept
 ChunkManager::Impl::FrontierCoverage ChunkManager::Impl::streamingFrontierCoverageSnapshot() const noexcept
 {
     std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
-    FrontierCoverage coverage{
+    return FrontierCoverage{
         streamingFrontierVisibleRequired_,
         streamingFrontierVisibleReady_,
         streamingFrontierExactRequired_,
-        streamingFrontierExactReady_};
-    for (const auto& [coord, demand] : streamingFrontierDemands_)
-    {
-        (void)coord;
-        if (demand.forceResident)
-        {
-            ++coverage.protectedRequired;
-            if (demand.state == FrontierDemandState::Ready)
-            {
-                ++coverage.protectedReady;
-            }
-        }
+        streamingFrontierExactReady_,
+        streamingFrontierProtectedRequired_,
+        streamingFrontierProtectedReady_,
+        streamingFrontierExactMissingState_,
+        streamingFrontierExactWaitingDependencies_,
+        streamingFrontierExactQueuedGenerate_,
+        streamingFrontierExactGenerating_,
+        streamingFrontierExactMeshing_};
+}
 
-        if (!demand.countedExact)
+glm::ivec2 ChunkManager::Impl::exactFillSupportPageKeyForChunk(const glm::ivec3& chunkCoord) const noexcept
+{
+    return exactGpuWorldgenPageWindowForChunk(chunkCoord).minPageKey;
+}
+
+bool ChunkManager::Impl::exactFillChunkSupportReady(const glm::ivec3& chunkCoord) const
+{
+    const ExactGpuWorldgenPageWindow pageWindow = exactGpuWorldgenPageWindowForChunk(chunkCoord);
+    for (const glm::ivec2& pageKey : pageWindow.pageKeys)
+    {
+        if (!tryGetReadyWorldgenPage(pageKey))
+        {
+            return false;
+        }
+    }
+
+    const std::vector<StructureRegionKey> regionKeys = collectChunkRegionKeys(chunkCoord);
+    return std::all_of(regionKeys.begin(),
+                       regionKeys.end(),
+                       [this](const StructureRegionKey& key)
+                       {
+                           return tryGetReadyRegion(key) != nullptr;
+                       });
+}
+
+bool ChunkManager::Impl::chunkEligibleForExactFillBatch(const glm::ivec3& coord,
+                                                        const glm::ivec3& center) const
+{
+    if (!stationaryExactFillModeActive_ || coord.y < 0)
+    {
+        return false;
+    }
+    if (shouldKeepChunkInteractive(coord, center))
+    {
+        return false;
+    }
+    if (chunkHasBlockEditOverlay(coord) || chunkHasPendingStructureEdits(coord))
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(chunksMutex);
+    return chunks_.find(coord) == chunks_.end();
+}
+
+bool ChunkManager::Impl::deferExactFillChunkForSupport(const glm::ivec3& coord,
+                                                       const glm::ivec3& center)
+{
+    if (!chunkEligibleForExactFillBatch(coord, center))
+    {
+        return false;
+    }
+
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point discoveryStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    const glm::ivec2 supportPageKey = exactFillSupportPageKeyForChunk(coord);
+    const ExactGpuWorldgenPageWindow pageWindow = exactGpuWorldgenPageWindowForChunk(coord);
+    const DependencyPriority priority = DependencyPriority::Visible;
+    const JobServiceClass serviceClass = JobServiceClass::Standard;
+    for (const glm::ivec2& pageKey : pageWindow.pageKeys)
+    {
+        (void)requestWorldgenPageDependency(pageKey, priority, true, true, serviceClass);
+    }
+    for (const StructureRegionKey& regionKey : collectChunkRegionKeys(coord))
+    {
+        (void)requestStructureRegionDependency(regionKey, priority, serviceClass);
+    }
+    if (benchmarkEnabled)
+    {
+        const double discoveryMs =
+            std::chrono::duration<double, std::milli>(SteadyClock::now() - discoveryStart).count();
+        exactFillSupportDiscoveryMsLastFrame_ += discoveryMs;
+        benchmarkMetrics_.exactFillSupportDiscoveryStage.recordMicros(static_cast<std::uint64_t>(discoveryMs * 1000.0));
+    }
+
+    setStreamingChunkLifecycleState(coord, FrontierDemandState::WaitingDependencies);
+    bool shouldRefill = false;
+    {
+        std::lock_guard<std::mutex> lock(exactFillMutex_);
+        ExactFillSupportPage& page = exactFillSupportPages_[supportPageKey];
+        const bool newPage = page.waitingChunks.empty() && page.state == ExactFillSupportPageState::Missing;
+        page.pageKey = supportPageKey;
+        page.generation = exactFillWindowGeneration_;
+        page.lastRequestFrame = updateFrameIndex_;
+        if (newPage)
+        {
+            page.state = ExactFillSupportPageState::Queued;
+            ++exactFillSupportPagesQueued_;
+            benchmarkMetrics_.exactFillSupportPagesQueued.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (std::find(page.waitingChunks.begin(), page.waitingChunks.end(), coord) == page.waitingChunks.end())
+        {
+            page.waitingChunks.push_back(coord);
+        }
+        if (exactFillChunkSupportReady(coord))
+        {
+            formExactFillBatchesForReadySupportLocked(page);
+            shouldRefill = true;
+        }
+    }
+    if (shouldRefill)
+    {
+        refillExactFillBatchPrepareJobs();
+    }
+    return true;
+}
+
+void ChunkManager::Impl::formExactFillBatchesForReadySupportLocked(ExactFillSupportPage& page)
+{
+    if (page.waitingChunks.empty())
+    {
+        return;
+    }
+
+    const std::size_t batchSize = std::min(kExactFillDefaultBatchSize, kExactFillMaxBatchSize);
+    while (!page.waitingChunks.empty())
+    {
+        ExactFillBatch batch{};
+        batch.id = nextExactFillBatchId_++;
+        batch.supportPage = page.pageKey;
+        batch.state = ExactFillBatchState::ReadyToPrepare;
+        batch.exactWindowGeneration = exactFillWindowGeneration_;
+        batch.queuedTimestampMicros = steadyMicrosNow();
+        const std::size_t count = std::min(batchSize, page.waitingChunks.size());
+        batch.chunks.insert(batch.chunks.end(), page.waitingChunks.begin(), page.waitingChunks.begin() + count);
+        page.waitingChunks.erase(page.waitingChunks.begin(), page.waitingChunks.begin() + count);
+        exactFillReadyBatchIds_.push_back(batch.id);
+        exactFillBatches_.emplace(batch.id, std::move(batch));
+        ++exactFillBatchesQueued_;
+        benchmarkMetrics_.exactFillBatchesQueued.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (page.state != ExactFillSupportPageState::Ready)
+    {
+        page.state = ExactFillSupportPageState::Ready;
+        ++exactFillSupportPagesReady_;
+        benchmarkMetrics_.exactFillSupportPagesReady.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void ChunkManager::Impl::notifyExactFillSupportProgress(const glm::ivec2& pageKey)
+{
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point prepStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    bool shouldRefill = false;
+    {
+        std::lock_guard<std::mutex> lock(exactFillMutex_);
+        for (auto& [supportKey, page] : exactFillSupportPages_)
+        {
+            (void)supportKey;
+            if (page.waitingChunks.empty() ||
+                (page.state != ExactFillSupportPageState::Queued &&
+                 page.state != ExactFillSupportPageState::Blocked))
+            {
+                continue;
+            }
+
+            bool anyReady = false;
+            for (const glm::ivec3& coord : page.waitingChunks)
+            {
+                const ExactGpuWorldgenPageWindow window = exactGpuWorldgenPageWindowForChunk(coord);
+                if (std::find(window.pageKeys.begin(), window.pageKeys.end(), pageKey) == window.pageKeys.end())
+                {
+                    continue;
+                }
+                if (exactFillChunkSupportReady(coord))
+                {
+                    anyReady = true;
+                    break;
+                }
+            }
+            if (!anyReady)
+            {
+                page.state = ExactFillSupportPageState::Blocked;
+                ++exactFillSupportPagesBlocked_;
+                benchmarkMetrics_.exactFillSupportPagesBlocked.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            std::vector<glm::ivec3> stillWaiting;
+            std::vector<glm::ivec3> ready;
+            stillWaiting.reserve(page.waitingChunks.size());
+            ready.reserve(page.waitingChunks.size());
+            for (const glm::ivec3& coord : page.waitingChunks)
+            {
+                if (exactFillChunkSupportReady(coord))
+                {
+                    ready.push_back(coord);
+                }
+                else
+                {
+                    stillWaiting.push_back(coord);
+                }
+            }
+            page.waitingChunks = std::move(ready);
+            formExactFillBatchesForReadySupportLocked(page);
+            page.waitingChunks.insert(page.waitingChunks.end(), stillWaiting.begin(), stillWaiting.end());
+            shouldRefill = true;
+        }
+    }
+    if (benchmarkEnabled)
+    {
+        const double prepMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - prepStart).count();
+        exactFillSupportPreparationMsLastFrame_ += prepMs;
+        benchmarkMetrics_.exactFillSupportPreparationStage.recordMicros(static_cast<std::uint64_t>(prepMs * 1000.0));
+    }
+    if (shouldRefill)
+    {
+        refillExactFillBatchPrepareJobs();
+    }
+}
+
+void ChunkManager::Impl::refillExactFillBatchPrepareJobs()
+{
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const std::size_t outstanding = jobQueue_.outstanding(JobType::ExactFillBatchPrepare);
+    std::size_t readyBatches = 0;
+    {
+        std::lock_guard<std::mutex> lock(exactFillMutex_);
+        readyBatches = exactFillReadyBatchIds_.size();
+    }
+    if (readyBatches == 0 || outstanding >= kExactFillMaxBatchJobsPerRefill)
+    {
+        return;
+    }
+    const std::size_t toQueue =
+        std::min<std::size_t>(readyBatches, kExactFillMaxBatchJobsPerRefill - outstanding);
+    for (std::size_t i = 0; i < toQueue; ++i)
+    {
+        enqueueJob(nullptr,
+                   JobType::ExactFillBatchPrepare,
+                   schedulingPriorityOrigin_,
+                   0,
+                   false,
+                   JobServiceClass::Refinement);
+    }
+}
+
+bool ChunkManager::Impl::acquireNextExactFillBatch(ExactFillBatch& outBatch)
+{
+    std::lock_guard<std::mutex> lock(exactFillMutex_);
+    while (!exactFillReadyBatchIds_.empty())
+    {
+        const std::uint64_t batchId = exactFillReadyBatchIds_.front();
+        exactFillReadyBatchIds_.pop_front();
+        auto it = exactFillBatches_.find(batchId);
+        if (it == exactFillBatches_.end() || it->second.state != ExactFillBatchState::ReadyToPrepare)
         {
             continue;
+        }
+
+        it->second.state = ExactFillBatchState::Preparing;
+        --exactFillBatchesQueued_;
+        ++exactFillBatchesPreparing_;
+        outBatch = it->second;
+        const std::uint64_t nowMicros = steadyMicrosNow();
+        if (benchmarkMetrics_.isEnabled() &&
+            outBatch.queuedTimestampMicros > 0u &&
+            nowMicros > outBatch.queuedTimestampMicros)
+        {
+            const std::uint64_t waitMicros = nowMicros - outBatch.queuedTimestampMicros;
+            exactFillBatchQueueWaitMsLastFrame_ += static_cast<double>(waitMicros) / 1000.0;
+            benchmarkMetrics_.exactFillBatchQueueWaitStage.recordMicros(waitMicros);
+        }
+        benchmarkMetrics_.exactFillBatchesPreparing.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    return false;
+}
+
+bool ChunkManager::Impl::prepareExactGpuInputsForChunk(const std::shared_ptr<Chunk>& chunk,
+                                                       std::uint32_t generationEpoch)
+{
+    if (!chunk)
+    {
+        return false;
+    }
+    return generateChunkBlocks(*chunk, generationEpoch);
+}
+
+bool ChunkManager::Impl::publishPreparedExactGpuInputs(const std::shared_ptr<Chunk>& chunk,
+                                                       std::uint64_t exactWindowGeneration)
+{
+    if (!chunk)
+    {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(exactFillMutex_);
+        if (exactWindowGeneration != exactFillWindowGeneration_)
+        {
+            return false;
+        }
+    }
+    chunk->exactFillPreparedGeneration.store(exactWindowGeneration, std::memory_order_release);
+    if (chunk->hasBlocks.load(std::memory_order_acquire))
+    {
+        chunk->pendingMeshRefresh.store(false, std::memory_order_release);
+        chunk->state.store(ChunkState::Meshing, std::memory_order_release);
+        setStreamingChunkLifecycleState(chunk->coord, FrontierDemandState::Meshing);
+        if (benchmarkMetrics_.isEnabled())
+        {
+            storeFirstBenchmarkTimestamp(chunk->meshQueuedTimestampMicros, steadyMicrosNow());
+        }
+        return true;
+    }
+
+    chunk->state.store(ChunkState::Uploaded, std::memory_order_release);
+    chunk->meshReady.store(false, std::memory_order_release);
+    chunk->indexCount.store(0, std::memory_order_release);
+    publishChunkReady(*chunk);
+    return false;
+}
+
+bool ChunkManager::Impl::processExactFillBatchPrepareJob()
+{
+    ExactFillBatch batch{};
+    if (!acquireNextExactFillBatch(batch))
+    {
+        return false;
+    }
+
+    const bool benchmarkEnabled = benchmarkMetrics_.isEnabled();
+    const SteadyClock::time_point prepareStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    std::vector<std::shared_ptr<Chunk>> preparedChunks;
+    preparedChunks.reserve(batch.chunks.size());
+    int fallbackChunks = 0;
+    int staleChunks = 0;
+    for (const glm::ivec3& coord : batch.chunks)
+    {
+        if (shouldStop_.load(std::memory_order_acquire))
+        {
+            break;
+        }
+        if (shouldKeepChunkInteractive(coord, lastCenterChunk_) ||
+            chunkHasBlockEditOverlay(coord) ||
+            chunkHasPendingStructureEdits(coord))
+        {
+            ++fallbackChunks;
+            (void)ensureChunkAsync(coord, false, true);
+            continue;
+        }
+        if (!exactFillChunkSupportReady(coord))
+        {
+            ++staleChunks;
+            setStreamingChunkLifecycleState(coord, FrontierDemandState::Missing);
+            continue;
+        }
+
+        std::shared_ptr<Chunk> chunk{};
+        std::uint32_t generationEpoch = 0;
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            if (chunks_.find(coord) != chunks_.end())
+            {
+                continue;
+            }
+            chunk = acquireChunk(coord);
+            chunk->state.store(ChunkState::Generating, std::memory_order_release);
+            chunk->requestTimestampMicros.store(static_cast<long long>(steadyMicrosNow()), std::memory_order_release);
+            chunk->initialReadyRecorded.store(false, std::memory_order_release);
+            generationEpoch = chunk->generationEpoch.fetch_add(1, std::memory_order_acq_rel) + 1u;
+            chunks_.emplace(coord, chunk);
+            registerChunkRenderRegistryEntry(coord, chunk);
+        }
+        setStreamingChunkLifecycleState(coord, FrontierDemandState::Generating);
+        if (!prepareExactGpuInputsForChunk(chunk, generationEpoch))
+        {
+            ++staleChunks;
+            continue;
+        }
+        if (publishPreparedExactGpuInputs(chunk, batch.exactWindowGeneration))
+        {
+            preparedChunks.push_back(std::move(chunk));
+        }
+    }
+    const int preparedCount = static_cast<int>(preparedChunks.size());
+    if (benchmarkEnabled)
+    {
+        const double prepareMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - prepareStart).count();
+        exactFillBatchCpuPreparationMsLastFrame_ += prepareMs;
+        benchmarkMetrics_.exactFillBatchCpuPreparationStage.recordMicros(static_cast<std::uint64_t>(prepareMs * 1000.0));
+        benchmarkMetrics_.exactFillChunksPrepared.fetch_add(
+            static_cast<std::uint64_t>(std::max(preparedCount, 0)),
+            std::memory_order_relaxed);
+        if (fallbackChunks > 0)
+        {
+            benchmarkMetrics_.exactFillFallbackChunks.fetch_add(static_cast<std::uint64_t>(fallbackChunks),
+                                                                std::memory_order_relaxed);
+        }
+    }
+
+    const SteadyClock::time_point enqueueStart = benchmarkEnabled ? SteadyClock::now() : SteadyClock::time_point{};
+    const int submittedCount = queuePreparedExactGpuBuildBatch(preparedChunks, false);
+    if (benchmarkEnabled)
+    {
+        const double enqueueMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - enqueueStart).count();
+        exactFillBatchExactGpuEnqueueMsLastFrame_ += enqueueMs;
+        benchmarkMetrics_.exactFillBatchExactGpuEnqueueStage.recordMicros(static_cast<std::uint64_t>(enqueueMs * 1000.0));
+        if (submittedCount > 0)
+        {
+            benchmarkMetrics_.exactFillChunksSubmittedToExactGpu.fetch_add(static_cast<std::uint64_t>(submittedCount),
+                                                                           std::memory_order_relaxed);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(exactFillMutex_);
+        --exactFillBatchesPreparing_;
+        ++exactFillBatchesPrepared_;
+        exactFillChunksPrepared_ += preparedCount;
+        exactFillChunksSubmittedToExactGpu_ += submittedCount;
+        exactFillFallbackChunks_ += fallbackChunks;
+        if (staleChunks > 0)
+        {
+            ++exactFillStaleBatchesDropped_;
+            benchmarkMetrics_.exactFillStaleBatchesDropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        auto it = exactFillBatches_.find(batch.id);
+        if (it != exactFillBatches_.end())
+        {
+            it->second.state = staleChunks > 0 ? ExactFillBatchState::Stale : ExactFillBatchState::SubmittedToExactGpu;
+        }
+    }
+    benchmarkMetrics_.exactFillBatchesPrepared.fetch_add(1, std::memory_order_relaxed);
+    return preparedCount > 0 || fallbackChunks > 0;
+}
+
+ChunkManager::Impl::ExactFillTrackerSnapshot ChunkManager::Impl::exactFillTrackerSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(exactFillMutex_);
+    int supportPagesQueued = 0;
+    int supportPagesReady = 0;
+    int supportPagesBlocked = 0;
+    for (const auto& [pageKey, page] : exactFillSupportPages_)
+    {
+        (void)pageKey;
+        switch (page.state)
+        {
+        case ExactFillSupportPageState::Queued:
+            ++supportPagesQueued;
+            break;
+        case ExactFillSupportPageState::Ready:
+            ++supportPagesReady;
+            break;
+        case ExactFillSupportPageState::Blocked:
+            ++supportPagesBlocked;
+            break;
+        default:
+            break;
+        }
+    }
+
+    int batchesQueued = 0;
+    int batchesPreparing = 0;
+    for (const auto& [batchId, batch] : exactFillBatches_)
+    {
+        (void)batchId;
+        switch (batch.state)
+        {
+        case ExactFillBatchState::ReadyToPrepare:
+            ++batchesQueued;
+            break;
+        case ExactFillBatchState::Preparing:
+            ++batchesPreparing;
+            break;
+        default:
+            break;
+        }
+    }
+
+    return ExactFillTrackerSnapshot{
+        supportPagesQueued,
+        supportPagesReady,
+        supportPagesBlocked,
+        batchesQueued,
+        batchesPreparing,
+        exactFillBatchesPrepared_,
+        exactFillChunksPrepared_,
+        exactFillChunksSubmittedToExactGpu_,
+        exactFillChunksCommitted_,
+        exactFillStaleBatchesDropped_,
+        exactFillFallbackChunks_};
+}
+
+void ChunkManager::Impl::resetExactFillTracker()
+{
+    std::lock_guard<std::mutex> lock(exactFillMutex_);
+    exactFillSupportPages_.clear();
+    exactFillBatches_.clear();
+    exactFillReadyBatchIds_.clear();
+    nextExactFillBatchId_ = 1;
+    ++exactFillWindowGeneration_;
+    exactFillSupportPagesQueued_ = 0;
+    exactFillSupportPagesReady_ = 0;
+    exactFillSupportPagesBlocked_ = 0;
+    exactFillBatchesQueued_ = 0;
+    exactFillBatchesPreparing_ = 0;
+    exactFillBatchesPrepared_ = 0;
+    exactFillChunksPrepared_ = 0;
+    exactFillChunksSubmittedToExactGpu_ = 0;
+    exactFillChunksCommitted_ = 0;
+    exactFillStaleBatchesDropped_ = 0;
+    exactFillFallbackChunks_ = 0;
+}
+
+void ChunkManager::Impl::applyStreamingFrontierDemandCountersLocked(const FrontierChunkDemand& demand,
+                                                                   int delta) noexcept
+{
+    if (demand.countedVisible)
+    {
+        streamingFrontierVisibleRequired_ += delta;
+        if (demand.state == FrontierDemandState::Ready)
+        {
+            streamingFrontierVisibleReady_ += delta;
+        }
+    }
+
+    if (demand.countedExact)
+    {
+        streamingFrontierExactRequired_ += delta;
+        if (demand.state == FrontierDemandState::Ready)
+        {
+            streamingFrontierExactReady_ += delta;
         }
 
         switch (demand.state)
         {
         case FrontierDemandState::Missing:
-            ++coverage.exactMissingState;
+            streamingFrontierExactMissingState_ += delta;
             break;
         case FrontierDemandState::WaitingDependencies:
-            ++coverage.exactWaitingDependencies;
+            streamingFrontierExactWaitingDependencies_ += delta;
             break;
         case FrontierDemandState::QueuedGenerate:
-            ++coverage.exactQueuedGenerate;
+            streamingFrontierExactQueuedGenerate_ += delta;
             break;
         case FrontierDemandState::Generating:
-            ++coverage.exactGenerating;
+            streamingFrontierExactGenerating_ += delta;
             break;
         case FrontierDemandState::Meshing:
-            ++coverage.exactMeshing;
+            streamingFrontierExactMeshing_ += delta;
             break;
         case FrontierDemandState::Ready:
             break;
         }
     }
 
-    return coverage;
+    if (demand.forceResident)
+    {
+        streamingFrontierProtectedRequired_ += delta;
+        if (demand.state == FrontierDemandState::Ready)
+        {
+            streamingFrontierProtectedReady_ += delta;
+        }
+    }
+}
+
+void ChunkManager::Impl::overwriteStreamingFrontierDemandLocked(FrontierChunkDemand& demand,
+                                                                const FrontierChunkDemand& updated) noexcept
+{
+    applyStreamingFrontierDemandCountersLocked(demand, -1);
+    demand = updated;
+    applyStreamingFrontierDemandCountersLocked(demand, +1);
+}
+
+void ChunkManager::Impl::eraseStreamingFrontierDemandLocked(
+    std::unordered_map<glm::ivec3, FrontierChunkDemand, ChunkHasher>::iterator it) noexcept
+{
+    applyStreamingFrontierDemandCountersLocked(it->second, -1);
+    streamingFrontierDemands_.erase(it);
 }
 
 void ChunkManager::Impl::setStreamingFrontierDemandState(const glm::ivec3& coord, FrontierDemandState state)
@@ -17914,29 +18419,44 @@ void ChunkManager::Impl::setStreamingFrontierDemandState(const glm::ivec3& coord
     }
 
     FrontierChunkDemand& demand = it->second;
-    const bool oldReady = demand.state == FrontierDemandState::Ready;
-    const bool newReady = state == FrontierDemandState::Ready;
-    if (oldReady != newReady)
-    {
-        if (demand.countedVisible)
-        {
-            streamingFrontierVisibleReady_ += newReady ? 1 : -1;
-        }
-        if (demand.countedExact)
-        {
-            streamingFrontierExactReady_ += newReady ? 1 : -1;
-        }
-    }
-
     if (demand.state != state)
     {
-        demand.state = state;
-        ++demand.version;
-        if (state == FrontierDemandState::Missing)
+        FrontierChunkDemand updated = demand;
+        updated.state = state;
+        ++updated.version;
+        overwriteStreamingFrontierDemandLocked(demand, updated);
+        if (updated.state == FrontierDemandState::Missing)
         {
             queueStreamingFrontierDispatchEntryLocked(coord, demand);
         }
     }
+}
+
+bool ChunkManager::Impl::rebuildStreamingFrontierMissingDispatchEntry(const glm::ivec3& coord,
+                                                                      FrontierDispatchEntry& outEntry)
+{
+    std::lock_guard<std::mutex> lock(streamingFrontierMutex_);
+    auto it = streamingFrontierDemands_.find(coord);
+    if (it == streamingFrontierDemands_.end() || it->second.state != FrontierDemandState::Missing)
+    {
+        return false;
+    }
+
+    // A required exact chunk must remain dispatchable until it transitions into an explicit
+    // lifecycle state such as WaitingDependencies, QueuedGenerate, or Ready.
+    ++it->second.version;
+    const glm::vec3 priorityForward{
+        streamingFrontierDispatchForwardXZ_.x,
+        0.0f,
+        streamingFrontierDispatchForwardXZ_.y};
+    outEntry.coord = coord;
+    outEntry.priority = buildUploadPriorityKey(coord, streamingFrontierDispatchOrigin_, priorityForward);
+    outEntry.localInteraction =
+        it->second.forceResident || shouldKeepChunkInteractive(coord, streamingFrontierDispatchOrigin_);
+    outEntry.version = it->second.version;
+    outEntry.sequence = nextStreamingFrontierSequence_++;
+    outEntry.priorityEpoch = streamingFrontierDispatchPriorityEpoch_;
+    return true;
 }
 
 void ChunkManager::Impl::queueStreamingFrontierDispatchEntryLocked(const glm::ivec3& coord,
@@ -18054,6 +18574,7 @@ void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPl
                 }
                 auto [insertIt, inserted] = streamingFrontierDemands_.emplace(coord, demand);
                 (void)inserted;
+                applyStreamingFrontierDemandCountersLocked(insertIt->second, +1);
                 demandIt = insertIt;
                 if (demandIt->second.state == FrontierDemandState::Missing)
                 {
@@ -18066,13 +18587,18 @@ void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPl
             const bool flagsChanged =
                 demand.forceResident != entry.forceResident ||
                 demand.planGeneration != newGeneration;
-            demand.forceResident = entry.forceResident;
-            demand.countedVisible = false;
-            demand.countedExact = false;
-            demand.planGeneration = newGeneration;
+            FrontierChunkDemand updated = demand;
+            updated.forceResident = entry.forceResident;
+            updated.countedVisible = false;
+            updated.countedExact = false;
+            updated.planGeneration = newGeneration;
             if (flagsChanged && demand.state == FrontierDemandState::Missing)
             {
-                ++demand.version;
+                ++updated.version;
+            }
+            overwriteStreamingFrontierDemandLocked(demand, updated);
+            if (flagsChanged && demand.state == FrontierDemandState::Missing)
+            {
                 queueStreamingFrontierDispatchEntryLocked(coord, demand);
             }
         }
@@ -18087,40 +18613,11 @@ void ChunkManager::Impl::applyPlanDiff(const std::shared_ptr<const ExactWindowPl
             ++it;
             continue;
         }
-        it = streamingFrontierDemands_.erase(it);
+        auto eraseIt = it++;
+        eraseStreamingFrontierDemandLocked(eraseIt);
     }
 
     (void)oldPlan;
-    recomputeStreamingFrontierCoverageCountsLocked();
-}
-
-bool ChunkManager::Impl::waitingPlanDependenciesStillOutstanding(const ExactWindowPlan& plan) const
-{
-    for (const glm::ivec2& pageKey : plan.missingWorldgenPages)
-    {
-        if (tryGetReadyWorldgenPage(pageKey))
-        {
-            return false;
-        }
-        if (!worldgenPageDependencyHasOutstandingWork(pageKey))
-        {
-            return false;
-        }
-    }
-
-    for (const StructureRegionKey& key : plan.missingStructureRegions)
-    {
-        if (tryGetReadyRegion(key))
-        {
-            return false;
-        }
-        if (!structureRegionDependencyHasOutstandingWork(key))
-        {
-            return false;
-        }
-    }
-
-    return !plan.missingWorldgenPages.empty() || !plan.missingStructureRegions.empty();
 }
 
 void ChunkManager::Impl::retagActivePlanFrontierDemands(const glm::ivec3& center, int visibleRadius, int exactRadius)
@@ -18156,10 +18653,11 @@ void ChunkManager::Impl::retagActivePlanFrontierDemands(const glm::ivec3& center
 
             const int horizontalDistance =
                 std::max(std::abs(coord.x - centerColumn.x), std::abs(coord.z - centerColumn.y));
-            demand.countedVisible = horizontalDistance <= visibleRadius;
-            demand.countedExact = horizontalDistance <= exactRadius;
+            FrontierChunkDemand updated = demand;
+            updated.countedVisible = horizontalDistance <= visibleRadius;
+            updated.countedExact = horizontalDistance <= exactRadius;
+            overwriteStreamingFrontierDemandLocked(demand, updated);
         }
-        recomputeStreamingFrontierCoverageCountsLocked();
     }
 
     std::lock_guard<std::mutex> lock(exactPlanMutex_);
@@ -18235,7 +18733,7 @@ void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
         auto demandIt = streamingFrontierDemands_.find(*it);
         if (demandIt != streamingFrontierDemands_.end() && demandIt->second.planGeneration == 0)
         {
-            streamingFrontierDemands_.erase(demandIt);
+            eraseStreamingFrontierDemandLocked(demandIt);
         }
         it = playerSafetyOverlayCoords_.erase(it);
     }
@@ -18257,15 +18755,21 @@ void ChunkManager::Impl::updatePlayerSafetyOverlay(const glm::ivec3& center,
                 }
                 auto [insertIt, inserted] = streamingFrontierDemands_.emplace(coord, demand);
                 (void)inserted;
+                applyStreamingFrontierDemandCountersLocked(insertIt->second, +1);
                 demandIt = insertIt;
             }
 
             if (demandIt->second.planGeneration == 0)
             {
-                demandIt->second.forceResident = true;
+                FrontierChunkDemand updated = demandIt->second;
+                updated.forceResident = true;
                 if (demandIt->second.state == FrontierDemandState::Missing)
                 {
-                    ++demandIt->second.version;
+                    ++updated.version;
+                }
+                overwriteStreamingFrontierDemandLocked(demandIt->second, updated);
+                if (demandIt->second.state == FrontierDemandState::Missing)
+                {
                     queueStreamingFrontierDispatchEntryLocked(coord, demandIt->second);
                 }
             }
@@ -18296,6 +18800,7 @@ int ChunkManager::Impl::dispatchStreamingFrontierGenerateJobs(const glm::ivec3& 
     const int maxRescoreAttempts = std::max(32, jobBudget * 8);
     int rescoreAttempts = 0;
     int issued = 0;
+    int exactFillSupportRequestBudget = kExactFillMaxSupportRequestsPerUpdate;
     while (jobBudget > 0)
     {
         FrontierDispatchEntry entry{};
@@ -18366,6 +18871,19 @@ int ChunkManager::Impl::dispatchStreamingFrontierGenerateJobs(const glm::ivec3& 
             deferredEntries.push_back(entry);
             continue;
         }
+        if (!localInteraction && chunkEligibleForExactFillBatch(entry.coord, center))
+        {
+            if (exactFillSupportRequestBudget <= 0)
+            {
+                deferredEntries.push_back(entry);
+                continue;
+            }
+            --exactFillSupportRequestBudget;
+            if (deferExactFillChunkForSupport(entry.coord, center))
+            {
+                continue;
+            }
+        }
         const bool requireAccurateStructureReady =
             stationaryExactFillModeActive_ && !localInteraction;
         if (requireAccurateStructureReady)
@@ -18414,6 +18932,15 @@ int ChunkManager::Impl::dispatchStreamingFrontierGenerateJobs(const glm::ivec3& 
             --jobBudget;
             ++issued;
         }
+        else if (ensureResult == EnsureChunkAsyncResult::RetryMissing)
+        {
+            FrontierDispatchEntry retryEntry{};
+            if (rebuildStreamingFrontierMissingDispatchEntry(entry.coord, retryEntry))
+            {
+                deferredEntries.push_back(retryEntry);
+            }
+            continue;
+        }
         else if (ensureResult == EnsureChunkAsyncResult::WaitingDependencies)
         {
             continue;
@@ -18435,8 +18962,11 @@ int ChunkManager::Impl::dispatchStreamingFrontierGenerateJobs(const glm::ivec3& 
 
     if (benchmarkEnabled)
     {
-        ensureVolumeDispatchMsLastFrame_ +=
+        const double dispatchMs =
             std::chrono::duration<double, std::milli>(SteadyClock::now() - dispatchStart).count();
+        ensureVolumeDispatchMsLastFrame_ += dispatchMs;
+        exactFillDispatchMsLastFrame_ += dispatchMs;
+        benchmarkMetrics_.exactFillDispatchStage.recordMicros(static_cast<std::uint64_t>(dispatchMs * 1000.0));
     }
 
     return issued;
@@ -18656,10 +19186,10 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                        << " state=" << static_cast<int>(entry.state)
                        << " has_page=" << (entry.page ? 1 : 0)
                        << " support_h=" << (entry.supportsHeight ? 1 : 0)
-                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_occ=" << (entry.supportsColumnSupport ? 1 : 0)
                        << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
                        << " missing_h=" << entry.missingHeightColumns
-                       << " missing_occ=" << entry.missingOccupancyColumns
+                       << " missing_occ=" << entry.missingSupportColumns
                        << " missing_warm_regions=" << entry.missingWarmStructureRegions;
                 exactDependencyStallDebugLog(stream.str());
             }
@@ -18691,7 +19221,7 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                 stream << "exact_dep_request_defer_to_regions"
                        << " page=(" << pageKey.x << "," << pageKey.y << ")"
                        << " support_h=" << (entry.supportsHeight ? 1 : 0)
-                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_occ=" << (entry.supportsColumnSupport ? 1 : 0)
                        << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
                        << " missing_warm_regions=" << entry.missingWarmStructureRegions;
                 debugMessage = stream.str();
@@ -18713,10 +19243,10 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                        << " state=" << static_cast<int>(entry.state)
                        << " has_page=" << (entry.page ? 1 : 0)
                        << " support_h=" << (entry.supportsHeight ? 1 : 0)
-                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_occ=" << (entry.supportsColumnSupport ? 1 : 0)
                        << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
                        << " missing_h=" << entry.missingHeightColumns
-                       << " missing_occ=" << entry.missingOccupancyColumns
+                       << " missing_occ=" << entry.missingSupportColumns
                        << " missing_warm_regions=" << entry.missingWarmStructureRegions;
                 exactDependencyStallDebugLog(stream.str());
             }
@@ -18732,7 +19262,7 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                        << " page=(" << pageKey.x << "," << pageKey.y << ")"
                        << " has_page=" << (entry.page ? 1 : 0)
                        << " support_h=" << (entry.supportsHeight ? 1 : 0)
-                       << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                       << " support_occ=" << (entry.supportsColumnSupport ? 1 : 0)
                        << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0);
                 exactDependencyStallDebugLog(stream.str());
             }
@@ -18784,10 +19314,10 @@ bool ChunkManager::Impl::requestWorldgenPageDependency(const glm::ivec2& pageKey
                    << " state=" << static_cast<int>(entry.state)
                    << " has_page=" << (entry.page ? 1 : 0)
                    << " support_h=" << (entry.supportsHeight ? 1 : 0)
-                   << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                   << " support_occ=" << (entry.supportsColumnSupport ? 1 : 0)
                    << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
                    << " missing_h=" << entry.missingHeightColumns
-                   << " missing_occ=" << entry.missingOccupancyColumns
+                   << " missing_occ=" << entry.missingSupportColumns
                    << " missing_warm_regions=" << entry.missingWarmStructureRegions
                    << " build_occ=" << (entry.buildOccupancy ? 1 : 0)
                    << " warm=" << (entry.warmStructures ? 1 : 0)
@@ -20404,9 +20934,9 @@ int ChunkManager::Impl::worldgenPageLocalChunkColumnIndex(const glm::ivec2& page
 void ChunkManager::Impl::refreshWorldgenPageSupportStatusLocked(WorldgenPageDependencyEntry& entry) const noexcept
 {
     entry.missingHeightColumns = kWorldgenPageChunkColumnCount - entry.readyHeightColumns;
-    entry.missingOccupancyColumns = kWorldgenPageChunkColumnCount - entry.readyOccupancyColumns;
+    entry.missingSupportColumns = kWorldgenPageChunkColumnCount - entry.readySupportColumns;
     entry.supportsHeight = entry.missingHeightColumns == 0;
-    entry.supportsOccupancy = entry.missingOccupancyColumns == 0;
+    entry.supportsColumnSupport = entry.missingSupportColumns == 0;
     entry.supportsWarmStructures =
         entry.warmStructureRegionsInitialized && entry.missingWarmStructureRegions == 0;
 }
@@ -20499,14 +21029,14 @@ void ChunkManager::Impl::refreshWorldgenPageHeightSupportForColumn(const glm::iv
     }
 }
 
-void ChunkManager::Impl::refreshWorldgenPageOccupancySupportForColumn(const glm::ivec2& column, bool ready) const
+void ChunkManager::Impl::refreshWorldgenPageColumnSupportForColumn(const glm::ivec2& column, bool ready) const
 {
     const glm::ivec2 pageKey = worldgenPageKeyForChunkColumn(column);
     std::lock_guard<std::mutex> lock(worldgenPageMutex_);
     WorldgenPageDependencyEntry& entry = worldgenPageEntries_[pageKey];
     const int bitIndex = worldgenPageLocalChunkColumnIndex(pageKey, column);
     const std::uint32_t bitMask = 1u << bitIndex;
-    const bool alreadyReady = (entry.occupancyReadyBits & bitMask) != 0;
+    const bool alreadyReady = (entry.columnSupportReadyBits & bitMask) != 0;
     if (ready == alreadyReady)
     {
         return;
@@ -20514,13 +21044,13 @@ void ChunkManager::Impl::refreshWorldgenPageOccupancySupportForColumn(const glm:
 
     if (ready)
     {
-        entry.occupancyReadyBits |= bitMask;
-        ++entry.readyOccupancyColumns;
+        entry.columnSupportReadyBits |= bitMask;
+        ++entry.readySupportColumns;
     }
     else
     {
-        entry.occupancyReadyBits &= ~bitMask;
-        entry.readyOccupancyColumns = std::max(entry.readyOccupancyColumns - 1, 0);
+        entry.columnSupportReadyBits &= ~bitMask;
+        entry.readySupportColumns = std::max(entry.readySupportColumns - 1, 0);
     }
 
     refreshWorldgenPageSupportStatusLocked(entry);
@@ -20538,7 +21068,7 @@ bool ChunkManager::Impl::worldgenPageSupportSatisfiedLocked(const WorldgenPageDe
     {
         return false;
     }
-    if (buildOccupancy && !entry.supportsOccupancy)
+    if (buildOccupancy && !entry.supportsColumnSupport)
     {
         return false;
     }
@@ -20585,6 +21115,189 @@ bool ChunkManager::Impl::prefetchPageFrontierRequestUpgraded(
            (desired.warmStructures && !existing.warmStructures);
 }
 
+void ChunkManager::Impl::fillWorldgenColumnValue(WorldgenColumnValue& outColumn,
+                                                 int worldX,
+                                                 int worldZ,
+                                                 const terrain::SurfaceColumn& surfaceColumn) const noexcept
+{
+    outColumn = WorldgenColumnValue{};
+    outColumn.surface = surfaceColumn;
+
+    const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
+    const BiomeDefinition* biome = outColumn.surface.dominantBiome;
+    outColumn.biomeIndex =
+        biome != nullptr
+            ? static_cast<std::uint32_t>(biomeDatabase_.definitionIndex(*biome))
+            : (std::numeric_limits<std::uint32_t>::max)();
+    outColumn.distanceToCoast = climateSample.distanceToCoast;
+    outColumn.signedDistanceToCoast = climateSample.signedDistanceToCoast;
+    outColumn.landBaseHeight = climateSample.landBaseHeight;
+    outColumn.oceanBaseHeight = climateSample.oceanBaseHeight;
+    outColumn.keepOriginalMix = climateSample.keepOriginalMix;
+    outColumn.dominantIsOcean = climateSample.dominantIsOcean;
+    outColumn.grassTintIndex = worldgenGrassTintIndexForBiome(biome);
+
+    if (biome == nullptr)
+    {
+        return;
+    }
+
+    outColumn.surfaceBlock = biome->surfaceBlock;
+    outColumn.fillerBlock = biome->fillerBlock;
+    outColumn.smoothBeaches = biome->terrainSettings.smoothBeaches;
+    outColumn.taigaBiome = terrain::isTaigaBiome(*biome);
+    outColumn.soilCreepStrength = biome->terrainSettings.soilCreep.strength;
+    outColumn.soilCreepMaxStep =
+        static_cast<std::uint16_t>(std::max(biome->terrainSettings.soilCreep.maxStep, 0));
+    outColumn.soilCreepMaxDepth =
+        static_cast<std::uint16_t>(std::max(biome->terrainSettings.soilCreep.maxDepth, 0));
+    outColumn.waterFillEnabled = biome->terrainSettings.waterFill.enabled;
+    outColumn.waterFillMaxDepth =
+        static_cast<std::uint16_t>(std::max(biome->terrainSettings.waterFill.maxDepth, 0));
+    outColumn.waterBlock = biome->terrainSettings.waterFill.block;
+    outColumn.stripesEnabled = biome->terrainSettings.stripes.enabled;
+    outColumn.stripePeriod =
+        static_cast<std::uint16_t>(std::max(biome->terrainSettings.stripes.period, 0));
+    outColumn.stripeThickness =
+        static_cast<std::uint16_t>(std::max(biome->terrainSettings.stripes.thickness, 0));
+    outColumn.stripeNoiseThreshold = biome->terrainSettings.stripes.noiseThreshold;
+    outColumn.stripeBlock = biome->terrainSettings.stripes.block;
+}
+
+ChunkManager::Impl::WorldgenPage::ChunkColumnSupport
+ChunkManager::Impl::buildWorldgenPageChunkColumnSupport(const glm::ivec2& chunkColumn,
+                                                        const WorldgenPage* ownerPage) const
+{
+    WorldgenPage::ChunkColumnSupport support{};
+    if (!surfaceMap_ || !climateMap_)
+    {
+        return support;
+    }
+
+    const int baseWorldX = chunkColumn.x * kChunkSizeX;
+    const int baseWorldZ = chunkColumn.y * kChunkSizeZ;
+    constexpr int kSampleExtentX = kChunkSizeX + 2;
+    constexpr int kSampleExtentZ = kChunkSizeZ + 2;
+    std::array<WorldgenColumnValue, static_cast<std::size_t>(kSampleExtentX * kSampleExtentZ)> worldgenColumns{};
+    auto sampleIndex = [](int sampleX, int sampleZ) noexcept
+    {
+        return static_cast<std::size_t>(sampleZ * kSampleExtentX + sampleX);
+    };
+
+    for (int sampleX = -1; sampleX <= kChunkSizeX; ++sampleX)
+    {
+        for (int sampleZ = -1; sampleZ <= kChunkSizeZ; ++sampleZ)
+        {
+            const int sampleWorldX = baseWorldX + sampleX;
+            const int sampleWorldZ = baseWorldZ + sampleZ;
+            const glm::ivec2 pageKey = worldgenPageKeyForWorld(sampleWorldX, sampleWorldZ);
+            const terrain::SurfaceColumn surfaceColumn =
+                ownerPage != nullptr && ownerPage->key == pageKey
+                    ? ownerPage->column(sampleWorldX - ownerPage->baseWorld.x, sampleWorldZ - ownerPage->baseWorld.y).surface
+                    : surfaceMap_->columnValue(sampleWorldX, sampleWorldZ);
+            fillWorldgenColumnValue(worldgenColumns[sampleIndex(sampleX + 1, sampleZ + 1)],
+                                    sampleWorldX,
+                                    sampleWorldZ,
+                                    surfaceColumn);
+        }
+    }
+
+    auto computeNeighborAverage = [&](int localX, int localZ) noexcept
+    {
+        float sum = 0.0f;
+        int count = 0;
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            for (int dz = -1; dz <= 1; ++dz)
+            {
+                if (dx == 0 && dz == 0)
+                {
+                    continue;
+                }
+                sum += static_cast<float>(
+                    worldgenColumns[sampleIndex(localX + dx + 1, localZ + dz + 1)].surface.surfaceY);
+                ++count;
+            }
+        }
+        return count > 0 ? sum / static_cast<float>(count) : 0.0f;
+    };
+
+    int highestTerrainWorld = std::numeric_limits<int>::min();
+    int lowestTerrainWorld = std::numeric_limits<int>::max();
+    int minWaterBottomWorld = std::numeric_limits<int>::max();
+    int maxWaterTopWorld = std::numeric_limits<int>::min();
+    for (int localX = 0; localX < kChunkSizeX; ++localX)
+    {
+        for (int localZ = 0; localZ < kChunkSizeZ; ++localZ)
+        {
+            const WorldgenColumnValue& worldgenColumn = worldgenColumns[sampleIndex(localX + 1, localZ + 1)];
+            if (worldgenColumn.surface.dominantBiome == nullptr)
+            {
+                continue;
+            }
+
+            const int adjustedSurfaceY =
+                adjustedSurfaceYForColumn(worldgenColumn, computeNeighborAverage(localX, localZ));
+            highestTerrainWorld = std::max(highestTerrainWorld, adjustedSurfaceY);
+            lowestTerrainWorld = std::min(lowestTerrainWorld, adjustedSurfaceY);
+
+            if (!worldgenColumn.waterFillEnabled || adjustedSurfaceY >= globalSeaLevel_)
+            {
+                continue;
+            }
+
+            int waterBottomWorld = adjustedSurfaceY + 1;
+            int waterTopWorld = globalSeaLevel_;
+            if (worldgenColumn.waterFillMaxDepth > 0)
+            {
+                waterBottomWorld = std::max(
+                    waterBottomWorld,
+                    waterTopWorld - static_cast<int>(worldgenColumn.waterFillMaxDepth) + 1);
+            }
+            minWaterBottomWorld = std::min(minWaterBottomWorld, waterBottomWorld);
+            maxWaterTopWorld = std::max(maxWaterTopWorld, waterTopWorld);
+        }
+    }
+
+    support.highestTerrainWorld = ColumnManager::kNoHeight;
+    if (highestTerrainWorld != std::numeric_limits<int>::min())
+    {
+        support.highestTerrainWorld = highestTerrainWorld;
+        support.highestTerrainChunkY = floorDiv(highestTerrainWorld, kChunkSizeY);
+        support.highestOccupiedChunkY = std::max(support.highestOccupiedChunkY, support.highestTerrainChunkY);
+        support.hasTerrain = true;
+        support.definitelyEmpty = false;
+        addColumnChunkInterval(support.terrainIntervals, 0, support.highestTerrainChunkY);
+
+        int shellFloorChunk = surfaceShellFloorChunkForHeight(chunkColumn, highestTerrainWorld);
+        if (lowestTerrainWorld != std::numeric_limits<int>::max() &&
+            highestTerrainWorld - lowestTerrainWorld >= kExactSurfaceShellInternalReliefThresholdBlocks)
+        {
+            const int internalReliefFloorChunk =
+                std::max(0,
+                         floorDiv(std::max(0, lowestTerrainWorld), kChunkSizeY) -
+                             kExactSurfaceShellBelowSlackChunks);
+            shellFloorChunk = std::min(shellFloorChunk, internalReliefFloorChunk);
+        }
+        addColumnChunkInterval(support.surfaceShellIntervals,
+                               std::max(0, shellFloorChunk),
+                               std::max(support.highestTerrainChunkY,
+                                        support.highestTerrainChunkY + kExactSurfaceShellAirAboveChunks));
+    }
+
+    if (maxWaterTopWorld >= 0 && minWaterBottomWorld <= maxWaterTopWorld)
+    {
+        const int minChunkY = floorDiv(std::max(0, minWaterBottomWorld), kChunkSizeY);
+        const int maxChunkY = floorDiv(std::max(0, maxWaterTopWorld), kChunkSizeY);
+        support.highestOccupiedChunkY = std::max(support.highestOccupiedChunkY, maxChunkY);
+        support.hasWater = true;
+        support.definitelyEmpty = false;
+        addColumnChunkInterval(support.waterIntervals, minChunkY, maxChunkY);
+    }
+
+    return support;
+}
+
 std::shared_ptr<const ChunkManager::Impl::WorldgenPage>
 ChunkManager::Impl::tryGetReadyWorldgenPage(const glm::ivec2& pageKey) const
 {
@@ -20619,50 +21332,24 @@ ChunkManager::Impl::buildWorldgenPage(const glm::ivec2& pageKey) const
             const std::size_t index =
                 static_cast<std::size_t>(localZ) * WorldgenPage::kSize + static_cast<std::size_t>(localX);
             WorldgenColumnValue& worldgenColumn = page->columns[index];
-            worldgenColumn.surface = surfaceFragment.column(localX, localZ);
-
             const int worldX = page->baseWorld.x + localX;
             const int worldZ = page->baseWorld.y + localZ;
-            const terrain::ClimateSample climateSample = climateMap_->sample(worldX, worldZ);
-            const BiomeDefinition* biome = worldgenColumn.surface.dominantBiome;
-
-            worldgenColumn.biomeIndex =
-                biome != nullptr
-                    ? static_cast<std::uint32_t>(biomeDatabase_.definitionIndex(*biome))
-                    : (std::numeric_limits<std::uint32_t>::max)();
-            worldgenColumn.distanceToCoast = climateSample.distanceToCoast;
-            worldgenColumn.signedDistanceToCoast = climateSample.signedDistanceToCoast;
-            worldgenColumn.landBaseHeight = climateSample.landBaseHeight;
-            worldgenColumn.oceanBaseHeight = climateSample.oceanBaseHeight;
-            worldgenColumn.keepOriginalMix = climateSample.keepOriginalMix;
-            worldgenColumn.dominantIsOcean = climateSample.dominantIsOcean;
-            worldgenColumn.grassTintIndex = worldgenGrassTintIndexForBiome(biome);
-
-            if (biome != nullptr)
-            {
-                worldgenColumn.surfaceBlock = biome->surfaceBlock;
-                worldgenColumn.fillerBlock = biome->fillerBlock;
-                worldgenColumn.smoothBeaches = biome->terrainSettings.smoothBeaches;
-                worldgenColumn.taigaBiome = terrain::isTaigaBiome(*biome);
-                worldgenColumn.soilCreepStrength = biome->terrainSettings.soilCreep.strength;
-                worldgenColumn.soilCreepMaxStep =
-                    static_cast<std::uint16_t>(std::max(biome->terrainSettings.soilCreep.maxStep, 0));
-                worldgenColumn.soilCreepMaxDepth =
-                    static_cast<std::uint16_t>(std::max(biome->terrainSettings.soilCreep.maxDepth, 0));
-                worldgenColumn.waterFillEnabled = biome->terrainSettings.waterFill.enabled;
-                worldgenColumn.waterFillMaxDepth =
-                    static_cast<std::uint16_t>(std::max(biome->terrainSettings.waterFill.maxDepth, 0));
-                worldgenColumn.waterBlock = biome->terrainSettings.waterFill.block;
-                worldgenColumn.stripesEnabled = biome->terrainSettings.stripes.enabled;
-                worldgenColumn.stripePeriod =
-                    static_cast<std::uint16_t>(std::max(biome->terrainSettings.stripes.period, 0));
-                worldgenColumn.stripeThickness =
-                    static_cast<std::uint16_t>(std::max(biome->terrainSettings.stripes.thickness, 0));
-                worldgenColumn.stripeNoiseThreshold = biome->terrainSettings.stripes.noiseThreshold;
-                worldgenColumn.stripeBlock = biome->terrainSettings.stripes.block;
-            }
-
+            fillWorldgenColumnValue(worldgenColumn, worldX, worldZ, surfaceFragment.column(localX, localZ));
             page->gpuColumns[index] = packGpuWorldgenPageColumn(worldgenColumn);
+        }
+    }
+    for (int localChunkZ = 0; localChunkZ < WorldgenPage::kChunkColumnsPerAxis; ++localChunkZ)
+    {
+        for (int localChunkX = 0; localChunkX < WorldgenPage::kChunkColumnsPerAxis; ++localChunkX)
+        {
+            const std::size_t supportIndex =
+                static_cast<std::size_t>(localChunkZ) * WorldgenPage::kChunkColumnsPerAxis +
+                static_cast<std::size_t>(localChunkX);
+            page->chunkColumnSupport[supportIndex] =
+                buildWorldgenPageChunkColumnSupport(glm::ivec2{
+                                                        pageKey.x * WorldgenPage::kChunkColumnsPerAxis + localChunkX,
+                                                        pageKey.y * WorldgenPage::kChunkColumnsPerAxis + localChunkZ},
+                                                    page.get());
         }
     }
     return page;
@@ -20771,6 +21458,7 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
     {
         queueDeferredChunkGenerateIfReady(readyCoords[index], readyDependencies[index]);
     }
+    notifyExactFillSupportProgress(pageKey);
 
     if (shouldRefillStructureJobs)
     {
@@ -20810,10 +21498,10 @@ void ChunkManager::Impl::publishWorldgenPageReady(const glm::ivec2& pageKey,
                    << " page=(" << pageKey.x << "," << pageKey.y << ")"
                    << " republished=" << (republishedReadyPage ? 1 : 0)
                    << " support_h=" << (entry.supportsHeight ? 1 : 0)
-                   << " support_occ=" << (entry.supportsOccupancy ? 1 : 0)
+                   << " support_occ=" << (entry.supportsColumnSupport ? 1 : 0)
                    << " support_warm=" << (entry.supportsWarmStructures ? 1 : 0)
                    << " missing_h=" << entry.missingHeightColumns
-                   << " missing_occ=" << entry.missingOccupancyColumns
+                   << " missing_occ=" << entry.missingSupportColumns
                    << " missing_warm_regions=" << entry.missingWarmStructureRegions
                    << " warm_regions=" << entry.warmStructureRegions.size();
             exactDependencyStallDebugLog(stream.str());
@@ -20934,7 +21622,7 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
                 if (entry.state == WorldgenPageState::Ready &&
                     entry.page &&
                     entry.buildOccupancy &&
-                    !entry.supportsOccupancy &&
+                    !entry.supportsColumnSupport &&
                     entry.supportsWarmStructures)
                 {
                     enqueueDirtyPrefetchPageLocked(pageKey, entry);
@@ -21028,6 +21716,10 @@ void ChunkManager::Impl::publishStructureRegionReady(const StructureRegionKey& k
     for (std::size_t index = 0; index < readyCoords.size(); ++index)
     {
         queueDeferredChunkGenerateIfReady(readyCoords[index], readyDependencies[index]);
+    }
+    for (const glm::ivec2& pageKey : collectRegionWorldgenPageKeys(key))
+    {
+        notifyExactFillSupportProgress(pageKey);
     }
 }
 
@@ -21876,7 +22568,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::cachedColumnSlabOccu
     ColumnSlabOccupancy built = buildColumnSlabOccupancy(column);
     if (!built.supportComplete)
     {
-        refreshWorldgenPageOccupancySupportForColumn(column, false);
+        refreshWorldgenPageColumnSupportForColumn(column, false);
         return built;
     }
 
@@ -21888,7 +22580,7 @@ ChunkManager::Impl::ColumnSlabOccupancy ChunkManager::Impl::cachedColumnSlabOccu
             return it->second;
         }
     }
-    refreshWorldgenPageOccupancySupportForColumn(column, true);
+    refreshWorldgenPageColumnSupportForColumn(column, true);
     return built;
 }
 
@@ -21927,7 +22619,7 @@ void ChunkManager::Impl::invalidateColumnSlabOccupancy(const glm::ivec2& column)
         columnSlabOccupancyCache_.erase(column);
     }
     markPlanDirtyColumn(column);
-    refreshWorldgenPageOccupancySupportForColumn(column, false);
+    refreshWorldgenPageColumnSupportForColumn(column, false);
 }
 
 void ChunkManager::Impl::invalidateAllColumnSlabOccupancy() const
@@ -22553,7 +23245,7 @@ ChunkManager::Impl::EnsureChunkAsyncResult ChunkManager::Impl::ensureChunkAsync(
                     }
                     exactDependencyStallDebugLog(stream.str());
                 }
-                return EnsureChunkAsyncResult::NoAction;
+                return EnsureChunkAsyncResult::RetryMissing;
             }
 
             {
@@ -23469,6 +24161,24 @@ bool ChunkManager::Impl::queueChunkForPreparedExactGpuBuild(const std::shared_pt
 
     std::lock_guard<std::mutex> lock(chunk->meshMutex);
     return queuePreparedExactGpuBuildLocked(chunk, prioritizeFront);
+}
+
+int ChunkManager::Impl::queuePreparedExactGpuBuildBatch(std::span<const std::shared_ptr<Chunk>> chunks,
+                                                        bool prioritizeFront)
+{
+    int queued = 0;
+    for (const std::shared_ptr<Chunk>& chunk : chunks)
+    {
+        if (queueChunkForPreparedExactGpuBuild(chunk, prioritizeFront))
+        {
+            ++queued;
+        }
+    }
+    if (queued > 0 && benchmarkMetrics_.isEnabled())
+    {
+        benchmarkMetrics_.exactGpuFeedBatchSize.record(static_cast<std::uint64_t>(queued));
+    }
+    return queued;
 }
 
 void ChunkManager::Impl::queueChunkForExactGpuRefresh(const std::shared_ptr<Chunk>& chunk, bool prioritizeFront)
@@ -25774,6 +26484,16 @@ void ChunkManager::Impl::commitPendingExactGpuBuilds()
                     }
                     releaseExactGpuTransient(chunk);
                     exactGpuBuildsCommitted_.fetch_add(1, std::memory_order_relaxed);
+                    const std::uint64_t exactFillGeneration =
+                        chunk.exactFillPreparedGeneration.exchange(0, std::memory_order_acq_rel);
+                    if (exactFillGeneration != 0)
+                    {
+                        {
+                            std::lock_guard<std::mutex> exactFillLock(exactFillMutex_);
+                            ++exactFillChunksCommitted_;
+                        }
+                        benchmarkMetrics_.exactFillChunksCommitted.fetch_add(1, std::memory_order_relaxed);
+                    }
                     if (!chunk.exactGpuInputsDirty.load(std::memory_order_acquire) &&
                         !chunk.exactGpuBuildQueued.load(std::memory_order_acquire))
                     {

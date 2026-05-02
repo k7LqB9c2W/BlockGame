@@ -2731,6 +2731,20 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeStageStatsJson(out, exactGpuTotalStats);
     out << ",\"exact_gpu_build_queue_wait\":";
     writeStageStatsJson(out, report.exactGpuBuildQueueWaitStage);
+    out << ",\"exact_fill_dispatch\":";
+    writeStageStatsJson(out, report.exactFillDispatchStage);
+    out << ",\"exact_fill_support_discovery\":";
+    writeStageStatsJson(out, report.exactFillSupportDiscoveryStage);
+    out << ",\"exact_fill_support_preparation\":";
+    writeStageStatsJson(out, report.exactFillSupportPreparationStage);
+    out << ",\"exact_fill_batch_cpu_preparation\":";
+    writeStageStatsJson(out, report.exactFillBatchCpuPreparationStage);
+    out << ",\"exact_fill_batch_queue_wait\":";
+    writeStageStatsJson(out, report.exactFillBatchQueueWaitStage);
+    out << ",\"exact_fill_batch_exact_gpu_enqueue\":";
+    writeStageStatsJson(out, report.exactFillBatchExactGpuEnqueueStage);
+    out << ",\"exact_gpu_feed_batch_size\":";
+    writeCountStatsJson(out, report.exactGpuFeedBatchSize);
     out << ",\"chunk_ready_latency\":";
     writeStageStatsJson(out, report.chunkReadyLatency);
     out << ",\"chunk_ready_wait_generate\":";
@@ -2919,7 +2933,22 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
     writeCountStatsJson(out, report.exactGpuBuildQueueDepthEnqueue);
     out << ",\"queue_depth_start\":";
     writeCountStatsJson(out, report.exactGpuBuildQueueDepthStart);
+    out << ",\"batch_size\":";
+    writeCountStatsJson(out, report.exactGpuFeedBatchSize);
     out << "}";
+    out << ",\"exact_fill\":{"
+        << "\"support_pages_queued\":" << report.exactFillSupportPagesQueued
+        << ",\"support_pages_ready\":" << report.exactFillSupportPagesReady
+        << ",\"support_pages_blocked\":" << report.exactFillSupportPagesBlocked
+        << ",\"batches_queued\":" << report.exactFillBatchesQueued
+        << ",\"batches_preparing\":" << report.exactFillBatchesPreparing
+        << ",\"batches_prepared\":" << report.exactFillBatchesPrepared
+        << ",\"chunks_prepared\":" << report.exactFillChunksPrepared
+        << ",\"chunks_submitted_to_exact_gpu\":" << report.exactFillChunksSubmittedToExactGpu
+        << ",\"chunks_committed\":" << report.exactFillChunksCommitted
+        << ",\"stale_batches_dropped\":" << report.exactFillStaleBatchesDropped
+        << ",\"fallback_chunks\":" << report.exactFillFallbackChunks
+        << "}";
     out << ",\"queues\":{"
         << "\"job_backlog\":";
     writeQueueStatsJson(out, report.jobQueueDepth);
@@ -3049,6 +3078,23 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"ensure_volume_candidates_built_last_frame\":" << finalProfiling.ensureVolumeCandidatesBuiltLastFrame
         << ",\"ensure_volume_existing_chunk_skips_last_frame\":" << finalProfiling.ensureVolumeExistingChunkSkipsLastFrame
         << ",\"ensure_volume_column_cap_skips_last_frame\":" << finalProfiling.ensureVolumeColumnCapSkipsLastFrame
+        << ",\"exact_fill_dispatch_ms\":" << finalProfiling.exactFillDispatchMsLastFrame
+        << ",\"exact_fill_support_discovery_ms\":" << finalProfiling.exactFillSupportDiscoveryMsLastFrame
+        << ",\"exact_fill_support_preparation_ms\":" << finalProfiling.exactFillSupportPreparationMsLastFrame
+        << ",\"exact_fill_batch_cpu_preparation_ms\":" << finalProfiling.exactFillBatchCpuPreparationMsLastFrame
+        << ",\"exact_fill_batch_queue_wait_ms\":" << finalProfiling.exactFillBatchQueueWaitMsLastFrame
+        << ",\"exact_fill_batch_exact_gpu_enqueue_ms\":" << finalProfiling.exactFillBatchExactGpuEnqueueMsLastFrame
+        << ",\"exact_fill_support_pages_queued\":" << finalProfiling.exactFillSupportPagesQueued
+        << ",\"exact_fill_support_pages_ready\":" << finalProfiling.exactFillSupportPagesReady
+        << ",\"exact_fill_support_pages_blocked\":" << finalProfiling.exactFillSupportPagesBlocked
+        << ",\"exact_fill_batches_queued\":" << finalProfiling.exactFillBatchesQueued
+        << ",\"exact_fill_batches_preparing\":" << finalProfiling.exactFillBatchesPreparing
+        << ",\"exact_fill_batches_prepared\":" << finalProfiling.exactFillBatchesPrepared
+        << ",\"exact_fill_chunks_prepared\":" << finalProfiling.exactFillChunksPrepared
+        << ",\"exact_fill_chunks_submitted_to_exact_gpu\":" << finalProfiling.exactFillChunksSubmittedToExactGpu
+        << ",\"exact_fill_chunks_committed\":" << finalProfiling.exactFillChunksCommitted
+        << ",\"exact_fill_stale_batches_dropped\":" << finalProfiling.exactFillStaleBatchesDropped
+        << ",\"exact_fill_fallback_chunks\":" << finalProfiling.exactFillFallbackChunks
         << ",\"column_prefetch_queue_depth\":" << finalProfiling.columnPrefetchQueueDepth
         << "}";
     out << ",\"final_streaming\":{"
@@ -3061,6 +3107,17 @@ bool writeBenchmarkScenarioJson(const BenchmarkConfig& config,
         << ",\"exact_required_chunks_authoritative\":" << streamingStatus.exactRequiredChunksAuthoritative
         << ",\"exact_coverage_reconciling\":" << (streamingStatus.exactCoverageReconciling ? "true" : "false")
         << ",\"exact_pending_uploads\":" << streamingStatus.exactPendingUploads
+        << ",\"exact_fill_support_pages_queued\":" << streamingStatus.exactFillSupportPagesQueued
+        << ",\"exact_fill_support_pages_ready\":" << streamingStatus.exactFillSupportPagesReady
+        << ",\"exact_fill_support_pages_blocked\":" << streamingStatus.exactFillSupportPagesBlocked
+        << ",\"exact_fill_batches_queued\":" << streamingStatus.exactFillBatchesQueued
+        << ",\"exact_fill_batches_preparing\":" << streamingStatus.exactFillBatchesPreparing
+        << ",\"exact_fill_batches_prepared\":" << streamingStatus.exactFillBatchesPrepared
+        << ",\"exact_fill_chunks_prepared\":" << streamingStatus.exactFillChunksPrepared
+        << ",\"exact_fill_chunks_submitted_to_exact_gpu\":" << streamingStatus.exactFillChunksSubmittedToExactGpu
+        << ",\"exact_fill_chunks_committed\":" << streamingStatus.exactFillChunksCommitted
+        << ",\"exact_fill_stale_batches_dropped\":" << streamingStatus.exactFillStaleBatchesDropped
+        << ",\"exact_fill_fallback_chunks\":" << streamingStatus.exactFillFallbackChunks
         << ",\"far_active_tiles\":" << streamingStatus.farActiveTiles
         << ",\"far_dirty_tiles\":" << streamingStatus.farDirtyTiles
         << ",\"far_ready_tiles\":" << streamingStatus.farReadyTiles
@@ -5837,6 +5894,19 @@ int runGame()
                         streamingStatus.exactQueuedGenerateChunks,
                         streamingStatus.exactGeneratingChunks,
                         streamingStatus.exactMeshingChunks);
+            ImGui::Text("Exact fill: pages q/r/b %d/%d/%d | batches q/prep/done %d/%d/%d",
+                        streamingStatus.exactFillSupportPagesQueued,
+                        streamingStatus.exactFillSupportPagesReady,
+                        streamingStatus.exactFillSupportPagesBlocked,
+                        streamingStatus.exactFillBatchesQueued,
+                        streamingStatus.exactFillBatchesPreparing,
+                        streamingStatus.exactFillBatchesPrepared);
+            ImGui::Text("Exact fill GPU: prepared %d | queued %d | committed %d | stale %d | fallback %d",
+                        streamingStatus.exactFillChunksPrepared,
+                        streamingStatus.exactFillChunksSubmittedToExactGpu,
+                        streamingStatus.exactFillChunksCommitted,
+                        streamingStatus.exactFillStaleBatchesDropped,
+                        streamingStatus.exactFillFallbackChunks);
             if (lodActive)
             {
                 ImGui::Text("LOD tiles: %d/%d ready (%.0f%%) | queued %d | pending upload %d | dirty %d",

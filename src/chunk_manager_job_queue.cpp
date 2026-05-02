@@ -416,6 +416,9 @@ JobQueue::PrioritizedJob JobQueue::wrap(const Job& job)
     case JobType::BulkShellOracle:
         bias = 4;
         break;
+    case JobType::ExactFillBatchPrepare:
+        bias = 3;
+        break;
     }
     const std::uint64_t sequence = nextSequence_++;
     return PrioritizedJob{job, priority, lifecycleBias, serviceBias, bias, sequence};
@@ -469,11 +472,13 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     const std::size_t worldgenDependencyIndex = jobTypeIndex(JobType::WorldgenPageDependency);
     const std::size_t structureDependencyIndex = jobTypeIndex(JobType::StructureRegionDependency);
     const std::size_t bulkShellIndex = jobTypeIndex(JobType::BulkShellOracle);
+    const std::size_t exactFillBatchIndex = jobTypeIndex(JobType::ExactFillBatchPrepare);
     const std::size_t generateBacklog = queues_[generateIndex].size();
     const std::size_t meshBacklog = queues_[meshIndex].size();
     const std::size_t worldgenDependencyBacklog = queues_[worldgenDependencyIndex].size();
     const std::size_t structureDependencyBacklog = queues_[structureDependencyIndex].size();
     const std::size_t bulkShellBacklog = queues_[bulkShellIndex].size();
+    const std::size_t exactFillBatchBacklog = queues_[exactFillBatchIndex].size();
     const bool generateInitialReadyTop =
         generateBacklog > 0 && queues_[generateIndex].top().lifecycleBias == 0;
     const bool meshInitialReadyTop =
@@ -550,6 +555,24 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         }
     }
 
+    std::size_t exactFillBatchTarget = 0;
+    if (exactFillBatchBacklog > 0)
+    {
+        const std::size_t supportBacklog = worldgenDependencyBacklog + structureDependencyBacklog;
+        if (!playableBacklog && supportBacklog == 0)
+        {
+            const std::size_t supportTargets = worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget;
+            const std::size_t remainingCapacity =
+                totalWorkers > supportTargets ? (totalWorkers - supportTargets) : 0;
+            exactFillBatchTarget =
+                std::min<std::size_t>(exactFillBatchBacklog, std::min<std::size_t>(remainingCapacity, 4));
+        }
+        else if (latencySensitivePressure == 0 && supportBacklog < 128 && totalWorkers >= 8)
+        {
+            exactFillBatchTarget = 1;
+        }
+    }
+
     std::size_t playableReserve = 0;
     if (generateBacklog > 0)
     {
@@ -561,13 +584,17 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
     }
     playableReserve = std::min(playableReserve, totalWorkers);
 
-    std::size_t supportTargetTotal = worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget;
+    std::size_t supportTargetTotal =
+        worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget + exactFillBatchTarget;
     const std::size_t maxSupportWorkers = (totalWorkers > playableReserve)
         ? (totalWorkers - playableReserve)
         : 0;
     if (supportTargetTotal > maxSupportWorkers)
     {
         std::size_t overflow = supportTargetTotal - maxSupportWorkers;
+        const std::size_t exactFillTrim = std::min(exactFillBatchTarget, overflow);
+        exactFillBatchTarget -= exactFillTrim;
+        overflow -= exactFillTrim;
         const std::size_t bulkTrim = std::min(bulkShellTarget, overflow);
         bulkShellTarget -= bulkTrim;
         overflow -= bulkTrim;
@@ -581,12 +608,13 @@ std::array<std::size_t, kJobTypeCount> JobQueue::computeStageTargetsLocked() con
         {
             worldgenDependencyTarget -= std::min(worldgenDependencyTarget, overflow);
         }
-        supportTargetTotal = worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget;
+        supportTargetTotal = worldgenDependencyTarget + structureDependencyTarget + bulkShellTarget + exactFillBatchTarget;
     }
 
     targets[worldgenDependencyIndex] = worldgenDependencyTarget;
     targets[structureDependencyIndex] = structureDependencyTarget;
     targets[bulkShellIndex] = bulkShellTarget;
+    targets[exactFillBatchIndex] = exactFillBatchTarget;
 
     const std::size_t playableWorkers = totalWorkers - supportTargetTotal;
     if (playableWorkers == 0)

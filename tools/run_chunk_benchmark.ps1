@@ -373,6 +373,13 @@ $summaryLines.Add(("Watchdog: not_responding={0}s post_write_grace={1}s poll_ms=
     $PostWriteGraceSeconds,
     $PollMilliseconds))
 $summaryLines.Add("")
+function Test-JsonProperty {
+    param(
+        [Parameter(Mandatory=$true)] $Object,
+        [Parameter(Mandatory=$true)] [string] $Name
+    )
+    return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
+}
 foreach ($scenario in $scenarioObjects) {
     $summaryLines.Add("Scenario: $($scenario.scenario)")
     $summaryLines.Add(("  watchdog_reason={0} exit_code={1}" -f `
@@ -465,7 +472,9 @@ foreach ($scenario in $scenarioObjects) {
             $scenario.stages.exact_gpu_face_prefix.avg_ms,
             $scenario.stages.exact_gpu_face_emit.avg_ms,
             $scenario.stages.exact_gpu_total.avg_ms))
-        if ($scenario.stages.exact_gpu_prepare_cpu -and $scenario.stages.exact_gpu_submit_cpu -and $scenario.stages.exact_gpu_commit_cpu) {
+        if ((Test-JsonProperty $scenario.stages "exact_gpu_prepare_cpu") -and
+            (Test-JsonProperty $scenario.stages "exact_gpu_submit_cpu") -and
+            (Test-JsonProperty $scenario.stages "exact_gpu_commit_cpu")) {
             $summaryLines.Add(("  exact_gpu_cpu_avg_ms prepare={0:F2} submit={1:F2} commit={2:F2}" -f `
                 $scenario.stages.exact_gpu_prepare_cpu.avg_ms,
                 $scenario.stages.exact_gpu_submit_cpu.avg_ms,
@@ -477,6 +486,27 @@ foreach ($scenario in $scenarioObjects) {
             $scenario.exact_gpu_feed_in.build_queue_wait.avg_ms,
             $scenario.exact_gpu_feed_in.queue_depth_enqueue.avg,
             $scenario.exact_gpu_feed_in.queue_depth_start.avg))
+        if (Test-JsonProperty $scenario.exact_gpu_feed_in "batch_size") {
+            $summaryLines.Add(("  exact_gpu_feed_batch avg={0:F2} p95={1:F2} max={2:F2}" -f `
+                $scenario.exact_gpu_feed_in.batch_size.avg,
+                $scenario.exact_gpu_feed_in.batch_size.p95,
+                $scenario.exact_gpu_feed_in.batch_size.max))
+        }
+    }
+    if (Test-JsonProperty $scenario "exact_fill") {
+        $summaryLines.Add(("  exact_fill pages q/r/b={0}/{1}/{2} batches q/prep/done={3}/{4}/{5}" -f `
+            $scenario.exact_fill.support_pages_queued,
+            $scenario.exact_fill.support_pages_ready,
+            $scenario.exact_fill.support_pages_blocked,
+            $scenario.exact_fill.batches_queued,
+            $scenario.exact_fill.batches_preparing,
+            $scenario.exact_fill.batches_prepared))
+        $summaryLines.Add(("  exact_fill chunks prepared={0} submitted={1} committed={2} stale_batches={3} fallback={4}" -f `
+            $scenario.exact_fill.chunks_prepared,
+            $scenario.exact_fill.chunks_submitted_to_exact_gpu,
+            $scenario.exact_fill.chunks_committed,
+            $scenario.exact_fill.stale_batches_dropped,
+            $scenario.exact_fill.fallback_chunks))
     }
     if ($scenario.queues.column_prefetch_backlog) {
         $summaryLines.Add(("  column_prefetch_backlog avg={0:F2} p95={1:F2}" -f `

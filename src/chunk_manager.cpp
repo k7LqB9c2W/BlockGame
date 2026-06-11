@@ -73,6 +73,10 @@ constexpr int kRelightMinBatchBudget = 4;
 constexpr int kRelightMaxBatchBudget = 24;
 constexpr int kStartupInteractiveExactChunks = 8;
 constexpr int kStartupExactRampStepChunks = 4;
+// Grace period the protected safety bubble must hold fully-ready before the exact-only preload force
+// releases the player even if the broader exact bubble has not finished. Acts as a bounded safety valve
+// against boundary dependency stalls that would otherwise trap the player on the loading screen forever.
+constexpr double kExactPreloadProtectedReleaseGraceSeconds = 8.0;
 constexpr std::size_t kExactFillDefaultBatchSize = 64u;
 constexpr std::size_t kExactFillMaxBatchSize = 128u;
 constexpr int kExactFillMaxSupportRequestsPerUpdate = 24;
@@ -5670,6 +5674,7 @@ private:
     [[nodiscard]] bool deferExactFillChunkForSupport(const glm::ivec3& coord,
                                                      const glm::ivec3& center);
     void notifyExactFillSupportProgress(const glm::ivec2& pageKey);
+    void reconcileExactFillSupportWaiters();
     void formExactFillBatchesForReadySupportLocked(ExactFillSupportPage& page);
     void refillExactFillBatchPrepareJobs();
     [[nodiscard]] bool acquireNextExactFillBatch(ExactFillBatch& outBatch);
@@ -6410,6 +6415,10 @@ private:
         double phaseTimeSeconds{0.0};
         double totalTimeSeconds{0.0};
         double healthyTimeSeconds{0.0};
+        // Time accumulated while the protected safety bubble is fully ready but the broader exact bubble
+        // has not yet satisfied the normal release condition. Used as a bounded safety valve so a stalled
+        // boundary dependency can never trap the player on the loading screen indefinitely.
+        double protectedReleaseHoldSeconds{0.0};
         int exactNearCurrentChunks{0};
         int farCurrentBlocks{0};
         bool preloadStarted{false};
@@ -7788,6 +7797,13 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
                 .count();
     }
     {
+        // Re-drive any exact-fill chunks whose support became ready without an edge waking them, then
+        // refill prepare jobs. Without this backstop a missed notify can strand the last stragglers and
+        // freeze the exact preload just short of completion.
+        if (stationaryExactFillModeActive_)
+        {
+            reconcileExactFillSupportWaiters();
+        }
         refillExactFillBatchPrepareJobs();
     }
 
@@ -8087,10 +8103,30 @@ void ChunkManager::Impl::update(const glm::vec3& cameraPos, const glm::vec3& cam
             startupState_.playerReleaseReady = exactReleaseReady;
             if (exactOnlyMode)
             {
-                if (exactReleaseReady)
+                // Bounded safety valve. The protected safety bubble being fully ready is, by design, the
+                // condition for safe player release (see comment below). The broader exact bubble is best
+                // effort and is allowed to finish in steady-state streaming. If a boundary dependency
+                // stalls (e.g. a structure region stuck waiting on an edge worldgen page whose readiness
+                // edge was lost), the normal release condition can never be met and the player would be
+                // trapped on the loading screen forever. Once the safety bubble has held ready for a grace
+                // period, release regardless so the world can always be entered.
+                if (currentPlanCommitted && protectedCoverageReady)
+                {
+                    startupState_.protectedReleaseHoldSeconds += frameSeconds;
+                }
+                else
+                {
+                    startupState_.protectedReleaseHoldSeconds = 0.0;
+                }
+                const bool safetyValveRelease =
+                    currentPlanCommitted &&
+                    protectedCoverageReady &&
+                    startupState_.protectedReleaseHoldSeconds >= kExactPreloadProtectedReleaseGraceSeconds;
+                if (exactReleaseReady || safetyValveRelease)
                 {
                     startupState_.phaseTimeSeconds = 0.0;
                     startupState_.healthyTimeSeconds = 0.0;
+                    startupState_.protectedReleaseHoldSeconds = 0.0;
                     startupState_.playerReleaseReady = true;
                     // In exact-only mode the startup system should only gate safe player release.
                     // After that point, exact fill belongs to steady-state streaming rather than
@@ -17980,9 +18016,14 @@ void ChunkManager::Impl::notifyExactFillSupportProgress(const glm::ivec2& pageKe
         for (auto& [supportKey, page] : exactFillSupportPages_)
         {
             (void)supportKey;
+            // A support page that already formed batches for some chunks transitions to Ready, but it
+            // can still retain stragglers whose support became ready later. Those must continue to be
+            // re-evaluated, otherwise they are stranded in WaitingDependencies forever (the publish that
+            // would satisfy them may have already fired before they were enqueued here).
             if (page.waitingChunks.empty() ||
                 (page.state != ExactFillSupportPageState::Queued &&
-                 page.state != ExactFillSupportPageState::Blocked))
+                 page.state != ExactFillSupportPageState::Blocked &&
+                 page.state != ExactFillSupportPageState::Ready))
             {
                 continue;
             }
@@ -18035,6 +18076,70 @@ void ChunkManager::Impl::notifyExactFillSupportProgress(const glm::ivec2& pageKe
         const double prepMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - prepStart).count();
         exactFillSupportPreparationMsLastFrame_ += prepMs;
         benchmarkMetrics_.exactFillSupportPreparationStage.recordMicros(static_cast<std::uint64_t>(prepMs * 1000.0));
+    }
+    if (shouldRefill)
+    {
+        refillExactFillBatchPrepareJobs();
+    }
+}
+
+// Level-triggered backstop for the exact-fill support pipeline. notifyExactFillSupportProgress() only
+// fires on a worldgen-page / structure-region publish, and only for pages that happen to overlap the
+// freshly published key. When the final stragglers in a support page have their dependencies satisfied
+// by a publish that fired *before* they were enqueued (or for a page already in the Ready state), no
+// edge ever wakes them and they stall in WaitingDependencies indefinitely, freezing the exact preload
+// just short of completion. This sweep re-evaluates every support page's waiting chunks each frame so a
+// missed edge can never permanently strand them.
+void ChunkManager::Impl::reconcileExactFillSupportWaiters()
+{
+    if (shouldStop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    bool shouldRefill = false;
+    {
+        std::lock_guard<std::mutex> lock(exactFillMutex_);
+        for (auto& [supportKey, page] : exactFillSupportPages_)
+        {
+            (void)supportKey;
+            if (page.waitingChunks.empty() || page.state == ExactFillSupportPageState::Stale)
+            {
+                continue;
+            }
+
+            std::vector<glm::ivec3> stillWaiting;
+            std::vector<glm::ivec3> ready;
+            stillWaiting.reserve(page.waitingChunks.size());
+            ready.reserve(page.waitingChunks.size());
+            for (const glm::ivec3& coord : page.waitingChunks)
+            {
+                if (exactFillChunkSupportReady(coord))
+                {
+                    ready.push_back(coord);
+                }
+                else
+                {
+                    stillWaiting.push_back(coord);
+                }
+            }
+
+            if (ready.empty())
+            {
+                if (page.state == ExactFillSupportPageState::Queued)
+                {
+                    page.state = ExactFillSupportPageState::Blocked;
+                    ++exactFillSupportPagesBlocked_;
+                    benchmarkMetrics_.exactFillSupportPagesBlocked.fetch_add(1, std::memory_order_relaxed);
+                }
+                continue;
+            }
+
+            page.waitingChunks = std::move(ready);
+            formExactFillBatchesForReadySupportLocked(page);
+            page.waitingChunks.insert(page.waitingChunks.end(), stillWaiting.begin(), stillWaiting.end());
+            shouldRefill = true;
+        }
     }
     if (shouldRefill)
     {

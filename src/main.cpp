@@ -4486,6 +4486,7 @@ int runGame()
     double fpsValue = 0.0;
     double loadingOverlayTimer = 0.0;
     std::string loadingOverlayText;
+    bool playerSafeSpawnApplied = false;
     double profilingOverlayTimer = 0.0;
     std::string profilingOverlayText;
     const bool rendererTimingCaptureEnabled = envFlagEnabled("BLOCKGAME_RENDER_TIMING_CAPTURE");
@@ -4666,6 +4667,32 @@ int runGame()
 
         const StreamingStatusSnapshot streamingStatus = chunkManager.streamingStatusSnapshot();
         const bool playerReleased = streamingStatus.playerReleaseReady;
+        if (playerReleased && !playerSafeSpawnApplied)
+        {
+            playerSafeSpawnApplied = true;
+            // The initial spawn position is resolved before the world is generated. If the spawn column
+            // is not ready within the resolve timeout (which is now the common case, since the exact
+            // preload takes much longer than that timeout), the player is placed at a fallback height
+            // that ends up buried once the real terrain streams in. The player is frozen on the loading
+            // screen until release, so they are still sitting at that spawn point. Now that the spawn
+            // neighborhood is actually loaded, re-resolve a guaranteed-safe surface position and lift the
+            // player out of any solid blocks they are embedded in. Benchmarks place the camera
+            // deliberately, so this correction only applies to normal gameplay.
+            if (!benchmarkConfig.enabled)
+            {
+                const glm::vec3 safeSpawn =
+                    chunkManager.findSafeSpawnPosition(camera.position.x, camera.position.z);
+                if (safeSpawn.y > camera.position.y + 0.5f)
+                {
+                    std::cout << "Safe spawn correction: lifting player from Y=" << camera.position.y
+                              << " to Y=" << safeSpawn.y << " (spawn resolved before terrain was ready)"
+                              << std::endl;
+                    camera.position = safeSpawn;
+                    camera.velocity = glm::vec3(0.0f);
+                    camera.onGround = false;
+                }
+            }
+        }
         if (!playerReleased)
         {
             loadingOverlayTimer += frameTime;
